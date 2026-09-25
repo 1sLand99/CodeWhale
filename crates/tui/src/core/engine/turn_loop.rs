@@ -749,7 +749,6 @@ impl Engine {
         let mut image_rejection_recovered = false;
         let mut tool_policy = tool_policy;
         let mut mode = tool_policy.mode;
-        let mut questions_allowed = tool_policy.allows_questions();
         let strict_tool_mode = tool_policy.strict_tool_mode;
         let mut tool_catalog = std::mem::take(&mut tool_policy.catalog);
         let mut active_tool_names = std::mem::take(&mut tool_policy.active_names);
@@ -853,9 +852,6 @@ impl Engine {
                         .permission_denial_rounds_without_progress = 0;
                 }
                 mode = self.current_mode;
-                questions_allowed = crate::core::authority::permission_posture_allows_questions(
-                    self.session.approval_mode,
-                );
             }
 
             let mut accepted_steer = false;
@@ -2810,9 +2806,6 @@ impl Engine {
                         .permission_denial_rounds_without_progress = 0;
                 }
                 mode = self.current_mode;
-                questions_allowed = crate::core::authority::permission_posture_allows_questions(
-                    self.session.approval_mode,
-                );
             }
 
             // Execute tools
@@ -2900,7 +2893,6 @@ impl Engine {
                     mcp_pool,
                     &batch_sandbox_policy,
                     &mut mode,
-                    &mut questions_allowed,
                     &mut nested_gate_env,
                 )
                 .await;
@@ -3733,7 +3725,6 @@ impl Engine {
         mcp_pool: Option<Arc<AsyncMutex<McpPool>>>,
         batch_sandbox_policy: &crate::sandbox::SandboxPolicy,
         mode: &mut AppMode,
-        questions_allowed: &mut bool,
         nested_gate_env: &mut NestedGateEnv<'_>,
     ) -> (Vec<Option<ToolExecOutcome>>, bool) {
         let mut authority_changed = false;
@@ -3817,9 +3808,6 @@ impl Engine {
             if changed_now || self.applied_runtime_authority().narrows(&planned_posture) {
                 authority_changed = true;
                 *mode = self.current_mode;
-                *questions_allowed = crate::core::authority::permission_posture_allows_questions(
-                    self.session.approval_mode,
-                );
                 for plan in plans {
                     let result = Err(ToolError::permission_denied(
                         "Permissions changed while this tool call was being planned; retry it with the current permissions."
@@ -4245,28 +4233,17 @@ impl Engine {
 
                     if tool_name == REQUEST_USER_INPUT_NAME {
                         let started_at = Instant::now();
-                        let result = if *questions_allowed {
-                            match UserInputRequest::from_value_with_limits(
-                                &tool_input,
-                                self.config.user_input_limits,
-                            ) {
-                                Ok(request) => self
-                                    .await_user_input(&tool_id, request)
-                                    .await
-                                    .and_then(|response| {
-                                        ToolResult::json(&response)
-                                            .map_err(|e| ToolError::execution_failed(e.to_string()))
-                                    }),
-                                Err(err) => Err(err),
-                            }
-                        } else {
-                            Ok(ToolResult::success(
-                                "Auto-Review does not pause for user questions. Decide from the available context and continue autonomously.",
-                            )
-                            .with_metadata(json!({
-                                "auto_resolved": true,
-                                "permission_posture": "auto-review",
-                            })))
+                        let result = match UserInputRequest::from_value_with_limits(
+                            &tool_input,
+                            self.config.user_input_limits,
+                        ) {
+                            Ok(request) => self.await_user_input(&tool_id, request).await.and_then(
+                                |response| {
+                                    ToolResult::json(&response)
+                                        .map_err(|e| ToolError::execution_failed(e.to_string()))
+                                },
+                            ),
+                            Err(err) => Err(err),
                         };
 
                         let _ = self
@@ -4425,10 +4402,6 @@ impl Engine {
                     let mut result_override = if self.apply_pending_runtime_authority().await {
                         authority_changed = true;
                         *mode = self.current_mode;
-                        *questions_allowed =
-                            crate::core::authority::permission_posture_allows_questions(
-                                self.session.approval_mode,
-                            );
                         let approval_survives = approval_stamp.is_some()
                             && !self
                                 .applied_runtime_authority()
@@ -4472,10 +4445,6 @@ impl Engine {
                     if self.apply_pending_runtime_authority().await {
                         authority_changed = true;
                         *mode = self.current_mode;
-                        *questions_allowed =
-                            crate::core::authority::permission_posture_allows_questions(
-                                self.session.approval_mode,
-                            );
                         if approval_stamp.is_none()
                             || self
                                 .applied_runtime_authority()
@@ -4542,10 +4511,6 @@ impl Engine {
                     if std::mem::take(&mut nested_gate_env.authority_changed) {
                         authority_changed = true;
                         *mode = self.current_mode;
-                        *questions_allowed =
-                            crate::core::authority::permission_posture_allows_questions(
-                                self.session.approval_mode,
-                            );
                     }
 
                     if cancelled_before_completion {
