@@ -8551,3 +8551,56 @@ fn only_a_reviewed_plugin_read_only_hint_relaxes_approval() {
         .expect("unannotated tool parses");
     assert_eq!(approval_hint_for(&bare, true), None);
 }
+
+fn stdio_server(args: Vec<String>) -> McpServerConfig {
+    serde_json::from_value(serde_json::json!({ "command": "node", "args": args }))
+        .expect("stdio server config")
+}
+
+#[test]
+fn user_server_launching_the_computer_use_bundle_is_recognized() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bundle = dir
+        .path()
+        .join("Codewhale Computer Use.app/Contents/Resources/plugin");
+    std::fs::create_dir_all(bundle.join("mcp")).expect("bundle dirs");
+    std::fs::write(bundle.join("mcp/server.mjs"), "").expect("server");
+    std::fs::write(bundle.join("plugin.json"), r#"{"name": "computer-use"}"#).expect("manifest");
+    let script = bundle.join("mcp/server.mjs").to_string_lossy().to_string();
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec![script.clone()])),
+        Some(script)
+    );
+
+    // Another plugin's server with the same layout is not a duplicate.
+    let other = dir.path().join("other-plugin");
+    std::fs::create_dir_all(other.join("mcp")).expect("other dirs");
+    std::fs::write(other.join("plugin.json"), r#"{"name": "browser-tools"}"#).expect("manifest");
+    let other_script = other.join("mcp/server.mjs").to_string_lossy().to_string();
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec![other_script])),
+        None
+    );
+
+    // Without a readable manifest the bundle's path shape still counts.
+    let shaped = "/opt/computer-use/mcp/server.mjs".to_string();
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec![shaped.clone()])),
+        Some(shaped)
+    );
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec!["/opt/tools/mcp/server.mjs".to_string()])),
+        None
+    );
+}
+
+#[test]
+fn computer_use_duplicate_warning_needs_the_builtin_bundle_enabled() {
+    // A user entry alone (no enabled built-in bundle) is never flagged.
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "codewhale-cu".to_string(),
+        stdio_server(vec!["/opt/computer-use/mcp/server.mjs".to_string()]),
+    );
+    assert!(duplicate_computer_use_servers(&config).is_empty());
+}
