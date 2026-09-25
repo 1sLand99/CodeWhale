@@ -3569,6 +3569,19 @@ pub struct UpdateThreadRequest {
     pub title: Option<String>,
     pub system_prompt: Option<String>,
     pub workspace: Option<PathBuf>,
+    /// Switch the provider this thread's future turns route through: a
+    /// built-in kind (`deepseek`, `xai`, ...) or a configured route name, as
+    /// `/provider` accepts. Validated against the live config (the route must
+    /// resolve and its credentials must be usable) before it is saved. Without
+    /// `model`, the thread takes that provider's default model; `auto` stays
+    /// `auto`. Conversation history is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    /// Exact configured provider id (`[providers.<id>]`), as `POST /v1/threads`
+    /// and `POST /v1/providers/{id}/switch` accept it. Takes precedence over a
+    /// route name in `model_provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3608,6 +3621,52 @@ pub struct StartTurnRequest {
     pub dynamic_tools: Vec<DynamicToolSpec>,
     #[serde(default)]
     pub environment_id: Option<String>,
+    /// Route this turn only through another provider (same grammar as
+    /// `UpdateThreadRequest::model_provider`). The thread's saved provider is
+    /// unchanged. Without `model`, the turn uses that provider's default model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    /// Exact configured provider id for this turn only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
+}
+
+/// Resolve a caller-selected provider the way `/provider` and
+/// `POST /v1/providers/{id}/switch` do. An exact configured id names one
+/// `[providers.<id>]` route; otherwise `model_provider` is a provider pin: a
+/// built-in kind or a configured route name. `Ok(None)` when neither is set.
+fn requested_provider_identity(
+    config: &Config,
+    model_provider: Option<&str>,
+    model_provider_id: Option<&str>,
+) -> Result<Option<ProviderIdentity>> {
+    if model_provider.is_some_and(|value| value.trim().is_empty()) {
+        bail!("model_provider must not be empty");
+    }
+    if model_provider_id.is_some_and(|value| value.trim().is_empty()) {
+        bail!("model_provider_id must not be empty");
+    }
+    let kind = model_provider.map(str::trim);
+    let identity = match (kind, model_provider_id.map(str::trim)) {
+        (None, None) => return Ok(None),
+        (kind, Some(exact_id)) => config.resolve_persisted_provider_identity(kind, Some(exact_id)),
+        (Some(kind), None) => config.resolve_provider_pin_identity(kind),
+    };
+    identity.map(Some).map_err(|reason| anyhow!(reason))
+}
+
+/// Resolve and client-preflight `identity` for `model` (`None` or `auto`
+/// selects the provider's default route). A provider whose route does not
+/// resolve, or whose credentials cannot build a client, is not ready.
+fn ready_provider_route(
+    config: &Config,
+    identity: &ProviderIdentity,
+    model: Option<&str>,
+) -> Result<crate::route_runtime::ResolvedRuntimeRoute> {
+    let model = model.filter(|model| !model.trim().eq_ignore_ascii_case("auto"));
+    resolve_runtime_thread_route_for_identity(config, identity, model)?
+        .preflight()
+        .map_err(|reason| anyhow!("provider '{}' is not ready: {reason}", identity.key))
 }
 
 fn parse_runtime_reasoning_effort(
@@ -5071,13 +5130,27 @@ impl RuntimeThreadManager {
             });
         match restored {
             Some((restored_kind, restored_id, model)) => {
-                let identity = thread_config
-                    .resolve_persisted_provider_identity(
-                        restored_kind.as_deref(),
-                        restored_id.as_deref(),
-                    )
-                    .map_err(|reason| anyhow!(reason))?;
-                resolve_runtime_thread_route_for_identity(config, &identity, Some(&model))
+                let identity = thread_config.resolve_persisted_provider_identity(
+                    restored_kind.as_deref(),
+                    restored_id.as_deref(),
+                );
+                // The saved thread provider is the authority. An earlier Auto
+                // pick is restored only when it was made on that same
+                // provider; a pick from before a provider switch, from a
+                // one-turn override, or from a provider no longer configured
+                // is ignored and the saved provider's default route applies.
+                match identity {
+                    Ok(identity)
+                        if identity.provider == provider_identity.provider
+                            && identity.key == provider_identity.key
+                            && identity.exact_id == provider_identity.exact_id =>
+                    {
+                        resolve_runtime_thread_route_for_identity(config, &identity, Some(&model))
+                    }
+                    _ => {
+                        resolve_runtime_thread_route_for_identity(config, &provider_identity, None)
+                    }
+                }
             }
             None => resolve_runtime_thread_route_for_identity(config, &provider_identity, None),
         }
@@ -5149,6 +5222,18 @@ impl RuntimeThreadManager {
                 Some(&engine_model),
             ) {
                 Ok(route) => validated.push((thread_id, engine, route, active_turn_id)),
+                // An idle engine still carries the route of its last turn,
+                // which may predate a provider switch or have been a one-turn
+                // override. Its next turn resolves the saved thread route, so
+                // that is the route the new config has to serve.
+                Err(err) if active_turn_id.is_none() => match self
+                    .store
+                    .load_thread(&thread_id)
+                    .and_then(|thread| self.resolved_route_for_thread(&new_config, &thread))
+                {
+                    Ok(route) => validated.push((thread_id, engine, route, active_turn_id)),
+                    Err(_) => failures.push(format!("{thread_id}: {err}")),
+                },
                 Err(err) => failures.push(format!("{thread_id}: {err}")),
             }
         }
@@ -6446,6 +6531,8 @@ impl RuntimeThreadManager {
             auto_approve: None,
             dynamic_tools: Vec::new(),
             environment_id: None,
+            model_provider: None,
+            model_provider_id: None,
         };
         self.start_turn_with_source(
             thread_id,
@@ -6968,6 +7055,8 @@ impl RuntimeThreadManager {
                     auto_approve: None,
                     dynamic_tools: Vec::new(),
                     environment_id: None,
+                    model_provider: None,
+                    model_provider_id: None,
                 },
                 RuntimeTurnInputSource::AgentMail {
                     message_id: message_id.to_string(),
@@ -8182,6 +8271,8 @@ impl RuntimeThreadManager {
             && req.title.is_none()
             && req.system_prompt.is_none()
             && req.workspace.is_none()
+            && req.model_provider.is_none()
+            && req.model_provider_id.is_none()
         {
             bail!("At least one thread field is required");
         }
@@ -8206,6 +8297,41 @@ impl RuntimeThreadManager {
         {
             bail!("workspace must not be empty");
         }
+
+        // A provider switch resolves and preflights the target route before
+        // anything is saved, exactly like the TUI's `/provider`: a provider
+        // that cannot serve the next turn is refused, not recorded. History
+        // stays with the thread; the next turn installs the new route.
+        let provider_switch = {
+            let config = self.read_config().clone();
+            match requested_provider_identity(
+                &config,
+                req.model_provider.as_deref(),
+                req.model_provider_id.as_deref(),
+            )? {
+                Some(identity) => {
+                    let current_model = self.get_thread(id).await?.model;
+                    let requested_model = req.model.clone().or_else(|| {
+                        current_model
+                            .trim()
+                            .eq_ignore_ascii_case("auto")
+                            .then_some(current_model)
+                    });
+                    let route =
+                        ready_provider_route(&config, &identity, requested_model.as_deref())?;
+                    let model = match requested_model {
+                        Some(model) if model.trim().eq_ignore_ascii_case("auto") => model,
+                        _ => route.model.clone(),
+                    };
+                    Some((
+                        identity.provider.as_str().to_string(),
+                        identity.exact_id,
+                        model,
+                    ))
+                }
+                None => None,
+            }
+        };
 
         // Source resolution reads config files. Do it off the Tokio worker,
         // then recheck the conversation identity before committing the grant.
@@ -8289,7 +8415,21 @@ impl RuntimeThreadManager {
                 thread.trust_mode = trust_mode;
                 changes.insert("trust_mode".to_string(), json!(trust_mode));
             }
-            if let Some(model) = req.model
+            let requested_model = match provider_switch {
+                Some((model_provider, model_provider_id, model)) => {
+                    if thread.model_provider.as_deref() != Some(model_provider.as_str())
+                        || thread.model_provider_id != model_provider_id
+                    {
+                        changes.insert("model_provider".to_string(), json!(model_provider));
+                        changes.insert("model_provider_id".to_string(), json!(model_provider_id));
+                        thread.model_provider = Some(model_provider);
+                        thread.model_provider_id = model_provider_id;
+                    }
+                    Some(model)
+                }
+                None => req.model,
+            };
+            if let Some(model) = requested_model
                 && thread.model != model
             {
                 thread.model = model.clone();
@@ -10418,7 +10558,30 @@ impl RuntimeThreadManager {
                 )
             };
         let mode = policy.mode;
-        let requested_model = req.model.as_deref().unwrap_or(&thread.model).to_string();
+        let cfg_snapshot = self.config.read().clone();
+        // Optional per-turn provider override: routes this turn only. The
+        // saved thread keeps its provider; `route_thread` is the view the
+        // route, fingerprint and turn receipt are resolved from.
+        let turn_provider = requested_provider_identity(
+            &cfg_snapshot,
+            req.model_provider.as_deref(),
+            req.model_provider_id.as_deref(),
+        )?;
+        let mut route_thread = thread.clone();
+        let requested_model = match turn_provider.as_ref() {
+            Some(identity) => {
+                route_thread.model_provider = Some(identity.provider.as_str().to_string());
+                route_thread.model_provider_id = identity.exact_id.clone();
+                match req.model.as_deref() {
+                    Some(model) => model.to_string(),
+                    None if thread.model.trim().eq_ignore_ascii_case("auto") => {
+                        thread.model.clone()
+                    }
+                    None => ready_provider_route(&cfg_snapshot, identity, None)?.model.clone(),
+                }
+            }
+            None => req.model.as_deref().unwrap_or(&thread.model).to_string(),
+        };
         let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
         if !image_blocks.is_empty() && (requested_model.is_empty() || requested_model.trim() != requested_model) {
             bail!("image inputs require an exact nonempty named model");
@@ -10426,7 +10589,6 @@ impl RuntimeThreadManager {
         if !image_blocks.is_empty() && auto_model {
             bail!("image inputs require an exact named model with supported image input; Auto is unavailable for images");
         }
-        let cfg_snapshot = self.config.read().clone();
         let configured_reasoning_preference = cfg_snapshot
             .reasoning_effort()
             .map(crate::reasoning_preference::ReasoningEffort::from_setting);
@@ -10448,7 +10610,7 @@ impl RuntimeThreadManager {
         let operation = if let Some(operation_key) = req.operation_key.as_deref() {
             validate_runtime_turn_operation_key(operation_key)?;
             let request_fingerprint = runtime_turn_request_fingerprint(
-                &thread,
+                &route_thread,
                 &prompt,
                 req.input_summary.as_deref(),
                 &requested_model,
@@ -10477,7 +10639,7 @@ impl RuntimeThreadManager {
             return Ok((original_turn, true));
         }
         if !image_blocks.is_empty() || req.max_output_tokens.is_some() {
-            let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
+            let identity = self.provider_identity_for_thread(&cfg_snapshot, &route_thread)?;
             let route = resolve_runtime_thread_route_for_identity(&cfg_snapshot, &identity, Some(&requested_model))?;
             if !image_blocks.is_empty() && route.candidate.capabilities().image_input != codewhale_config::route::CapabilityState::Supported {
                 bail!("image inputs require a model with explicitly supported image input");
@@ -10504,7 +10666,7 @@ impl RuntimeThreadManager {
         // Resolve the concrete provider/model before persisting a turn. Auto
         // routing can fail, and such a failure must not leave a zombie
         // in-progress record behind.
-        let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
+        let identity = self.provider_identity_for_thread(&cfg_snapshot, &route_thread)?;
         let mut thread_config = cfg_snapshot.clone();
         thread_config.scope_to_provider_identity(&identity);
         let verbosity = thread_config.verbosity.clone();
@@ -10607,7 +10769,7 @@ impl RuntimeThreadManager {
                 None,
             )
         };
-        let route = if client_preflight_required {
+        let route = if client_preflight_required || turn_provider.is_some() {
             route
                 .preflight()
                 .map_err(|reason| anyhow!("Failed to validate runtime thread route: {reason}"))?
