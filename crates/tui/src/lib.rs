@@ -429,7 +429,10 @@ Examples:
 
 Plain `codewhale exec` is a one-shot model response: one Engine turn with the
 same system prompt as every other run, and no tools. Use `--auto` for
-non-interactive agent-with-tools execution. `--auto` does not change the
+non-interactive agent-with-tools execution. Tools are offered only with
+`--auto`, `--yolo`, `--allowed-tools`, or when resuming a session; limits such
+as `--max-turns`, `--disallowed-tools` or `--sandbox`, and the output format,
+never add tools. `--auto` does not change the
 sandbox posture or elevate a denied tool. Use `--sandbox danger-full-access`
 or `--allow-sandbox-elevation` to explicitly authorize sandbox elevation.
 ")]
@@ -599,6 +602,32 @@ fn shell_only_exec_allowed_tools() -> Vec<String> {
         .iter()
         .map(|name| (*name).to_string())
         .collect()
+}
+
+/// #6510: whether an `exec` run is offered tools. Plain exec is one Engine
+/// turn with no tools; only a flag that grants tool authority opens a
+/// surface: `--auto`/`--yolo`, an explicit `--allowed-tools` list, a Fleet
+/// authority envelope, or the launcher's tool-surface env. A resumed session
+/// keeps its surface, because its history can carry tool calls and results
+/// that a zero-tool request cannot replay.
+///
+/// Limits (`--max-turns`, `--max-tool-calls`, `--disallowed-tools`,
+/// `--sandbox`, `--allow-sandbox-elevation`), prompt and hook opt-ins
+/// (`--append-system-prompt`, `--hooks`) and the output format never grant
+/// tools. They used to, so `exec --max-turns 1 "hi"` silently became a
+/// tool-using agent.
+fn exec_grants_tool_surface(
+    args: &ExecArgs,
+    yolo: bool,
+    resuming: bool,
+    env_tool_surface: bool,
+) -> bool {
+    args.auto
+        || yolo
+        || resuming
+        || args.allowed_tools.is_some()
+        || args.tool_authority_json.is_some()
+        || env_tool_surface
 }
 
 fn resolve_exec_allowed_tools(
@@ -2445,23 +2474,15 @@ async fn run_async_main_dispatch(
                 let yolo = cli.yolo || config.yolo.unwrap_or(false);
                 let env_tool_surface = exec_tool_surface_from_env();
                 // #6510: every exec runs on the Engine — one turn loop, one
-                // prompt authority (BASE_PROMPT, AGENTS.md, skills). These
-                // flags ask for a tool surface; without any of them the run
-                // is a one-shot answer on a zero-tool surface.
-                let tool_surface_requested = args.auto
-                    || yolo
-                    || resume_session_id.is_some()
-                    || args.output_format == ExecOutputFormat::StreamJson
-                    || args.max_turns.is_some()
-                    || args.max_tool_calls.is_some()
-                    || args.allowed_tools.is_some()
-                    || args.disallowed_tools.is_some()
-                    || args.append_system_prompt.is_some()
-                    || args.tool_authority_json.is_some()
-                    || args.hooks
-                    || args.sandbox.is_some()
-                    || args.allow_sandbox_elevation
-                    || env_tool_surface.is_some();
+                // prompt authority (BASE_PROMPT, AGENTS.md, skills). Without
+                // a tool grant the run is a one-shot answer on a zero-tool
+                // surface.
+                let tool_surface_requested = exec_grants_tool_surface(
+                    &args,
+                    yolo,
+                    resume_session_id.is_some(),
+                    env_tool_surface.is_some(),
+                );
                 {
                     if args.parent_death_watch {
                         spawn_parent_death_watch();
@@ -8977,10 +8998,7 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
             eprintln!("Review receipt written: {}", path.display());
         }
     } else {
-        match structured.as_ref() {
-            Some(review) => println!("{}", render_review_markdown(review, None)),
-            None => println!("{output}"),
-        }
+        println!("{}", plain_diff_review_report(structured.as_ref(), &output));
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
@@ -9670,6 +9688,20 @@ fn plan_inline_review_comments(
     );
     plan.comments = comments;
     plan
+}
+
+/// The local report for a plain-diff review (#6510). The diff is reviewed
+/// under the one structured review prompt; when the model kept the JSON
+/// contract the report is rendered Markdown, otherwise its prose is printed
+/// verbatim, as before.
+fn plain_diff_review_report(
+    structured: Option<&crate::tools::review::ReviewOutput>,
+    output: &str,
+) -> String {
+    structured.map_or_else(
+        || output.to_string(),
+        |review| render_review_markdown(review, None),
+    )
 }
 
 /// Render a structured review as Markdown. `posted` names the PR the body is
@@ -15796,6 +15828,58 @@ reasoning = "high"
         assert_eq!(client.base_url(), "http://127.0.0.1:18183/v1");
     }
 
+    /// #6510: only a flag that grants tool authority opens a tool surface.
+    /// Limits, prompt/hook opt-ins and the output format keep plain exec a
+    /// zero-tool one-shot; `--max-turns 1` used to make it a tool agent.
+    #[test]
+    fn exec_tool_surface_needs_an_explicit_grant() {
+        let grants = |argv: &[&str], yolo: bool, resuming: bool, env: bool| {
+            let mut full = vec!["codewhale", "exec"];
+            full.extend_from_slice(argv);
+            full.push("hi");
+            let cli = parse_cli(&full);
+            let Some(Commands::Exec(args)) = cli.command else {
+                panic!("expected exec command");
+            };
+            exec_grants_tool_surface(&args, yolo, resuming, env)
+        };
+
+        for zero_tool in [
+            &[][..],
+            &["--max-turns", "1"],
+            &["--max-tool-calls", "3"],
+            &["--disallowed-tools", "exec_shell"],
+            &["--append-system-prompt", "be brief"],
+            &["--hooks"],
+            &["--sandbox", "read-only"],
+            &["--allow-sandbox-elevation"],
+            &["--output-format", "stream-json"],
+            &["--json"],
+        ] {
+            assert!(
+                !grants(zero_tool, false, false, false),
+                "{zero_tool:?} must not grant tools"
+            );
+        }
+
+        assert!(grants(&["--auto"], false, false, false));
+        assert!(grants(
+            &["--allowed-tools", "read_file"],
+            false,
+            false,
+            false
+        ));
+        assert!(grants(
+            &["--tool-authority-json", "{}"],
+            false,
+            false,
+            false
+        ));
+        assert!(grants(&["--max-turns", "1"], true, false, false), "yolo");
+        assert!(grants(&[], false, true, false), "resumed session");
+        assert!(grants(&[], false, false, true), "launcher tool surface");
+    }
+
     #[test]
     fn exec_accepts_split_prompt_words_for_windows_cmd_shims() {
         let cli = parse_cli(&["codewhale", "exec", "hello", "world"]);
@@ -17129,6 +17213,29 @@ api_key = "test-only-key"
         );
         assert!(!posted.contains("```suggestion"), "{posted}");
         assert!(posted.contains("```text"), "{posted}");
+    }
+
+    /// #6510: a plain-diff review now asks for the one structured review
+    /// contract. A reply that keeps it renders as the Markdown report; one
+    /// that ignores it is printed verbatim, as the old prose path did.
+    #[test]
+    fn plain_diff_review_renders_structured_reply_and_keeps_prose() {
+        let json = r#"{"summary":"One risky unwrap.","issues":[{"severity":"high","title":"Unchecked unwrap","description":"Panics on None.","path":"src/lib.rs","line":11}],"suggestions":[],"overall_assessment":"request changes"}"#;
+        let structured = crate::tools::review::ReviewOutput::from_structured_str(json);
+        let report = plain_diff_review_report(structured.as_ref(), json);
+        assert!(report.starts_with("## Codewhale review"), "{report}");
+        assert!(report.contains("One risky unwrap."), "{report}");
+        assert!(report.contains("### Findings"), "{report}");
+        assert!(report.contains("`src/lib.rs:11`"), "{report}");
+        assert!(
+            !report.contains("\"issues\""),
+            "raw JSON must not leak: {report}"
+        );
+
+        let prose = "Looks fine overall; consider a test for the empty case.";
+        let structured = crate::tools::review::ReviewOutput::from_structured_str(prose);
+        assert!(structured.is_none());
+        assert_eq!(plain_diff_review_report(structured.as_ref(), prose), prose);
     }
 
     #[test]

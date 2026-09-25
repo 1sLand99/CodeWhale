@@ -140,10 +140,11 @@ Rules for \"suggestions\":\n\
 - Anchor a suggestion only to lines that appear in the diff you were given, and never to a deleted line. If you are not sure of the exact line numbers, omit \"replacement\".\n\
 - A wrong replacement is worse than no replacement: it is one click from being merged. When in doubt, omit it.";
 
-/// The system prompt shared by every structured review path (`review`
-/// tool and `codewhale review --pr`). Callers parse the reply with
-/// [`ReviewOutput::from_str`], which falls back to freeform text when a
-/// model ignores the JSON contract.
+/// The one review system prompt (#6510), shared by every review path: the
+/// `review` tool, `codewhale review --pr`, and `codewhale review` of a plain
+/// diff. Callers parse the reply with [`ReviewOutput::from_str`] or
+/// [`ReviewOutput::from_structured_str`], which fall back to freeform text
+/// when a model ignores the JSON contract.
 #[must_use]
 pub fn review_system_prompt() -> &'static str {
     REVIEW_SYSTEM_PROMPT

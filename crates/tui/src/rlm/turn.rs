@@ -16,10 +16,14 @@
 //!   history is bounded by [`MAX_RLM_ITERATIONS`] (two small metadata messages
 //!   per round), not by silently dropping the middle.
 //! - **Never an empty answer without a reason.** On exhaustion the last root
-//!   response is returned with the error; any other empty answer carries an
-//!   error naming the termination.
+//!   response is returned with the error, and the REPL's `rlm_query` hands
+//!   that text to the caller marked `[rlm_query incomplete: …]`. Any other
+//!   empty answer, except a deliberate `FINAL("")`, carries an error naming
+//!   the termination.
 //! - Not bounded by wall clock: per-request cancellation comes from the
-//!   parent turn; the iteration cap is the cost bound.
+//!   parent turn; the iteration cap is the cost bound. `turn_timeout()` was
+//!   deliberately made `None` (no fixed 180s cap on long RLM work), so the
+//!   #6511 ask to bound by wall clock instead of a count is still open.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -743,9 +747,13 @@ async fn run_rlm_turn_impl(
 }
 
 /// An empty answer is never returned silently: without an error of its own,
-/// it gets one naming how the loop ended.
+/// it gets one naming how the loop ended. A deliberate `FINAL("")` is the
+/// model's answer, not a failure, and stays an empty answer with no error.
 fn require_answer_or_error(mut result: RlmTurnResult) -> RlmTurnResult {
-    if result.answer.trim().is_empty() && result.error.is_none() {
+    if result.termination != RlmTermination::Final
+        && result.answer.trim().is_empty()
+        && result.error.is_none()
+    {
         result.error = Some(format!(
             "RLM ended ({:?}) after {} iteration(s) with an empty answer",
             result.termination, result.iterations
@@ -1238,7 +1246,7 @@ mod tests {
 
     #[test]
     fn empty_answer_is_never_returned_without_an_error() {
-        let result = require_answer_or_error(RlmTurnResult {
+        let empty = |termination| RlmTurnResult {
             answer: "  ".to_string(),
             iterations: 2,
             duration: Duration::ZERO,
@@ -1247,13 +1255,19 @@ mod tests {
             routed_usage: Vec::new(),
             routed_usage_drop_records: Vec::new(),
             routed_usage_dropped_records: 0,
-            termination: RlmTermination::Final,
+            termination,
             trace: Vec::new(),
             total_rpcs: 0,
-        });
-        let error = result.error.expect("empty answer needs a reason");
+        };
+        let error = require_answer_or_error(empty(RlmTermination::NoCode))
+            .error
+            .expect("empty answer needs a reason");
         assert!(error.contains("empty answer"), "{error}");
-        assert!(error.contains("Final"), "{error}");
+        assert!(error.contains("NoCode"), "{error}");
+
+        // `FINAL("")` is an answer the model chose; callers keep getting "".
+        let deliberate = require_answer_or_error(empty(RlmTermination::Final));
+        assert!(deliberate.error.is_none(), "{:?}", deliberate.error);
     }
 
     #[test]

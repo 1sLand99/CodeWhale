@@ -400,14 +400,7 @@ async fn plain_exec_runs_one_engine_turn_under_one_prompt_authority() {
         "{receipt}"
     );
 
-    let bodies: Vec<Value> = server
-        .received_requests()
-        .await
-        .expect("request recording")
-        .into_iter()
-        .filter(|request| request.url.path() == "/v1/chat/completions")
-        .map(|request| serde_json::from_slice(&request.body).expect("request body JSON"))
-        .collect();
+    let bodies = chat_bodies(&server).await;
     assert_eq!(bodies.len(), 2, "one model call per run: {bodies:#?}");
     for body in &bodies {
         let messages = body["messages"].to_string();
@@ -425,4 +418,115 @@ async fn plain_exec_runs_one_engine_turn_under_one_prompt_authority() {
             "plain exec offers no tools: {body}"
         );
     }
+}
+
+/// Chat-completions bodies the mock received, in order.
+async fn chat_bodies(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .expect("request recording")
+        .into_iter()
+        .filter(|request| request.url.path() == "/v1/chat/completions")
+        .map(|request| serde_json::from_slice(&request.body).expect("request body JSON"))
+        .collect()
+}
+
+/// #6510: a limit is not a tool grant. `--max-turns`, `--disallowed-tools`
+/// and `--append-system-prompt` used to put plain exec on the full tool
+/// catalog, so `exec --max-turns 1 "hi"` became a tool-using agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_exec_limits_do_not_grant_tools() {
+    let server = start_mock_llm(answer_sse_with_usage("pong")).await;
+
+    for flags in [
+        &["--max-turns", "1"][..],
+        &["--disallowed-tools", "exec_shell"],
+        &["--append-system-prompt", "Be brief."],
+    ] {
+        let mut args = flags.to_vec();
+        args.extend(["--model", TEST_MODEL, "answer briefly"]);
+        let text = run_exec(&server, &args);
+        assert_eq!(text.trim(), "pong", "{flags:?}: {text}");
+    }
+
+    let bodies = chat_bodies(&server).await;
+    assert_eq!(bodies.len(), 3, "one model call per run: {bodies:#?}");
+    for body in &bodies {
+        assert!(
+            body.get("tools")
+                .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)),
+            "a limit flag must not offer tools: {body}"
+        );
+    }
+}
+
+/// #6510: plain exec now runs on the Engine, so an output-limit stop follows
+/// the Engine's one policy: the partial answer is kept, the model is asked to
+/// continue, and the run succeeds with the whole answer. The old direct call
+/// printed the partial answer and failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_exec_continues_past_an_output_limit_stop() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(json_response(json!({
+            "object": "list",
+            "data": [{ "id": TEST_MODEL, "object": "model" }]
+        })))
+        .mount(&server)
+        .await;
+    let truncated = [
+        sse_chunk(json!({
+            "id": "chatcmpl-cut",
+            "object": "chat.completion.chunk",
+            "model": TEST_MODEL,
+            "choices": [{"index": 0, "delta": {"content": "first half"}, "finish_reason": null}]
+        })),
+        sse_chunk(json!({
+            "id": "chatcmpl-cut",
+            "object": "chat.completion.chunk",
+            "model": TEST_MODEL,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+        })),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .join("");
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse_response(truncated))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse_response(answer_sse_without_usage(" second half")))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let json_stdout = run_exec(
+        &server,
+        &["--json", "--model", TEST_MODEL, "answer briefly"],
+    );
+    let receipt: Value = serde_json::from_str(&json_stdout)
+        .unwrap_or_else(|err| panic!("--json receipt should parse: {err}\n{json_stdout}"));
+    assert_eq!(receipt["mode"], "one-shot", "{receipt}");
+    assert_eq!(receipt["success"], true, "{receipt}");
+    let output = receipt["output"].as_str().unwrap_or_default();
+    assert!(
+        output.contains("first half") && output.contains("second half"),
+        "{receipt}"
+    );
+
+    let bodies = chat_bodies(&server).await;
+    assert_eq!(bodies.len(), 2, "one continuation request: {bodies:#?}");
+    assert!(
+        bodies[1]["messages"]
+            .to_string()
+            .contains("stopped generation at its output limit"),
+        "the continuation names the truncation: {}",
+        bodies[1]["messages"]
+    );
 }

@@ -74,6 +74,24 @@ quieter, and Fleet runs can be checked before they spend anything.
   honours `NO_COLOR` ([#5846](https://github.com/Hmbown/Codewhale/issues/5846)).
 - `/cache`, `/stash`, `/config`, session prune, `metrics --since` and the
   `lane start`/`lane stop --json` flags handle their edge cases.
+- Plain `codewhale exec` (no `--auto`) runs one Engine turn with the same
+  system prompt as every other run, so `--json` no longer changes the model's
+  instructions, and the run is recorded as a session. It offers no tools
+  unless a flag grants them (`--auto`, `--yolo`, `--allowed-tools`, or
+  resuming a session): `--max-turns`, `--disallowed-tools`,
+  `--append-system-prompt`, `--sandbox` and `--output-format stream-json` no
+  longer turn a chat call into a tool-using agent. The `--json` one-shot
+  receipt drops `stop_reason` and gains the agent receipt's fields. A reply
+  cut off at the provider's output limit is continued instead of failing the
+  run ([#6510](https://github.com/Hmbown/Codewhale/issues/6510)).
+- `codewhale review` of a plain diff uses the same review prompt as
+  `review --pr` and prints the structured review as Markdown, or the model's
+  prose when it ignores the JSON format
+  ([#6510](https://github.com/Hmbown/Codewhale/issues/6510)).
+- A recursive `rlm_query` that runs out of rounds returns its last answer
+  marked `[rlm_query incomplete: …]` instead of an empty string, its model
+  calls appear in the parent turn's record, and its history is no longer
+  trimmed ([#6511](https://github.com/Hmbown/Codewhale/issues/6511)).
 
 ### Experience
 
