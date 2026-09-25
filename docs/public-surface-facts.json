@@ -110,7 +110,8 @@
       "create_goal",
       "get_goal",
       "update_goal",
-      "load_skill"
+      "load_skill",
+      "request_user_input"
     ],
     "schemas": {
       "read": [

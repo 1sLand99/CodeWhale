@@ -17,7 +17,7 @@ Implementation sources:
 
 ## Default-active contract
 
-New turns start with eleven eager native names plus synthetic `tool_search`:
+New turns start with twelve eager native names plus synthetic `tool_search`:
 
 1. `read`
 2. `write`
@@ -30,9 +30,10 @@ New turns start with eleven eager native names plus synthetic `tool_search`:
 9. `get_goal`
 10. `update_goal`
 11. `load_skill`
-12. `tool_search` (synthetic, always active)
+12. `request_user_input` (the question modal; the posture/host gate still decides whether it can open)
+13. `tool_search` (synthetic, always active)
 
-The eleven native names are `DEFAULT_ACTIVE_NATIVE_TOOLS` in
+The twelve native names are `DEFAULT_ACTIVE_NATIVE_TOOLS` in
 `crates/tui/src/core/engine/tool_catalog.rs`, pinned by
 `default_active_contract_keeps_discovery_and_core_tools_eager`. An authority
 boundary may remove `agent` at the maximum child depth, but route size alone
