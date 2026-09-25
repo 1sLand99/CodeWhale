@@ -1821,7 +1821,7 @@ pub struct TuiConfig {
     pub posture_bar: Option<ChromeRowPreset>,
     /// The same three settings for the metrics line under the posture bar.
     /// `compact` is the default: it keeps the route, the context reading, the cost and the
-    /// balance and drops the telemetry and the help hint (#5950).
+    /// balance, the cache rate, and drops the other telemetry and the help hint (#5950, #6565).
     #[serde(default)]
     pub metrics_line: Option<ChromeRowPreset>,
     /// Emit OSC 8 hyperlink escape sequences around URLs in the transcript so
