@@ -17,10 +17,10 @@ export const states: StatesDict = {
   reload: "Reload the page",
   homeLink: "Back to the home page",
   docsIndexLink: "Open the documentation index",
-  notFoundTitle: "We all make typos.",
+  notFoundTitle: "This page isn’t here",
   notFoundBody:
-    "This page doesn’t exist yet.\nNeither does this game.",
-  notFoundHomeLink: "Return to base",
+    "The link may be out of date, or the address has a typo. Start again from the home page or the documentation.",
+  notFoundHomeLink: "Go to the home page",
   notFoundPosterAlt:
     "A blue whale in tactical gear on the fictional Codwhale: Modern Whalefare game poster.",
   unavailableTitle: "The live record has not loaded",

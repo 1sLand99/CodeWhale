@@ -3,13 +3,14 @@
  * web/lib/content/getting-started.ts: install → provider connection →
  * first task → optional Fleet setup.
  *
- * Used by the homepage band and the /docs/guide page so the path reads
+ * Used by the homepage and the /docs/guide page so the path reads
  * identically in both places. Server component, SSG-safe.
  */
 
 import Link from "next/link";
 import { GETTING_STARTED_STEPS } from "@/lib/content/getting-started";
 import { pickText } from "@/lib/i18n/dictionaries";
+import { Icon } from "./icon";
 
 export function GettingStartedSteps({ locale = "en" }: { locale?: string }) {
   return (
@@ -17,7 +18,7 @@ export function GettingStartedSteps({ locale = "en" }: { locale?: string }) {
       {GETTING_STARTED_STEPS.map((step, index) => (
         <li key={step.id} data-step-id={step.id}>
           <span className="gs-step-index" aria-hidden="true">
-            {String(index + 1).padStart(2, "0")}
+            {index + 1}
           </span>
           <h3>{pickText(step.title, locale)}</h3>
           <p>{pickText(step.body, locale)}</p>
@@ -25,7 +26,8 @@ export function GettingStartedSteps({ locale = "en" }: { locale?: string }) {
             <pre className="code-block gs-step-commands"><code>{step.commands.join("\n")}</code></pre>
           )}
           <Link href={`/${locale}${step.link.href}`} className="gs-step-link">
-            {pickText(step.link.label, locale)} →
+            {pickText(step.link.label, locale)}
+            <Icon name="arrow-right" className="icon icon-flip" />
           </Link>
         </li>
       ))}

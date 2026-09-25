@@ -2,82 +2,56 @@
 /*  Tokens and roles — the whale-road                                  */
 /* ------------------------------------------------------------------ */
 /*
- * One token authority: vendor/codewhale-design/tokens.json, generated into
- * ../tokens.css as `--gpui-light-*` / `--gpui-dark-*`. This file names the
- * roles every surface paints with (codewhale-design/DIRECTION.md):
+ * Direction: codewhale-design/DIRECTION.md. Token authority:
+ * vendor/codewhale-design/tokens.json (1.1.x), generated into ../tokens.css
+ * as `--gpui-light-*` / `--gpui-dark-*`. This file names the roles every
+ * page paints with.
  *
- *   Depth is elevation.
- *     sunlit    --panel     raised plates, popovers, the thing in focus
- *     twilight  --bg        the reading floor
- *     recessed  --surface   code, rails, chrome set into the floor
- *     midnight  .midnight   the stage below the one horizon (the footer,
- *                           a home descent); always the dark set, in both
- *                           appearances
+ *   The ocean. Dark is the preferred look: deep navy grounds that rise into
+ *   the logo's gradient (#1E8FD8 -> #0B48BB). Light is warm paper above one
+ *   calm horizon. Below the horizon (the footer, the home sea) is always
+ *   the deep water, in both appearances (`.stage`).
  *
- *   Bioluminescence is how things light up. Focus, live work and "needs
- *   you" carry a soft halo (--glow, --glow-focus): a point of light in the
- *   dark, quieter on paper. Nothing else glows.
+ *   Depth is elevation. --panel is raised (nearer the surface, lighter);
+ *   --bg is the floor; --surface is recessed (code, rails, fields).
  *
- *   State is four hues and always a word: --accent (action, focus),
- *   --live (working, done, verified), --attention (needs you, warning),
- *   --danger (failed, destructive). Idle and offline use --muted.
+ *   Light means something. Focus, live work and "needs you" carry a small
+ *   point of light (--glow). Nothing else glows.
+ *
+ *   State is a mark and a word: --live (working, done, ready), --attention
+ *   (needs you), --danger (failed), --muted (idle). Never colour alone.
+ *
+ * Text, accent and state inks are the generated GPUI tokens in both
+ * appearances. The navy grounds are this site's reach for the ombre; they
+ * are measured against every ink here (gpui-role-tokens.test.ts checks
+ * WCAG AA on every ground).
  *
  * NAMING TRAP: tokens.json `surface` is the RAISED colour (web --panel);
  * tokens.json `sidebar` is the RECESSED one (web --surface).
- *
- * Every role is declared in each scheme block — light (:root), OS-dark and
- * pinned-dark (identical), and midnight — because a custom property that
- * references another is computed where it is declared.
- *
- * The legacy names (--paper, --ink, --indigo, --stage-*, --ocean-*, ...)
- * stay only so pages that have not migrated keep painting; new work uses the
- * roles. They are removed in the post-renovation sweep.
  */
 
 /* ---------- scheme-independent tokens ---------- */
 :root {
-  /* State and control-edge hues that tokens.json 1.0.0 has no slot for.
-     Values and their contrast on all five grounds are measured in
-     codewhale-design/reference/MEASUREMENTS.md §2.2–2.3 (proposed
-     tokens.json 1.1.0). Light live #3a6352 ≥ 4.97:1, light danger #9e3f36
-     ≥ 4.77:1, dark live #9ec7b2 ≥ 6.21:1, dark danger #e39a90 ≥ 5.12:1 on
-     background, panel, sidebar, hover and selected. border-strong clears
-     the 3:1 non-text floor on the same five grounds. */
-  --gpui-light-live: #3a6352;
-  --gpui-dark-live: #9ec7b2;
-  --gpui-light-danger: #9e3f36;
-  --gpui-dark-danger: #e39a90;
-  --gpui-light-border-strong: #807c76;
-  --gpui-dark-border-strong: #828386;
-
-  /* Legacy GPUI aliases, still read by unmigrated page partials. */
-  --gpui-paper: var(--gpui-light-bg);
-  --gpui-paper-raised: var(--gpui-light-panel);
-  --gpui-paper-muted: var(--gpui-light-sidebar);
-  --gpui-ink: var(--gpui-light-text);
-  --gpui-ink-soft: var(--gpui-light-text-muted);
-  --gpui-ink-mute: var(--gpui-light-text-muted);
-  --gpui-edge: var(--gpui-light-border);
-  --gpui-primary: var(--gpui-light-primary);
-  --gpui-primary-hover: rgb(var(--gpui-light-primary-rgb) / var(--gpui-primary-hover-opacity));
-  --gpui-stage: var(--gpui-dark-bg);
-  --gpui-stage-deep: var(--gpui-dark-sidebar);
-  --gpui-stage-muted: var(--gpui-dark-panel);
-  --gpui-stage-raised: var(--gpui-dark-list-active);
-  --gpui-stage-ink: var(--gpui-dark-text);
-  --gpui-stage-ink-soft: var(--gpui-dark-text-muted);
-  --gpui-stage-ink-dim: var(--gpui-dark-text-muted);
-  --gpui-stage-edge: var(--gpui-dark-border);
-  --gpui-primary-dark: var(--gpui-dark-primary);
-  --gpui-primary-hover-dark: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-primary-hover-opacity));
-  --gpui-accent-dark: var(--gpui-dark-accent);
-  --gpui-selection-dark: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-selection-opacity));
-  --gpui-tan: #b1a17a;
-  --gpui-moss: #739686;
-  --gpui-rust: #aa6f6c;
-  --c-stage-soft: var(--gpui-dark-text-muted-rgb);
-  --c-stage-deep: var(--gpui-dark-sidebar-rgb);
-  --c-primary-dark: var(--gpui-dark-primary-rgb);
+  /* The ocean: the navy grounds and the logo gradient. */
+  --ocean-abyss: #030a1c;
+  --ocean-floor: #061431;
+  --ocean-raised: #0c2152;
+  --ocean-hover: #11295e;
+  --ocean-selected: #16316b;
+  --ocean-line: #1f3a78;
+  --ocean-line-strong: #6f86b8;
+  --ocean-sky: #0a1d48;
+  --brand-light: #1e8fd8;
+  --brand-deep: #0b48bb;
+  /* The primary fill: the logo gradient, started where white text on it
+     still clears 4.5:1 (#1877c9 is 4.65:1; #1e8fd8 itself is 3.5:1). */
+  --brand-fill: linear-gradient(135deg, #1877c9, var(--brand-deep));
+  --brand-fill-hover: linear-gradient(135deg, #1670c2, #0a3fa6);
+  --on-brand: #ffffff;
+  /* The sea below the horizon: bright at the waterline, deep within a few
+     rows, so text from 3rem down sits on >= 4.5:1 muted contrast. */
+  --sea: linear-gradient(180deg, #0b48bb 0, #0a3a94 2.5rem, #06205a 9rem, #041234 18rem, var(--ocean-abyss) 100%);
+  --horizon-glow: rgb(144 185 255 / 0.9);
 
   /* Type: Shannon Sans for every role, the system monospace stack for
      things a person could type or paste. No serif, no third family. */
@@ -88,55 +62,51 @@
     "Liberation Mono", monospace;
   --font-cjk: var(--gpui-font-fallbacks), sans-serif;
 
-  /* Type scale (MEASUREMENTS §3.1). 12px is the floor: nothing renders
-     smaller. Display sizes are website-only, one per page. */
-  --text-caption: 0.75rem;   /* 12/16 meta, timestamps, labels */
-  --text-mono: var(--gpui-mono-size); /* 13/20 code, commands */
-  --text-ui: 0.875rem;       /* 14/20 controls, rows, panel body */
-  --text-body: 1rem;         /* 16/24 short copy, form inputs (no iOS zoom) */
-  --text-prose: 1.0625rem;   /* 17/26 reading: docs, legal, answers */
-  --leading-prose: 1.53;
-  --text-heading: 1.0625rem; /* 17/24 600 section heading */
-  --text-title: 1.375rem;    /* 22/28 600 page or sheet title */
-  --text-display: clamp(1.75rem, 1.2rem + 2.2vw, 2.5rem); /* 28→40 inner-page hero */
-  --text-display-lg: clamp(2.5rem, 1.6rem + 3.6vw, 3.5rem); /* 40→56 the home hero */
-  /* Short aliases the spec uses. */
+  /* Type scale. 12px is the floor. Display sizes are one per page. */
+  --text-caption: 0.75rem;   /* 12 meta, timestamps, labels */
+  --text-mono: var(--gpui-mono-size); /* 13 code, commands */
+  --text-ui: 0.875rem;       /* 14 controls, rows, panel body */
+  --text-body: 1rem;         /* 16 short copy, form inputs (no iOS zoom) */
+  --text-prose: 1.0625rem;   /* 17 reading: docs, legal, answers */
+  --leading-prose: 1.6;
+  --text-heading: 1.0625rem; /* 17 600 group heading */
+  --text-title: 1.375rem;    /* 22 600 section title */
+  --text-display: clamp(2rem, 1.3rem + 2.6vw, 3rem);         /* inner-page title */
+  --text-display-lg: clamp(2.5rem, 1.4rem + 4.4vw, 4.5rem);  /* the home hero */
   --text-xs: var(--text-caption);
   --text-sm: var(--text-ui);
   --text-base: var(--text-body);
 
-  /* Space: a 4px program (MEASUREMENTS §4.1). */
-  --space-1: 0.25rem;  /*  4 */
-  --space-2: 0.5rem;   /*  8 */
-  --space-3: 0.75rem;  /* 12 */
-  --space-4: 1rem;     /* 16 */
-  --space-5: 1.5rem;   /* 24 */
-  --space-6: 2rem;     /* 32 */
-  --space-7: 3rem;     /* 48 */
-  --space-8: 4rem;     /* 64 */
-  --section-gap: clamp(var(--space-7), 6vw, var(--space-8));
+  /* Space: a 4px program. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+  --section-gap: clamp(var(--space-7), 7vw, 5.5rem);
 
-  /* One container, one reading measure. --measure-prose is the GPUI
-     PROSE_MEASURE (880px), not the 1440px READING_COLUMN. */
+  /* One container, one reading measure. */
   --container: min(100% - var(--gpui-spacing-page), 76rem);
-  --measure-prose: 55rem;
-  --measure-text: 70ch;
-  --hero-pad: clamp(3rem, 6vw, 4.75rem);
+  --measure-prose: 46rem;
+  --measure-text: 68ch;
+  --hero-pad: clamp(3rem, 7vw, 5.5rem);
   --section-pad: clamp(2.75rem, 5vw, 4rem);
 
-  /* Radius: 6 controls, 10 surfaces (code, menus, cards), 14 sheets,
-     pill for dots. No other radius. */
+  /* Radius: 6 controls, 10 surfaces, 14 sheets, pill for dots. */
   --radius-control: var(--gpui-radius-control);
   --radius-surface: var(--gpui-radius-panel);
-  --radius-sheet: 14px;
+  --radius-sheet: var(--gpui-radius-sheet);
   --radius-pill: 999px;
 
-  /* Motion (MEASUREMENTS §9.1). Nothing bounces: every curve stays inside
-     [0, 1]. --ease-spring is the GPUI PANEL_SPRING fit (no overshoot). */
+  /* Motion. Nothing bounces: every curve stays inside [0, 1]. */
   --dur-state: 120ms;   /* colour, border, opacity on hover and press */
   --dur-arrive: 180ms;  /* something new arrives, rise <= 4px */
   --dur-exit: 120ms;    /* something closes or leaves */
   --dur-spring: 340ms;  /* panes and sheets */
+  --dur-spin: 1.2s;     /* a working spinner: motion that shows work */
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ease-spring: cubic-bezier(0.2, 0.1, 0.16, 1);
@@ -155,7 +125,7 @@
   }
 }
 
-/* ---------- light — the twilight floor on warm paper ---------- */
+/* ---------- light — warm paper above the horizon ---------- */
 :root {
   --bg: var(--gpui-light-bg);
   --surface: var(--gpui-light-sidebar);
@@ -175,267 +145,162 @@
   --success: var(--gpui-light-live);
   --attention: var(--gpui-light-attention);
   --danger: var(--gpui-light-danger);
-  --on-danger: var(--gpui-light-on-primary);
+  --mark-ink: var(--gpui-light-text);
   --diff-add: rgb(104 152 119 / 0.14);
   --diff-del: rgb(189 119 116 / 0.11);
-  --mark-ink: var(--gpui-light-text);
-  /* Light in the dark: on paper the halo is a quiet ring. */
-  --glow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
+  /* The sky: paper that brightens toward blue at the top of the page. */
+  --ground: linear-gradient(180deg, #e9f1fb 0, var(--gpui-light-bg) 26rem);
+  /* On paper, light is a quiet ring. */
+  --glow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
   --glow-focus: 0 0 0 6px rgb(var(--gpui-light-primary-rgb) / 0.12);
   --shadow-popover: 0 4px 8px rgb(0 0 0 / 0.16);
-  /* The horizon needs a drawn edge only where the two grounds are within
-     1.2:1 of each other — the dark appearance. */
-  --horizon-edge: transparent;
-
-  /* Legacy names (sweep). */
-  --c-paper: var(--gpui-light-bg-rgb);
-  --c-paper-deep: var(--gpui-light-sidebar-rgb);
-  --c-paper-edge: var(--gpui-light-border-rgb);
-  --c-ink: var(--gpui-light-text-rgb);
-  --c-ink-soft: var(--gpui-light-text-muted-rgb);
-  --c-ink-mute: var(--gpui-light-text-muted-rgb);
-  --c-indigo: var(--gpui-light-primary-rgb);
-  --paper: var(--gpui-paper);
-  --paper-deep: var(--gpui-paper-muted);
-  --paper-edge: var(--gpui-edge);
-  --paper-card: var(--gpui-paper-raised);
-  --paper-line: var(--gpui-edge);
-  --paper-line-soft: var(--gpui-edge);
-  --ink: var(--gpui-ink);
-  --ink-soft: var(--gpui-ink-soft);
-  --ink-mute: var(--gpui-ink-mute);
-  --indigo: var(--gpui-primary);
-  --indigo-deep: var(--gpui-primary-hover);
-  --indigo-pale: rgb(var(--c-indigo) / 0.1);
-  --action-on-dark: var(--gpui-primary-dark);
-  --ochre: #7d6a3f;
-  --jade: #4e6f61;
-  --seafoam: var(--gpui-moss);
-  --cobalt: var(--gpui-primary);
-  --cyan: var(--gpui-primary);
-  --ocean-deep: var(--gpui-stage-deep);
-  --ocean-mid: var(--gpui-stage-muted);
-  --ocean-current: var(--gpui-primary-dark);
-  --ocean-mist: var(--gpui-stage-ink-soft);
-  --ocean-coral: #8f5a56;
-  --signal-gold: #7d6a3f;
-  --docs-accent: var(--gpui-primary);
-  --docs-button-bg: var(--gpui-paper-raised);
-  --docs-button-border: var(--gpui-edge);
-  --docs-button-text: var(--gpui-ink);
-  --stage-text: var(--gpui-stage-ink);
-  --stage-soft: var(--gpui-stage-ink-soft);
-  --stage-muted: var(--gpui-stage-ink-dim);
-  --stage-field-top: var(--gpui-stage-muted);
-  --stage-field-mid: var(--gpui-stage);
-  --stage-field-deep: var(--gpui-stage-deep);
-  --stage-ambient: var(--gpui-accent-dark);
-  --stage-composer: var(--gpui-stage-muted);
-  --stage-elevated: var(--gpui-stage-raised);
-  --stage-line: var(--gpui-stage-edge);
-  --stage-hint: var(--gpui-stage-ink-dim);
-  --stage-dim: var(--gpui-stage-ink-soft);
-  --violet: var(--gpui-selection-dark);
-  --hairline: var(--gpui-light-border);
-  --code-bg: var(--gpui-light-sidebar);
-  --code-fg: var(--gpui-light-text);
   color-scheme: light;
 }
 
-/* ---------- dark — graphite; the OS-dark and pinned blocks match ---------- */
+/* ---------- dark — the navy ocean; the OS-dark and pinned blocks match ---------- */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: var(--gpui-dark-bg);
-    --surface: var(--gpui-dark-sidebar);
-    --panel: var(--gpui-dark-panel);
+    --bg: var(--ocean-floor);
+    --surface: var(--ocean-abyss);
+    --panel: var(--ocean-raised);
     --text: var(--gpui-dark-text);
     --muted: var(--gpui-dark-text-muted);
-    --line: var(--gpui-dark-border);
-    --line-strong: var(--gpui-dark-border-strong);
+    --line: var(--ocean-line);
+    --line-strong: var(--ocean-line-strong);
     --accent: var(--gpui-dark-primary);
     --accent-hover: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-primary-hover-opacity));
     --on-accent: var(--gpui-dark-on-primary);
-    --hover: var(--gpui-dark-accent);
-    --selected: var(--gpui-dark-list-active);
+    --hover: var(--ocean-hover);
+    --selected: var(--ocean-selected);
     --selection: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-selection-opacity));
     --ring: var(--gpui-dark-primary);
     --live: var(--gpui-dark-live);
     --success: var(--gpui-dark-live);
     --attention: var(--gpui-dark-attention);
     --danger: var(--gpui-dark-danger);
-    --on-danger: var(--gpui-dark-bg);
-    --diff-add: rgb(36 61 69 / 0.22);
-    --diff-del: rgb(116 72 84 / 0.15);
     --mark-ink: var(--gpui-dark-text);
-    --glow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 42%, transparent);
-    --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.32);
+    --diff-add: rgb(80 170 140 / 0.16);
+    --diff-del: rgb(227 154 144 / 0.12);
+    --ground: radial-gradient(90rem 38rem at 50% -14rem, rgb(30 143 216 / 0.3), transparent 70%), linear-gradient(180deg, var(--ocean-sky) 0, var(--ocean-floor) 34rem);
+    --glow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 45%, transparent);
+    --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.35);
     --shadow-popover: 0 4px 8px rgb(0 0 0 / 0.4);
-    --horizon-edge: var(--gpui-dark-border);
-
-    --c-paper: var(--gpui-dark-bg-rgb);
-    --c-paper-deep: var(--gpui-dark-panel-rgb);
-    --c-paper-edge: var(--gpui-dark-border-rgb);
-    --c-ink: var(--gpui-dark-text-rgb);
-    --c-ink-soft: var(--gpui-dark-text-muted-rgb);
-    --c-ink-mute: var(--gpui-dark-text-muted-rgb);
-    --c-indigo: var(--gpui-dark-primary-rgb);
-    --paper: var(--gpui-stage);
-    --paper-deep: var(--gpui-stage-muted);
-    --paper-edge: var(--gpui-stage-edge);
-    --paper-card: var(--gpui-stage-muted);
-    --paper-line: var(--gpui-stage-edge);
-    --paper-line-soft: var(--gpui-stage-edge);
-    --ink: var(--gpui-stage-ink);
-    --ink-soft: var(--gpui-stage-ink-soft);
-    --ink-mute: var(--gpui-stage-ink-dim);
-    --indigo: var(--gpui-primary-dark);
-    --indigo-deep: var(--gpui-primary-hover-dark);
-    --indigo-pale: rgb(var(--c-primary-dark) / 0.14);
-    --ochre: #d6c78f;
-    --jade: #9ec7b2;
-    --cyan: var(--gpui-primary-dark);
-    --ocean-coral: #d08a80;
-    --signal-gold: #d6c78f;
-    --docs-accent: var(--gpui-primary-dark);
-    --docs-button-bg: var(--gpui-stage-muted);
-    --docs-button-border: var(--gpui-stage-edge);
-    --docs-button-text: var(--gpui-stage-ink);
-    --hairline: var(--gpui-dark-border);
-    --code-bg: var(--gpui-dark-sidebar);
-    --code-fg: var(--gpui-dark-text);
     color-scheme: dark;
   }
 }
 
 :root[data-theme="dark"] {
-  --bg: var(--gpui-dark-bg);
-  --surface: var(--gpui-dark-sidebar);
-  --panel: var(--gpui-dark-panel);
+  --bg: var(--ocean-floor);
+  --surface: var(--ocean-abyss);
+  --panel: var(--ocean-raised);
   --text: var(--gpui-dark-text);
   --muted: var(--gpui-dark-text-muted);
-  --line: var(--gpui-dark-border);
-  --line-strong: var(--gpui-dark-border-strong);
+  --line: var(--ocean-line);
+  --line-strong: var(--ocean-line-strong);
   --accent: var(--gpui-dark-primary);
   --accent-hover: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-primary-hover-opacity));
   --on-accent: var(--gpui-dark-on-primary);
-  --hover: var(--gpui-dark-accent);
-  --selected: var(--gpui-dark-list-active);
+  --hover: var(--ocean-hover);
+  --selected: var(--ocean-selected);
   --selection: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-selection-opacity));
   --ring: var(--gpui-dark-primary);
   --live: var(--gpui-dark-live);
   --success: var(--gpui-dark-live);
   --attention: var(--gpui-dark-attention);
   --danger: var(--gpui-dark-danger);
-  --on-danger: var(--gpui-dark-bg);
-  --diff-add: rgb(36 61 69 / 0.22);
-  --diff-del: rgb(116 72 84 / 0.15);
   --mark-ink: var(--gpui-dark-text);
-  --glow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 42%, transparent);
-  --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.32);
+  --diff-add: rgb(80 170 140 / 0.16);
+  --diff-del: rgb(227 154 144 / 0.12);
+  --ground: radial-gradient(90rem 38rem at 50% -14rem, rgb(30 143 216 / 0.3), transparent 70%), linear-gradient(180deg, var(--ocean-sky) 0, var(--ocean-floor) 34rem);
+  --glow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 45%, transparent);
+  --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.35);
   --shadow-popover: 0 4px 8px rgb(0 0 0 / 0.4);
-  --horizon-edge: var(--gpui-dark-border);
-
-  --c-paper: var(--gpui-dark-bg-rgb);
-  --c-paper-deep: var(--gpui-dark-panel-rgb);
-  --c-paper-edge: var(--gpui-dark-border-rgb);
-  --c-ink: var(--gpui-dark-text-rgb);
-  --c-ink-soft: var(--gpui-dark-text-muted-rgb);
-  --c-ink-mute: var(--gpui-dark-text-muted-rgb);
-  --c-indigo: var(--gpui-dark-primary-rgb);
-  --paper: var(--gpui-stage);
-  --paper-deep: var(--gpui-stage-muted);
-  --paper-edge: var(--gpui-stage-edge);
-  --paper-card: var(--gpui-stage-muted);
-  --paper-line: var(--gpui-stage-edge);
-  --paper-line-soft: var(--gpui-stage-edge);
-  --ink: var(--gpui-stage-ink);
-  --ink-soft: var(--gpui-stage-ink-soft);
-  --ink-mute: var(--gpui-stage-ink-dim);
-  --indigo: var(--gpui-primary-dark);
-  --indigo-deep: var(--gpui-primary-hover-dark);
-  --indigo-pale: rgb(var(--c-primary-dark) / 0.14);
-  --ochre: #d6c78f;
-  --jade: #9ec7b2;
-  --cyan: var(--gpui-primary-dark);
-  --ocean-coral: #d08a80;
-  --signal-gold: #d6c78f;
-  --docs-accent: var(--gpui-primary-dark);
-  --docs-button-bg: var(--gpui-stage-muted);
-  --docs-button-border: var(--gpui-stage-edge);
-  --docs-button-text: var(--gpui-stage-ink);
-  --hairline: var(--gpui-dark-border);
-  --code-bg: var(--gpui-dark-sidebar);
-  --code-fg: var(--gpui-dark-text);
   color-scheme: dark;
 }
 
-/* ---------- midnight — the stage below the horizon ---------- */
-/* Always the dark set, in both appearances (MEASUREMENTS §5.1): the footer
-   and any home descent. The ground is the deepest graphite, so raised and
-   recessed plates step up from it. `.ocean-column` stays until the home
-   slice retires it. --horizon-edge is deliberately not redeclared: it
-   follows the page's appearance. */
-.midnight,
-.site-footer,
-.ocean-column {
-  --bg: var(--gpui-dark-sidebar);
-  --surface: var(--gpui-dark-bg);
-  --panel: var(--gpui-dark-panel);
+/* ---------- the stage — below the horizon, in both appearances ---------- */
+/* The footer and the home sea. The ground is the deep water; raised and
+   recessed plates step up and down from it. Legacy aliases are repeated
+   here because a custom property that references another is computed where
+   it is declared. */
+.stage,
+.site-footer {
+  --bg: var(--ocean-floor);
+  --surface: var(--ocean-abyss);
+  --panel: var(--ocean-raised);
   --text: var(--gpui-dark-text);
   --muted: var(--gpui-dark-text-muted);
-  --line: var(--gpui-dark-border);
-  --line-strong: var(--gpui-dark-border-strong);
+  --line: var(--ocean-line);
+  --line-strong: var(--ocean-line-strong);
   --accent: var(--gpui-dark-primary);
   --accent-hover: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-primary-hover-opacity));
   --on-accent: var(--gpui-dark-on-primary);
-  --hover: var(--gpui-dark-accent);
-  --selected: var(--gpui-dark-list-active);
+  --hover: var(--ocean-hover);
+  --selected: var(--ocean-selected);
   --selection: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-selection-opacity));
   --ring: var(--gpui-dark-primary);
   --live: var(--gpui-dark-live);
   --success: var(--gpui-dark-live);
   --attention: var(--gpui-dark-attention);
   --danger: var(--gpui-dark-danger);
-  --on-danger: var(--gpui-dark-bg);
-  --diff-add: rgb(36 61 69 / 0.22);
-  --diff-del: rgb(116 72 84 / 0.15);
   --mark-ink: var(--gpui-dark-text);
-  --glow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 42%, transparent);
-  --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.32);
+  --diff-add: rgb(80 170 140 / 0.16);
+  --diff-del: rgb(227 154 144 / 0.12);
+  --glow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 45%, transparent);
+  --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.35);
   --shadow-popover: 0 4px 8px rgb(0 0 0 / 0.4);
 
-  --c-paper: var(--gpui-dark-sidebar-rgb);
-  --c-paper-deep: var(--gpui-dark-panel-rgb);
-  --c-paper-edge: var(--gpui-dark-border-rgb);
-  --c-ink: var(--gpui-dark-text-rgb);
-  --c-ink-soft: var(--gpui-dark-text-muted-rgb);
-  --c-ink-mute: var(--gpui-dark-text-muted-rgb);
-  --c-indigo: var(--gpui-dark-primary-rgb);
-  --paper: var(--gpui-stage-deep);
-  --paper-deep: var(--gpui-stage-muted);
-  --paper-edge: var(--gpui-stage-edge);
-  --paper-card: var(--gpui-stage-muted);
-  --paper-line: var(--gpui-stage-edge);
-  --paper-line-soft: var(--gpui-stage-edge);
-  --ink: var(--gpui-stage-ink);
-  --ink-soft: var(--gpui-stage-ink-soft);
-  --ink-mute: var(--gpui-stage-ink-dim);
-  --indigo: var(--gpui-primary-dark);
-  --indigo-deep: var(--gpui-primary-hover-dark);
-  --indigo-pale: rgb(var(--c-primary-dark) / 0.14);
-  --ochre: #d6c78f;
-  --jade: #9ec7b2;
-  --cyan: var(--gpui-primary-dark);
-  --ocean-coral: #d08a80;
-  --signal-gold: #d6c78f;
-  --docs-accent: var(--gpui-primary-dark);
-  --docs-button-bg: var(--gpui-stage-muted);
-  --docs-button-border: var(--gpui-stage-edge);
-  --docs-button-text: var(--gpui-stage-ink);
-  --hairline: var(--gpui-dark-border);
-  --code-bg: var(--gpui-dark-bg);
-  --code-fg: var(--gpui-dark-text);
+  --paper: var(--bg);
+  --paper-deep: var(--surface);
+  --paper-card: var(--panel);
+  --paper-edge: var(--line);
+  --paper-line: var(--line);
+  --paper-line-soft: var(--line);
+  --hairline: var(--line);
+  --ink: var(--text);
+  --ink-soft: var(--muted);
+  --ink-mute: var(--muted);
+  --indigo: var(--accent);
+  --indigo-deep: var(--accent-hover);
+  --indigo-pale: color-mix(in srgb, var(--accent) 14%, transparent);
+  --docs-accent: var(--accent);
+  --code-bg: var(--surface);
+  --code-fg: var(--text);
   color-scheme: dark;
-  background: var(--bg);
   color: var(--text);
+}
+
+/* ---------- legacy names ---------- */
+/* Pages and partials that have not moved to the roles (the docs) read these.
+   Declared once on :root, they resolve against whichever scheme block wins
+   there; `.stage` repeats them. Removed in the post-renovation sweep. */
+:root {
+  --paper: var(--bg);
+  --paper-deep: var(--surface);
+  --paper-card: var(--panel);
+  --paper-edge: var(--line);
+  --paper-line: var(--line);
+  --paper-line-soft: var(--line);
+  --hairline: var(--line);
+  --ink: var(--text);
+  --ink-soft: var(--muted);
+  --ink-mute: var(--muted);
+  --indigo: var(--accent);
+  --indigo-deep: var(--accent-hover);
+  --indigo-pale: color-mix(in srgb, var(--accent) 12%, transparent);
+  --cobalt: var(--accent);
+  --cyan: var(--accent);
+  --ochre: var(--attention);
+  --signal-gold: var(--attention);
+  --jade: var(--live);
+  --seafoam: var(--live);
+  --ocean-coral: var(--danger);
+  --docs-accent: var(--accent);
+  --docs-button-bg: var(--panel);
+  --docs-button-border: var(--line);
+  --docs-button-text: var(--text);
+  --code-bg: var(--surface);
+  --code-fg: var(--text);
+  --stage-line: var(--line);
+  --stage-dim: var(--muted);
 }

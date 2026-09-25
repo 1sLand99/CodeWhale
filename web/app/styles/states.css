@@ -3,7 +3,8 @@
 /* ------------------------------------------------------------------ */
 /*
  * The empty / loading / error grammar itself lives in primitives.css
- * (.empty-state, .skeleton-bar); components/surface-state.tsx renders it.
+ * (.empty-state, .state-block, .skeleton-bar); components/surface-state.tsx
+ * renders it.
  * This file keeps the two containers around it.
  */
 
@@ -14,7 +15,6 @@
   width: var(--container);
   margin-inline: auto;
   padding-block: var(--space-6) var(--space-8);
-  max-width: 52rem;
 }
 
 /* ------------------------------------------------------------------ */
@@ -87,8 +87,8 @@
 }
 
 .connection-button:hover { background: var(--hover); }
-.connection-button-primary { border-color: transparent; background: var(--accent); color: var(--on-accent); }
-.connection-button-primary:hover { background: var(--accent-hover); color: var(--on-accent); }
+.connection-button-primary { border-color: transparent; background: var(--brand-fill); color: var(--on-brand); font-weight: 600; }
+.connection-button-primary:hover { background: var(--brand-fill-hover); color: var(--on-brand); }
 .connection-button:disabled { opacity: 0.5; cursor: not-allowed; }
 .connection-button[aria-busy="true"] { cursor: progress; }
 

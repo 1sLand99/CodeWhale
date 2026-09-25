@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { GETTING_STARTED_STEPS } from "@/lib/content/getting-started";
-import { Seal } from "@/components/seal";
+import { PageHeader } from "@/components/page-header";
 import { FaqSearch } from "@/components/faq-search";
 import { buildFaqPageJsonLd } from "@/lib/faq-schema";
 import { FACTS } from "@/lib/facts.generated";
@@ -53,8 +53,8 @@ npm install -g codewhale
 # Cargo (needs Rust 1.88+; installs the codewhale command)
 cargo install codewhale-cli --locked
 
-# Homebrew (macOS)
-brew tap Hmbown/deepseek-tui && brew install codewhale
+# Homebrew (tap; the full name taps and trusts in one step)
+brew install Hmbown/deepseek-tui/codewhale
 
 # Direct download
 # https://github.com/Hmbown/CodeWhale/releases`}
@@ -426,8 +426,8 @@ npm install -g codewhale
 # Cargo（需要 Rust 1.88+；安装 codewhale 命令）
 cargo install codewhale-cli --locked
 
-# Homebrew（macOS）
-brew tap Hmbown/deepseek-tui && brew install codewhale
+# Homebrew（tap；完整名称会一步完成 tap 与信任）
+brew install Hmbown/deepseek-tui/codewhale
 
 # 直接下载
 # https://github.com/Hmbown/CodeWhale/releases`}
@@ -773,42 +773,31 @@ export default async function FaqPage({ params }: { params: Promise<{ locale: st
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }}
       />
-      <section className="site-container section">
-        <div className="flex items-baseline gap-4 mb-3">
-          <Seal char="问" />
-          <div className="eyebrow">{isZh ? "常见问题" : "FAQ"}</div>
-        </div>
-        <h1 className="font-display tracking-crisp">
-          {isZh ? (
-            <>常见问题 <span className="font-cjk text-indigo text-5xl ml-2">FAQ</span></>
-          ) : (
-            <>FAQ <span className="font-cjk text-indigo text-5xl ml-2">常见问题</span></>
-          )}
-        </h1>
-        <p className="mt-5 max-w-3xl text-ink-soft text-lg leading-[1.9] tracking-wide">
-          {isZh
+      <PageHeader
+        kicker={isZh ? "常见问题" : "FAQ"}
+        title={isZh ? "常见问题" : "Frequently asked questions"}
+        lede={
+          isZh
             ? "答案来自实际代码、文档、发布说明和 GitHub 议题。每个回答下方标注了信息来源。如有未覆盖的问题，请在 GitHub 上提交 Issue。"
-            : "Answers sourced from real code, docs, release notes, and GitHub issues. Sources are cited below each answer. If your question isn't covered, open an issue on GitHub."}
-        </p>
-      </section>
+            : "Answers sourced from real code, docs, release notes, and GitHub issues. Sources are cited below each answer. If your question isn't covered, open an issue on GitHub."
+        }
+        pose="talk"
+      />
 
-      <section className="site-container pb-20">
-        <FaqSearch items={items} locale={locale} />
+      <div className="page-body">
+        <div className="page-body-narrow">
+          <FaqSearch items={items} locale={locale} />
 
-        <div className="mt-12 text-center">
-          <p className="text-ink-soft text-sm mb-4">
-            {isZh
-              ? "没找到你的问题？"
-              : "Didn't find your question?"}
-          </p>
-          <a
-            href="https://github.com/Hmbown/CodeWhale/issues/new/choose"
-            className="portal-button portal-button-primary gap-2"
-          >
-            {isZh ? "提交 Issue →" : "Open an issue →"}
-          </a>
+          <div className="empty-state empty-state-compact faq-more">
+            <p className="empty-state-title">{isZh ? "没找到你的问题？" : "Didn't find your question?"}</p>
+            <div className="empty-state-actions">
+              <a href="https://github.com/Hmbown/CodeWhale/issues/new/choose" className="btn btn-secondary">
+                {isZh ? "提交 Issue" : "Open an issue"}
+              </a>
+            </div>
+          </div>
         </div>
-      </section>
+      </div>
     </>
   );
 }

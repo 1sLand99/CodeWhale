@@ -17,7 +17,6 @@ import { INSTALL_GUIDE } from "./install-guide.generated";
 import { getChrome, getHome } from "./i18n/dictionaries";
 import { footerProjectLinks } from "./i18n/links";
 import { TERMINAL_SCREENSHOT } from "./media-manifest";
-import { siteCss } from "./site-css";
 
 const root = new URL("../../", import.meta.url);
 
@@ -643,16 +642,6 @@ done
     // within the existing three-call budget.
     expect(github).toContain("/releases?per_page=");
     expect(github).toContain('kind: "release"');
-  });
-
-  it("keeps reduced motion static without hiding the reasoning trace", () => {
-    const css = siteCss();
-
-    expect(css).toMatch(
-      /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\.ticker-track\s*\{\s*animation:\s*none;\s*\}[\s\S]*?\}/,
-    );
-    // Freezing the track must not also hide the entries it stopped scrolling.
-    expect(css).toMatch(/\.ticker-viewport\s*\{\s*overflow-x:\s*auto;\s*\}/);
   });
 
   it("keeps the homepage free of fabricated demo panels", () => {

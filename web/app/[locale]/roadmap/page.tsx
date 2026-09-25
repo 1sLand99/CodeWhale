@@ -1,4 +1,7 @@
 import Link from "next/link";
+import { Icon } from "@/components/icon";
+import { PageHeader, Section } from "@/components/page-header";
+import { Status, type StatusTone } from "@/components/status-badge";
 import { getCachedRoadmap, type RoadmapItem } from "@/lib/roadmap-feed";
 import { getEnv } from "@/lib/kv";
 import { buildPageMetadata } from "@/lib/page-meta";
@@ -119,7 +122,7 @@ const tracksZh = [
   {
     title: "暂不考虑",
     items: [
-      { title: "静默或内容级遥测", note: "0.9.12 源码中的匿名使用计数在明确接受当前处理方告知前保持关闭，所有关闭选项始终有效。仍被排除在外的是：对话、代码、prompt、文件、模型内容、凭据、逐轮或逐工具时间线、对用户隐藏的收集，以及运行时二进制中的任何第三方广告或分析 SDK。选用托管 provider 时仍会发送本轮所需上下文，回环地址路由可让推理保持本地。" },
+      { title: "静默或内容级遥测", note: "Codewhale 0.9.12 默认开启匿名使用计数，并在首次启动时告知；所有关闭选项始终有效。仍被排除在外的是：对话、代码、prompt、文件、模型内容、凭据、逐轮或逐工具时间线、对用户隐藏的收集，以及运行时二进制中的任何第三方广告或分析 SDK。选用托管 provider 时仍会发送本轮所需上下文，回环地址路由可让推理保持本地。" },
       { title: "本地会话强制经过托管中继", note: "本地 Runtime 与自带提供商路由继续工作，无需把会话发送到 Codewhale 服务" },
       { title: "本地 Runtime 强制注册账户", note: "本地安装和运行 Codewhale 不需要账户" },
       { title: "赞助商模型推广", note: "模型选择器保持中立——无付费推荐位" },
@@ -135,6 +138,10 @@ const tracksZh = [
     ],
   },
 ];
+
+// Track order is shared by both languages: shipped, underway, considered,
+// ruled out, and the open model platform direction (not started).
+const TRACK_TONES: StatusTone[] = ["ready", "accent", "idle", "idle", "idle"];
 
 const roadmapText = (text: string) =>
   text.replace(/^>\s*/, "").replaceAll("**", "").replaceAll("CodeWhale", "Codewhale");
@@ -180,7 +187,7 @@ export default async function RoadmapPage({ params }: { params: Promise<{ locale
         introduction: "这里将已完成的仓库工作、正在推进的工作、仍在评估的方案和明确不在范围内的方向分开列出。路线图的“已完成”可包含已在源码候选版中实现的工作；安装页与首页另行标明最新已发布包。发布记录和 GitHub issues 会在可用时更新这些分类。",
         sectionLabel: "当前状态",
         sectionTitle: "按状态查看工作",
-        browseIssues: "浏览 open issues ↗",
+        browseIssues: "浏览 open issues",
         count: (value: number) => `${value} 项`,
         contributeLabel: "参与贡献",
         contributeTitle: "路线图决策公开进行。",
@@ -197,7 +204,7 @@ export default async function RoadmapPage({ params }: { params: Promise<{ locale
         introduction: "This page separates completed repository work from work in progress, proposals still being evaluated, and directions intentionally kept out of scope. Roadmap Shipped can include work implemented in a source candidate; the install page and homepage separately identify the latest published package. Release records and GitHub issues refresh these categories when available.",
         sectionLabel: "Current status",
         sectionTitle: "Work grouped by status",
-        browseIssues: "Browse open issues ↗",
+        browseIssues: "Browse open issues",
         count: (value: number) => `${value} ${value === 1 ? "item" : "items"}`,
         contributeLabel: "Contribute",
         contributeTitle: "Keep roadmap decisions in the open.",
@@ -210,64 +217,61 @@ export default async function RoadmapPage({ params }: { params: Promise<{ locale
       };
 
   return (
-    <div className="roadmap-page">
-      <section className="hero">
-        <div className="portal-current" aria-hidden="true" />
-        <div className="portal-container community-welcome-inner">
-          <div className="eyebrow">{copy.eyebrow}</div>
-          <h1>{copy.title}</h1>
-          <p>{copy.introduction}</p>
-        </div>
-      </section>
+    <>
+      <PageHeader kicker={copy.eyebrow} title={copy.title} lede={copy.introduction} pose="browse" />
 
-      <section className="portal-section">
-        <div className="portal-container">
-          <div className="portal-docs-heading">
-            <div>
-              <span>{copy.sectionLabel}</span>
-              <h2>{copy.sectionTitle}</h2>
-            </div>
-            <Link href="https://github.com/Hmbown/CodeWhale/issues">{copy.browseIssues}</Link>
-          </div>
-          {tracks.map((track) => (
-            <section key={track.title} className="portal-section-grid py-10 hairline-t">
-              <div className="portal-section-copy">
-                <span>{copy.count(track.items.length)}</span>
-                <h2>{track.title}</h2>
-              </div>
-              <ul className="hairline-t">
-                {track.items.map((item) => (
-                  <li key={`${item.title}-${item.note}`} className="py-4 hairline-b">
-                    <h3 className="font-display text-base">{roadmapText(item.title)}</h3>
-                    <p className={`mt-1 text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
-                      {roadmapText(item.note)}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ))}
-        </div>
-      </section>
-
-      <section className="portal-section portal-section-muted">
-        <div className="portal-container portal-section-grid">
-          <div className="portal-section-copy">
-            <span>{copy.contributeLabel}</span>
-            <h2>{copy.contributeTitle}</h2>
-            <p>{copy.contributeBody}</p>
-          </div>
-          <div className="portal-topic-list">
-            {copy.links.map((link) => (
-              <Link key={link.title} href={link.href}>
-                <strong>{link.title}</strong>
-                <span>{link.detail}</span>
-                <span aria-hidden="true">↗</span>
-              </Link>
+      <div className="page-body">
+        <Section
+          id="roadmap-status"
+          title={copy.sectionTitle}
+          link={
+            <Link href="https://github.com/Hmbown/CodeWhale/issues" className="section-link">
+              {copy.browseIssues}
+              <Icon name="external" className="icon" />
+            </Link>
+          }
+        >
+          <div className="roadmap-tracks">
+            {tracks.map((track, index) => (
+              <section key={track.title} className="roadmap-track" aria-labelledby={`track-${index}`}>
+                <div className="roadmap-track-head">
+                  <h3 id={`track-${index}`}>
+                    <Status tone={TRACK_TONES[index] ?? "idle"}>{track.title}</Status>
+                  </h3>
+                  <span className="page-meta tabular">{copy.count(track.items.length)}</span>
+                </div>
+                <ul className="group-card" role="list">
+                  {track.items.map((item) => (
+                    <li key={`${item.title}-${item.note}`} className="group-row roadmap-item">
+                      <p className="roadmap-item-title">{roadmapText(item.title)}</p>
+                      <p className="roadmap-item-note">{roadmapText(item.note)}</p>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ))}
           </div>
-        </div>
-      </section>
-    </div>
+        </Section>
+
+        <Section id="roadmap-contribute" title={copy.contributeTitle} scope={copy.contributeBody}>
+          <ul className="dir-list dir-list-card" role="list">
+            {copy.links.map((link) => (
+              <li key={link.title}>
+                <Link href={link.href} className="dir-row">
+                  <span className="dir-mark" aria-hidden="true">
+                    <Icon name={link.title === "Pull requests" ? "git-pull-request" : link.title === "Discussions" ? "message" : "alert"} />
+                  </span>
+                  <span className="dir-text">
+                    <span className="dir-title">{link.title}</span>
+                    <span className="dir-purpose">{link.detail}</span>
+                  </span>
+                  <span className="dir-action" aria-hidden="true"><Icon name="external" /></span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      </div>
+    </>
   );
 }

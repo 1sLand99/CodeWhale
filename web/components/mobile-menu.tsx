@@ -171,7 +171,7 @@ export function MobileMenu({
         createPortal(<div
           ref={menuRef}
           id="mobile-menu"
-          className={`mm-panel lg:hidden fixed inset-0 z-40 bg-paper overflow-y-auto${closing ? " mm-closing" : ""}`}
+          className={`mm-panel lg:hidden fixed inset-0 z-40 bg-canvas overflow-y-auto${closing ? " mm-closing" : ""}`}
           role="dialog"
           aria-modal="true"
           aria-label={navAria}
@@ -198,7 +198,7 @@ export function MobileMenu({
                       aria-current={isActive ? "page" : undefined}
                     >
                       <span>{l.label}</span>
-                      <Icon name="chevron-right" className="nav-icon mm-link-chevron" />
+                      <Icon name="chevron-right" className="nav-icon mm-link-chevron icon-flip" />
                     </Link>
                   </li>
                 );
