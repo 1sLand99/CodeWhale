@@ -2989,10 +2989,8 @@ pub(crate) fn file_line_reference(line: &str, workspace: &Path) -> Option<(PathB
     line.split_whitespace().find_map(|token| {
         // Leading `.` stays: `./src/a.rs` is relative, not `/src/a.rs`.
         let token = token
-            .trim_start_matches(|c: char| matches!(c, '`' | '\'' | '"' | '(' | '[' | '<'))
-            .trim_end_matches(|c: char| {
-                matches!(c, '`' | '\'' | '"' | ')' | ']' | '>' | ',' | ';' | '.')
-            });
+            .trim_start_matches(['`', '\'', '"', '(', '[', '<'])
+            .trim_end_matches(['`', '\'', '"', ')', ']', '>', ',', ';', '.']);
         let (path_str, line_no) = split_path_line(token)?;
         if !looks_like_file_path(path_str) {
             return None;

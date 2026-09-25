@@ -302,6 +302,18 @@ impl TerminalClipboardWriter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyTransport {
     /// A native clipboard accepted the text before the write returned.
+    /// Targets with no native clipboard (e.g. OpenHarmony) never build it.
+    #[cfg_attr(
+        all(
+            not(test),
+            not(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))
+        ),
+        allow(dead_code)
+    )]
     Native,
     /// Handed to the terminal (OSC 52, or tmux's buffer). Terminals never
     /// acknowledge these, so success cannot be confirmed; a failure surfaces
