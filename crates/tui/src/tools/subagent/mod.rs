@@ -15193,8 +15193,7 @@ fn parse_optional_u64(input: &Value, keys: &[&str]) -> Result<Option<u64>, ToolE
     let Some((key, value)) = aliased_value(input, keys) else {
         return Ok(None);
     };
-    value
-        .as_u64()
+    codewhale_tools::json_nonnegative_integer(value)
         .map(Some)
         .ok_or_else(|| codewhale_tools::type_mismatch(key, value, "a non-negative integer"))
 }
