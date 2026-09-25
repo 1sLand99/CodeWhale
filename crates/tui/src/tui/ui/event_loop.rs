@@ -2334,6 +2334,11 @@ pub(crate) async fn run_event_loop(
                     // Liveness only. `record_turn_activity` above consumes the
                     // pulse; it must not alter transcript or status copy.
                     EngineEvent::ToolCallHeartbeat => {}
+                    // Typed owner activity is a pet-facing projection;
+                    // `pet_watch::observe` above already consumed it, and the
+                    // transcript renders from the ToolCall* events.
+                    EngineEvent::OperationActivityStarted { .. }
+                    | EngineEvent::OperationActivityCompleted { .. } => {}
                     EngineEvent::ToolCallComplete { id, name, result } => {
                         if crate::tui::tool_routing::evidence_completion_should_be_ignored(
                             app, &id, &result,
