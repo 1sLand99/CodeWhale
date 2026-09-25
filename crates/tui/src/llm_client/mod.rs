@@ -144,6 +144,8 @@ pub struct AuthenticationErrorContext {
     pub key_source: Option<String>,
     pub key_fingerprint: Option<String>,
     pub key_kind: Option<String>,
+    /// The one command or action that replaces the rejected credential.
+    pub fix: Option<String>,
 }
 
 impl AuthenticationErrorContext {
@@ -180,7 +182,14 @@ impl AuthenticationErrorContext {
             key_source: key_source.and_then(non_empty_trimmed).map(str::to_string),
             key_fingerprint: api_key.map(redacted_key_fingerprint),
             key_kind: api_key.map(classify_api_key_prefix).map(str::to_string),
+            fix: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into()).filter(|fix: &String| !fix.trim().is_empty());
+        self
     }
 
     fn is_empty(&self) -> bool {
@@ -190,6 +199,7 @@ impl AuthenticationErrorContext {
             && self.key_source.is_none()
             && self.key_fingerprint.is_none()
             && self.key_kind.is_none()
+            && self.fix.is_none()
     }
 
     fn detail_segments(&self) -> Vec<String> {
@@ -211,6 +221,9 @@ impl AuthenticationErrorContext {
         }
         if let Some(kind) = self.key_kind.as_deref() {
             segments.push(format!("key type: {kind}"));
+        }
+        if let Some(fix) = self.fix.as_deref() {
+            segments.push(format!("fix: {fix}"));
         }
         segments
     }

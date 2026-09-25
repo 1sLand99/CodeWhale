@@ -1366,7 +1366,43 @@ impl Secrets {
 /// candidate environment variables are set to a non-empty value.
 #[must_use]
 pub fn env_for(name: &str) -> Option<String> {
-    let candidates: &[&str] = match name.to_ascii_lowercase().as_str() {
+    env_var_for(name).map(|(_, value)| value)
+}
+
+/// Remove characters a copy-paste adds to an API key but no provider issues
+/// (#6528): Unicode whitespace anywhere (including NBSP and internal
+/// spaces/newlines), control characters, and invisible format characters —
+/// BOM, zero-width space/joiner/non-joiner, word joiner and invisible
+/// operators, soft hyphen, and bidi marks/embeddings/isolates. Every API-key
+/// entry path (onboarding, `/provider`, `auth set`, env import, and the
+/// runtime resolver) goes through this one helper.
+#[must_use]
+pub fn normalize_api_key(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| {
+            !(ch.is_whitespace()
+                || ch.is_control()
+                || matches!(
+                    ch,
+                    '\u{00ad}'
+                        | '\u{061c}'
+                        | '\u{180e}'
+                        | '\u{200b}'..='\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2060}'..='\u{2064}'
+                        | '\u{2066}'..='\u{206f}'
+                        | '\u{feff}'
+                ))
+        })
+        .collect()
+}
+
+/// Like [`env_for`], also naming the environment variable that supplied the
+/// key so auth errors can point at it. The value is normalized with
+/// [`normalize_api_key`].
+#[must_use]
+pub fn env_var_for(name: &str) -> Option<(&'static str, String)> {
+    let candidates: &[&'static str] = match name.to_ascii_lowercase().as_str() {
         "deepseek" => &["DEEPSEEK_API_KEY"],
         "openrouter" => &["OPENROUTER_API_KEY"],
         "xiaomi-mimo" | "xiaomi_mimo" | "xiaomimimo" | "mimo" | "xiaomi" => {
@@ -1445,10 +1481,11 @@ pub fn env_for(name: &str) -> Option<String> {
         _ => return None,
     };
     for var in candidates {
-        if let Ok(value) = std::env::var(var)
-            && !value.trim().is_empty()
-        {
-            return Some(value);
+        if let Ok(value) = std::env::var(var) {
+            let value = normalize_api_key(&value);
+            if !value.is_empty() {
+                return Some((var, value));
+            }
         }
     }
     None
@@ -1483,6 +1520,29 @@ pub fn daytona_credential_source(secrets: &Secrets) -> Option<&'static str> {
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn normalize_api_key_strips_each_invisible_character_class() {
+        let cases = [
+            ("byte-order mark", "\u{feff}sk-abc123"),
+            ("zero-width space", "sk-abc\u{200b}123"),
+            ("zero-width non-joiner", "sk-abc\u{200c}123"),
+            ("zero-width joiner", "sk-abc\u{200d}123"),
+            ("no-break space", "sk-abc123\u{a0}"),
+            ("word joiner", "sk-\u{2060}abc123"),
+            ("soft hyphen", "sk-abc\u{ad}123"),
+            (
+                "bidi marks",
+                "\u{200e}sk-abc123\u{200f}\u{202a}\u{202c}\u{2066}\u{2069}",
+            ),
+            ("internal whitespace", " sk-abc\n 123\t\r\n"),
+        ];
+        for (class, raw) in cases {
+            assert_eq!(normalize_api_key(raw), "sk-abc123", "{class}");
+        }
+        assert_eq!(normalize_api_key("\u{feff}\u{200b} "), "");
+        assert_eq!(normalize_api_key("tp-Key_9.x/+="), "tp-Key_9.x/+=");
+    }
 
     /// Serialise env-mutating tests: tests in this module poke
     /// `DEEPSEEK_API_KEY` etc., which is process-global.

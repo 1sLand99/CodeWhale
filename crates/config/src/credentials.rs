@@ -73,6 +73,10 @@ pub fn set_provider_api_key(
     provider: ProviderKind,
     api_key: &str,
 ) -> Result<bool> {
+    // #6528: strip pasted invisible characters and whitespace in one place.
+    let api_key = codewhale_secrets::normalize_api_key(api_key);
+    anyhow::ensure!(!api_key.is_empty(), "Refusing to save an empty API key.");
+    let api_key = api_key.as_str();
     if provider == ProviderKind::Xai {
         return crate::with_xai_oauth_revocation_transaction(|| {
             set_provider_api_key_unlocked(store, secrets, provider, api_key)
