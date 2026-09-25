@@ -846,6 +846,188 @@ mod tests {
         }
     }
 
+    /// Wait for the next approval request, returning its id, tool name and
+    /// description; every other event seen on the way is kept in `seen`.
+    async fn next_approval(
+        events: &Arc<tokio::sync::RwLock<tokio::sync::mpsc::Receiver<Event>>>,
+        seen: &mut Vec<Event>,
+    ) -> (String, String, String) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut events = events.write().await;
+            while let Some(event) = events.recv().await {
+                if let Event::ApprovalRequired {
+                    id,
+                    tool_name,
+                    description,
+                    ..
+                } = &event
+                {
+                    return (id.clone(), tool_name.clone(), description.clone());
+                }
+                seen.push(event);
+            }
+            panic!("event channel closed before an approval request");
+        })
+        .await
+        .expect("approval request deadline")
+    }
+
+    /// #6562: a nested call that needs approval suspends the program and
+    /// raises the normal approval request; allow resumes it, deny fails only
+    /// that nested call, a nested MCP call runs through the session pool, and
+    /// the program's receipt names each nested call and its decision.
+    #[tokio::test]
+    async fn execute_tools_nested_approval_suspends_resumes_and_denies_one_call() {
+        use crate::tools::codemode::EXECUTE_TOOLS_TOOL_NAME;
+
+        let tmp = tempfile::tempdir().expect("fixture directory");
+        let code = format!(
+            "const first = await tools.call('{COUNTER_TOOL}', {{}}); \
+             let denied = null; \
+             try {{ await tools.call('{COUNTER_TOOL}', {{}}); }} \
+             catch (e) {{ denied = String(e.message || e); }} \
+             const listed = await tools.call('list_mcp_resources', {{}}); \
+             return {{ first: first.content, denied, mcp: listed.truncated === null }};"
+        );
+        let args = json!({ "code": code }).to_string();
+        let mock = Arc::new(MockLlmClient::new(vec![
+            canned::tool_call_turn("exec-1", EXECUTE_TOOLS_TOOL_NAME, &args),
+            canned::simple_text_turn("Program finished."),
+        ]));
+        let (mut engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                workspace: tmp.path().to_path_buf(),
+                snapshots_enabled: false,
+                subagents_enabled: false,
+                terminal_chrome_enabled: false,
+                ..EngineConfig::default()
+            },
+            &Config::default(),
+            mock.clone(),
+        );
+        engine.session.approval_mode = ApprovalMode::Suggest;
+        // Never touch the developer's real MCP config from a test.
+        engine.session.mcp_config_path = tmp.path().join("mcp.json");
+        engine.session.add_message(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Compose the counter twice.".into(),
+                cache_control: None,
+            }],
+        });
+        let store = crate::approval_log::ApprovalReceiptStore::new(tmp.path().join("sessions"));
+        engine.approval_receipt_store = Ok(store.clone());
+        let session_id = engine.session.id.clone();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = crate::tools::ToolRegistry::new(ToolContext::new(tmp.path()));
+        registry.register(Arc::new(ApprovalFixtureTool {
+            executions: executions.clone(),
+            claim_only: false,
+        }));
+        let catalog = registry.to_api_tools_with_cache(true);
+        let surface = ToolSurfacePolicy::new(
+            registry,
+            Some(catalog),
+            AppMode::Agent,
+            &engine.config.tools_always_load,
+            &[],
+            false,
+            None,
+            None,
+            Some(8),
+            engine.session.approval_mode,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
+        );
+        let events = handle.rx_event.clone();
+        let mut task = tokio::spawn(async move {
+            engine
+                .run_turn(&mut TurnContext::new(8), surface, None, None)
+                .await
+        });
+
+        let mut seen = Vec::new();
+        let (id, tool_name, description) = next_approval(&events, &mut seen).await;
+        assert_eq!(id, "exec-1.1", "the program itself is not a prompt");
+        assert_eq!(tool_name, COUNTER_TOOL);
+        assert!(
+            description.contains("execute_tools program call"),
+            "{description}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut task)
+                .await
+                .is_err(),
+            "the program is suspended on its nested call"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        handle.approve_tool_call("exec-1.1").await.expect("allow");
+
+        let (id, tool_name, _) = next_approval(&events, &mut seen).await;
+        assert_eq!(id, "exec-1.2");
+        assert_eq!(tool_name, COUNTER_TOOL);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "allow resumed the program"
+        );
+        handle.deny_tool_call("exec-1.2").await.expect("deny");
+
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("turn deadline")
+            .expect("turn");
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "the denied call never ran"
+        );
+        {
+            let mut rx = events.write().await;
+            while let Ok(event) = rx.try_recv() {
+                seen.push(event);
+            }
+        }
+        let receipt = seen
+            .iter()
+            .find_map(|event| match event {
+                Event::ToolCallComplete {
+                    name,
+                    result: Ok(result),
+                    ..
+                } if name == EXECUTE_TOOLS_TOOL_NAME => Some(result.content.clone()),
+                _ => None,
+            })
+            .expect("execute_tools completed with a receipt");
+        let receipt: Value = serde_json::from_str(&receipt).expect("receipt JSON");
+        assert_eq!(receipt["success"], true, "{receipt}");
+        assert_eq!(receipt["body"]["return"]["first"], "counter executed");
+        assert!(
+            receipt["body"]["return"]["denied"]
+                .as_str()
+                .is_some_and(|message| message.contains("denied by user")),
+            "{receipt}"
+        );
+        assert_eq!(receipt["body"]["return"]["mcp"], true, "{receipt}");
+        assert_eq!(receipt["calls"][0]["decision"], "approved");
+        assert_eq!(receipt["calls"][0]["status"], "ok");
+        assert_eq!(receipt["calls"][1]["decision"], "denied");
+        assert_eq!(receipt["calls"][1]["status"], "refused");
+        assert_eq!(receipt["calls"][2]["tool"], "list_mcp_resources");
+        assert_eq!(receipt["calls"][2]["decision"], "auto");
+        assert_eq!(receipt["calls"][2]["status"], "ok");
+
+        let replay = store.replay(&session_id).expect("approval receipts");
+        assert!(replay.unmatched_asks.is_empty());
+        assert_eq!(
+            replay
+                .completed
+                .iter()
+                .map(|receipt| receipt.outcome.clone())
+                .collect::<Vec<_>>(),
+            vec![ApprovalOutcome::ApprovedOnce, ApprovalOutcome::Denied]
+        );
+    }
+
     #[tokio::test]
     async fn required_tool_execution_uses_typed_host_decisions_not_approval_claims() {
         for source in [
