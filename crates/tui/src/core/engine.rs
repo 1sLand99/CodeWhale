@@ -4700,7 +4700,6 @@ impl Engine {
                     Some(Vec::new()),
                     None,
                     Some(0),
-                    input_policy.approval_mode_for_session(),
                     tool_catalog::ToolMode::Direct,
                 ),
                 mcp_tool_names: Vec::new(),
@@ -4956,7 +4955,6 @@ impl Engine {
             allowed_tools,
             self.config.disallowed_tools.clone(),
             self.config.max_tool_calls,
-            input_policy.approval_mode_for_session(),
             // Model metadata wins once wired; today the hint is always None
             // and the [features] flags decide (model_registry follow-up).
             tool_catalog::requested_tool_mode(None, &self.config.features),
@@ -7503,9 +7501,9 @@ pub(crate) fn auto_review_plan_decision_for_context(
     let plan_decision = if context.approval_mode == ApprovalMode::Auto
         && context.tool_name == REQUEST_USER_INPUT_NAME
     {
-        // This synthetic tool does not execute user work. Let the turn loop
-        // return its ordinary autonomous guidance result instead of treating
-        // a hallucinated question as an unknown external action.
+        // A question executes no user work and changes no state. Auto-Review
+        // reviews tool approvals only, so let the turn loop ask the user
+        // instead of treating the question as an unknown external action.
         AutoReviewPlanDecision::Allow
     } else {
         match decision.action {
