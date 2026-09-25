@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} fertig",
   "WorkflowPhaseCountOne": "{count} Phase",
   "WorkflowPhaseCountMany": "{count} Phasen",
-  "WorkflowPhaseOrdinal": "Phase {n}/{total}"
+  "WorkflowPhaseOrdinal": "Phase {n}/{total}",
+  "ModelPickerPinned": "{route} angeheftet",
+  "ModelPickerUnpinned": "{route} gelöst",
+  "ModelPickerPinFailed": "Anheften konnte nicht aktualisiert werden: {error}",
+  "ModelPickerPinOrderUpdated": "Reihenfolge der angehefteten Modelle aktualisiert",
+  "ModelPickerPinReorderFailed": "Anheftung konnte nicht verschoben werden: {error}",
+  "ModelPickerReadinessRefreshed": "Modellbereitschaft aktualisiert · Katalogzeilen neu aufgebaut",
+  "ModelPickerOpenToRefresh": "Öffne /model, um Bereitschaft und Katalog zu aktualisieren",
+  "ModelPickerPinnedChip": "angeheftet"
 }

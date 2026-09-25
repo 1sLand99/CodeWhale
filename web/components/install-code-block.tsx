@@ -7,9 +7,10 @@ interface Props {
   cmd: string;
   copyLabel?: string;
   copiedLabel?: string;
+  copyLocale?: string;
 }
 
-export function InstallCodeBlock({ cmd, copyLabel = "Copy", copiedLabel = "Copied ✓" }: Props) {
+export function InstallCodeBlock({ cmd, copyLabel = "Copy", copiedLabel = "Copied ✓", copyLocale }: Props) {
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
@@ -28,6 +29,7 @@ export function InstallCodeBlock({ cmd, copyLabel = "Copy", copiedLabel = "Copie
   return (
     <div className="relative">
       <button
+        lang={copyLocale}
         onClick={copy}
         aria-label={copied ? copiedLabel : copyLabel}
         data-copied={copied}

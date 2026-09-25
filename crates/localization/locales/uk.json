@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} готово",
   "WorkflowPhaseCountOne": "фаз: {count}",
   "WorkflowPhaseCountMany": "фаз: {count}",
-  "WorkflowPhaseOrdinal": "фаза {n}/{total}"
+  "WorkflowPhaseOrdinal": "фаза {n}/{total}",
+  "ModelPickerPinned": "{route} закріплено",
+  "ModelPickerUnpinned": "{route} відкріплено",
+  "ModelPickerPinFailed": "Не вдалося оновити закріплення: {error}",
+  "ModelPickerPinOrderUpdated": "Порядок закріплених моделей оновлено",
+  "ModelPickerPinReorderFailed": "Не вдалося змінити порядок закріплення: {error}",
+  "ModelPickerReadinessRefreshed": "Готовність моделей оновлено · рядки каталогу перебудовано",
+  "ModelPickerOpenToRefresh": "Відкрийте /model, щоб оновити готовність і каталог",
+  "ModelPickerPinnedChip": "закріплено"
 }

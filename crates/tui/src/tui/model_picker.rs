@@ -39,7 +39,7 @@ use crate::provider_lake::{
 };
 use crate::reasoning_preference::ReasoningEffort;
 use crate::settings::PinnedModel;
-use crate::tui::app::App;
+use crate::tui::app::{App, StatusToastLevel};
 use crate::tui::menu_style;
 use crate::tui::views::fleet_detail::{FleetRouteSelection, FleetRouteTarget};
 use crate::tui::views::{
@@ -266,6 +266,12 @@ pub struct ModelPickerView {
     catalog_action_hovered: bool,
     purpose: ModelPickerPurpose,
     assignment_context: Option<(String, String)>,
+    /// Receipt of the last ⇧P / ⇧F / refresh with its typed toast level. The
+    /// picker covers the status line, so this line is the only place those
+    /// actions can confirm or refuse (#6500). Cleared by the next key.
+    notice: Option<(String, StatusToastLevel)>,
+    /// Theme the notice resolves its semantic ink through.
+    theme: codewhale_palette::UiTheme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -644,6 +650,8 @@ impl ModelPickerView {
             catalog_action_hovered: false,
             purpose: ModelPickerPurpose::Session,
             assignment_context: None,
+            notice: None,
+            theme: app.ui_theme,
         };
         view.restore_memory(app.model_picker_memory.as_ref());
         view
@@ -769,7 +777,8 @@ impl ModelPickerView {
             self.sort.is_none() && query.is_empty() && self.view == ModelListView::Catalog;
         let mut rows: Vec<_> = visible
             .iter()
-            .map(|row| PaneRow {
+            .map(|row| (row, pin_for_row(&self.pinned_models, row)))
+            .map(|(row, pin)| PaneRow {
                 primary: if self.purpose != ModelPickerPurpose::Session
                     && row.id == "auto"
                     && row.provider.is_none()
@@ -794,6 +803,10 @@ impl ModelPickerView {
                 meta: if row.provider.is_none() {
                     vec![row.hint.clone()]
                 } else {
+                    // A pin or Fleet membership leads the chips so a squeezed
+                    // row never sheds it: without it ⇧P / ⇧F changed nothing
+                    // the person could see (#6500). A not-listed notice still
+                    // leads when there is no pin.
                     let mut chips = model_row_meta_chips(row);
                     if let Some(not_listed) = &row.not_listed {
                         chips.insert(
@@ -803,9 +816,20 @@ impl ModelPickerView {
                                 .replace("{date}", &not_listed.checked),
                         );
                     }
+                    if let Some(pin) = pin {
+                        chips.insert(
+                            0,
+                            pin.label.clone().unwrap_or_else(|| {
+                                tr(self.locale, MessageId::ModelPickerPinnedChip).into_owned()
+                            }),
+                        );
+                    }
                     chips
                 },
-                family: grouped
+                // Pinned rows sort above every group, so they draw no family
+                // header: otherwise the family's header repeats where its
+                // unpinned rows begin.
+                family: (grouped && pin.is_none())
                     .then(|| {
                         row.provider.and_then(|provider| {
                             catalog_family_for_identity(
@@ -2019,6 +2043,26 @@ pub(crate) fn provider_scoped_model_completion_ids(app: &App) -> Vec<String> {
     provider_scoped_model_ids_for_app(app, true)
 }
 
+/// The pin (Fleet model or the person's own) naming this exact row, if any.
+fn pin_for_row<'a>(pins: &'a [PinnedModel], row: &ModelPickerRow) -> Option<&'a PinnedModel> {
+    pins.iter().find(|pin| pin_names_row(pin, row))
+}
+
+/// One route match for sorting, marking and labelling alike. Built-in
+/// provider slugs are case-insensitive aliases; a named custom provider's
+/// identity is its exact config key, so `TeamA` and `teama` stay two routes.
+/// Model ids are exact.
+fn pin_names_row(pin: &PinnedModel, row: &ModelPickerRow) -> bool {
+    let named_custom = row.provider == Some(ApiProvider::Custom);
+    row_provider_identity(row).is_some_and(|provider| {
+        if named_custom {
+            provider == pin.provider
+        } else {
+            provider.eq_ignore_ascii_case(&pin.provider)
+        }
+    }) && row.id == pin.model
+}
+
 /// The pins the picker sorts and labels by: the fleet's models first (the
 /// selected Fleet's operator and every pinned member, labelled with the roles
 /// each fills — design §10 F1), then the person's own pins.
@@ -2124,11 +2168,9 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
     // chose rather than with a provider's alphabet.
     let pins = picker_pins_for_app(app);
     for row in &mut rows {
-        if let Some(pin) = pins.iter().find(|pin| {
-            row_provider_identity(row).is_some_and(|provider| provider == pin.provider)
-                && row.id == pin.model
-        }) {
-            let label = pin.label.as_deref().unwrap_or("pinned");
+        if let Some(pin) = pin_for_row(&pins, row) {
+            let pinned = tr(app.ui_locale, MessageId::ModelPickerPinnedChip);
+            let label = pin.label.as_deref().unwrap_or(&pinned);
             row.hint = format!(
                 "{label} · exact {} / {} · {}",
                 pin.provider, pin.model, row.hint
@@ -3858,6 +3900,7 @@ pub(crate) fn format_picker_context_window(tokens: u64) -> String {
 impl ModelPickerView {
     /// Rebuild model rows from a fresh app/config snapshot (readiness + catalog).
     pub fn re_resolve_from_app(&mut self, app: &App, config: &Config) {
+        self.theme = app.ui_theme;
         let selected = self
             .visible_model_rows()
             .get(self.selected_model_idx)
@@ -3898,20 +3941,29 @@ impl ModelPickerView {
 }
 
 impl ModelPickerView {
-    fn emit_pin_move(&self, delta: isize) -> ViewAction {
+    /// Exact route of the highlighted catalog row: the target of ⇧P, ⇧F and
+    /// Alt+↑↓. `None` on provider-less rows (`auto`) and the custom row.
+    fn highlighted_route(&self) -> Option<(ApiProvider, Option<String>, String)> {
         let rows = self.visible_model_rows();
-        let Some(row) = rows.get(self.selected_model_idx) else {
-            return ViewAction::None;
-        };
-        let Some(provider) = row.provider else {
+        let row = rows.get(self.selected_model_idx)?;
+        Some((row.provider?, row.provider_identity.clone(), row.id.clone()))
+    }
+
+    fn emit_pin_move(&self, delta: isize) -> ViewAction {
+        let Some((provider, provider_id, model)) = self.highlighted_route() else {
             return ViewAction::None;
         };
         ViewAction::Emit(ViewEvent::ModelPickerMovePin {
             provider,
-            provider_id: row.provider_identity.clone(),
-            model: row.id.clone(),
+            provider_id,
+            model,
             delta,
         })
+    }
+
+    /// Show an action receipt inside the picker (see `notice`).
+    pub fn set_notice(&mut self, text: String, level: StatusToastLevel) {
+        self.notice = Some((text, level));
     }
 }
 
@@ -3927,6 +3979,7 @@ impl ModalView for ModelPickerView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         self.last_mouse_selected = None;
         self.hovered_row = None;
+        self.notice = None;
         // Movement keys come from the shared vocabulary (#6290); the match
         // below owns only the picker's own verbs. The live filter means the
         // typing-safe set — no letter aliases to eat the query.
@@ -3980,44 +4033,49 @@ impl ModalView for ModelPickerView {
             {
                 ViewAction::EmitAndClose(self.build_apply_event(true))
             }
+            // Only an empty query explains a locked row. While searching,
+            // ⇧D is query text: it used to open provider auth for a row that
+            // was not locked at all (#6500).
             KeyCode::Char(ch)
-                if key.modifiers.contains(KeyModifiers::SHIFT) && ch.eq_ignore_ascii_case(&'d') =>
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.query.is_empty()
+                    && ch.eq_ignore_ascii_case(&'d') =>
             {
                 self.explain_unselectable_selection()
             }
-            // Pinning must never steal the first character of a route search:
-            // use the explicitly shifted key advertised in the footer.
-            KeyCode::Char('P') if key.modifiers == KeyModifiers::SHIFT && self.query.is_empty() => {
-                let rows = self.visible_model_rows();
-                let Some(row) = rows.get(self.selected_model_idx) else {
-                    return ViewAction::None;
-                };
-                let Some(provider) = row.provider else {
+            // ⇧P / ⇧F act on the highlighted row, searching or not: a search
+            // is how a model is found, and the verbs used to become query
+            // text the moment one was typed (#6500). The filter ignores case,
+            // so only a custom id being typed (no catalog row highlighted)
+            // still receives the capital letter. Some terminals report the
+            // chord as lowercase + SHIFT, hence `eq_ignore_ascii_case`.
+            KeyCode::Char(ch)
+                if key.modifiers == KeyModifiers::SHIFT
+                    && ch.eq_ignore_ascii_case(&'p')
+                    && (self.query.is_empty() || self.highlighted_route().is_some()) =>
+            {
+                let Some((provider, provider_id, model)) = self.highlighted_route() else {
                     return ViewAction::None;
                 };
                 ViewAction::Emit(ViewEvent::ModelPickerTogglePin {
                     provider,
-                    provider_id: row.provider_identity.clone(),
-                    model: row.id.clone(),
+                    provider_id,
+                    model,
                 })
             }
-            // Same rule as pinning: a shifted key, never a search character.
-            KeyCode::Char('F')
+            KeyCode::Char(ch)
                 if key.modifiers == KeyModifiers::SHIFT
-                    && self.query.is_empty()
-                    && self.purpose == ModelPickerPurpose::Session =>
+                    && ch.eq_ignore_ascii_case(&'f')
+                    && self.purpose == ModelPickerPurpose::Session
+                    && (self.query.is_empty() || self.highlighted_route().is_some()) =>
             {
-                let rows = self.visible_model_rows();
-                let Some(row) = rows.get(self.selected_model_idx) else {
-                    return ViewAction::None;
-                };
-                let Some(provider) = row.provider else {
+                let Some((provider, provider_id, model)) = self.highlighted_route() else {
                     return ViewAction::None;
                 };
                 ViewAction::Emit(ViewEvent::ModelPickerToggleFleet {
                     provider,
-                    provider_id: row.provider_identity.clone(),
-                    model: row.id.clone(),
+                    provider_id,
+                    model,
                 })
             }
             KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) && self.query.is_empty() => {
@@ -4234,6 +4292,9 @@ impl ModelPickerView {
                 })
                 .render(action, buf);
         }
+        // ⇧A and ⇧D are query text while a search is typed; advertise them
+        // only when they act.
+        let searching = !self.query.is_empty();
         let mut footer_hints = vec![
             ActionHint::new("↑↓", tr(self.locale, MessageId::PickerActionMove)),
             ActionHint::new("Tab", tr(self.locale, MessageId::PickerActionSwitch)),
@@ -4242,8 +4303,10 @@ impl ModelPickerView {
                 tr(self.locale, MessageId::RouteActionSearchAnyModel),
             ),
             ActionHint::new("Enter", tr(self.locale, self.apply_action_id())),
-            ActionHint::new("⇧A", view_action),
         ];
+        if !searching {
+            footer_hints.push(ActionHint::new("⇧A", view_action));
+        }
         if inner.height >= 16 {
             footer_hints.push(ActionHint::new(
                 "Ctrl+S",
@@ -4255,7 +4318,7 @@ impl ModelPickerView {
         }
         // A Fleet row has no startup default to save; the chord is a
         // session-route action only.
-        if self.purpose == ModelPickerPurpose::Session && inner.height >= 16 {
+        if self.purpose == ModelPickerPurpose::Session && inner.height >= 16 && !searching {
             footer_hints.insert(
                 4,
                 ActionHint::new(
@@ -4266,7 +4329,9 @@ impl ModelPickerView {
         }
         // Keep compact route modals focused on the core browse/apply actions;
         // wider shells have room to disclose the pin action too.
-        if inner.width >= 72 && inner.height >= 16 {
+        // ⇧P / ⇧F act only on a highlighted catalog route; without one
+        // (typing a custom id) they are query text, so they are not offered.
+        if inner.width >= 72 && inner.height >= 16 && self.highlighted_route().is_some() {
             if self.purpose == ModelPickerPurpose::Session {
                 footer_hints.push(ActionHint::new(
                     "⇧F",
@@ -4314,6 +4379,16 @@ impl ModelPickerView {
                     .map(|reason| format!(" · ! {reason}"))
                     .unwrap_or_default(),
                 Style::default().fg(palette::STATUS_WARNING),
+            ),
+            Span::styled(
+                self.notice
+                    .as_ref()
+                    .map(|(text, _)| format!(" · {text}"))
+                    .unwrap_or_default(),
+                self.notice
+                    .as_ref()
+                    .map(|(_, level)| palette::chrome_style(&self.theme, level.ink()))
+                    .unwrap_or_default(),
             ),
             Span::styled(
                 if self.assignment_context.is_some() {
@@ -4702,6 +4777,29 @@ mod tests {
         }
     }
 
+    /// #6523 review: named custom providers are exact config keys, so a pin
+    /// on `TeamA` must not mark the same model under `teama`; built-in slugs
+    /// stay case-insensitive aliases.
+    #[test]
+    fn pin_matching_is_exact_for_named_custom_providers_only() {
+        let pin = |provider: &str| PinnedModel {
+            provider: provider.to_string(),
+            model: "model".to_string(),
+            label: None,
+        };
+        let custom = |identity: &str| ModelPickerRow {
+            provider_identity: Some(identity.to_string()),
+            ..model_row(ApiProvider::Custom, true)
+        };
+        assert!(pin_names_row(&pin("TeamA"), &custom("TeamA")));
+        assert!(!pin_names_row(&pin("TeamA"), &custom("teama")));
+        assert!(!pin_names_row(&pin("teama"), &custom("TeamA")));
+
+        let builtin = model_row(ApiProvider::Deepseek, true);
+        assert!(pin_names_row(&pin("deepseek"), &builtin));
+        assert!(pin_names_row(&pin("DeepSeek"), &builtin));
+    }
+
     #[test]
     fn locked_model_keeps_keyboard_focus_visible_without_becoming_selectable() {
         let mut picker = test_picker();
@@ -4783,6 +4881,8 @@ mod tests {
             catalog_action_hovered: false,
             purpose: ModelPickerPurpose::Session,
             assignment_context: None,
+            notice: None,
+            theme: codewhale_palette::UI_THEME,
         }
     }
 

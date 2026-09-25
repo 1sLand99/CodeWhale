@@ -45,6 +45,7 @@ import {
   getLegalPrivacy,
   getLegalTerms,
   pickText,
+  pickTextLocale,
   splitToken,
   splitTokens,
 } from "./dictionaries";
@@ -479,6 +480,8 @@ describe("website dictionaries", () => {
     expect(pickText(pair, "zh")).toBe("中文");
     expect(pickText(pair, "en")).toBe("English");
     expect(pickText(pair, "ja"), "non-zh locales read the English side").toBe("English");
+    expect(pickTextLocale("zh")).toBe("zh");
+    for (const locale of ["en", "ja", "ar"]) expect(pickTextLocale(locale)).toBe("en");
   });
 
   it("keeps the gain, models, availability, and surface lists structurally aligned", () => {

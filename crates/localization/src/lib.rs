@@ -2562,6 +2562,14 @@ pub enum MessageId {
     WorkflowPhaseCountOne,
     WorkflowPhaseCountMany,
     WorkflowPhaseOrdinal,
+    ModelPickerPinned,
+    ModelPickerUnpinned,
+    ModelPickerPinFailed,
+    ModelPickerPinOrderUpdated,
+    ModelPickerPinReorderFailed,
+    ModelPickerReadinessRefreshed,
+    ModelPickerOpenToRefresh,
+    ModelPickerPinnedChip,
 }
 
 #[allow(dead_code)]
@@ -4909,6 +4917,14 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::WorkflowPhaseCountOne,
     MessageId::WorkflowPhaseCountMany,
     MessageId::WorkflowPhaseOrdinal,
+    MessageId::ModelPickerPinned,
+    MessageId::ModelPickerUnpinned,
+    MessageId::ModelPickerPinFailed,
+    MessageId::ModelPickerPinOrderUpdated,
+    MessageId::ModelPickerPinReorderFailed,
+    MessageId::ModelPickerReadinessRefreshed,
+    MessageId::ModelPickerOpenToRefresh,
+    MessageId::ModelPickerPinnedChip,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {

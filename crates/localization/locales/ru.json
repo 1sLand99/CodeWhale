@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} готово",
   "WorkflowPhaseCountOne": "фаз: {count}",
   "WorkflowPhaseCountMany": "фаз: {count}",
-  "WorkflowPhaseOrdinal": "фаза {n}/{total}"
+  "WorkflowPhaseOrdinal": "фаза {n}/{total}",
+  "ModelPickerPinned": "{route} закреплено",
+  "ModelPickerUnpinned": "{route} откреплено",
+  "ModelPickerPinFailed": "Не удалось обновить закрепление: {error}",
+  "ModelPickerPinOrderUpdated": "Порядок закреплённых моделей обновлён",
+  "ModelPickerPinReorderFailed": "Не удалось изменить порядок закрепления: {error}",
+  "ModelPickerReadinessRefreshed": "Готовность моделей обновлена · строки каталога перестроены",
+  "ModelPickerOpenToRefresh": "Откройте /model, чтобы обновить готовность и каталог",
+  "ModelPickerPinnedChip": "закреплено"
 }
