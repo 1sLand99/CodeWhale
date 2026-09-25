@@ -9,13 +9,15 @@
 //! **OS sandbox.** Where Codewhale's default command sandbox is available
 //! (Seatbelt on macOS; bubblewrap stays opt-in for shell commands and is not
 //! used here) the host runs under a workspace-write profile rooted at
-//! `$CODEWHALE_HOME/extension-host/data`: no network, writes only there and
-//! in the temp dirs, and **no reads** of the credential-store default
-//! deny-list (`sandbox::read_guard`) plus Codewhale's own secret, credential,
-//! config, MCP and session stores. Elsewhere (Linux, Windows) the host runs
-//! unsandboxed with the user's permissions, and
-//! `/plugin` says so. This is defense-in-depth, not the phase-5 sandbox:
-//! exec is not restricted beyond what the profile allows.
+//! `$CODEWHALE_HOME/extension-host/data`: no direct network, writes only
+//! there and in the temp dirs, and **no reads** of the Codewhale homes
+//! (everything but the bundle, its data dir and plugin code), the Codex and
+//! DSH credential homes, and the credential-store default deny-list
+//! (`sandbox::read_guard`). Other user-readable files stay readable —
+//! including `.env` files, whose filename rule has no Seatbelt subpath form —
+//! and Mach services are not restricted, so this is defense-in-depth, not a
+//! containment boundary. Elsewhere (Linux, Windows) the host runs unsandboxed
+//! with the user's permissions, and `/plugin` says so.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 use super::protocol::{
@@ -71,31 +73,97 @@ pub(crate) struct HostLaunch {
     pub sandbox_env: Vec<(String, String)>,
 }
 
+/// Top-level entries of a Codewhale home the host may read: its own bundle
+/// and data (`extension-host`), and plugin code (the staged snapshots live
+/// under `plugins/.runtime`). Everything else in a Codewhale home — secrets,
+/// tokens, config and its backups, sessions, state, tool outputs, history —
+/// is denied.
+const HOST_READABLE_HOME_ENTRIES: &[&str] = &["extension-host", "plugins", "builtin-plugins"];
+
+/// Codewhale-home entries denied by name even before they exist, so a store
+/// created after the host started is still covered. Existing entries are
+/// denied by enumeration (`host_denied_read_paths`).
+const HOST_DENIED_HOME_ENTRIES: &[&str] = &[
+    "secrets",
+    "credentials",
+    "tokens",
+    "state",
+    "state.db",
+    "sessions",
+    "session-archives",
+    "session_index.jsonl",
+    "tool_outputs",
+    "composer_history.txt",
+    "remote-control",
+    "integrations",
+    "audit.log",
+    "logs",
+    "memory",
+    "mcp.json",
+    "mcp.json.bak",
+    "config.toml.bak",
+    "settings.toml",
+];
+
 /// Paths the host process must never read, even though the sandbox otherwise
-/// grants full-disk read: the curated credential-store defaults, plus
-/// Codewhale's own stores under both the runtime home and the ambient
-/// `~/.codewhale` (a relocated home is not a licence to read the real one).
+/// grants full-disk read: the curated credential-store defaults; every entry
+/// of Codewhale's homes (the runtime home, the ambient `~/.codewhale`, and the
+/// legacy `~/.deepseek`) except [`HOST_READABLE_HOME_ENTRIES`]; and the Codex
+/// and DSH homes whose credential files Codewhale itself reads. Blocking.
 pub(crate) fn host_denied_read_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = crate::sandbox::read_guard::ReadDenylist::build(true, &[], &[]).subtree_paths();
+    let mut push = |path: PathBuf| {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    let user_home = codewhale_paths::user_home();
     let mut roots = vec![home.to_path_buf()];
     roots.extend(codewhale_config::codewhale_home().ok());
-    roots.extend(
-        codewhale_paths::user_home().map(|user| user.join(codewhale_config::CODEWHALE_APP_DIR)),
-    );
+    if let Some(user) = &user_home {
+        roots.push(user.join(codewhale_config::CODEWHALE_APP_DIR));
+        roots.push(user.join(".deepseek"));
+    }
     for root in roots {
-        for store in [
-            "secrets",
-            "credentials",
-            codewhale_config::CONFIG_FILE_NAME,
-            "mcp.json",
-            "sessions",
-            "session-archives",
-        ] {
-            let path = root.join(store);
-            if !paths.contains(&path) {
-                paths.push(path);
+        let mut names: Vec<std::ffi::OsString> = HOST_DENIED_HOME_ENTRIES
+            .iter()
+            .chain(std::iter::once(&codewhale_config::CONFIG_FILE_NAME))
+            .map(std::ffi::OsString::from)
+            .collect();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            names.extend(
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name()),
+            );
+        }
+        // Seatbelt matches the kernel-resolved path, and a name that does not
+        // exist yet cannot be canonicalized later, so deny it under both the
+        // given and the resolved spelling of its (existing) root.
+        let resolved = std::fs::canonicalize(&root).ok();
+        for name in names {
+            let readable = name
+                .to_str()
+                .is_some_and(|name| HOST_READABLE_HOME_ENTRIES.contains(&name));
+            if !readable {
+                if let Some(resolved) = &resolved {
+                    push(resolved.join(&name));
+                }
+                push(root.join(name));
             }
         }
+    }
+    // Codex's home (ChatGPT OAuth tokens in `auth.json`) and the DSH home
+    // (`.credentials.yaml`), wherever the environment points them.
+    if let Some(codex_home) = crate::oauth::auth_file_path().parent() {
+        push(codex_home.to_path_buf());
+    }
+    if let Some(user) = &user_home {
+        push(user.join(".codex"));
+        push(user.join(".dsh"));
+    }
+    if let Some(dsh_home) = codewhale_config::default_dsh_credentials_path().parent() {
+        push(dsh_home.to_path_buf());
     }
     paths
 }
@@ -228,11 +296,18 @@ impl HostProcess {
         // Scrubbed environment: no credentials, no ambient proxy URLs.
         command.env_clear();
         let parent_pid = std::process::id().to_string();
+        // On Unix the host leads its own process group (below), so it may kill
+        // that group when the core goes away (stdin EOF, or a parent change
+        // seen by its watchdog thread).
+        let own_group = if cfg!(unix) { "1" } else { "0" };
         let overrides = launch
             .sandbox_env
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
-            .chain([("CODEWHALE_HOST_PARENT_PID", parent_pid.as_str())]);
+            .chain([
+                ("CODEWHALE_HOST_PARENT_PID", parent_pid.as_str()),
+                ("CODEWHALE_HOST_PROCESS_GROUP", own_group),
+            ]);
         for (key, value) in
             crate::child_env::sanitized_plugin_mcp_env_from(std::env::vars_os(), overrides)
         {
@@ -278,15 +353,24 @@ impl HostProcess {
             }
         });
 
-        // stderr: tail for diagnostics, lines into tracing.
+        // stderr: a bounded tail for diagnostics, chunks into tracing. Read
+        // in fixed-size chunks, never by line: a plugin writing endless
+        // output without a newline must not grow this process's memory.
         {
             let tail = Arc::clone(&stderr_tail);
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    push_tail(&tail, line.as_bytes());
-                    push_tail(&tail, b"\n");
-                    tracing::debug!(target: "extension_host", "host stderr: {line}");
+                let mut stderr = stderr;
+                let mut chunk = vec![0_u8; 4096];
+                while let Ok(read) = stderr.read(&mut chunk).await {
+                    if read == 0 {
+                        break;
+                    }
+                    push_tail(&tail, &chunk[..read]);
+                    tracing::debug!(
+                        target: "extension_host",
+                        "host stderr: {}",
+                        String::from_utf8_lossy(&chunk[..read]).trim_end()
+                    );
                 }
             });
         }

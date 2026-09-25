@@ -21,11 +21,14 @@ export const LIMITS = { max_frame: 32 * 1024 * 1024, max_inflight: 256, dispose_
  * Start a host. `admit(spec, owner)` decides `registry/register`: return a
  * handle number or `{ refused }`. Registry traffic is recorded in `registry`.
  */
-export async function startHost({ admit, env } = {}) {
+export async function startHost({ admit, env, ownGroup = false } = {}) {
   const started = performance.now()
+  // `ownGroup` spawns the host as a process-group leader and tells it so, as
+  // the Rust core does on Unix.
   const child = spawn(process.execPath, ['--max-old-space-size=256', '--disable-proto=throw', '--no-addons', BUNDLE], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...env, ...(ownGroup ? { CODEWHALE_HOST_PROCESS_GROUP: '1' } : {}) },
+    detached: ownGroup,
   })
   const decoder = new FrameDecoder()
   const pending = new Map()

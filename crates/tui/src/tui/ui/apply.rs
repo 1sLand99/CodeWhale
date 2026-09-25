@@ -1544,6 +1544,9 @@ pub(crate) async fn apply_command_result(
                 }
             }
             AppAction::PluginRegistryChanged => {
+                // Revoke a disabled or untrusted plugin's host code now, not at
+                // the next turn's rebuild.
+                crate::extension_host::plugins_changed(std::sync::Arc::clone(&app.plugin_registry));
                 let command_errors = crate::commands::user_registry::install_plugin_registry(
                     &app.workspace,
                     app.plugin_registry.as_ref(),

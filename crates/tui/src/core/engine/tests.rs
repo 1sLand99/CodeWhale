@@ -25904,7 +25904,7 @@ async fn extension_tool_is_deferred_gated_and_attributed_on_the_model_path() {
         return;
     };
     let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(true);
-    let fixture = crate::extension_host::tests::FixturePlugins::new(&["dsh-workspace-deps"]);
+    let fixture = crate::extension_host::tests::FixturePlugins::new(&["dsh-workspace-deps"]).await;
     let manager = fixture.manager(node);
     manager
         .sync(fixture.registry())
@@ -26018,7 +26018,7 @@ async fn extension_host_flag_off_never_spawns_the_host() {
 
     let fixture = {
         let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(true);
-        crate::extension_host::tests::FixturePlugins::new(&["dsh-workspace-deps"])
+        crate::extension_host::tests::FixturePlugins::new(&["dsh-workspace-deps"]).await
     };
     let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(false);
     let manager = Arc::new(crate::extension_host::ExtensionHostManager::new(

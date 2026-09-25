@@ -10,6 +10,7 @@ var __export = (target, all) => {
 import { createHash as createHash2 } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 
 // node_modules/@deepseek-ai/cordis/lib/index.js
 var lib_exports2 = {};
@@ -4331,12 +4332,16 @@ var HostRoot = class {
     const host2 = this;
     const reflect = root.reflect;
     const originalProvide = reflect.provide;
-    reflect.provide = function(name, ...rest) {
-      const caller = this.ctx;
-      if (caller?.[OWNER] && REFUSED_SERVICES.has(name)) {
-        throw new Error(`extension may not provide core service \`${name}\`: the Codewhale core owns it`);
+    let toolsShimProvided = false;
+    reflect.provide = function(name, value, ...rest) {
+      if (REFUSED_SERVICES.has(name)) {
+        const hostShim = name === "tools" && !toolsShimProvided && value instanceof ToolsShim;
+        if (!hostShim) {
+          throw new Error(`extension may not provide core service \`${name}\`: the Codewhale core owns it`);
+        }
+        toolsShimProvided = true;
       }
-      return originalProvide.call(this, name, ...rest);
+      return originalProvide.call(this, name, value, ...rest);
     };
     root.logger.exporter({
       colors: false,
@@ -4360,6 +4365,7 @@ var HostRoot = class {
         return ctx.effect(() => host2.addTool(owner, definition), `tools.register(${JSON.stringify(definition.name)})`);
       }
     }
+    Object.freeze(ToolsShim.prototype);
     root.plugin(ToolsShim);
   }
   rpc;
@@ -4607,6 +4613,26 @@ function bundleDigest() {
     return "unknown";
   }
 }
+var OWN_GROUP = process.platform !== "win32" && process.env.CODEWHALE_HOST_PROCESS_GROUP === "1";
+function killHostTree() {
+  if (OWN_GROUP) {
+    try {
+      process.kill(-process.pid, "SIGKILL");
+    } catch {
+    }
+  }
+  return realExit(0);
+}
+var watchdog = new Worker(
+  `const { workerData } = require('node:worker_threads')
+  const parent = process.ppid
+  setInterval(() => {
+    if (process.ppid === parent) return
+    try { process.kill(workerData.group ? -workerData.pid : workerData.pid, 'SIGKILL') } catch {}
+  }, 500)`,
+  { eval: true, workerData: { pid: process.pid, group: OWN_GROUP }, resourceLimits: { maxOldGenerationSizeMb: 8 } }
+);
+watchdog.unref();
 function shutdownNow(code) {
   channelWrite("", () => realExit(code));
   setTimeout(() => realExit(code), 200).unref();
@@ -4683,7 +4709,7 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   rpc.close("core closed the channel");
-  realExit(0);
+  killHostTree();
 });
 rpc.notify("host/hello", {
   protocol: { min: PROTOCOL_VERSION, max: PROTOCOL_VERSION },

@@ -339,8 +339,22 @@ pub fn node_version_supported_for_extension_host(version: (u32, u32, u32)) -> bo
 }
 
 fn probe_node_version(path: &Path) -> Result<(u32, u32, u32), String> {
+    // Only absolute candidates are run: a relative `PATH` entry resolves
+    // against the current (workspace) directory, where a repository could
+    // plant a `node`.
+    if !path.is_absolute() {
+        return Err("not an absolute path; skipped".to_string());
+    }
     let mut cmd = Command::new(path);
     crate::utils::suppress_console_window(&mut cmd);
+    // The probe runs unsandboxed, so it gets no inherited environment (no
+    // credentials, no NODE_OPTIONS preloads); Windows needs SystemRoot to
+    // load system DLLs.
+    cmd.env_clear();
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        cmd.env("SystemRoot", root);
+    }
     cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -840,13 +854,22 @@ mod tests {
         let old = script("old-node", "echo v20.11.1");
         let good = script("good-node", "echo v22.20.0");
         let later = script("later-node", "echo v24.0.0");
-        let resolution = select_node(vec![broken.clone(), old.clone(), good.clone(), later]);
+        let relative = PathBuf::from("node_modules/.bin/node");
+        let resolution = select_node(vec![
+            relative.clone(),
+            broken.clone(),
+            old.clone(),
+            good.clone(),
+            later,
+        ]);
         assert_eq!(resolution.selected, Some((good, (22, 20, 0))));
-        assert_eq!(resolution.rejected.len(), 2);
-        assert_eq!(resolution.rejected[0].0, broken);
-        assert!(resolution.rejected[0].1.contains("does not run"));
-        assert_eq!(resolution.rejected[1].0, old);
-        assert!(resolution.rejected[1].1.contains("below"));
+        assert_eq!(resolution.rejected.len(), 3);
+        assert_eq!(resolution.rejected[0].0, relative);
+        assert!(resolution.rejected[0].1.contains("not an absolute path"));
+        assert_eq!(resolution.rejected[1].0, broken);
+        assert!(resolution.rejected[1].1.contains("does not run"));
+        assert_eq!(resolution.rejected[2].0, old);
+        assert!(resolution.rejected[2].1.contains("below"));
     }
 
     #[test]

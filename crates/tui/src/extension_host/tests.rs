@@ -178,6 +178,60 @@ fn registry_refuses_shadowing_and_foreign_names_and_undoes_exactly_one_entry() {
     assert!(register(&mut registry, &a, "after_revoke").is_err());
 }
 
+/// Names that the approval tables key by name must never reach an extension:
+/// a `fetch_url` session grant for github.com is `net:github.com`, and a
+/// plugin tool called `web_fetch` would otherwise get that same key.
+#[test]
+fn registry_refuses_names_the_approval_tables_special_case() {
+    let mut registry = OwnerRegistry::new();
+    let a = registry.begin_owner("a", "a", fake_authority("a"), "hash-a");
+    // Special-cased by name somewhere in the approval path; some are also
+    // natives in some modes.
+    for name in [
+        "web_fetch",
+        "exec_wait",
+        "exec_interact",
+        "task_shell_start",
+        "web_search",
+        "run_tests",
+        "run_verifiers",
+        "fim_edit",
+        "Bash",
+        "read_workspace_deps",
+        "list_things",
+        "get_secret",
+        "start_mcp_server",
+    ] {
+        let refused =
+            register(&mut registry, &a, name).expect_err(&format!("{name} must be refused"));
+        assert!(
+            refused.contains("reserved") || refused.contains("collides with a built-in"),
+            "{name}: {refused}"
+        );
+    }
+    // Not natives in any mode: only the classifier probe refuses these.
+    for name in [
+        "web_fetch",
+        "exec_wait",
+        "exec_interact",
+        "read_workspace_deps",
+    ] {
+        let refused = register(&mut registry, &a, name).unwrap_err();
+        assert!(refused.contains("reserved"), "{name}: {refused}");
+    }
+    // The fetch-family key really is shared by name: this is what the refusal
+    // protects.
+    let input = json!({"url": "https://github.com/x"});
+    assert_eq!(
+        crate::tools::approval_cache::build_approval_grouping_key("web_fetch", &input),
+        crate::tools::approval_cache::build_approval_grouping_key("fetch_url", &input),
+    );
+    // Opaque names are admitted and keyed as themselves.
+    for name in ["load_workspace_dependencies", "slow_wait", "probe_read"] {
+        register(&mut registry, &a, name).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+}
+
 #[test]
 fn registry_enforces_schema_and_count_caps() {
     let mut registry = OwnerRegistry::new();
@@ -250,20 +304,8 @@ pub(crate) fn node_for_tests(test: &str) -> Option<PathBuf> {
     }
 }
 
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-    }
-}
-
-/// Fixture plugins installed into a private user plugin dir, reviewed
+/// Fixture plugins installed into a private user plugin dir through the
+/// reviewed installer (`plugins::install`, local path), then reviewed
 /// (trusted) and enabled through the real registry. Callers must hold a
 /// `TestPolicyGuard::extension_host(true)` on this thread.
 pub(crate) struct FixturePlugins {
@@ -273,13 +315,29 @@ pub(crate) struct FixturePlugins {
 }
 
 impl FixturePlugins {
-    pub(crate) fn new(names: &[&str]) -> Self {
+    pub(crate) async fn new(names: &[&str]) -> Self {
+        use crate::plugins::install::{
+            DEFAULT_MAX_SIZE_BYTES, PluginInstallOutcome, PluginInstallSource, install,
+        };
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         let user = temp.path().join("user");
         std::fs::create_dir_all(&workspace).unwrap();
         for name in names {
-            copy_dir(&fixtures_dir().join(name), &user.join(name));
+            let outcome = install(
+                PluginInstallSource::LocalPath(fixtures_dir().join(name)),
+                &user,
+                DEFAULT_MAX_SIZE_BYTES,
+                &crate::network_policy::NetworkPolicy::default(),
+                false,
+                &|_| None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("install {name}: {error:#}"));
+            assert!(
+                matches!(outcome, PluginInstallOutcome::Installed(ref installed) if installed.name == *name),
+                "install {name}: {outcome:?}"
+            );
         }
         let config = DiscoveryConfig {
             workspace: workspace.clone(),
@@ -360,7 +418,7 @@ async fn dsh_plugin_runs_end_to_end_behind_the_approval_gate() {
         return;
     };
     let _policy = TestPolicyGuard::extension_host(true);
-    let fixture = FixturePlugins::new(&["dsh-workspace-deps"]);
+    let fixture = FixturePlugins::new(&["dsh-workspace-deps"]).await;
     let manager = fixture.manager(node);
     assert_eq!(
         manager.status(),
@@ -426,7 +484,7 @@ async fn execute_tools_refuses_extension_tools_before_any_host_call() {
         return;
     };
     let _policy = TestPolicyGuard::extension_host(true);
-    let fixture = FixturePlugins::new(&["slow-tool"]);
+    let fixture = FixturePlugins::new(&["slow-tool"]).await;
     let manager = fixture.manager(node);
     manager.sync(fixture.registry()).await.unwrap();
     let mut registry = crate::tools::registry::ToolRegistryBuilder::new()
@@ -458,7 +516,7 @@ async fn disabling_mid_call_revokes_at_once_and_teardown_waits_for_async_dispose
         return;
     };
     let _policy = TestPolicyGuard::extension_host(true);
-    let fixture = FixturePlugins::new(&["slow-tool"]);
+    let fixture = FixturePlugins::new(&["slow-tool"]).await;
     let manager = fixture.manager(node);
     manager.sync(fixture.registry()).await.unwrap();
     let tool = host_tool(&manager, fixture.workspace(), "slow_wait");
@@ -530,7 +588,7 @@ async fn killed_host_fails_calls_with_a_typed_error_and_does_not_respawn() {
         return;
     };
     let _policy = TestPolicyGuard::extension_host(true);
-    let fixture = FixturePlugins::new(&["slow-tool"]);
+    let fixture = FixturePlugins::new(&["slow-tool"]).await;
     let manager = fixture.manager(node);
     manager.sync(fixture.registry()).await.unwrap();
     assert_eq!(manager.spawn_attempts(), 1);
@@ -581,7 +639,7 @@ async fn approval_providing_plugin_fails_activation_and_leaves_nothing_registere
         return;
     };
     let _policy = TestPolicyGuard::extension_host(true);
-    let fixture = FixturePlugins::new(&["refuses-approval", "clash-native"]);
+    let fixture = FixturePlugins::new(&["refuses-approval", "clash-native"]).await;
     let manager = fixture.manager(node);
     manager.sync(fixture.registry()).await.unwrap();
     let registry = fixture.registry();
@@ -640,7 +698,7 @@ async fn an_extension_named_like_a_script_tool_is_skipped_at_turn_build() {
         return;
     };
     let _policy = TestPolicyGuard::extension_host(true);
-    let fixture = FixturePlugins::new(&["clash-script"]);
+    let fixture = FixturePlugins::new(&["clash-script"]).await;
     let manager = fixture.manager(node);
     manager.sync(fixture.registry()).await.unwrap();
     assert_eq!(manager.live_tool_names(), vec!["fixture_script_tool"]);
@@ -697,14 +755,22 @@ async fn sandboxed_host_cannot_read_codewhale_secrets_or_write_outside_its_data_
         return;
     };
     let _policy = TestPolicyGuard::extension_host(true);
-    let fixture = FixturePlugins::new(&["secret-probe"]);
+    let fixture = FixturePlugins::new(&["secret-probe"]).await;
     // Created before launch: the deny-list records the canonical spelling of
     // paths that exist (macOS `/var` → `/private/var`).
     let secrets = fixture.root.join("secrets");
     std::fs::create_dir_all(&secrets).unwrap();
     let token = secrets.join("token");
     std::fs::write(&token, "s3cret-value").unwrap();
-    let readable = fixture.root.join("readable.txt");
+    // Any other entry of the Codewhale home is denied too (config backups,
+    // OAuth tokens, state), not only the named stores.
+    let backup = fixture.root.join("config.toml.bak-20260925");
+    std::fs::write(&backup, "api_key = \"s3cret-backup\"").unwrap();
+    let tokens = fixture.root.join("tokens");
+    std::fs::create_dir_all(&tokens).unwrap();
+    std::fs::write(tokens.join("codex.json"), "s3cret-oauth").unwrap();
+    // Outside the Codewhale home, ordinary files stay readable.
+    let readable = fixture.workspace().join("readable.txt");
     std::fs::write(&readable, "plain").unwrap();
 
     let manager = fixture.manager(node);
@@ -733,9 +799,24 @@ async fn sandboxed_host_cannot_read_codewhale_secrets_or_write_outside_its_data_
         json!({"ok": true, "text": "plain"}),
         "ordinary reads work"
     );
-    let secret = probe(&read, &token, &context).await;
-    assert_eq!(secret["ok"], false, "{secret}");
-    assert!(!secret.to_string().contains("s3cret"), "{secret}");
+    for denied in [token, backup, tokens.join("codex.json")] {
+        let secret = probe(&read, &denied, &context).await;
+        assert_eq!(secret["ok"], false, "{}: {secret}", denied.display());
+        assert!(!secret.to_string().contains("s3cret"), "{secret}");
+    }
+    // A store created after the host started is denied by name.
+    let state = fixture.root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("late.json"), "s3cret-late").unwrap();
+    let late = probe(&read, &state.join("late.json"), &context).await;
+    assert_eq!(late["ok"], false, "{late}");
+    // The Codex credential file Codewhale itself reads, when this machine has
+    // one. Only `ok` is reported, never the content.
+    let codex_auth = crate::oauth::auth_file_path();
+    if codex_auth.is_file() {
+        let codex = probe(&read, &codex_auth, &context).await;
+        assert_eq!(codex["ok"], false, "code: {}", codex["code"]);
+    }
 
     let data = fixture.root.join("extension-host/data/probe.txt");
     assert_eq!(probe(&write, &data, &context).await["ok"], true);

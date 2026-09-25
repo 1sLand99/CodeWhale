@@ -94,6 +94,49 @@ fn valid_tool_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Why the core would treat a tool called `name` as something other than an
+/// opaque extension tool, if it would.
+///
+/// Approval keys, approval-card summaries, and the approval/auto-review
+/// category are all derived from the tool *name*. A name any of them
+/// special-cases would let an extension borrow a native tool's identity: a
+/// session grant for `fetch_url` on a host (`net:<host>`) would approve a
+/// plugin tool named `web_fetch`, and a `read_*` name would be classified as
+/// a read. Such names need not be registered natives (`web_fetch`,
+/// `exec_wait`, and mode-dependent tools such as `task_shell_start` are not),
+/// so they are refused by probing the classifiers themselves rather than by a
+/// hand-kept list that would drift from them.
+fn core_special_case(name: &str) -> Option<&'static str> {
+    use crate::tools::approval_cache::{build_approval_grouping_key, build_approval_key};
+    use crate::tui::approval::{ToolCategory, get_tool_category_for_call};
+    let empty = Value::Object(serde_json::Map::new());
+    let spellings = [name.to_string(), name.to_ascii_lowercase()];
+    for spelling in &spellings {
+        let generic = format!("tool:{spelling}:");
+        if !build_approval_key(spelling, &empty).0.starts_with(&generic)
+            || !build_approval_grouping_key(spelling, &empty)
+                .0
+                .starts_with(&generic)
+        {
+            return Some("the approval cache keys it as a built-in tool family");
+        }
+        if crate::tools::canonical_action::canonical_action_alias(spelling, &empty) != spelling {
+            return Some("it is an alias of a built-in tool");
+        }
+        if crate::tools::approval_summary::approval_summary(spelling, &empty, None)
+            != format!("Use the {spelling} tool")
+        {
+            return Some("approval cards describe it as a built-in tool");
+        }
+        if get_tool_category_for_call(spelling, &empty) != ToolCategory::Unknown {
+            return Some(
+                "the approval policy classifies it by name (read, write, shell, network, MCP or agent)",
+            );
+        }
+    }
+    None
+}
+
 impl OwnerRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -211,6 +254,11 @@ impl OwnerRegistry {
         if self.native_names.contains(&key) {
             return Err(format!(
                 "tool name `{name}` collides with a built-in tool; extensions never shadow core tools"
+            ));
+        }
+        if let Some(reason) = core_special_case(name) {
+            return Err(format!(
+                "tool name `{name}` is reserved: {reason}; extension tools never borrow a built-in's approval identity"
             ));
         }
         if spec.description.len() > MAX_DESCRIPTION_BYTES {
@@ -375,6 +423,15 @@ impl OwnerRegistry {
                 .owners
                 .get(&owner.plugin_id)
                 .is_some_and(|entry| entry.owner == *owner && entry.state == OwnerState::Active)
+    }
+
+    /// Active owners other than `plugin_id` sharing the one host process.
+    #[must_use]
+    pub fn other_active_owners(&self, plugin_id: &str) -> usize {
+        self.owners
+            .values()
+            .filter(|entry| entry.owner.plugin_id != plugin_id && entry.state == OwnerState::Active)
+            .count()
     }
 
     #[must_use]

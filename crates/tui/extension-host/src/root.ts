@@ -117,15 +117,22 @@ export class HostRoot {
     this.root = root
     const host = this
 
-    // Refuse core service names before any plugin can run.
+    // Refuse core service names before any plugin can run. The refusal does
+    // not depend on who calls: `ctx.root.provide(...)` runs with the root as
+    // its context, so an owner check alone could be sidestepped. The one
+    // exception is the host's own `tools` shim, provided once, below.
     const reflect = root.reflect
     const originalProvide = reflect.provide
-    reflect.provide = function (this: any, name: string, ...rest: unknown[]) {
-      const caller = this.ctx
-      if (caller?.[OWNER] && REFUSED_SERVICES.has(name)) {
-        throw new Error(`extension may not provide core service \`${name}\`: the Codewhale core owns it`)
+    let toolsShimProvided = false
+    reflect.provide = function (this: any, name: string, value: unknown, ...rest: unknown[]) {
+      if (REFUSED_SERVICES.has(name)) {
+        const hostShim = name === 'tools' && !toolsShimProvided && value instanceof ToolsShim
+        if (!hostShim) {
+          throw new Error(`extension may not provide core service \`${name}\`: the Codewhale core owns it`)
+        }
+        toolsShimProvided = true
       }
-      return originalProvide.call(this, name, ...rest)
+      return originalProvide.call(this, name, value, ...rest)
     }
 
     // Logger shim: every Cordis log line becomes a `log` notification.
@@ -153,6 +160,11 @@ export class HostRoot {
         return ctx.effect(() => host.addTool(owner, definition), `tools.register(${JSON.stringify(definition.name)})`)
       }
     }
+    // Plugins share one process, so the owner token is not a boundary
+    // between them (design §4.4, threat 3). Freezing the shim at least stops
+    // the direct route of one plugin rewriting `register` for every other
+    // plugin; shared globals remain, and the approval card says so.
+    Object.freeze(ToolsShim.prototype)
     root.plugin(ToolsShim)
   }
 

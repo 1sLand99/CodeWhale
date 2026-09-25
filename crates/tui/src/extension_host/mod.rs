@@ -19,18 +19,37 @@
 //!   `core/call` (the host cannot ask the core to do anything).
 //! * No heartbeat and no auto-restart. A dead host fails in-flight calls with
 //!   a typed error and stays failed until the next session or until a plugin
-//!   the session has not seen before becomes desired.
+//!   the session has not seen before becomes desired. A teardown that times
+//!   out or reports leaks is logged in `/plugin`; the plugin's leftover
+//!   JavaScript keeps running until the host process ends.
 //! * One host per engine process and one trust tier. On macOS (Seatbelt) the
-//!   host has no network and cannot read Codewhale's secret/credential/config
-//!   stores (`supervisor::plan_launch`); on Linux and Windows it runs
-//!   unsandboxed with the user's permissions. Either way the flag is
+//!   host has no direct network, and cannot read the Codewhale home (except
+//!   the bundle, its data dir and plugin code), the Codex and DSH credential
+//!   homes, or the default credential stores (`supervisor::plan_launch`).
+//!   Other files the user can read — including project `.env` files — stay
+//!   readable, and Mach services are not restricted. On Linux and Windows it
+//!   runs unsandboxed with the user's permissions. Either way the flag is
 //!   Experimental.
 //! * The owner token is a bug/staleness guard, not a boundary between
-//!   plugins that share the process.
+//!   plugins that share the process: one plugin can alter another's
+//!   behaviour, which the approval card discloses.
+//! * Extension tool names that any name-keyed approval table special-cases
+//!   are refused (`registry::core_special_case`), so an extension tool never
+//!   shares an approval key, summary or category with a built-in.
 //! * The host's process tree (Unix process group / Windows Job Object,
 //!   shared with hooks via `crate::process_tree`) is killed as a whole. On
 //!   Windows the host is assigned to its job just after spawn, not created
-//!   suspended as hooks are.
+//!   suspended as hooks are. On Unix a plugin child that calls `setsid` leaves
+//!   the group and is not killed with it. When the core goes away, the host
+//!   kills its own group at stdin EOF, and a watchdog thread does the same
+//!   when its parent process changes, even if a plugin blocks the event loop.
+//! * One manager per process: `sync` reconciles against the calling engine's
+//!   plugin registry, so engines for different workspaces in one process
+//!   would revoke each other's plugins. Only one workspace runs per process
+//!   today.
+//! * The host re-hashes each `native` entry file before importing it; other
+//!   files in the staged snapshot are covered by Rust's per-call receipt
+//!   check, not re-hashed by the host.
 
 pub(crate) mod protocol;
 pub(crate) mod registry;
@@ -726,9 +745,10 @@ impl ExtensionHostManager {
     }
 
     /// Bounded shutdown of the host process, if one is running. Production
-    /// relies on the host exiting at stdin EOF when this process ends: the
-    /// host is shared by every engine in the process, so no single engine's
-    /// shutdown may stop it.
+    /// has no such call: the host is shared by every engine in the process,
+    /// so no single engine's shutdown may stop it. When this process ends the
+    /// host sees stdin EOF and kills its own process tree; if a plugin blocks
+    /// its event loop, its watchdog thread does so when the parent changes.
     #[cfg(test)]
     pub async fn shutdown(&self) {
         let host = {
@@ -778,7 +798,7 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
                 pid.map_or_else(|| "?".to_string(), |pid| pid.to_string()),
                 match sandbox {
                     Some(sandbox) => format!(
-                        "{sandbox} sandbox (no network; Codewhale secrets and credential stores unreadable)"
+                        "{sandbox} sandbox (no direct network; the Codewhale home except plugin code, the Codex and DSH credential homes and the default credential stores are unreadable; other files you can read, such as project .env files, are not protected)"
                     ),
                     None => "UNSANDBOXED: host code runs with your user permissions".to_string(),
                 }
@@ -801,16 +821,24 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
         }
     }
     let _ = write!(out, "\n  spawn attempts: {}", manager.spawn_attempts());
-    let tools = manager
-        .shared
-        .registry
-        .lock()
-        .expect("registry lock")
-        .live_tools();
+    let (tools, owners) = {
+        let registry = manager.shared.registry.lock().expect("registry lock");
+        let owners = registry
+            .owners()
+            .filter(|entry| entry.state == OwnerState::Active)
+            .count();
+        (registry.live_tools(), owners)
+    };
+    if owners > 1 {
+        let _ = write!(
+            out,
+            "\n  {owners} plugins share this one host process and can alter each other's behaviour"
+        );
+    }
     for tool in tools {
         let _ = write!(
             out,
-            "\n  tool {} (extension:{}, always asks for approval)",
+            "\n  tool {} (extension:{}; needs approval, which your approval mode or a session grant for this exact tool may give)",
             tool.name, tool.plugin_name
         );
     }
@@ -819,6 +847,15 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
         let _ = write!(out, "\n  · {diagnostic}");
     }
     out
+}
+
+/// A plugin was enabled, disabled, trusted, revoked or removed: reconcile the
+/// host now, so a disabled plugin's calls are cancelled and its code torn
+/// down without waiting for the next turn. No-op with the flag off.
+pub fn plugins_changed(plugins: Arc<PluginRegistry>) {
+    if activation::extension_host_policy_enabled() {
+        manager().sync_in_background(plugins);
+    }
 }
 
 /// The `/plugin` section, or `None` when the experimental host is off.

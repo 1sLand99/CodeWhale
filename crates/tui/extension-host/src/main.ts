@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { Worker } from 'node:worker_threads'
 import * as cordis from '@deepseek-ai/cordis'
 import * as schemastery from '@deepseek-ai/schemastery'
 import * as cosmokit from '@deepseek-ai/cosmokit'
@@ -54,6 +55,38 @@ function bundleDigest(): string {
     return 'unknown'
   }
 }
+
+// 3b. When the core goes away, take every process this host started with it.
+//     On Unix the core spawns the host as the leader of its own process group
+//     and says so; killing the group reaches plugin children (not ones that
+//     called `setsid`). On Windows the core's Job Object does this when the
+//     core's handle closes.
+const OWN_GROUP = process.platform !== 'win32' && process.env.CODEWHALE_HOST_PROCESS_GROUP === '1'
+
+function killHostTree(): never {
+  if (OWN_GROUP) {
+    try {
+      process.kill(-process.pid, 'SIGKILL')
+    } catch {
+      // Not a group leader after all; exit alone.
+    }
+  }
+  return realExit(0)
+}
+
+// A plugin that blocks the event loop would never see stdin EOF, so a
+// watchdog on its own thread notices the parent going away (the host is
+// re-parented, which PID reuse cannot fake) and kills the tree from there.
+const watchdog = new Worker(
+  `const { workerData } = require('node:worker_threads')
+  const parent = process.ppid
+  setInterval(() => {
+    if (process.ppid === parent) return
+    try { process.kill(workerData.group ? -workerData.pid : workerData.pid, 'SIGKILL') } catch {}
+  }, 500)`,
+  { eval: true, workerData: { pid: process.pid, group: OWN_GROUP }, resourceLimits: { maxOldGenerationSizeMb: 8 } },
+)
+watchdog.unref()
 
 function shutdownNow(code: number) {
   // Let queued frames flush before exiting.
@@ -140,7 +173,7 @@ process.stdin.on('data', (chunk: Buffer) => {
 })
 process.stdin.on('end', () => {
   rpc.close('core closed the channel')
-  realExit(0)
+  killHostTree()
 })
 
 rpc.notify('host/hello', {

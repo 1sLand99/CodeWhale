@@ -50,10 +50,27 @@ impl HostToolSpec {
         format!("extension:{}", self.registration.plugin_name)
     }
 
+    /// The approval-card text. Rust composes it; the extension supplies none.
+    /// Plugins in one host share a process and can interfere with each other,
+    /// so the card says when this one is not alone (design §4.4, threat 3).
     #[must_use]
     pub fn approval_text(&self) -> String {
+        let others = self
+            .manager
+            .registry
+            .lock()
+            .expect("registry lock")
+            .other_active_owners(&self.registration.owner.plugin_id);
+        let sharing = match others {
+            0 => String::new(),
+            1 => "; it shares one host process with 1 other plugin, which can alter its behaviour"
+                .to_string(),
+            n => format!(
+                "; it shares one host process with {n} other plugins, which can alter its behaviour"
+            ),
+        };
         format!(
-            "Extension tool `{}` from plugin `{}` ({}) runs JavaScript on this computer with your user permissions",
+            "Extension tool `{}` from plugin `{}` ({}) runs JavaScript on this computer with the extension host's permissions{sharing}",
             self.registration.name,
             self.registration.plugin_name,
             self.origin()
