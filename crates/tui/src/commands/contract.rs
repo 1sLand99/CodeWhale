@@ -4208,9 +4208,21 @@ impl CommandPluginContext for PluginAdapter<'_> {
                 ..
             } => spec,
             crate::plugins::marketplace::document::CatalogInstallResolution::AlreadyPresent {
+                plugin,
                 reason,
-                ..
             } => {
+                // Installing a bundle Codewhale ships succeeds as a no-op
+                // (B5); any other occupied name stays a refusal.
+                if plugin.scope == crate::plugins::types::PluginScope::Builtin {
+                    return Ok(PluginMutationReceipt {
+                        name: plugin.id.as_str().to_string(),
+                        path: None,
+                        content_hash: Some(plugin.content_hash.clone()),
+                        installed_content_hash: None,
+                        outcome:
+                            codewhale_command_contract::facets::PluginMutationOutcome::NoChange,
+                    });
+                }
                 return Err(escape_review_text(&reason));
             }
             crate::plugins::marketplace::document::CatalogInstallResolution::Unsupported {
