@@ -263,13 +263,19 @@ impl NestedCallGate {
 /// itself or their own approval card stay direct. Checked on the name the
 /// program sent, and again by the turn loop on the name planning resolved it
 /// to (`Agent` resolves to `agent`) and the final, hook-rewritten input.
+///
+/// Names compare ASCII case-insensitively: dispatch resolves `Agent` to
+/// `agent`, so a case-sensitive list would be a bypass, not a policy.
 pub(crate) fn refusal_before_gate(name: &str, input: &Value, gated: bool) -> Option<String> {
-    if PROHIBITED_NESTED.contains(&name) || (!gated && name == "tool_search") {
+    let lower = name.to_ascii_lowercase();
+    if PROHIBITED_NESTED.contains(&lower.as_str())
+        || (!gated && crate::core::engine::tool_catalog::is_tool_search_tool(&lower))
+    {
         return Some(format!(
             "`{name}` is not available inside execute_tools programs; call it directly (use workflow/task() for fan-out)"
         ));
     }
-    if matches!(name, "bash" | "Bash" | "exec_shell")
+    if matches!(lower.as_str(), "bash" | "exec_shell")
         && input.get("interactive").and_then(Value::as_bool) == Some(true)
     {
         return Some(format!(
@@ -1428,6 +1434,12 @@ mod tests {
             ("mcp_github_authenticate", json!({})),
             ("exec_shell", json!({"command": "ls", "interactive": true})),
             ("request_user_input", json!({})),
+            // Dispatch resolves names case-insensitively, so the refusals do.
+            ("Agent", json!({})),
+            ("WORKFLOW", json!({})),
+            ("Execute_Tools", json!({"code": "return 1;"})),
+            ("BASH", json!({"command": "ls", "interactive": true})),
+            ("Exec_Shell", json!({"command": "ls", "interactive": true})),
         ] {
             let err = invoker
                 .invoke(ToolCallRequest {

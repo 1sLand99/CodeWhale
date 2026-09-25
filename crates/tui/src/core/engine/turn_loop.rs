@@ -4795,13 +4795,6 @@ impl Engine {
                 decision: NestedDecision::Refused,
             };
         }
-        let hook_context = hook_contexts.remove(&nested_id);
-        if let Some(result) = plan.guard_result {
-            return NestedCallVerdict::Answered {
-                result,
-                hook_context,
-            };
-        }
         // Planning resolves a near-miss name (`Agent` -> `agent`) and hooks
         // may rewrite the input, so the direct-only refusals the program's
         // raw request passed are checked again on what would actually run.
@@ -4813,6 +4806,13 @@ impl Engine {
             return NestedCallVerdict::Refused {
                 error: ToolError::permission_denied(note),
                 decision: NestedDecision::Refused,
+            };
+        }
+        let hook_context = hook_contexts.remove(&nested_id);
+        if let Some(result) = plan.guard_result {
+            return NestedCallVerdict::Answered {
+                result,
+                hook_context,
             };
         }
 

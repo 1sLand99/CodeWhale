@@ -1270,15 +1270,18 @@ mod tests {
         );
     }
 
-    /// #6562: the direct-only names cannot be reached by changing their
-    /// case. Planning resolves `Agent` to `agent` and `BASH` to `bash`; the
-    /// gate refuses what the name resolved to, before anything runs.
+    /// #6562: the direct-only names cannot be reached by another spelling.
+    /// A case change (`Agent`, `BASH`) is refused from the request itself;
+    /// an alias planning resolves (`WorkflowTool` -> `workflow`,
+    /// `bash-tool` -> `bash`) is refused on the resolved name, before any
+    /// card or execution.
     #[tokio::test]
     async fn execute_tools_refuses_direct_only_tools_reached_by_another_spelling() {
         let executions = Arc::new(AtomicUsize::new(0));
         let code = "const errors = []; \
-             for (const [name, args] of [['Agent', {}], ['Workflow', {}], \
-                                         ['BASH', { interactive: true }]]) { \
+             for (const [name, args] of [['Agent', {}], ['WorkflowTool', {}], \
+                                         ['BASH', { interactive: true }], \
+                                         ['bash-tool', { interactive: true }]]) { \
                try { await tools.call(name, args); errors.push(null); } \
                catch (e) { errors.push(String(e.message || e)); } \
              } \
@@ -1301,8 +1304,9 @@ mod tests {
             .as_array()
             .unwrap_or_else(|| panic!("{receipt}"));
         for (index, expected) in [
-            "`agent` is not available inside execute_tools programs",
+            "`Agent` is not available inside execute_tools programs",
             "`workflow` is not available inside execute_tools programs",
+            "`BASH` with interactive:true needs the terminal",
             "`bash` with interactive:true needs the terminal",
         ]
         .into_iter()
@@ -1316,6 +1320,12 @@ mod tests {
             );
             assert_eq!(receipt["calls"][index]["status"], "refused", "{receipt}");
         }
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::ApprovalRequired { .. })),
+            "a refused spelling never reaches a card"
+        );
     }
 
     /// #6562: a nested tool_search describes matching tools (name and input
