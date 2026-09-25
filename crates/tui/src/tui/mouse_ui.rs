@@ -938,6 +938,21 @@ fn first_line(text: &str) -> &str {
 /// Resolve a left-click in the sidebar to a typed row action, if the clicked
 /// row has a click action assigned (#3028, #4009).
 fn sidebar_click_action(app: &App, mouse: MouseEvent) -> Option<SidebarRowAction> {
+    let row = sidebar_row_at(app, mouse)?;
+    if let (Some(action), Some(start), Some(end)) = (
+        row.stop_action.as_ref(),
+        row.stop_zone_start_col,
+        row.stop_zone_end_col,
+    ) && mouse.column >= start
+        && mouse.column < end
+    {
+        return Some(action.clone());
+    }
+    row.click_action.clone()
+}
+
+/// The work-surface row under the pointer, if any.
+fn sidebar_row_at(app: &App, mouse: MouseEvent) -> Option<&crate::tui::app::SidebarHoverRow> {
     for section in &app.sidebar_hover.sections {
         if mouse.column >= section.content_area.x
             && mouse.column
@@ -953,16 +968,7 @@ fn sidebar_click_action(app: &App, mouse: MouseEvent) -> Option<SidebarRowAction
                     .saturating_add(section.content_area.height)
             && let Some(row) = section.rows.iter().find(|row| row.row_y == mouse.row)
         {
-            if let (Some(action), Some(start), Some(end)) = (
-                row.stop_action.as_ref(),
-                row.stop_zone_start_col,
-                row.stop_zone_end_col,
-            ) && mouse.column >= start
-                && mouse.column < end
-            {
-                return Some(action.clone());
-            }
-            return row.click_action.clone();
+            return Some(row);
         }
     }
     None
@@ -1611,8 +1617,20 @@ fn push_work_row_entries(app: &App, mouse: MouseEvent, entries: &mut Vec<Context
     let row = |label: String, action: SidebarRowAction| {
         ContextMenuEntry::new(label, "", ContextMenuAction::Row(action))
     };
-    let mut stop = None;
-    match sidebar_click_action(app, mouse) {
+    // The menu is built from the row's own action, never from its inline
+    // stop zone: a right-click there must not make an unconfirmed stop the
+    // primary entry. The row's stop, if any, goes last behind the confirm.
+    let hovered = sidebar_row_at(app, mouse);
+    let mut stop = hovered
+        .and_then(|hovered| hovered.stop_action.clone())
+        .map(|action| {
+            let label = match action {
+                SidebarRowAction::CancelAgent { .. } => MessageId::CtxMenuStopAgent,
+                _ => MessageId::CtxMenuStopWork,
+            };
+            row(app.tr(label).into_owned(), action).confirm(confirm())
+        });
+    match hovered.and_then(|hovered| hovered.click_action.clone()) {
         Some(SidebarRowAction::OpenAgentTranscript { agent_id }) => {
             entries.push(
                 ContextMenuEntry::new(
@@ -1889,19 +1907,13 @@ pub(crate) fn apply_context_menu_action(
 /// still held raw mode, the alt screen and mouse capture (#6235).
 /// The path `open_file_in_editor` may hand to the editor: `path` only while it
 /// is still a regular file inside `workspace` reached without links
-/// (`history::workspace_file`), else the refusal to show.
+/// (`history::workspace_file`), else `None`.
 fn editor_target(
     workspace: &std::path::Path,
     path: &std::path::Path,
-) -> Result<std::path::PathBuf, String> {
+) -> Option<std::path::PathBuf> {
     path.to_str()
         .and_then(|raw| crate::tui::history::workspace_file(workspace, raw))
-        .ok_or_else(|| {
-            format!(
-                "Did not open {}: it is no longer a file inside the workspace",
-                path.display()
-            )
-        })
 }
 
 pub(crate) fn open_file_in_editor(
@@ -1912,12 +1924,12 @@ pub(crate) fn open_file_in_editor(
 ) {
     // The menu checked this path when it was built; a link can be swapped in
     // before the click, so check again right before the editor gets it.
-    let path = match editor_target(&app.workspace, path) {
-        Ok(path) => path,
-        Err(refusal) => {
-            app.status_message = Some(refusal);
-            return;
-        }
+    let Some(path) = editor_target(&app.workspace, path) else {
+        app.status_message = Some(
+            app.tr(MessageId::CtxMenuEditorRefused)
+                .replace("{path}", &path.display().to_string()),
+        );
+        return;
     };
     let path = path.as_path();
     let outcome = crate::tui::external_editor::spawn_editor_for_path(
@@ -2027,6 +2039,29 @@ pub(crate) fn copy_receipt(
         crate::tui::clipboard::CopyTransport::Native => native.into(),
         crate::tui::clipboard::CopyTransport::Terminal => {
             app.tr(MessageId::ClipboardSentToTerminal).into_owned()
+        }
+    }
+}
+
+/// Ctrl+X on a composer selection. The text is deleted only after a native
+/// clipboard confirmed the copy; an OSC 52 / tmux copy is never confirmed,
+/// so the text stays and the receipt says why.
+pub(crate) fn cut_selection(app: &mut App) {
+    let sel = app.selected_text();
+    if sel.is_empty() {
+        return;
+    }
+    match app.clipboard.write_text_status(&sel) {
+        Ok(crate::tui::clipboard::CopyTransport::Native) => {
+            app.push_status_toast("Cut to clipboard", StatusToastLevel::Info, None);
+            app.delete_selection();
+        }
+        Ok(crate::tui::clipboard::CopyTransport::Terminal) => {
+            let receipt = app.tr(MessageId::ClipboardCutKeptText).into_owned();
+            app.push_status_toast(receipt, StatusToastLevel::Info, None);
+        }
+        Err(_) => {
+            app.push_status_toast("Cut failed", StatusToastLevel::Error, None);
         }
     }
 }
@@ -3386,35 +3421,128 @@ mod tests {
     }
 
     /// The menu resolved the file when it opened; a link swapped in before
-    /// the click (to `/` or `~/.ssh`) must be refused at launch.
+    /// the click (to a real key file outside the workspace, or to `/`) must
+    /// be refused at launch. The key is one the test creates, so the check
+    /// does not depend on what the host has in `~/.ssh`.
     #[cfg(unix)]
     #[test]
     fn editor_target_rechecks_links_swapped_in_after_the_menu_opened() {
         let dir = tempfile::tempdir().unwrap();
-        let workspace = dir.path();
+        let workspace = &dir.path().join("ws");
+        let key = dir.path().join("home/.ssh/id_ed25519");
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        std::fs::write(&key, "PRIVATE KEY\n").unwrap();
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let file = workspace.join("src/a.rs");
         std::fs::write(&file, "fn a() {}\n").unwrap();
-        assert_eq!(super::editor_target(workspace, &file), Ok(file.clone()));
+        assert!(super::editor_target(workspace, &file).is_some());
 
-        // The file becomes a link into ~/.ssh.
+        // The file becomes a link to the key.
         std::fs::remove_file(&file).unwrap();
-        let ssh =
-            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
-                .join(".ssh/id_ed25519");
-        std::os::unix::fs::symlink(&ssh, &file).unwrap();
-        let refusal = super::editor_target(workspace, &file).unwrap_err();
-        assert!(
-            refusal.contains("no longer a file inside the workspace"),
-            "{refusal}"
-        );
+        std::os::unix::fs::symlink(&key, &file).unwrap();
+        assert!(file.is_file(), "the link resolves to a real file");
+        assert_eq!(super::editor_target(workspace, &file), None);
 
         // The directory becomes a link to /.
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_dir(workspace.join("src")).unwrap();
         std::os::unix::fs::symlink("/", workspace.join("src")).unwrap();
-        assert!(super::editor_target(workspace, &workspace.join("src/etc/hosts")).is_err());
-        assert!(super::editor_target(workspace, std::path::Path::new("/etc/hosts")).is_err());
+        assert_eq!(
+            super::editor_target(workspace, &workspace.join("src/etc/hosts")),
+            None
+        );
+        assert_eq!(
+            super::editor_target(workspace, std::path::Path::new("/etc/hosts")),
+            None
+        );
+
+        // The refusal the user sees names the file and why.
+        let refusal = codewhale_localization::tr(
+            codewhale_localization::Locale::En,
+            codewhale_localization::MessageId::CtxMenuEditorRefused,
+        )
+        .replace("{path}", "src/a.rs");
+        assert_eq!(
+            refusal,
+            "Did not open src/a.rs: it is no longer a file inside the workspace"
+        );
+    }
+
+    /// Ctrl+X deletes the selection only when a native clipboard confirmed
+    /// the copy. A terminal (OSC 52 / tmux) copy keeps the text and says why;
+    /// a failed copy keeps it and says the cut failed.
+    #[test]
+    fn cut_deletes_only_after_a_native_copy() {
+        fn select_all(app: &mut App, text: &str) {
+            app.input = text.to_string();
+            app.selection_anchor = Some(0);
+            app.cursor_position = text.chars().count();
+        }
+        fn last_toast(app: &App) -> Option<&str> {
+            app.status_toasts.back().map(|toast| toast.text.as_str())
+        }
+
+        let mut app = create_test_app();
+        select_all(&mut app, "hello");
+        super::cut_selection(&mut app);
+        assert_eq!(app.clipboard.last_written_text(), Some("hello"));
+        assert_eq!(app.input, "", "a native copy cuts");
+        assert_eq!(last_toast(&app), Some("Cut to clipboard"));
+
+        app.clipboard = crate::tui::clipboard::ClipboardHandler::terminal_only_for_test();
+        select_all(&mut app, "kept");
+        super::cut_selection(&mut app);
+        assert_eq!(
+            app.input, "kept",
+            "an unconfirmed terminal copy keeps the text"
+        );
+        assert_eq!(
+            last_toast(&app),
+            Some(
+                "Sent to the terminal clipboard; the text stays because terminals do not confirm copies"
+            )
+        );
+
+        app.clipboard = crate::tui::clipboard::ClipboardHandler::unavailable_for_test(false);
+        select_all(&mut app, "also kept");
+        super::cut_selection(&mut app);
+        assert_eq!(app.input, "also kept", "a failed copy keeps the text");
+        assert_eq!(last_toast(&app), Some("Cut failed"));
+    }
+
+    /// A right-click on a row's inline stop zone opens the row's own menu;
+    /// the stop is offered last behind the confirm, never as the primary
+    /// entry that one click would run.
+    #[test]
+    fn right_click_on_a_stop_zone_keeps_the_stop_confirmed() {
+        let mut app = create_test_app();
+        work_row_section(
+            &mut app,
+            SidebarRowAction::Command("/jobs show shell_x".to_string()),
+        );
+        let row = &mut app.sidebar_hover.sections[0].rows[0];
+        row.stop_action = Some(SidebarRowAction::Command(
+            "/jobs cancel shell_x".to_string(),
+        ));
+        row.stop_zone_start_col = Some(76);
+        row.stop_zone_end_col = Some(79);
+
+        let entries = build_context_menu_entries(&app, right_click(77, 4));
+        let primary = entries.iter().find(|entry| entry.primary).expect("primary");
+        assert_eq!(
+            primary.action,
+            ContextMenuAction::Row(SidebarRowAction::Command("/jobs show shell_x".to_string()))
+        );
+        assert!(primary.confirm_label.is_none());
+        let stop = entries.last().expect("stop entry");
+        assert_eq!(stop.label, "Stop…");
+        assert_eq!(
+            stop.action,
+            ContextMenuAction::Row(SidebarRowAction::Command(
+                "/jobs cancel shell_x".to_string()
+            ))
+        );
+        assert!(stop.confirm_label.is_some(), "the stop needs the confirm");
     }
 
     /// N9: an OSC 52 / tmux write is never acknowledged, so its receipt says

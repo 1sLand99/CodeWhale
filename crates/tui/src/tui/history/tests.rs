@@ -2787,18 +2787,28 @@ fn file_line_reference_refuses_links_out_of_the_workspace() {
     );
 }
 
-/// The two escapes the review named: a directory link to `/` and a file link
-/// into `~/.ssh`. Neither may resolve, whether or not the target exists.
+/// The two escapes the review named: a directory link to `/` and links into
+/// an `.ssh` directory. The `.ssh` here is one the test creates outside the
+/// workspace with real files in it, so a follow-the-link check would find
+/// them and resolve; the test does not depend on the host's own keys.
 #[cfg(unix)]
 #[test]
 fn file_line_reference_refuses_links_to_root_and_ssh() {
     let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path();
+    let workspace = &dir.path().join("ws");
+    std::fs::create_dir_all(workspace).unwrap();
     std::os::unix::fs::symlink("/", workspace.join("rootfs")).unwrap();
-    let ssh = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
-        .join(".ssh");
+    let ssh = dir.path().join("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY\n").unwrap();
+    std::fs::write(ssh.join("config"), "Host *\n").unwrap();
     std::os::unix::fs::symlink(ssh.join("id_ed25519"), workspace.join("key.rs")).unwrap();
     std::os::unix::fs::symlink(&ssh, workspace.join("ssh")).unwrap();
+    assert!(workspace.join("key.rs").is_file(), "the file link resolves");
+    assert!(
+        workspace.join("ssh/config").is_file(),
+        "the dir link resolves"
+    );
 
     for line in [
         "rootfs/etc/hosts:1",

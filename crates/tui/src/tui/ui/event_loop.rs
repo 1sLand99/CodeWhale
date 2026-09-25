@@ -6710,32 +6710,7 @@ pub(crate) async fn run_event_loop(
                     }
                 }
                 KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let sel = app.selected_text();
-                    if !sel.is_empty() {
-                        // Cut deletes only after a native clipboard confirmed
-                        // the copy. A terminal (OSC 52 / tmux) copy is never
-                        // confirmed, so the text stays where it is.
-                        match app.clipboard.write_text_status(&sel) {
-                            Ok(crate::tui::clipboard::CopyTransport::Native) => {
-                                app.push_status_toast(
-                                    "Cut to clipboard",
-                                    StatusToastLevel::Info,
-                                    None,
-                                );
-                                app.delete_selection();
-                            }
-                            Ok(crate::tui::clipboard::CopyTransport::Terminal) => {
-                                app.push_status_toast(
-                                    "Sent to the terminal clipboard; kept the text because terminals do not confirm copies",
-                                    StatusToastLevel::Info,
-                                    None,
-                                );
-                            }
-                            Err(_) => {
-                                app.push_status_toast("Cut failed", StatusToastLevel::Error, None);
-                            }
-                        }
-                    }
+                    crate::tui::mouse_ui::cut_selection(app);
                 }
                 _ if key_shortcuts::is_paste_shortcut(&key) => {
                     app.paste_from_clipboard();
