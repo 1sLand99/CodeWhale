@@ -10152,6 +10152,10 @@ impl ToolSpec for AgentTool {
                     "type": "array", "items": {"type": "string", "minLength": 1},
                     "description": "Named coordination contracts claimed by the child or added by action=claim. Peer contention is refused."
                 },
+                "fork_context": {
+                    "type": "boolean",
+                    "description": "For start: true = child starts from your current conversation prefix (cache-shared); false (default) = fresh context. Carries context, never permissions."
+                },
                 "resume_from": {
                     "type": "string",
                     "description": "Settled child agent_id or session name to fork into a separate new worker. Repeating start with resume_from creates another independent worker; use action=followup to continue parked work without an accidental duplicate. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implementer → verifier). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
@@ -10163,7 +10167,8 @@ impl ToolSpec for AgentTool {
                         {
                             "properties": {
                                 "action": {"const": "start"},
-                                "prompt": {}
+                                "prompt": {},
+                                "fork_context": {}
                             },
                             "required": ["prompt"]
                         },

@@ -5833,6 +5833,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "detached",
         "exact_files",
         "expected_artifact",
+        "fork_context",
         "limit",
         "max_output_tokens",
         "max_steps",
@@ -5860,7 +5861,6 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     );
     for unadvertised in [
         "max_depth",
-        "fork_context",
         "workspace_policy",
         "worktree_base",
         "worktree_branch",
@@ -21162,7 +21162,9 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 // base prompt's progress-narration rule (E4, 5cf9db3d6) and the workflow
 // Fleet origin list (26cfaf8de), net of the read/bash wording trims
 // (105ad9d3e).
-const PARENT_SURFACE_BYTE_CEILING: usize = 88_715;
+// Re-measured 2026-09-25 at 88,937B on Linux (88,924B on macOS), +222B: the
+// agent schema advertises `fork_context` (it was parse-accepted but hidden).
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_937;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
