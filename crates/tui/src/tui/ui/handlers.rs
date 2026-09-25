@@ -1500,10 +1500,11 @@ pub(crate) async fn handle_view_events(
             ViewEvent::CopyToClipboard { text, label } => {
                 if text.is_empty() {
                     app.status_message = Some(format!("{label} is empty"));
-                } else if app.clipboard.write_text(&text).is_ok() {
-                    app.status_message = Some(format!("{label} copied"));
                 } else {
-                    app.status_message = Some(format!("Copy failed ({label})"));
+                    app.status_message = Some(match app.clipboard.write_text_status(&text) {
+                        Ok(transport) => copy_receipt(app, transport, format!("{label} copied")),
+                        Err(_) => format!("Copy failed ({label})"),
+                    });
                 }
             }
             ViewEvent::ApprovalDecision {

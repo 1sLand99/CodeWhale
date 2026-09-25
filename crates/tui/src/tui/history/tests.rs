@@ -2751,6 +2751,42 @@ fn file_line_reference_refuses_paths_outside_the_workspace() {
     );
 }
 
+/// A link inside the workspace passed the text-only check and `is_file()`
+/// followed it, so `vendor -> <outside>` or `notes.md -> <outside file>` in
+/// model output offered "Open in editor" on a file outside the workspace.
+#[cfg(unix)]
+#[test]
+fn file_line_reference_refuses_links_out_of_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("ws");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.rs"), "secret\n").unwrap();
+    std::fs::write(workspace.join("src/in.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink(&outside, workspace.join("vendor")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.rs"), workspace.join("notes.rs")).unwrap();
+    // A link that stays inside is still a link: refused, not followed.
+    std::os::unix::fs::symlink(workspace.join("src"), workspace.join("alias")).unwrap();
+
+    for line in ["vendor/secret.rs:1", "notes.rs:1", "alias/in.rs:1"] {
+        assert_eq!(
+            super::file_line_reference(line, &workspace),
+            None,
+            "{line:?}"
+        );
+    }
+    assert_eq!(
+        super::workspace_file(&workspace, "src"),
+        None,
+        "a directory"
+    );
+    assert_eq!(
+        super::file_line_reference("src/in.rs:2", &workspace),
+        Some((workspace.join("src/in.rs"), 2))
+    );
+}
+
 #[test]
 fn first_file_line_reference_skips_unresolvable_and_malformed_rows() {
     let dir = tempfile::tempdir().unwrap();

@@ -2983,9 +2983,8 @@ pub(crate) fn first_file_line_reference(text: &str, workspace: &Path) -> Option<
 /// Accepts the forms tools and models print: `src/a.rs:12`, `src/a.rs:12:5`,
 /// `--> src/a.rs:12:5` (rustc), `` `src/a.rs:12` `` and a reference inside a
 /// sentence or brackets. The text is model output, so it is not trusted to
-/// name a file: every candidate goes through
-/// [`crate::snapshot::workspace_relative_path`] — the gate file-revert already
-/// trusts — which refuses `..` and absolute paths outside the workspace.
+/// name a file: every candidate goes through [`workspace_file`], which
+/// refuses `..`, absolute paths outside the workspace and links.
 pub(crate) fn file_line_reference(line: &str, workspace: &Path) -> Option<(PathBuf, u32)> {
     line.split_whitespace().find_map(|token| {
         // Leading `.` stays: `./src/a.rs` is relative, not `/src/a.rs`.
@@ -2999,10 +2998,35 @@ pub(crate) fn file_line_reference(line: &str, workspace: &Path) -> Option<(PathB
             return None;
         }
         let path_str = path_str.strip_prefix("./").unwrap_or(path_str);
-        let relative = crate::snapshot::workspace_relative_path(workspace, path_str)?;
-        let absolute = workspace.join(relative);
-        absolute.is_file().then_some((absolute, line_no))
+        workspace_file(workspace, path_str).map(|absolute| (absolute, line_no))
     })
+}
+
+/// The regular file `raw` names inside `workspace`, as
+/// `workspace.join(relative)`, or `None`.
+///
+/// [`crate::snapshot::workspace_relative_path`] checks only the text, and
+/// `is_file()` follows links, so a link inside the workspace (`vendor -> /`,
+/// `notes.md -> ~/.ssh/config`) used to pass. Each part below the workspace
+/// is read with `symlink_metadata` and a link is refused, as
+/// `runtime_api::workspace::confined_directory` does, and the resolved path
+/// must still sit under the resolved workspace. Callers that act later check
+/// again at that point: this is a check at one moment, not a lock.
+pub(crate) fn workspace_file(workspace: &Path, raw: &str) -> Option<PathBuf> {
+    let relative = crate::snapshot::workspace_relative_path(workspace, raw)?;
+    let mut path = workspace.to_path_buf();
+    let mut is_file = false;
+    for component in relative.components() {
+        path.push(component);
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if crate::plugins::metadata_is_link_or_reparse(&metadata) {
+            return None;
+        }
+        is_file = metadata.is_file();
+    }
+    let resolved_workspace = workspace.canonicalize().ok()?;
+    let inside = path.canonicalize().ok()?.starts_with(&resolved_workspace);
+    (is_file && inside).then_some(path)
 }
 
 /// Split `path:N`, `path:N:C` or `path:N:text` at the first all-digit

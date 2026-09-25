@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -421,7 +421,13 @@ impl ModalView for ContextMenuView {
                 ViewAction::None
             }
             KeyCode::Enter => self.activate(self.selected, true),
-            KeyCode::Char(c) => {
+            // A hint is the bare letter: Ctrl+C or Alt+Y must not run the
+            // row that happens to carry `c` or `y`.
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
                 let key = c.to_string();
                 match self.entries.iter().position(|entry| entry.hint == key) {
                     Some(idx) => self.activate(idx, false),
@@ -799,6 +805,13 @@ mod tests {
             view.handle_key(key(KeyCode::Char('x'))),
             ViewAction::None
         ));
+        // A modified letter is a different shortcut, not the row's hint.
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            assert!(matches!(
+                view.handle_key(KeyEvent::new(KeyCode::Char('y'), modifiers)),
+                ViewAction::None
+            ));
+        }
     }
 
     /// Entries past the ninth had no key at all. Each now gets a spare

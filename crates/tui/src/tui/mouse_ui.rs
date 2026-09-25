@@ -1724,8 +1724,9 @@ fn push_work_row_entries(app: &App, mouse: MouseEvent, entries: &mut Vec<Context
 }
 
 /// The workspace file a right-click on a transcript cell points at: the first
-/// `path:line` on the clicked line, else the first in the cell. Both are
-/// confined to the workspace by `history::file_line_reference`.
+/// `path:line` on the clicked line, else the first in the cell. Both must be
+/// regular files inside the workspace, reached without links
+/// (`history::workspace_file`); `open_file_in_editor` checks again.
 fn context_menu_file_reference(
     app: &App,
     mouse: MouseEvent,
@@ -1890,6 +1891,19 @@ pub(crate) fn open_file_in_editor(
     path: &std::path::Path,
     line: u32,
 ) {
+    // The menu checked this path when it was built; a link can be swapped in
+    // before the click, so check again right before the editor gets it.
+    let Some(path) = path
+        .to_str()
+        .and_then(|raw| crate::tui::history::workspace_file(&app.workspace, raw))
+    else {
+        app.status_message = Some(format!(
+            "Did not open {}: it is no longer a file inside the workspace",
+            path.display()
+        ));
+        return;
+    };
+    let path = path.as_path();
     let outcome = crate::tui::external_editor::spawn_editor_for_path(
         terminal,
         app.use_alt_screen(),
