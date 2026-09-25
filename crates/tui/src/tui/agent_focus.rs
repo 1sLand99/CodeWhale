@@ -435,17 +435,16 @@ pub(crate) enum AgentShellShortcut {
 /// surface owns that same arrow. Rendering and dispatch both consume this
 /// predicate so the footer cannot promise an action that another owner will
 /// swallow.
+///
+/// A workflow run on the workbar counts as agents to manage: `↓` then opens
+/// `/workflows` instead of the agent register.
 pub(crate) fn shell_shortcuts_available(app: &App, completion_menu_open: bool) -> bool {
-    agents_exist(app)
+    (agents_exist(app) || !app.workflow_runs.is_empty())
         && !completion_menu_open
         && app.input.is_empty()
         && app.view_stack.is_empty()
         && app.selected_composer_attachment_index().is_none()
         && !app.work_surface.focused
-        && !app
-            .workflow_panel
-            .as_ref()
-            .is_some_and(|panel| panel.keyboard_focus)
 }
 
 /// Resolve a key only while the agent shortcut contract is actually active.

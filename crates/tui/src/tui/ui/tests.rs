@@ -226,6 +226,98 @@ fn frame_cursor_is_hidden_during_diff_then_positioned_before_reveal() {
 }
 
 #[test]
+fn workbar_rows_sit_under_the_status_row_one_per_workflow() {
+    let mut app = crate::test_support::test_app_with_options(crate::tui::app::TuiOptions {
+        model: "deepseek-v4-flash".to_string(),
+        start_in_agent_mode: true,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    });
+    app.onboarding = crate::tui::app::OnboardingState::None;
+    app.launch.visible = false;
+    app.ui_locale = codewhale_localization::Locale::En;
+    app.onboarding_needs_api_key = false;
+    app.current_session_id = Some("session-wb".to_string());
+    app.history.push(HistoryCell::User {
+        content: "Established conversation".to_string(),
+    });
+    for (run, goal) in [
+        ("run-a", "Audit the parser"),
+        ("run-b", "Port the fixtures"),
+    ] {
+        assert!(apply_owned_workflow_ui_event(
+            &mut app,
+            "session-wb",
+            run,
+            &serde_json::json!({"type": "run_started", "workflow_goal": goal, "at_ms": 1}),
+        ));
+        for index in 0..3 {
+            apply_owned_workflow_ui_event(
+                &mut app,
+                "session-wb",
+                run,
+                &serde_json::json!({
+                    "type": "task_started",
+                    "task_id": format!("{run}-{index}"),
+                    "workflow_task_label": format!("agent {index}"),
+                    "at_ms": 2,
+                }),
+            );
+        }
+    }
+    apply_owned_workflow_ui_event(
+        &mut app,
+        "session-wb",
+        "run-a",
+        &serde_json::json!({"type": "task_completed", "task_id": "run-a-0", "status": "succeeded", "at_ms": 3}),
+    );
+    app.is_loading = true;
+    app.turn_started_at = Some(Instant::now());
+
+    let config = Config::default();
+    let (width, height) = (100u16, 30u16);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let _ = super::frame::render(frame, &mut app, &config);
+        })
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let rows: Vec<String> = (0..height)
+        .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect();
+
+    // No progress card sits between the transcript and the composer, and the
+    // transcript carries no run rows.
+    let composer = app.viewport.last_composer_area.expect("composer area");
+    let status = usize::from(composer.y + composer.height);
+    assert!(
+        rows[status].contains("Esc to interrupt") && rows[status].contains("to manage"),
+        "the status row keeps Esc and names the manage key: {:?}",
+        rows[status]
+    );
+    assert!(
+        rows[status + 1].contains("Audit the parser") && rows[status + 1].contains("1/3 so far"),
+        "first workbar row: {:?}",
+        rows[status + 1]
+    );
+    assert!(
+        rows[status + 2].contains("Port the fixtures") && rows[status + 2].contains("0/3 so far"),
+        "second workbar row: {:?}",
+        rows[status + 2]
+    );
+    assert!(
+        rows[..usize::from(composer.y)]
+            .iter()
+            .all(|row| !row.contains("so far")),
+        "progress stays out of the transcript"
+    );
+    assert_eq!(
+        app.viewport.last_workbar_area.map(|area| area.height),
+        Some(2)
+    );
+}
+
+#[test]
 fn composer_rows_stay_pinned_across_turn_state_transitions() {
     // The Tideline shell: the stage, one merged footer row, and the info line
     // footer row (slots 6+8 collapsed, spec §3). In an established session,
@@ -721,7 +813,7 @@ fn focus_test_app() -> App {
     app.onboarding = crate::tui::app::OnboardingState::None;
     app.launch.visible = false;
     app.work_surface.focused = false;
-    app.workflow_panel = None;
+    app.workflow_runs.clear();
     app
 }
 
@@ -2299,7 +2391,7 @@ fn workflow_ui_events_apply_only_to_the_active_session_owner() {
         &a_started,
     ));
     assert!(
-        app.workflow_panel.is_none(),
+        app.workflow_runs.is_empty(),
         "foreign event must not mutate B"
     );
 
@@ -2314,12 +2406,7 @@ fn workflow_ui_events_apply_only_to_the_active_session_owner() {
         "workflow-b",
         &b_started,
     ));
-    assert_eq!(
-        app.workflow_panel
-            .as_ref()
-            .map(|panel| panel.run_id.as_str()),
-        Some("workflow-b")
-    );
+    assert!(app.workflow_run("workflow-b").is_some());
 
     // A -> B -> A restores A's event lane with a new chronological start; it
     // never replays an older start through B.
@@ -2336,10 +2423,9 @@ fn workflow_ui_events_apply_only_to_the_active_session_owner() {
         &a_resumed,
     ));
     assert_eq!(
-        app.workflow_panel
-            .as_ref()
-            .map(|panel| panel.run_id.as_str()),
-        Some("workflow-a")
+        app.workflow_run("workflow-a")
+            .map(|panel| panel.label.as_str()),
+        Some("A workflow resumed")
     );
 }
 
@@ -2421,63 +2507,6 @@ fn successful_workflow_run_raises_no_failure_toast() {
     assert!(
         app.sticky_status.is_none(),
         "a successful run must not raise a failure toast"
-    );
-}
-
-#[test]
-fn workflow_panel_plain_letters_return_to_composer() {
-    let mut app = create_test_app();
-    app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
-        "workflow_typing",
-        "typing regression",
-        0,
-    ));
-
-    for ch in ['t', 'c', 'j', 'k'] {
-        app.workflow_panel
-            .as_mut()
-            .expect("workflow panel")
-            .keyboard_focus = true;
-        let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
-        assert!(
-            !handle_workflow_panel_key(&mut app, &key),
-            "plain {ch:?} must fall through to the composer"
-        );
-        assert!(
-            !app.workflow_panel
-                .as_ref()
-                .expect("workflow panel")
-                .keyboard_focus,
-            "typing releases panel focus"
-        );
-        app.insert_char(ch);
-    }
-
-    assert_eq!(app.input, "tcjk");
-}
-
-#[test]
-fn workflow_panel_uses_non_text_keys_for_controls() {
-    let mut app = create_test_app();
-    let mut panel = crate::tui::widgets::workflow_panel::WorkflowPanel::new(
-        "workflow_keys",
-        "keyboard controls",
-        0,
-    );
-    panel.keyboard_focus = true;
-    let was_expanded = panel.expanded;
-    app.workflow_panel = Some(panel);
-
-    assert!(handle_workflow_panel_key(
-        &mut app,
-        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
-    ));
-    assert_ne!(
-        app.workflow_panel
-            .as_ref()
-            .expect("workflow panel")
-            .expanded,
-        was_expanded
     );
 }
 

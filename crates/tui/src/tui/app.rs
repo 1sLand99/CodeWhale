@@ -963,9 +963,9 @@ pub struct ViewportState {
     /// Painted band occupied by the active approval or question sheet. Stored
     /// so wheel routing can prefer the prompt over side surfaces underneath it.
     pub last_prompt_area: Option<Rect>,
-    /// WorkflowPanel rect above the composer (#4121), for mouse toggle/cancel.
-    pub last_workflow_panel_area: Option<Rect>,
-    pub last_workflow_cancel_area: Option<Rect>,
+    /// The workbar's painted rows under the posture bar; a click there opens
+    /// `/workflows`.
+    pub last_workbar_area: Option<Rect>,
     /// Info-line segment rects (Tideline shell, spec §6), recorded at render so
     /// hover and — in a follow-up slice — click routing can hit-test the
     /// painted cells. Mirrors the workflow-panel cancel-area storage pattern.
@@ -1011,8 +1011,7 @@ impl Default for ViewportState {
             interaction_targets: crate::tui::tideline::InteractionRegistry::default(),
             composer_click_trace: None,
             last_prompt_area: None,
-            last_workflow_panel_area: None,
-            last_workflow_cancel_area: None,
+            last_workbar_area: None,
             last_infoline_hitboxes: Vec::new(),
             last_plugin_cta_area: None,
             last_plugin_cta_review_area: None,
@@ -2424,10 +2423,11 @@ pub struct App {
     /// every frame, so the counts live here rather than behind a
     /// settings-file read.
     pub footer_hint_uses: std::collections::BTreeMap<String, u8>,
-    /// Unified Workflow activity surface (#4121). Lives above the composer so
-    /// phase/row progress does not flood the chat transcript. Preserved after
-    /// completion until the next `RunStarted` replaces it.
-    pub workflow_panel: Option<crate::tui::widgets::workflow_panel::WorkflowPanel>,
+    /// Every workflow run this session is showing, in start order, one state
+    /// per run id (#4121). The workbar under the composer paints one row per
+    /// run; the transcript gets only each run's start and finish lines.
+    /// Settled runs stay until a later turn starts with nothing still running.
+    pub workflow_runs: Vec<crate::tui::widgets::workflow_panel::WorkflowPanel>,
     /// Wall-clock time when this TUI session started. Used by the Work
     /// sidebar projection to hide completed durable tasks that finished
     /// before the current session (bug #1913).
@@ -2644,12 +2644,7 @@ impl App {
         if self.launch.visible {
             return Focus::Launch;
         }
-        if self.work_surface.focused
-            || self
-                .workflow_panel
-                .as_ref()
-                .is_some_and(|panel| panel.keyboard_focus)
-        {
+        if self.work_surface.focused {
             return Focus::Panel;
         }
         Focus::Composer
@@ -5402,6 +5397,9 @@ impl App {
         {
             self.scroll_to_bottom();
         }
+        // A foreground workflow's finish line waits for its start card to
+        // leave the active group, so the transcript reads started → finished.
+        self.announce_settled_workflows();
     }
 
     /// Mark every still-running entry in the active cell as interrupted, then
@@ -5410,23 +5408,19 @@ impl App {
         if let Some(active) = self.active_cell.as_mut() {
             active.mark_in_progress_as_interrupted();
         }
+        // A detached workflow outlives the turn that started it, and a
+        // foreground one is cancelled by the engine, which says so with its
+        // own `run_cancelled`. Neither is marked here.
         self.flush_active_cell();
-        // #4121: interrupt finalizes running workflow children as cancelled
-        // and preserves the completed panel until the next run starts.
-        if let Some(panel) = self.workflow_panel.as_mut() {
-            panel.finalize_interrupt();
-            self.needs_redraw = true;
-        }
     }
 
-    /// Apply a workflow panel event for one immutable workflow run, creating
-    /// the panel on first `RunStarted`.
+    /// Apply one event to the run it names, creating that run's state on
+    /// first sight. Runs are independent: a newer run never replaces one that
+    /// is still going, so ten concurrent workflows are ten rows.
     ///
-    /// Returns whether the event belonged to the displayed run and was
-    /// applied. Budget-only updates still return `true`, but leave repaint to
-    /// the caller so high-frequency fan-out budget ticks can be paced (#4095).
-    /// A `RunStarted` event may select a different run only when its start is
-    /// strictly newer; every other cross-run event fails closed.
+    /// Returns whether the event was applied. Only a run's start and end ask
+    /// for a repaint here; progress leaves it to the caller, which paces a
+    /// fan-out's event stream (#4095).
     pub fn apply_workflow_panel_event(
         &mut self,
         event_run_id: &str,
@@ -5451,17 +5445,14 @@ impl App {
         {
             return false;
         }
-        if let Some(panel) = self.workflow_panel.as_ref()
-            && panel.run_id != event_run_id
-        {
-            match &event {
-                WorkflowPanelEvent::RunStarted { at_ms, .. } if *at_ms > panel.started_at_ms => {}
-                _ => return false,
-            }
-        }
 
-        let budget_only = matches!(&event, WorkflowPanelEvent::BudgetUpdated { .. });
-        // #5528: a failed run must be loud, not just a panel row. Capture the
+        let lifecycle = matches!(
+            &event,
+            WorkflowPanelEvent::RunStarted { .. }
+                | WorkflowPanelEvent::RunCompleted { .. }
+                | WorkflowPanelEvent::RunCancelled { .. }
+        );
+        // #5528: a failed run must be loud, not just a row. Capture the
         // failure before the event is consumed below; the sticky notice fires
         // once per run because the live stream and the tool-complete hydration
         // can both deliver the same terminal event.
@@ -5473,10 +5464,15 @@ impl App {
             } => Some(error.clone()),
             _ => None,
         };
-        let already_failed = self.workflow_panel.as_ref().is_some_and(|panel| {
-            panel.run_id == event_run_id && panel.lifecycle == WorkflowPanelLifecycle::Failed
+        let existing = self
+            .workflow_runs
+            .iter()
+            .position(|panel| panel.run_id == event_run_id);
+        let already_failed = existing.is_some_and(|index| {
+            self.workflow_runs[index].lifecycle == WorkflowPanelLifecycle::Failed
         });
-        match (&mut self.workflow_panel, &event) {
+        match (existing, &event) {
+            (Some(index), _) => self.workflow_runs[index].apply_event(event),
             (
                 None,
                 WorkflowPanelEvent::RunStarted {
@@ -5496,21 +5492,18 @@ impl App {
                 panel.locale = self.ui_locale;
                 panel.budget_total = *token_budget;
                 panel.budget_remaining = *token_budget;
-                self.workflow_panel = Some(panel);
+                self.push_workflow_run(panel);
             }
             (None, _) => {
-                // No panel yet and event is not a start — seed a shell panel
-                // so late events still surface rather than being dropped.
+                // A late event for a run this view never saw start still
+                // surfaces, under its id, rather than being dropped.
                 let mut panel = WorkflowPanel::new(event_run_id, event_run_id, 0);
                 panel.locale = self.ui_locale;
                 panel.apply_event(event);
-                self.workflow_panel = Some(panel);
-            }
-            (Some(panel), _) => {
-                panel.apply_event(event);
+                self.push_workflow_run(panel);
             }
         }
-        if !budget_only {
+        if lifecycle {
             self.needs_redraw = true;
         }
         if let Some(error) = run_failure
@@ -5534,18 +5527,152 @@ impl App {
                 Some(Self::STICKY_ERROR_TTL_MS),
             );
         }
+        self.announce_settled_workflows();
         true
     }
 
-    /// Toggle the workflow panel expand/collapse state. Returns true when a
-    /// panel was present and toggled.
-    pub fn toggle_workflow_panel(&mut self) -> bool {
-        let Some(panel) = self.workflow_panel.as_mut() else {
-            return false;
+    /// Most runs kept at once. Past it the oldest settled run goes first; a
+    /// live run is never evicted.
+    const MAX_WORKFLOW_RUNS: usize = 64;
+
+    pub(crate) fn push_workflow_run(
+        &mut self,
+        panel: crate::tui::widgets::workflow_panel::WorkflowPanel,
+    ) {
+        self.workflow_runs.push(panel);
+        while self.workflow_runs.len() > Self::MAX_WORKFLOW_RUNS {
+            let Some(oldest_settled) = self
+                .workflow_runs
+                .iter()
+                .position(|run| run.lifecycle.is_terminal() && run.finish_announced)
+            else {
+                break;
+            };
+            self.workflow_runs.remove(oldest_settled);
+        }
+    }
+
+    /// The state of one run, by id.
+    pub(crate) fn workflow_run(
+        &self,
+        run_id: &str,
+    ) -> Option<&crate::tui::widgets::workflow_panel::WorkflowPanel> {
+        self.workflow_runs.iter().find(|run| run.run_id == run_id)
+    }
+
+    pub(crate) fn workflow_run_mut(
+        &mut self,
+        run_id: &str,
+    ) -> Option<&mut crate::tui::widgets::workflow_panel::WorkflowPanel> {
+        self.workflow_runs
+            .iter_mut()
+            .find(|run| run.run_id == run_id)
+    }
+
+    /// Whether any workflow run is still going.
+    pub(crate) fn workflow_run_live(&self) -> bool {
+        self.workflow_runs
+            .iter()
+            .any(|run| run.lifecycle.is_running())
+    }
+
+    /// A new turn clears settled rows from the workbar once nothing is still
+    /// running — their finish lines are already in the transcript. While any
+    /// run is live the settled ones stay, so a batch reads as one batch.
+    pub(crate) fn prune_settled_workflow_runs(&mut self) {
+        if self.workflow_run_live() {
+            return;
+        }
+        let before = self.workflow_runs.len();
+        self.workflow_runs
+            .retain(|run| !(run.lifecycle.is_terminal() && run.finish_announced));
+        if self.workflow_runs.len() != before {
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Write each settled run's finish line into the transcript, once. The
+    /// line is a `workflow` card marked `transcript_line: finished`, so it
+    /// reuses the card renderer and expands in Transcript mode.
+    ///
+    /// While a `workflow` card is still in the active group (a foreground
+    /// `run`, or a `start` whose turn has not flushed) the line waits: pushed
+    /// now it would land above the card that started it. `flush_active_cell`
+    /// calls back here once the card is in history.
+    pub(crate) fn announce_settled_workflows(&mut self) {
+        use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
+        use crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle;
+        if !self
+            .workflow_runs
+            .iter()
+            .any(|run| run.lifecycle.is_terminal() && !run.finish_announced)
+        {
+            return;
+        }
+        let card_in_flight = self.active_cell.as_ref().is_some_and(|active| {
+            active.entries().iter().any(|cell| {
+                matches!(cell, HistoryCell::Tool(ToolCell::Generic(tool)) if tool.name == "workflow")
+            })
+        });
+        if card_in_flight {
+            return;
+        }
+        // A foreground `run` card that returned its settled record already
+        // shows the finish (history.rs); writing another would say it twice.
+        let card_owns_finish = |history: &[HistoryCell], run_id: &str| {
+            history.iter().rev().any(|cell| {
+                let HistoryCell::Tool(ToolCell::Generic(tool)) = cell else {
+                    return false;
+                };
+                if tool.name != "workflow" || tool.status == ToolStatus::Running {
+                    return false;
+                }
+                let Some(value) = tool
+                    .output
+                    .as_deref()
+                    .and_then(|out| serde_json::from_str::<serde_json::Value>(out).ok())
+                else {
+                    return false;
+                };
+                value.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id)
+                    && value.get("transcript_line").is_none()
+                    && matches!(
+                        value.get("status").and_then(serde_json::Value::as_str),
+                        Some("completed" | "succeeded" | "degraded" | "failed" | "cancelled")
+                    )
+            })
         };
-        let _ = panel.toggle_expanded();
+        let mut lines = Vec::new();
+        for run in &mut self.workflow_runs {
+            if !run.lifecycle.is_terminal() || run.finish_announced {
+                continue;
+            }
+            run.finish_announced = true;
+            if card_owns_finish(&self.history, &run.run_id) {
+                continue;
+            }
+            let mut output = run.to_run_json();
+            output["transcript_line"] = serde_json::Value::from("finished");
+            let status = match run.lifecycle {
+                WorkflowPanelLifecycle::Succeeded => ToolStatus::Success,
+                WorkflowPanelLifecycle::Degraded => ToolStatus::Warning,
+                _ => ToolStatus::Failed,
+            };
+            lines.push(HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+                name: "workflow".to_string(),
+                status,
+                input_summary: None,
+                output: Some(output.to_string()),
+                prompts: None,
+                spillover_path: None,
+                output_summary: None,
+                is_diff: false,
+            })));
+        }
+        for line in lines {
+            self.add_message(line);
+        }
         self.needs_redraw = true;
-        true
     }
 
     /// How long the "press Ctrl+C again to quit" prompt stays armed before it

@@ -11468,6 +11468,53 @@ fn xai_invalid_owned_generation_blocks_external_and_uses_api_key_fallback() -> R
     Ok(())
 }
 
+/// #6528 — a key pasted with a BOM, zero-width characters, NBSP or internal
+/// whitespace is saved clean, and an ambient env key is normalized and named
+/// as the source the runtime resolver used.
+#[test]
+fn pasted_key_is_saved_clean_and_env_source_is_named() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-pasted-key-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", config_path.as_os_str());
+    let _secret_backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "local");
+
+    let path = save_api_key_for(
+        ApiProvider::Openrouter,
+        "\u{feff}or-\u{200b}pasted\u{a0}key \u{2060}\n",
+    )?;
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(&path)?)?;
+    assert_eq!(
+        parsed
+            .get("providers")
+            .and_then(|p| p.get("openrouter"))
+            .and_then(|t| t.get("api_key"))
+            .and_then(toml::Value::as_str),
+        Some("or-pastedkey")
+    );
+
+    let _env_key = EnvVarGuard::set("OPENROUTER_API_KEY", "\u{feff}or-env\u{200d}key\u{a0}");
+    let config = Config {
+        provider: Some("openrouter".to_string()),
+        ..Config::default()
+    };
+    let (key, source) = config.active_route_api_key_with_source()?;
+    assert_eq!(key, "or-envkey");
+    assert_eq!(source, "env var OPENROUTER_API_KEY");
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(())
+}
+
 #[test]
 fn save_api_key_for_openrouter_writes_provider_table() -> Result<()> {
     let _lock = lock_test_env();

@@ -3,6 +3,7 @@ pub mod key_hint;
 pub mod pending_input_preview;
 mod renderable;
 pub mod tool_card;
+pub(crate) mod workbar;
 pub mod workflow_panel;
 
 pub use renderable::Renderable;

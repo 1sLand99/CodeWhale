@@ -2214,10 +2214,7 @@ pub(crate) async fn apply_command_result(
                 }
             }
             AppAction::OpenWorkflowsManager => {
-                if app.view_stack.top_kind() != Some(ModalKind::WorkflowsManager) {
-                    app.view_stack
-                        .push(crate::tui::views::workflows_manager::WorkflowsManagerView::new(app));
-                }
+                crate::tui::views::workflows_manager::open(app);
             }
             AppAction::OpenExtensions { tab } => {
                 if app.view_stack.top_kind() != Some(ModalKind::Extensions) {
