@@ -7589,6 +7589,26 @@ impl RuntimeThreadManager {
     }
 
     pub async fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadRecord> {
+        self.create_thread_with_shell_policy(req, None, None).await
+    }
+
+    /// Create a thread, resolving an unset `allow_shell` against the config
+    /// source the host actually loaded (`config_path`/`config_profile`).
+    ///
+    /// An unset `allow_shell` takes the interactive default
+    /// (`Config::interactive_allow_shell`, on unless configured off): a
+    /// conversation opened from an app is attended, and every shell command
+    /// still passes the thread's approval posture. The default is then checked
+    /// with the same `validate_shell_access_policy` a PATCH opt-in runs, so a
+    /// project, profile, environment or managed `allow_shell = false` still
+    /// wins at creation. Callers that pass an explicit value (tasks,
+    /// automations, the chat relay) are unchanged.
+    pub(crate) async fn create_thread_with_shell_policy(
+        &self,
+        req: CreateThreadRequest,
+        config_path: Option<&Path>,
+        config_profile: Option<&str>,
+    ) -> Result<ThreadRecord> {
         let now = Utc::now();
         let reasoning_effort = canonical_runtime_reasoning_effort(req.reasoning_effort.as_deref())?;
         let (model_provider, model_provider_id, default_model) = {
@@ -7644,9 +7664,17 @@ impl RuntimeThreadManager {
         )?;
         let mode = policy.mode_setting().to_string();
         let permission_posture = Some(policy.permission_wire().to_string());
-        let allow_shell = req
-            .allow_shell
-            .unwrap_or_else(|| self.read_config().allow_shell());
+        let allow_shell = match req.allow_shell {
+            Some(explicit) => explicit,
+            None => {
+                let interactive_default = self.read_config().interactive_allow_shell();
+                interactive_default
+                    && self
+                        .validate_shell_access_policy(&workspace, config_path, config_profile)
+                        .await
+                        .is_ok()
+            }
+        };
         let trust_mode = req.trust_mode.unwrap_or(false);
         let auto_approve = policy.auto_approve();
 
