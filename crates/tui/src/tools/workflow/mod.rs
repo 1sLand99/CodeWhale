@@ -342,7 +342,11 @@ fn finish_workflow_controller(state: &WorkflowWorkspaceState, record: &WorkflowR
         if let Some(report) = &report {
             receipt["report"] = json!(report);
         }
-        let summary = workflow_receipt_summary(record, report.as_deref());
+        let summary = workflow_receipt_summary(
+            record,
+            &controller.driver.task_records_snapshot(),
+            report.as_deref(),
+        );
         let payload =
             format!("{summary}\n<codewhale:subagent.done>{receipt}</codewhale:subagent.done>");
         debug_assert!(payload.len() <= WORKFLOW_COMPLETION_MAX_BYTES);
@@ -358,8 +362,14 @@ fn finish_workflow_controller(state: &WorkflowWorkspaceState, record: &WorkflowR
 /// The plain-language half of a workflow's parent receipt: what ended, how
 /// many agents finished and why the others stopped, where the report is, and
 /// a bounded result preview. Event names and the JSON receipt carry the
-/// machine-readable status; this is for the reader.
-fn workflow_receipt_summary(record: &WorkflowRunRecord, report: Option<&str>) -> String {
+/// machine-readable status; this is for the reader. `tasks` is the driver's
+/// per-task ledger, which counts the agents once the run's retained event
+/// tail has been trimmed.
+fn workflow_receipt_summary(
+    record: &WorkflowRunRecord,
+    tasks: &[RuntimeTaskRecord],
+    report: Option<&str>,
+) -> String {
     let name = record
         .workflow_goal
         .as_deref()
@@ -367,7 +377,13 @@ fn workflow_receipt_summary(record: &WorkflowRunRecord, report: Option<&str>) ->
         .filter(|goal| !goal.is_empty())
         .map(|goal| format!("Workflow \"{}\"", truncate_chars(goal, 160)))
         .unwrap_or_else(|| format!("Workflow {}", truncate_chars(&record.run_id, 64)));
-    let tally = WorkflowTally::from_events(&record.events);
+    let mut tally = WorkflowTally::from_events(&record.events);
+    if record.events_dropped > 0 {
+        tally.count_from_ledger(
+            tasks.iter().map(|task| task.status),
+            record.dispatch_failure_count,
+        );
+    }
     let mut summary = format!(
         "{name} {}: {}.",
         view::run_outcome_phrase(record.status),
@@ -1706,6 +1722,9 @@ fn cancel_workflow_run(
         state.mark_owner_missing(run_id);
         let mut failed = snapshot;
         failed.error = Some(format!("workflow cancellation journal failed: {err}"));
+        if let Some(controller) = controller.as_ref() {
+            write_run_report_artifact(&controller.driver.workspace, &failed);
+        }
         finish_workflow_controller(&state, &failed);
         return Err(ToolError::execution_failed(format!(
             "workflow cancellation journal failed: {err}"
@@ -1717,6 +1736,9 @@ fn cancel_workflow_run(
     // the live panel finalizes running rows and cannot remain visually failed.
     if let Some(controller) = controller {
         controller.driver.emit_ui_event(&cancelled_event);
+        // The receipt links the report, so write it first; the VM's own
+        // terminal path may rewrite it moments later.
+        write_run_report_artifact(&controller.driver.workspace, &snapshot);
     }
     finish_workflow_controller(&state, &snapshot);
     workflow_result_for(run_id, state, owner_session_id)
@@ -12325,8 +12347,11 @@ FINAL RECEIPT
         ));
         record.result = Some(json!({"a": "ok", "b": null}));
 
-        let summary =
-            workflow_receipt_summary(&record, Some(".codewhale/reports/workflow_d08d912f.md"));
+        let summary = workflow_receipt_summary(
+            &record,
+            &[],
+            Some(".codewhale/reports/workflow_d08d912f.md"),
+        );
         let first_line = summary.lines().next().expect("sentence");
         assert_eq!(
             first_line,
@@ -12336,10 +12361,83 @@ FINAL RECEIPT
         assert!(summary.contains("\nReport: .codewhale/reports/workflow_d08d912f.md"));
         assert!(!summary.contains("Degraded") && !summary.contains(" ended "));
 
-        let unreported = workflow_receipt_summary(&record, None);
+        let unreported = workflow_receipt_summary(&record, &[], None);
         assert!(
             unreported.contains("No report file was written; `workflow status workflow_d08d912f`"),
             "{unreported}"
+        );
+    }
+
+    #[test]
+    fn receipt_counts_from_the_task_ledger_once_events_were_trimmed() {
+        let mut record = WorkflowRunRecord::new(
+            "workflow_trimmed".to_string(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
+        record.status = WorkflowRunStatus::Degraded;
+        record.workflow_goal = Some("Survey".to_string());
+        // Chatty run: logs push every task_started out of the retained tail.
+        for index in 0..(WORKFLOW_RUN_EVENTS_MAX_RETAINED + 50) {
+            record.push_event(WorkflowUiEvent::at(
+                1,
+                "session-test",
+                WorkflowUiEventKind::Log {
+                    message: format!("line {index}"),
+                },
+            ));
+        }
+        let budget = TaskCompletion::BudgetExhausted {
+            message: "child step budget exhausted".to_string(),
+        };
+        let (reason, kind) = view::task_stop(&budget);
+        record.push_event(WorkflowUiEvent::at(
+            2,
+            "session-test",
+            WorkflowUiEventKind::TaskCompleted {
+                task_id: "agent_mid".to_string(),
+                status: IrWorkflowRunStatus::BudgetExceeded,
+                reason,
+                kind,
+                usage: None,
+            },
+        ));
+        record.dispatch_failure_count = 1;
+        assert!(record.events_dropped > 0);
+
+        // Events alone still count the agent they name as stopped.
+        let events_only = workflow_receipt_summary(&record, &[], None);
+        assert!(
+            events_only.starts_with(
+                "Workflow \"Survey\" finished with gaps: 0 of 1 agent finished, 1 failed \
+                 (agent_mid: stopped at the step limit)."
+            ),
+            "{events_only}"
+        );
+
+        let task = |index: usize, status| RuntimeTaskRecord {
+            agent_id: format!("agent_{index}"),
+            label: None,
+            role: None,
+            status,
+            output: None,
+            schema_error: None,
+            usage: None,
+        };
+        let mut ledger: Vec<RuntimeTaskRecord> = (0..598)
+            .map(|index| task(index, IrWorkflowRunStatus::Succeeded))
+            .collect();
+        ledger.push(task(598, IrWorkflowRunStatus::BudgetExceeded));
+        ledger.push(task(599, IrWorkflowRunStatus::Failed));
+        let summary = workflow_receipt_summary(&record, &ledger, None);
+        assert!(
+            summary.starts_with(
+                "Workflow \"Survey\" finished with gaps: 598 of 601 agents finished, 2 failed, \
+                 1 could not start (agent_mid: stopped at the step limit; 2 more)."
+            ),
+            "{summary}"
         );
     }
 
@@ -12845,6 +12943,53 @@ FINAL RECEIPT
     }
 
     #[tokio::test]
+    async fn explicit_cancel_receipt_links_the_report_it_wrote() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (mut tool, context, mut completion_rx) = native_lifecycle_tool(tmp.path());
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        tool.runtime.event_tx = Some(event_tx);
+        let started = tool
+            .execute(
+                json!({"action":"start", "script":"phase('spin'); while (true) {}"}),
+                &context,
+            )
+            .await
+            .expect("detached start");
+        let started: Value = serde_json::from_str(&started.content).expect("start json");
+        let run_id = started["run_id"].as_str().expect("run id").to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Event::WorkflowUi { event, .. } =
+                    event_rx.recv().await.expect("event channel")
+                    && event["type"] == "phase_started"
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("VM entered its phase");
+        tool.execute(json!({"action":"cancel", "run_id":run_id}), &context)
+            .await
+            .expect("cancel");
+        let completion =
+            tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+                .await
+                .expect("cancel receipt arrives")
+                .expect("parent inbox open");
+        let receipt = terminal_workflow_receipt(&completion.payload);
+        assert_eq!(receipt["status"], "cancelled");
+        let report = format!(".codewhale/reports/{run_id}.md");
+        assert_eq!(receipt["report"], report.as_str());
+        assert!(
+            completion.payload.contains(&format!("\nReport: {report}")),
+            "{}",
+            completion.payload
+        );
+        assert!(!completion.payload.contains("No report file was written"));
+    }
+
+    #[tokio::test]
     async fn native_cancel_closes_queued_admission_without_cancelling_parent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         set_session_workflow_config(
@@ -13033,6 +13178,14 @@ FINAL RECEIPT
                 .to_string()
                 .contains("workflow.max_children limit (1)"),
             "{second}"
+        );
+        // Both attempts found the one slot free, so neither was announced as
+        // waiting for it.
+        assert!(
+            driver.state.runs.lock().expect("runs")[&driver.run_id]
+                .events
+                .iter()
+                .all(|event| event.event_type() != "task_queued")
         );
         assert_eq!(driver.child_counter.load(Ordering::SeqCst), 1);
         assert!(driver.child_ids.lock().expect("children").is_empty());

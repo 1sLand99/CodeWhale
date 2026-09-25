@@ -10099,7 +10099,12 @@ impl ToolSpec for AgentTool {
                 "runtime": {
                     "type": "string",
                     "enum": ["local", "cloud"],
-                    "description": "For action=start. local (default) runs the agent here. cloud only proposes a long job for a cloud sandbox that raises a branch and opens a PR: it starts nothing and spends nothing, and returns a job the person confirms with /dispatch confirm <id>. Never confirm it yourself. Pass only prompt, plus remote (github, cnb or gitee) when the repository has several forges."
+                    "description": "For action=start. local (default) runs the agent here. cloud only proposes a long job for a cloud sandbox that raises a branch and opens a PR: it starts nothing and spends nothing, and returns a job the person confirms with /dispatch confirm <id>. Never confirm it yourself. Pass only prompt, plus remote when the repository has several forges."
+                },
+                "remote": {
+                    "type": "string",
+                    "enum": ["github", "cnb", "gitee"],
+                    "description": "For runtime=cloud only: which forge gets the branch and PR when the repository has several."
                 },
                 "detached": {
                     "type": "boolean",

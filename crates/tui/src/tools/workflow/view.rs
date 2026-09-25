@@ -132,16 +132,7 @@ impl WorkflowTally {
                     kind,
                     ..
                 } => {
-                    let state = match status {
-                        IrWorkflowRunStatus::Succeeded => RowState::Finished,
-                        IrWorkflowRunStatus::Cancelled => RowState::Cancelled,
-                        IrWorkflowRunStatus::Pending | IrWorkflowRunStatus::Running => {
-                            RowState::Running
-                        }
-                        IrWorkflowRunStatus::Failed
-                        | IrWorkflowRunStatus::BudgetExceeded
-                        | IrWorkflowRunStatus::ReplayDiverged => RowState::Failed,
-                    };
+                    let state = row_state(*status);
                     set_row(&mut rows, task_id, state);
                     if matches!(state, RowState::Failed | RowState::Cancelled) {
                         tally.stopped.push(StoppedAgent {
@@ -201,6 +192,36 @@ impl WorkflowTally {
         tally
     }
 
+    /// Recount agents from the driver's own per-task ledger. A run keeps only
+    /// its newest events, so once older ones were trimmed the events alone
+    /// under-count; the ledger and the exact dispatch-failure total do not.
+    /// `stopped` stays the named sample the retained events carry.
+    pub(super) fn count_from_ledger(
+        &mut self,
+        statuses: impl IntoIterator<Item = IrWorkflowRunStatus>,
+        dispatch_failures: u64,
+    ) {
+        let (mut running, mut finished, mut failed, mut cancelled) = (0, 0, 0, 0);
+        for status in statuses {
+            match row_state(status) {
+                RowState::Running => running += 1,
+                RowState::Finished => finished += 1,
+                RowState::Failed => failed += 1,
+                RowState::Cancelled => cancelled += 1,
+            }
+        }
+        if running + finished + failed + cancelled == 0 {
+            return;
+        }
+        self.running = running;
+        self.finished = finished;
+        self.failed = failed;
+        self.cancelled = cancelled;
+        self.not_started = self
+            .not_started
+            .max(usize::try_from(dispatch_failures).unwrap_or(usize::MAX));
+    }
+
     /// Agents that started, plus tasks refused before they could.
     pub(super) fn total(&self) -> usize {
         self.running + self.finished + self.failed + self.cancelled + self.not_started
@@ -249,8 +270,14 @@ impl WorkflowTally {
                     }
                 })
                 .collect();
-            if self.stopped.len() > SHOWN {
-                details.push(format!("{} more", self.stopped.len() - SHOWN));
+            // The named list can be a sample of a trimmed run; the counts
+            // are the whole run, so "more" is measured against them.
+            let stopped_total = self
+                .stopped
+                .len()
+                .max(self.failed + self.cancelled + self.not_started);
+            if stopped_total > details.len() {
+                details.push(format!("{} more", stopped_total - details.len()));
             }
             sentence.push_str(&format!(" ({})", details.join("; ")));
         }
@@ -258,14 +285,30 @@ impl WorkflowTally {
     }
 }
 
-fn set_row(rows: &mut [(&str, RowState)], task_id: &str, state: RowState) -> bool {
+fn row_state(status: IrWorkflowRunStatus) -> RowState {
+    match status {
+        IrWorkflowRunStatus::Succeeded => RowState::Finished,
+        IrWorkflowRunStatus::Cancelled => RowState::Cancelled,
+        IrWorkflowRunStatus::Pending | IrWorkflowRunStatus::Running => RowState::Running,
+        IrWorkflowRunStatus::Failed
+        | IrWorkflowRunStatus::BudgetExceeded
+        | IrWorkflowRunStatus::ReplayDiverged => RowState::Failed,
+    }
+}
+
+/// Set a row's state, adding the row when its `task_started` event was
+/// trimmed from the retained tail. True when the row is new or changed.
+fn set_row<'a>(rows: &mut Vec<(&'a str, RowState)>, task_id: &'a str, state: RowState) -> bool {
     match rows.iter_mut().find(|(id, _)| *id == task_id) {
         Some(row) => {
             let changed = row.1 != state;
             row.1 = state;
             changed
         }
-        None => false,
+        None => {
+            rows.push((task_id, state));
+            true
+        }
     }
 }
 

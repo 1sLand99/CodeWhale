@@ -5844,6 +5844,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "offset",
         "profile",
         "prompt",
+        "remote",
         "resume_from",
         "runtime",
         "thinking",
