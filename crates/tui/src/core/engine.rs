@@ -490,8 +490,8 @@ pub struct EngineConfig {
     /// tool description.
     pub user_input_limits: crate::tools::user_input::UserInputLimits,
     /// Wait for a user-input answer before cancelling it (#6003). `None`
-    /// uses the built-in default (300s); `Some(Duration::ZERO)` waits
-    /// indefinitely.
+    /// or `Some(Duration::ZERO)` waits until the person answers or cancels.
+    /// A positive duration is one absolute deadline for that wait.
     pub user_input_timeout: Option<Duration>,
     /// Per-turn step allowance while a goal is active (#5994). Hosts opt in
     /// with their resolved `[goal] max_steps`; `None` keeps the ordinary
@@ -2051,6 +2051,7 @@ impl Engine {
                     self.tx_event.clone(),
                     Some(self.cancel_token.clone()),
                     tool_name.clone(),
+                    Some(tool_id.clone()),
                     tool_input.clone(),
                     self.session.workspace.clone(),
                     Some(&registry),
@@ -3369,6 +3370,7 @@ impl Engine {
                         let total_tokens = self.session.total_usage.input_tokens
                             + self.session.total_usage.output_tokens;
                         let snapshot = SessionSnapshot {
+                            session_id: self.session.id.clone(),
                             messages: self.session.messages.to_vec(),
                             total_tokens,
                             model: self.session.model.clone(),

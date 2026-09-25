@@ -434,6 +434,244 @@ mod recovery {
         Ok(())
     }
 
+    /// A backtrack over a turn that used a file tool must still find the
+    /// boundary it keeps.
+    ///
+    /// The saved transcript is the model-visible history, so it carries the
+    /// per-turn `<turn_meta>` preamble (rebuilt from runtime facts, never
+    /// recorded on an item) and tool results as the route's compaction left
+    /// them (items keep the raw output). Neither is reproducible from the
+    /// records, so a two-turn conversation whose first turn wrote a file could
+    /// not be cut at all: undo answered "Cannot identify an exact saved-history
+    /// boundary for this backtrack" and left the turn in place — reported from
+    /// the VS Code client on engine 0.10.0, where reverting one file of the
+    /// same conversation worked.
+    #[tokio::test]
+    async fn backtrack_over_a_file_tool_turn_finds_the_saved_history_boundary() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        // A file tool records itself as a `FileChange` item that carries the
+        // call identity — the same shape the transcript's tool_use/tool_result
+        // pair came from.
+        fn tool_metadata(call: &str, name: &str, input: &str) -> Value {
+            json!({
+                "tool_use_id": call,
+                "tool_name": name,
+                "tool_input": input,
+                "tool_result_for": call,
+                "is_error": false,
+            })
+        }
+        let write_call = "call_write_test";
+        let bash_call = "call_bash_test";
+        let write_item = |id: &str, turn: &str, order: i64, path: &str, call: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = TurnItemKind::FileChange;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.detail = Some(format!("Successfully wrote 5 bytes to {path}"));
+            item.metadata = Some(tool_metadata(
+                call,
+                "write",
+                &format!("{{\"path\":\"{path}\",\"content\":\"x\\n\"}}"),
+            ));
+            item
+        };
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+
+        let turn_one = "turn_writes_file";
+        let turn_two = "turn_after";
+        let items = vec![
+            text_item(
+                "item_u1",
+                turn_one,
+                0,
+                TurnItemKind::UserMessage,
+                "write test.txt",
+            ),
+            text_item(
+                "item_r1",
+                turn_one,
+                1,
+                TurnItemKind::AgentReasoning,
+                "I will write it.",
+            ),
+            write_item("item_f1", turn_one, 2, "test.txt", write_call),
+            {
+                let mut item = sample_item(turn_one, "item_t1", TurnItemLifecycleStatus::Completed);
+                item.kind = TurnItemKind::ToolCall;
+                item.started_at = at(3);
+                item.ended_at = item.started_at;
+                // The raw output keeps the newline the route's compaction trims
+                // before the model ever sees it.
+                item.detail = Some("test.txt\n".to_string());
+                item.metadata = Some(tool_metadata(
+                    bash_call,
+                    "bash",
+                    "{\"command\":\"ls -l test.txt\"}",
+                ));
+                item
+            },
+            text_item(
+                "item_a1",
+                turn_one,
+                4,
+                TurnItemKind::AgentMessage,
+                "created test.txt",
+            ),
+            text_item(
+                "item_u2",
+                turn_two,
+                5,
+                TurnItemKind::UserMessage,
+                "write test2.txt",
+            ),
+            write_item("item_f2", turn_two, 6, "test2.txt", "call_write_second"),
+            text_item(
+                "item_a2",
+                turn_two,
+                7,
+                TurnItemKind::AgentMessage,
+                "created test2.txt",
+            ),
+        ];
+        for item in &items {
+            manager.store.save_item(item)?;
+        }
+        for (turn_id, order) in [(turn_one, 0), (turn_two, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_two.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // The model-visible transcript: prompts (each with the per-turn
+        // preamble), the write pair the items cannot reproduce, and the bash
+        // result as the route left it.
+        let transcript: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[
+                {"type":"text","text":"write test.txt"},
+                {"type":"text","text":"<turn_meta>\nCurrent local date: 2026-09-24\n</turn_meta>"}]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"I will write it."},
+                {"type":"tool_use","id":write_call,"name":"write","input":{"path":"test.txt","content":"x\n"}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":write_call,"content":"Successfully wrote 5 bytes to test.txt"}]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"verify"},
+                {"type":"tool_use","id":bash_call,"name":"bash","input":{"command":"ls -l test.txt"}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":bash_call,"content":"test.txt"}]},
+            {"role":"assistant","content":[
+                {"type":"text","text":"created test.txt"}]},
+            {"role":"user","content":[
+                {"type":"text","text":"write test2.txt"},
+                {"type":"text","text":"<turn_meta>\nCurrent local date: 2026-09-24\n</turn_meta>"}]},
+            {"role":"assistant","content":[
+                {"type":"text","text":"created test2.txt"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &transcript,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        let prepared = manager.prepare_fork_at_user_message(&thread.id, 0).await?;
+        let (_, prefix, _) = prepared
+            .own_session
+            .as_ref()
+            .context("a prepared backtrack carries the prefix it keeps")?;
+        assert_eq!(
+            prefix.as_slice(),
+            &transcript[..6],
+            "the fork keeps exactly the messages before the undone turn"
+        );
+        let (fork, _, _, _) = manager.publish_prepared_fork(prepared).await?;
+        assert_eq!(manager.restore_thread_messages(&fork)?, transcript[..6]);
+
+        // Undoing the second turn back (`depth` 1) keeps nothing: the first
+        // turn's own prompt is the anchor, so the boundary is the first message.
+        let first_turn = manager.prepare_fork_at_user_message(&thread.id, 1).await?;
+        let (_, prefix, _) = first_turn
+            .own_session
+            .as_ref()
+            .context("a prepared backtrack carries the prefix it keeps")?;
+        assert!(prefix.is_empty(), "undoing the first turn keeps no history");
+
+        // A transcript that no longer lines up with the turn records must refuse
+        // rather than cut where it cannot account for the history: the undone
+        // turn's prompt is the anchor here, not a coincidence to match.
+        let mut drifted = transcript.clone();
+        drifted[6] = serde_json::from_value(json!({
+            "role":"user","content":[
+                {"type":"text","text":"a prompt no turn records"},
+                {"type":"text","text":"<turn_meta>\nCurrent local date: 2026-09-24\n</turn_meta>"}]}))?;
+        let drifted_session = crate::session_manager::create_saved_session_with_id_and_mode(
+            saved.metadata.id.clone(),
+            &drifted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&drifted_session)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &drifted_session)
+                .await?;
+        }
+        let error = match manager.prepare_fork_at_user_message(&thread.id, 0).await {
+            Ok(_) => panic!("a drifted transcript must not be cut"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot identify an exact saved-history boundary"),
+            "the refusal names the boundary it could not find: {error}"
+        );
+        Ok(())
+    }
+
     async fn control_case(interrupt: bool, follow_up: bool) -> Result<()> {
         let _env = crate::test_support::lock_test_env();
         let dir = tempfile::tempdir()?;
@@ -13070,6 +13308,114 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
     Ok(())
 }
 
+/// DESKTOP-QA-20260923 bug 1: the engine's 60s "Still waiting for tool
+/// approval" heartbeat is queued while the relay is parked on the external
+/// decision. It must never be sequenced after `approval.decided`, where it
+/// reads as a live claim that the (already answered) call is still waiting.
+#[tokio::test]
+async fn approval_wait_heartbeat_is_never_sequenced_after_the_decision() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "needs approval".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_turn_wait".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    // The Responses client joins call and item ids with `|`.
+    let call_id = "call_00_wait|fc_99765c30";
+    harness
+        .tx_event
+        .send(EngineEvent::ApprovalRequired {
+            approval_key: "wait-key".to_string(),
+            approval_grouping_key: "wait-key".to_string(),
+            id: call_id.to_string(),
+            tool_name: "run_verifiers".to_string(),
+            description: "verifiers".to_string(),
+            input: serde_json::json!({}),
+            intent_summary: None,
+            approval_force_prompt: false,
+        })
+        .await?;
+    let approval_id = await_approval_identity(&manager, &thread.id, call_id).await?;
+
+    // The engine's heartbeat fires while the card is still unanswered.
+    harness
+        .tx_event
+        .send(EngineEvent::Status {
+            message: format!(
+                "Still waiting for tool approval on `{call_id}` after 60s — the turn is parked here until it is answered"
+            ),
+        })
+        .await?;
+    sleep(Duration::from_millis(100)).await;
+
+    assert!(manager.deliver_external_approval(
+        &approval_id,
+        ExternalApprovalDecision::Allow { remember: false },
+    ));
+    assert_eq!(
+        harness.recv_approval_event().await,
+        Some(MockApprovalEvent::Approved {
+            id: call_id.to_string(),
+        })
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    wait_for_terminal_turn(&manager, &turn.id).await?;
+
+    let events = manager.events_since(&thread.id, None)?;
+    let decided_at = events
+        .iter()
+        .position(|event| event.event == "approval.decided")
+        .context("approval.decided was not emitted")?;
+    let stale: Vec<_> = events[decided_at..]
+        .iter()
+        .filter(|event| {
+            event.payload["item"]["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.starts_with("Still waiting for tool approval"))
+        })
+        .map(|event| (event.seq, event.payload["item"]["detail"].clone()))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "approval-wait heartbeat sequenced after approval.decided: {stale:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn approval_required_external_deny_is_denied() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
@@ -17837,6 +18183,33 @@ mod adoption_refusal {
         assert!(!binding.is_adoptable_empty_store()?);
         Ok(())
     }
+}
+
+#[test]
+fn saved_history_boundary_refuses_until_every_kept_prompt_is_seen() {
+    let user = |text: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    };
+    let kept = vec!["first".to_string(), "second".to_string()];
+
+    // The kept prompts in order, then the undone turn's prompt: cut there.
+    let messages = vec![user("first"), user("second"), user("undo me")];
+    assert_eq!(saved_history_boundary(&messages, &kept, "undo me"), Some(2));
+
+    // "second" never appears: matching "undo me" early would drop a kept turn.
+    let drifted = vec![user("first"), user("undo me"), user("second")];
+    assert_eq!(saved_history_boundary(&drifted, &kept, "undo me"), None);
+
+    // A repeated prompt stays aligned with the records.
+    let repeated = vec![user("same"), user("same")];
+    assert_eq!(
+        saved_history_boundary(&repeated, &["same".to_string()], "same"),
+        Some(1)
+    );
 }
 
 /// #6522 review: `/resume`, `/load` and launch warm the canonical sessions
