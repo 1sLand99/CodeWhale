@@ -96,7 +96,10 @@ refused under a worker authority envelope.
   (MCP `readOnlyHint`/`destructiveHint`), `tool_call_before` hooks, ask-rules,
   Auto-Review, repository law, and the Computer Use consent refusal. MCP calls
   run through the session MCP pool. Approving the program grants nothing, so
-  `execute_tools` itself is auto-approved.
+  `execute_tools` itself is auto-approved. If the permission posture changes
+  while a program runs, its remaining nested calls are refused (an approved
+  call survives only an equal or broader posture, as for a direct call) and
+  the model retries them under the new posture.
 - **Approvals suspend the program.** A nested call that needs approval raises
   the normal approval card (named `execute_tools program call: ...`) and the
   program waits; allow resumes it, deny fails only that nested call as an

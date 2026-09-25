@@ -51,6 +51,11 @@ struct NestedGateEnv<'a> {
     tool_policy: &'a ToolSurfacePolicy,
     tool_call_budget: &'a mut ToolCallBudget,
     fleet_denial_guard: Option<&'a FleetDenialGuard>,
+    /// Set once the live permission posture changed while a program was
+    /// running. The rest of that program's nested calls are refused (the
+    /// program's tool context was built under the old posture), and the
+    /// turn loop reports the change like any other mid-batch change.
+    authority_changed: bool,
 }
 
 struct StreamOutcome {
@@ -2881,6 +2886,7 @@ impl Engine {
                 tool_policy: &tool_policy,
                 tool_call_budget: &mut tool_call_budget,
                 fleet_denial_guard: fleet_denial_guard.as_ref(),
+                authority_changed: false,
             };
             let (outcomes, authority_changed_during_tools) = self
                 .execute_planned_tools(
@@ -4530,6 +4536,16 @@ impl Engine {
                             ) => (result, false),
                         }
                     };
+                    // A posture change a program's nested gate applied is
+                    // reported exactly like one applied between calls.
+                    if std::mem::take(&mut nested_gate_env.authority_changed) {
+                        authority_changed = true;
+                        *mode = self.current_mode;
+                        *questions_allowed =
+                            crate::core::authority::permission_posture_allows_questions(
+                                self.session.approval_mode,
+                            );
+                    }
 
                     if cancelled_before_completion {
                         result = Ok(RichToolResult::plain(
@@ -4644,7 +4660,7 @@ impl Engine {
         tool_registry: Option<&crate::tools::ToolRegistry>,
         mcp_pool: Option<Arc<AsyncMutex<McpPool>>>,
         mut context: crate::tools::ToolContext,
-        mode: AppMode,
+        mut mode: AppMode,
     ) -> (Result<RichToolResult, ToolError>, bool) {
         // The program may use what is left of the turn's own wall clock;
         // both clocks stop while a person decides an approval.
@@ -4694,7 +4710,7 @@ impl Engine {
                             tool_catalog,
                             active_tool_names,
                             tool_registry,
-                            mode,
+                            &mut mode,
                         )
                         .await;
                     let _ = request.reply.send(verdict);
@@ -4715,9 +4731,26 @@ impl Engine {
         tool_catalog: &[codewhale_models::Tool],
         active_tool_names: &mut std::collections::HashSet<String>,
         tool_registry: Option<&crate::tools::ToolRegistry>,
-        mode: AppMode,
+        mode: &mut AppMode,
     ) -> crate::tools::codemode::NestedCallVerdict {
         use crate::tools::codemode::{NestedCallVerdict, NestedDecision};
+
+        // The program's tool context (sandbox policy, trust) was built under
+        // the posture the program started with. Once that posture changes,
+        // no later nested call may run on it: refuse, like a direct batch
+        // planned under a stale posture, and let the model retry directly.
+        if !nested_gate_env.authority_changed && self.apply_pending_runtime_authority().await {
+            nested_gate_env.authority_changed = true;
+            *mode = self.current_mode;
+        }
+        if nested_gate_env.authority_changed {
+            return NestedCallVerdict::Refused {
+                error: ToolError::permission_denied(
+                    "Permissions changed while this execute_tools program was running; the nested call did not run. Return from the program and retry the remaining calls with the current permissions.",
+                ),
+                decision: NestedDecision::Refused,
+            };
+        }
 
         // Discovery inside a program describes tools without activating
         // them, so the session-pinned tool array never changes.
@@ -4751,7 +4784,7 @@ impl Engine {
                 tool_registry,
                 active_tool_names,
                 nested_gate_env.tool_call_budget,
-                mode,
+                *mode,
                 nested_gate_env.fleet_denial_guard,
                 ToolCallSource::CodeMode,
             )
@@ -4834,6 +4867,27 @@ impl Engine {
         } else {
             NestedDecision::Auto
         };
+
+        // Planning (hooks, Auto-Review) and an approval wait can outlive a
+        // posture switch. Same rule as a direct call: an approval survives
+        // an equal or broader posture; anything else is refused.
+        let posture_before_drain = self.applied_runtime_authority();
+        if self.apply_pending_runtime_authority().await {
+            nested_gate_env.authority_changed = true;
+            *mode = self.current_mode;
+            if decision != NestedDecision::Approved
+                || self
+                    .applied_runtime_authority()
+                    .narrows(&posture_before_drain)
+            {
+                return NestedCallVerdict::Refused {
+                    error: ToolError::permission_denied(
+                        "Permissions changed before this nested call executed; it did not run. Return from the program and retry it with the current permissions.",
+                    ),
+                    decision: NestedDecision::Refused,
+                };
+            }
+        }
 
         // Same `/undo` snapshot rule as a direct file write (#384).
         if should_pre_tool_snapshot(

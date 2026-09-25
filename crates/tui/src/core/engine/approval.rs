@@ -872,23 +872,23 @@ mod tests {
         .expect("approval request deadline")
     }
 
-    /// #6562: a nested call that needs approval suspends the program and
-    /// raises the normal approval request; allow resumes it, deny fails only
-    /// that nested call, a nested MCP call runs through the session pool, and
-    /// the program's receipt names each nested call and its decision.
-    #[tokio::test]
-    async fn execute_tools_nested_approval_suspends_resumes_and_denies_one_call() {
+    /// A session turn whose model emits one `execute_tools` call (id
+    /// `exec-1`) running `code`, over a registry holding the approval-gated
+    /// counter fixture, with the engine in Ask mode and a temp receipt log.
+    struct NestedProgramTurn {
+        _tmp: tempfile::TempDir,
+        task: tokio::task::JoinHandle<(crate::core::events::TurnOutcomeStatus, Option<String>)>,
+        events: Arc<tokio::sync::RwLock<tokio::sync::mpsc::Receiver<Event>>>,
+        handle: crate::core::engine::EngineHandle,
+        executions: Arc<AtomicUsize>,
+        store: crate::approval_log::ApprovalReceiptStore,
+        session_id: String,
+    }
+
+    fn start_nested_program_turn(code: &str) -> NestedProgramTurn {
         use crate::tools::codemode::EXECUTE_TOOLS_TOOL_NAME;
 
         let tmp = tempfile::tempdir().expect("fixture directory");
-        let code = format!(
-            "const first = await tools.call('{COUNTER_TOOL}', {{}}); \
-             let denied = null; \
-             try {{ await tools.call('{COUNTER_TOOL}', {{}}); }} \
-             catch (e) {{ denied = String(e.message || e); }} \
-             const listed = await tools.call('list_mcp_resources', {{}}); \
-             return {{ first: first.content, denied, mcp: listed.truncated === null }};"
-        );
         let args = json!({ "code": code }).to_string();
         let mock = Arc::new(MockLlmClient::new(vec![
             canned::tool_call_turn("exec-1", EXECUTE_TOOLS_TOOL_NAME, &args),
@@ -903,7 +903,7 @@ mod tests {
                 ..EngineConfig::default()
             },
             &Config::default(),
-            mock.clone(),
+            mock,
         );
         engine.session.approval_mode = ApprovalMode::Suggest;
         // Never touch the developer's real MCP config from a test.
@@ -911,7 +911,7 @@ mod tests {
         engine.session.add_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
-                text: "Compose the counter twice.".into(),
+                text: "Compose the counter.".into(),
                 cache_control: None,
             }],
         });
@@ -939,11 +939,72 @@ mod tests {
             crate::core::engine::tool_catalog::ToolMode::Direct,
         );
         let events = handle.rx_event.clone();
-        let mut task = tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             engine
                 .run_turn(&mut TurnContext::new(8), surface, None, None)
                 .await
         });
+        NestedProgramTurn {
+            _tmp: tmp,
+            task,
+            events,
+            handle,
+            executions,
+            store,
+            session_id,
+        }
+    }
+
+    /// Finish the turn and return the `execute_tools` receipt JSON; every
+    /// event is appended to `seen`.
+    async fn finish_nested_program_turn(
+        turn: &mut NestedProgramTurn,
+        seen: &mut Vec<Event>,
+    ) -> Value {
+        use crate::tools::codemode::EXECUTE_TOOLS_TOOL_NAME;
+
+        tokio::time::timeout(Duration::from_secs(10), &mut turn.task)
+            .await
+            .expect("turn deadline")
+            .expect("turn");
+        {
+            let mut rx = turn.events.write().await;
+            while let Ok(event) = rx.try_recv() {
+                seen.push(event);
+            }
+        }
+        let receipt = seen
+            .iter()
+            .find_map(|event| match event {
+                Event::ToolCallComplete {
+                    name,
+                    result: Ok(result),
+                    ..
+                } if name == EXECUTE_TOOLS_TOOL_NAME => Some(result.content.clone()),
+                _ => None,
+            })
+            .expect("execute_tools completed with a receipt");
+        serde_json::from_str(&receipt).expect("receipt JSON")
+    }
+
+    /// #6562: a nested call that needs approval suspends the program and
+    /// raises the normal approval request; allow resumes it, deny fails only
+    /// that nested call, a nested MCP call runs through the session pool, and
+    /// the program's receipt names each nested call and its decision.
+    #[tokio::test]
+    async fn execute_tools_nested_approval_suspends_resumes_and_denies_one_call() {
+        let code = format!(
+            "const first = await tools.call('{COUNTER_TOOL}', {{}}); \
+             let denied = null; \
+             try {{ await tools.call('{COUNTER_TOOL}', {{}}); }} \
+             catch (e) {{ denied = String(e.message || e); }} \
+             const listed = await tools.call('list_mcp_resources', {{}}); \
+             return {{ first: first.content, denied, mcp: listed.truncated === null }};"
+        );
+        let mut turn = start_nested_program_turn(&code);
+        let events = turn.events.clone();
+        let handle = turn.handle.clone();
+        let executions = turn.executions.clone();
 
         let mut seen = Vec::new();
         let (id, tool_name, description) = next_approval(&events, &mut seen).await;
@@ -954,7 +1015,7 @@ mod tests {
             "{description}"
         );
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut task)
+            tokio::time::timeout(Duration::from_millis(50), &mut turn.task)
                 .await
                 .is_err(),
             "the program is suspended on its nested call"
@@ -972,33 +1033,9 @@ mod tests {
         );
         handle.deny_tool_call("exec-1.2").await.expect("deny");
 
-        tokio::time::timeout(Duration::from_secs(10), task)
-            .await
-            .expect("turn deadline")
-            .expect("turn");
-        assert_eq!(
-            executions.load(Ordering::SeqCst),
-            1,
-            "the denied call never ran"
-        );
-        {
-            let mut rx = events.write().await;
-            while let Ok(event) = rx.try_recv() {
-                seen.push(event);
-            }
-        }
-        let receipt = seen
-            .iter()
-            .find_map(|event| match event {
-                Event::ToolCallComplete {
-                    name,
-                    result: Ok(result),
-                    ..
-                } if name == EXECUTE_TOOLS_TOOL_NAME => Some(result.content.clone()),
-                _ => None,
-            })
-            .expect("execute_tools completed with a receipt");
-        let receipt: Value = serde_json::from_str(&receipt).expect("receipt JSON");
+        let store = turn.store.clone();
+        let session_id = turn.session_id.clone();
+        let receipt = finish_nested_program_turn(&mut turn, &mut seen).await;
         assert_eq!(receipt["success"], true, "{receipt}");
         assert_eq!(receipt["body"]["return"]["first"], "counter executed");
         assert!(
@@ -1025,6 +1062,70 @@ mod tests {
                 .map(|receipt| receipt.outcome.clone())
                 .collect::<Vec<_>>(),
             vec![ApprovalOutcome::ApprovedOnce, ApprovalOutcome::Denied]
+        );
+    }
+
+    /// #6562: a nested call never runs on a posture the user has since
+    /// narrowed. Narrowing while a nested approval card is open fails that
+    /// call even though it was approved (same rule as a direct call), and
+    /// every later nested call in the program is refused too, because the
+    /// program's tool context was built under the old posture.
+    #[tokio::test]
+    async fn execute_tools_nested_call_is_refused_after_the_posture_narrows() {
+        let code = format!(
+            "const errors = []; \
+             for (let i = 0; i < 2; i++) {{ \
+               try {{ await tools.call('{COUNTER_TOOL}', {{}}); }} \
+               catch (e) {{ errors.push(String(e.message || e)); }} \
+             }} \
+             return {{ errors }};"
+        );
+        let mut turn = start_nested_program_turn(&code);
+        let events = turn.events.clone();
+        let handle = turn.handle.clone();
+        let executions = turn.executions.clone();
+
+        let mut seen = Vec::new();
+        let (id, _, _) = next_approval(&events, &mut seen).await;
+        assert_eq!(id, "exec-1.1");
+        // The user narrows Work/Ask to Plan while the card is open, then
+        // approves the card.
+        handle.publish_turn_authority(
+            AppMode::Plan,
+            true,
+            false,
+            false,
+            ApprovalMode::Suggest,
+            None,
+        );
+        handle.approve_tool_call("exec-1.1").await.expect("allow");
+
+        let receipt = finish_nested_program_turn(&mut turn, &mut seen).await;
+        assert_eq!(executions.load(Ordering::SeqCst), 0, "nothing ran");
+        let errors = receipt["body"]["return"]["errors"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{receipt}"));
+        assert_eq!(errors.len(), 2, "{receipt}");
+        assert!(
+            errors[0]
+                .as_str()
+                .is_some_and(|message| message
+                    .contains("Permissions changed before this nested call executed")),
+            "{receipt}"
+        );
+        assert!(
+            errors[1].as_str().is_some_and(|message| message
+                .contains("Permissions changed while this execute_tools program was running")),
+            "{receipt}"
+        );
+        assert_eq!(receipt["calls"][0]["status"], "refused");
+        assert_eq!(receipt["calls"][1]["status"], "refused");
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                Event::ApprovalRequired { id, .. } if id == "exec-1.2"
+            )),
+            "the second call is refused without a prompt"
         );
     }
 

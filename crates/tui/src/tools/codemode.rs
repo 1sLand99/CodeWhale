@@ -85,6 +85,9 @@ const MAX_CODE_BYTES: usize = 64 * 1024;
 /// short cap. A gated run takes the remaining turn wall clock instead.
 const FALLBACK_RUN_DEADLINE: Duration =
     Duration::from_secs(crate::core::engine::turn_budget::DEFAULT_TURN_WALL_CLOCK_SECS);
+/// How often the run watchdog re-checks while the program is paused on the
+/// gate (approval card, hook, review). Bounds the overrun after a pause.
+const PAUSED_WATCHDOG_POLL: Duration = Duration::from_millis(200);
 /// Maximum nested tool calls in flight at once, enforced host-side.
 const MAX_CONCURRENT_CALLS: usize = 4;
 /// Per nested-call result cap, in serialized bytes. The same threshold the
@@ -436,12 +439,13 @@ impl CodemodeInvoker {
     }
 
     /// Time left before the deadline, or `None` once it has passed. While
-    /// the program is paused on the gate the full deadline is reported so
-    /// the watchdog simply looks again later.
+    /// the program is paused on the gate its budget is frozen, so the
+    /// watchdog looks again shortly: sleeping out the whole deadline here
+    /// would let the program overrun by that much once the gate answers.
     fn remaining(&self, deadline: Duration) -> Option<Duration> {
         let clock = self.clock.lock().ok()?;
         if clock.depth > 0 {
-            return Some(deadline);
+            return Some(PAUSED_WATCHDOG_POLL.min(deadline));
         }
         deadline
             .checked_sub(clock.active())
@@ -1452,6 +1456,24 @@ mod tests {
             .unwrap();
         assert!(result.success, "{}", result.content);
         assert_eq!(body(&result)["body"]["return"], true);
+    }
+
+    #[test]
+    fn watchdog_rechecks_promptly_while_paused_on_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let invoker = CodemodeInvoker::new(Vec::new(), ToolContext::new(dir.path()));
+        let deadline = Duration::from_secs(600);
+        let paused = invoker.pause();
+        // A paused program never times out, but the watchdog must not sleep
+        // out the whole deadline or the run would overrun by that much once
+        // the gate answers.
+        assert_eq!(invoker.remaining(deadline), Some(PAUSED_WATCHDOG_POLL));
+        drop(paused);
+        assert!(
+            invoker
+                .remaining(deadline)
+                .is_some_and(|left| left > PAUSED_WATCHDOG_POLL)
+        );
     }
 
     #[tokio::test]
