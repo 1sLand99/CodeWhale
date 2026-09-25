@@ -179,6 +179,7 @@ fn verdict_from_response(response: &MessageResponse) -> ReviewerOutcome {
             action: AutoReviewAction::Allow,
             risk,
             reason,
+            ..
         }) if risk.may_auto_run() => ReviewerOutcome::Allow { risk, reason },
         Some(ReviewerVerdict {
             action: AutoReviewAction::Allow,
@@ -195,6 +196,7 @@ fn verdict_from_response(response: &MessageResponse) -> ReviewerOutcome {
             action: AutoReviewAction::Block,
             risk,
             reason,
+            ..
         }) => ReviewerOutcome::Deny { risk, reason },
         Some(_) | None => ReviewerOutcome::Unavailable {
             reason: format!("the reviewer answer was unparseable ({} chars)", text.len()),
