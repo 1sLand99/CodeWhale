@@ -2040,35 +2040,54 @@ impl<'a> ApprovalWidget<'a> {
     /// one line per rule instead of calling the request "truncated" (#6566).
     /// The band always reserves the compact preview's rows and `render` pins
     /// the preview above the controls, so a short band cuts the request
-    /// detail (with the details hint), never the preview.
+    /// detail, never the preview. A frame too small (or too narrow) for even
+    /// the one-line preview fails closed: the card drops the preview and the
+    /// save offers together (`[p]`, `s`), keeping only one-off decisions.
     fn build_inline_content(&self, area: Rect) -> InlineContent {
-        let (compact, save_start, controls) = self.build_inline_parts(area, true);
+        let (compact, save_start, controls) = self.build_inline_parts(area, true, true);
         let save_reserve = measure_wrapped_rows(&compact[save_start..], area.width);
         let compact = InlineContent {
             body: compact,
             save_start,
             save_reserve,
             controls,
+            save_shown: true,
         };
         if save_start == compact.body.len() {
-            return compact;
+            return InlineContent {
+                save_shown: false,
+                ..compact
+            };
         }
-        let (body, save_start, controls) = self.build_inline_parts(area, false);
+        if !compact.save_preview_fits(area) {
+            let (body, save_start, controls) = self.build_inline_parts(area, true, false);
+            return InlineContent {
+                body,
+                save_start,
+                save_reserve: 0,
+                controls,
+                save_shown: false,
+            };
+        }
+        let (body, save_start, controls) = self.build_inline_parts(area, false, true);
         let full = InlineContent {
             body,
             save_start,
             save_reserve,
             controls,
+            save_shown: true,
         };
         if full.body_fits(area) { full } else { compact }
     }
 
     /// The body, how many of its leading lines come before the save preview,
-    /// and the controls. `compact_save_preview` puts each rule on one line.
+    /// and the controls. `compact_save_preview` puts each rule on one line;
+    /// without `offer_save` there is neither a save preview nor a save offer.
     fn build_inline_parts(
         &self,
         area: Rect,
         compact_save_preview: bool,
+        offer_save: bool,
     ) -> (Vec<Line<'static>>, usize, Vec<Line<'static>>) {
         let risk = self.request.risk;
         let stakes = self.request.stakes();
@@ -2299,7 +2318,7 @@ impl<'a> ApprovalWidget<'a> {
         // Preview the validated persistent-rule candidates. Informational, so
         // they live in the scrollable body rather than the action rows.
         let essential_len = body.len();
-        if let Some(preview) = self.request.ask_rule_save_preview() {
+        if let Some(preview) = self.request.ask_rule_save_preview().filter(|_| offer_save) {
             push_permission_rule_save_preview(
                 &mut body,
                 &preview,
@@ -2308,7 +2327,11 @@ impl<'a> ApprovalWidget<'a> {
                 compact_save_preview,
             );
         }
-        if let Some(preview) = self.request.allow_rule_save_preview() {
+        if let Some(preview) = self
+            .request
+            .allow_rule_save_preview()
+            .filter(|_| offer_save)
+        {
             push_permission_rule_save_preview(
                 &mut body,
                 &preview,
@@ -2325,6 +2348,7 @@ impl<'a> ApprovalWidget<'a> {
             locale,
             palette_colors.accent,
             palette_colors.shortcut,
+            offer_save,
         );
         (body, essential_len, controls)
     }
@@ -2364,6 +2388,7 @@ impl Renderable for ApprovalWidget<'_> {
         // so the user can still see the transcript behind it.
         if self.view.collapsed {
             self.view.set_mouse_hitboxes(Vec::new());
+            self.view.set_save_preview_shown(false);
             let bar_y = area.y.saturating_add(area.height.saturating_sub(1));
             let bar_area = Rect::new(area.x, bar_y, area.width, 1);
             Clear.render(bar_area, buf);
@@ -2415,11 +2440,14 @@ impl Renderable for ApprovalWidget<'_> {
             body,
             save_start,
             controls,
+            save_shown,
             ..
         } = content;
+        self.view.set_save_preview_shown(false);
         if region.width == 0 || region.height == 0 {
             return;
         }
+        self.view.set_save_preview_shown(save_shown);
 
         // Opaque inline panel anchored to the bottom of the frame. The
         // transcript above stays visible; only this band is painted — the
@@ -2464,11 +2492,19 @@ impl Renderable for ApprovalWidget<'_> {
             height: control_rows,
         };
 
+        // One hitbox per option in `ApprovalOption` order; an option the card
+        // is not offering keeps an empty box so the indices stay aligned.
         let mut hitboxes = Vec::new();
-        let option_count =
-            approval_options_for_request(self.request, self.request.risk, self.view.locale()).len();
-        for index in 0..option_count {
-            let first_line = 1 + index;
+        let options =
+            approval_options_for_request(self.request, self.request.risk, self.view.locale());
+        let mut shown_index = 0;
+        for option in &options {
+            if option.persistent && !save_shown {
+                hitboxes.push(Rect::default());
+                continue;
+            }
+            let first_line = 1 + shown_index;
+            shown_index += 1;
             let y_offset = measure_wrapped_rows(&controls[..first_line], region.width);
             let next_offset = measure_wrapped_rows(&controls[..first_line + 1], region.width);
             let y = control_rect.y.saturating_add(y_offset);
@@ -2540,17 +2576,28 @@ impl Renderable for ApprovalWidget<'_> {
 
 /// The inline approval band's lines. `body[save_start..]` is the
 /// persistent-rule save preview; `save_reserve` is the rows its one-line
-/// form needs, which the band always keeps for it.
+/// form needs, which the band always keeps for it. `save_shown` says the
+/// preview is on screen, and with it the offers to save the rule.
 struct InlineContent {
     body: Vec<Line<'static>>,
     save_start: usize,
     save_reserve: u16,
     controls: Vec<Line<'static>>,
+    save_shown: bool,
 }
 
 impl InlineContent {
     fn region(&self, area: Rect) -> Rect {
         inline_region_for(area, &self.body, self.save_reserve, &self.controls)
+    }
+
+    /// Whether the band keeps the whole one-line save preview on screen
+    /// above the controls (render pins it there when the body is cut).
+    fn save_preview_fits(&self, area: Rect) -> bool {
+        let region = self.region(area);
+        let inner_height = region.height.saturating_sub(1);
+        let control_rows = measure_wrapped_rows(&self.controls, region.width).min(inner_height);
+        self.save_reserve <= inner_height.saturating_sub(control_rows)
     }
 
     /// Whether the whole body fits the band above the controls.
@@ -2651,6 +2698,7 @@ fn build_approval_controls(
     locale: Locale,
     accent: Color,
     shortcut: Color,
+    offer_save: bool,
 ) -> Vec<Line<'static>> {
     let mut controls: Vec<Line<'static>> = Vec::with_capacity(6);
     controls.push(Line::from(vec![
@@ -2664,6 +2712,9 @@ fn build_approval_controls(
     ]));
     let options = approval_options_for_request(request, risk, locale);
     for (i, opt) in options.iter().enumerate() {
+        if opt.persistent && !offer_save {
+            continue;
+        }
         let is_selected = i == view.selected();
         let label_color = if opt.dangerous {
             accent
@@ -2698,7 +2749,7 @@ fn build_approval_controls(
             },
             Style::default().fg(palette::TEXT_MUTED),
         ),
-        if request.can_save_ask_rule() {
+        if offer_save && request.can_save_ask_rule() {
             Span::styled(save_ask_rule_hint(locale), Style::default().fg(shortcut))
         } else {
             Span::raw("")
@@ -3200,6 +3251,8 @@ struct ApprovalOptionRow {
     label: Cow<'static, str>,
     key_hint: &'static str,
     dangerous: bool,
+    /// Saves a persistent rule: offered only beside its save preview.
+    persistent: bool,
 }
 
 fn approval_options_for(risk: RiskLevel, locale: Locale) -> [ApprovalOptionRow; 4] {
@@ -3209,21 +3262,25 @@ fn approval_options_for(risk: RiskLevel, locale: Locale) -> [ApprovalOptionRow; 
             label: option_approve_once(locale),
             key_hint: "1 / y",
             dangerous,
+            persistent: false,
         },
         ApprovalOptionRow {
             label: option_approve_always(locale),
             key_hint: "2 / a",
             dangerous,
+            persistent: false,
         },
         ApprovalOptionRow {
             label: option_deny(locale),
             key_hint: "3 / d / n",
             dangerous: false,
+            persistent: false,
         },
         ApprovalOptionRow {
             label: option_abort(locale),
             key_hint: "Esc",
             dangerous: false,
+            persistent: false,
         },
     ]
 }
@@ -3236,16 +3293,19 @@ fn workflow_approval_options(risk: RiskLevel, locale: Locale) -> [ApprovalOption
             label: workflow_option_approve(locale),
             key_hint: "1 / y",
             dangerous,
+            persistent: false,
         },
         ApprovalOptionRow {
             label: workflow_option_edit_plan(locale),
             key_hint: "2 / e",
             dangerous: false,
+            persistent: false,
         },
         ApprovalOptionRow {
             label: workflow_option_cancel(locale),
             key_hint: "3 / Esc",
             dangerous: false,
+            persistent: false,
         },
     ]
 }
@@ -3271,6 +3331,7 @@ fn approval_options_for_request(
                     label: tr(locale, MessageId::ApprovalOptionAllowExactRepo),
                     key_hint: "p",
                     dangerous: false,
+                    persistent: true,
                 },
             );
         }
@@ -9186,13 +9247,35 @@ diff --git a/src/b.rs b/src/b.rs\n\
 
         // Short bands cut the request detail, never the preview: what a
         // saved rule covers stays pinned above the controls that save it.
-        // (Below ten rows the controls alone fill the frame.)
         for height in [10, 11, 12, 14, 16, 20] {
             let rendered = render_approval_request(&request, Rect::new(0, 0, 120, height));
             assert!(
-                rendered.contains("always ask first"),
+                rendered.contains("always ask first · change src/a.rs"),
                 "height {height}: {rendered}"
             );
+            assert!(
+                rendered.contains("always allow · change src/a.rs"),
+                "height {height}: {rendered}"
+            );
+        }
+
+        // A band with no room for the preview (short or narrow) fails
+        // closed: no save offer without the rule it would save on screen.
+        for width in [40, 60, 120] {
+            for height in 6..=20 {
+                let rendered = render_approval_request(&request, Rect::new(0, 0, width, height));
+                let offers = rendered.contains("[p]") || rendered.contains("s allow now");
+                let previews =
+                    rendered.contains("always ask first") && rendered.contains("always allow");
+                assert!(
+                    !offers || previews,
+                    "{width}x{height} offers a save it does not preview:\n{rendered}"
+                );
+                assert!(
+                    rendered.contains("[1 / y]") && rendered.contains("[3 / d / n]"),
+                    "{width}x{height} keeps the one-off decisions:\n{rendered}"
+                );
+            }
         }
     }
 

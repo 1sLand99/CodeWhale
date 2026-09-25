@@ -1085,6 +1085,7 @@ fn benign_y_one_step_approves() {
 #[test]
 fn save_ask_rule_shortcut_approves_once_with_rule() {
     let mut view = ApprovalView::new(shell_request());
+    render_lines(&view, 120, 40);
 
     let action = view.handle_key(create_key_event(KeyCode::Char('s')));
     let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
@@ -1108,6 +1109,7 @@ fn save_file_ask_rule_shortcut_emits_file_rule() {
     // `S` on a write_file approval approves once and carries the exact
     // workspace-relative file rule for persistence.
     let mut view = ApprovalView::new(destructive_request());
+    render_lines(&view, 120, 40);
 
     let action = view.handle_key(create_key_event(KeyCode::Char('S')));
     let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
@@ -1129,6 +1131,7 @@ fn save_file_ask_rule_shortcut_emits_file_rule() {
 #[test]
 fn persistent_allow_option_approves_once_with_exact_repo_rule() {
     let mut view = ApprovalView::new(shell_request());
+    render_lines(&view, 120, 40);
 
     let action = view.handle_key(create_key_event(KeyCode::Char('p')));
     let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
@@ -1148,6 +1151,56 @@ fn persistent_allow_option_approves_once_with_exact_repo_rule() {
                 .into_exact_workspace_allow("/workspace")
         ]
     );
+}
+
+/// The save offers work only while the card shows what the rule covers:
+/// never before the first paint, never on a band too small for the save
+/// preview, never while collapsed to its banner.
+#[test]
+fn save_shortcuts_fail_closed_while_the_save_preview_is_off_screen() {
+    let saves = |view: &mut ApprovalView| {
+        [KeyCode::Char('p'), KeyCode::Char('s')].map(|code| {
+            matches!(
+                view.clone().handle_key(create_key_event(code)),
+                ViewAction::EmitAndClose(ViewEvent::ApprovalDecision { .. })
+            )
+        })
+    };
+    let mut view = ApprovalView::new(shell_request());
+    assert_eq!(saves(&mut view), [false, false], "before the first paint");
+
+    render_lines(&view, 120, 40);
+    assert_eq!(saves(&mut view), [true, true], "preview on screen");
+
+    let lines = render_lines(&view, 40, 9).join("\n");
+    assert!(!lines.contains("Save:"), "{lines}");
+    assert!(!lines.contains("[p]"), "{lines}");
+    assert_eq!(saves(&mut view), [false, false], "band too small: {lines}");
+
+    render_lines(&view, 120, 40);
+    view.handle_key(create_key_event(KeyCode::Tab));
+    render_lines(&view, 120, 40);
+    assert_eq!(saves(&mut view), [false, false], "collapsed banner");
+}
+
+/// With the save offer hidden, arrow keys skip its row and a stale selection
+/// on it commits nothing.
+#[test]
+fn hidden_save_offer_is_skipped_by_navigation_and_enter() {
+    let mut view = ApprovalView::new(shell_request());
+    render_lines(&view, 120, 40);
+    view.select_prev();
+    assert_eq!(view.current_option(), ApprovalOption::AllowExactRepo);
+
+    render_lines(&view, 40, 9);
+    assert!(matches!(
+        view.handle_key(create_key_event(KeyCode::Enter)),
+        ViewAction::None
+    ));
+    view.select_prev();
+    assert_eq!(view.current_option(), ApprovalOption::ApproveAlways);
+    view.select_next();
+    assert_eq!(view.current_option(), ApprovalOption::Deny);
 }
 
 #[test]
@@ -1236,10 +1289,15 @@ fn mouse_click_renders_and_approves_inline_option() {
     ));
 }
 
+/// A tiny frame keeps every one-off action and its hitbox. Where it has no
+/// room for the save preview (most locales at 40x12) it withholds the
+/// persistent save (`[p]`, index 2): its hitbox is empty and nothing clicks
+/// it. Where it offers the save, the preview is on screen.
 #[test]
 fn tiny_localized_approval_keeps_every_action_and_hitbox() {
     const WIDTH: u16 = 40;
     const HEIGHT: u16 = 12;
+    const PERSISTENT: usize = 2;
     let expected = [
         ReviewDecision::Approved,
         ReviewDecision::ApprovedForSession,
@@ -1267,13 +1325,33 @@ fn tiny_localized_approval_keeps_every_action_and_hitbox() {
 
             let hitboxes = view.row_hitboxes.borrow().clone();
             assert_eq!(hitboxes.len(), expected.len(), "{locale:?}: {hitboxes:?}");
-            for hitbox in &hitboxes {
+            let offered = hitboxes[PERSISTENT] != ratatui::layout::Rect::default();
+            let screen = terminal.backend().buffer().clone();
+            let text: String = screen.content.iter().map(|cell| cell.symbol()).collect();
+            assert_eq!(offered, text.contains("Save:"), "{locale:?}:\n{text}");
+            let shown: Vec<ratatui::layout::Rect> = hitboxes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| offered || *i != PERSISTENT)
+                .map(|(_, rect)| *rect)
+                .collect();
+            for hitbox in &shown {
                 assert!(hitbox.height > 0, "{locale:?}: {hitboxes:?}");
                 assert!(hitbox.right() <= WIDTH, "{locale:?}: {hitboxes:?}");
                 assert!(hitbox.bottom() <= HEIGHT, "{locale:?}: {hitboxes:?}");
             }
-            for pair in hitboxes.windows(2) {
+            for pair in shown.windows(2) {
                 assert!(pair[0].bottom() <= pair[1].y, "{locale:?}: {hitboxes:?}");
+            }
+            if index == PERSISTENT && !offered {
+                assert!(
+                    matches!(
+                        view.handle_key(create_key_event(KeyCode::Char('p'))),
+                        ViewAction::None
+                    ),
+                    "{locale:?}: [p] without its save preview"
+                );
+                continue;
             }
 
             let rect = hitboxes[index];

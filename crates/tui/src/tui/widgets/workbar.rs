@@ -67,7 +67,8 @@ pub(crate) fn desired_rows(runs: usize) -> u16 {
 }
 
 /// Paint the workbar into `area`: a rule, one row per run, a rule. A band
-/// too short for rules and a run keeps the runs and drops the rules.
+/// too short for the rules and every run row keeps the runs and drops the
+/// rules: rules never hide a run.
 pub(crate) fn render(
     area: ratatui::layout::Rect,
     buf: &mut ratatui::buffer::Buffer,
@@ -80,7 +81,8 @@ pub(crate) fn render(
     if area.width == 0 || area.height == 0 || runs.is_empty() {
         return;
     }
-    let ruled = area.height >= 3;
+    let run_rows = u16::try_from(runs.len().min(MAX_RUN_ROWS + 1)).unwrap_or(u16::MAX);
+    let ruled = area.height >= run_rows.saturating_add(2);
     let row_area = if ruled {
         ratatui::layout::Rect {
             y: area.y + 1,
@@ -719,6 +721,13 @@ mod tests {
         let rows = buffer_rows(&render_band(&runs[..1], 90, 2));
         assert!(rows[0].contains("Audit the parser"), "{rows:?}");
         assert!(!rows.iter().any(|row| row.starts_with('─')), "{rows:?}");
+
+        // Room for the rules but not every run: the runs win, never a band of
+        // rules around a "+2 more" with no run visible.
+        let rows = buffer_rows(&render_band(&runs, 90, 3));
+        assert!(rows[0].contains("Audit the parser"), "{rows:?}");
+        assert!(rows[1].contains("Port fixtures"), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.starts_with('─')), "{rows:?}");
     }
 
     /// NO_COLOR / 16-colour / ASCII terminals: every state still reads. Under
@@ -765,8 +774,14 @@ mod tests {
         };
         let mono = adapted(ColorDepth::Monochrome);
         assert_eq!(buffer_rows(&mono), text, "monochrome changes no text");
+        assert!(
+            mono.content.iter().all(|cell| {
+                cell.fg == ratatui::style::Color::Reset && cell.bg == ratatui::style::Color::Reset
+            }),
+            "monochrome paints no colour"
+        );
         let ansi16 = adapted(ColorDepth::Ansi16);
-        let mark_ink: Vec<ratatui::style::Color> = (1..=4).map(|y| ansi16[(1, y)].fg).collect();
+        let mark_ink: Vec<ratatui::style::Color> = (1..=5).map(|y| ansi16[(1, y)].fg).collect();
         for (index, ink) in mark_ink.iter().enumerate() {
             assert!(
                 !mark_ink[index + 1..].contains(ink),

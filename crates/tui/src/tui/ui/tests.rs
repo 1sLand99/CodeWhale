@@ -7970,6 +7970,8 @@ fn child_approval_card_hides_always_allow_in_repo() {
             .as_any_mut()
             .downcast_mut::<ApprovalView>()
             .expect("approval view");
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        approval.render(area, &mut ratatui::buffer::Buffer::empty(area));
         let action = approval.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
         assert_eq!(
             matches!(action, ViewAction::EmitAndClose(_)),
