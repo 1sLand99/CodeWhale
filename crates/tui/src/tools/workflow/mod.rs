@@ -3731,16 +3731,13 @@ impl RuntimeTaskRecord {
     ///
     /// `BudgetExceeded` is the named gap this exists to close: a child that
     /// dies of budget exhaustion is a failed task for the all-failed rule,
-    /// not an invisible one. `ReplayDiverged` means the leaf's replay did
-    /// not reproduce its recorded result — no output either. `Cancelled` is
+    /// not an invisible one. `Cancelled` is
     /// deliberately excluded: it is the run's own stop, not lost work, and
     /// run-level cancellation is finalized before this ledger is consulted.
     fn failed_for_ledger(&self) -> bool {
         matches!(
             self.status,
-            IrWorkflowRunStatus::Failed
-                | IrWorkflowRunStatus::BudgetExceeded
-                | IrWorkflowRunStatus::ReplayDiverged
+            IrWorkflowRunStatus::Failed | IrWorkflowRunStatus::BudgetExceeded
         )
     }
 }
@@ -5172,9 +5169,7 @@ fn aggregate_ir_status(
         match status {
             IrWorkflowRunStatus::BudgetExceeded => return IrWorkflowRunStatus::BudgetExceeded,
             IrWorkflowRunStatus::Cancelled => return IrWorkflowRunStatus::Cancelled,
-            IrWorkflowRunStatus::Failed | IrWorkflowRunStatus::ReplayDiverged => {
-                return IrWorkflowRunStatus::Failed;
-            }
+            IrWorkflowRunStatus::Failed => return IrWorkflowRunStatus::Failed,
             IrWorkflowRunStatus::Running => saw_running = true,
             IrWorkflowRunStatus::Pending => saw_pending = true,
             IrWorkflowRunStatus::Succeeded => {}
@@ -5191,9 +5186,7 @@ fn aggregate_ir_status(
 
 fn mark_ir_status(execution: &mut IrWorkflowExecution, status: IrWorkflowRunStatus) {
     match status {
-        IrWorkflowRunStatus::Failed | IrWorkflowRunStatus::ReplayDiverged => {
-            execution.mark_failed()
-        }
+        IrWorkflowRunStatus::Failed => execution.mark_failed(),
         IrWorkflowRunStatus::Cancelled => execution.mark_cancelled(),
         IrWorkflowRunStatus::BudgetExceeded => execution.mark_budget_exceeded(),
         IrWorkflowRunStatus::Running => {
@@ -5659,7 +5652,6 @@ fn host_task_state(status: IrWorkflowRunStatus) -> &'static str {
         IrWorkflowRunStatus::Failed => "failed",
         IrWorkflowRunStatus::Cancelled => "cancelled",
         IrWorkflowRunStatus::BudgetExceeded => "budget_exceeded",
-        IrWorkflowRunStatus::ReplayDiverged => "replay_diverged",
     }
 }
 
