@@ -15314,8 +15314,6 @@ mod terminal_mode_tests {
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
-        crate::provider_catalog_live::reset_cache_for_test();
-
         let fleets = home.join("fleets");
         std::fs::create_dir_all(&fleets).expect("fleets dir");
         std::fs::write(
@@ -15328,6 +15326,9 @@ mod terminal_mode_tests {
 
         let config = Config {
             provider: Some("deepseek".to_string()),
+            // A fresh one-row roster must not replace the normal DeepSeek
+            // endpoint's process-wide catalog for unrelated route tests.
+            base_url: Some("https://api.deepseek.com/v1/doctor-roster-fixture".to_string()),
             ..Default::default()
         };
         let kind = crate::config::ApiProvider::Deepseek;
