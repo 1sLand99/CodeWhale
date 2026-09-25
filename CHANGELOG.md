@@ -77,6 +77,11 @@ quieter, and Fleet runs can be checked before they spend anything.
   (a word for an on/off switch, text for a number, a choice outside the list)
   instead of saving it ([#6568](https://github.com/Hmbown/Codewhale/pull/6568),
   thanks @dajiaohuang).
+- Network audit lines now go to the same `audit.log` as every other audit
+  event (`$CODEWHALE_HOME` included), and test runs no longer append to your
+  real one.
+- Auto-Review verdicts now reach `audit.log`, as `/permissions` said they
+  did. They were written only when `CODEWHALE_TOOL_AUDIT_LOG` was set.
 - A turn that stops producing output now reports itself: the turn loop records
   its phase and last progress, and an overdue phase surfaces instead of
   hanging silently until the stream idle timeout. A delegated agent's final result is
