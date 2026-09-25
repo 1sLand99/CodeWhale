@@ -1,8 +1,23 @@
 //! Safe, ordered Engine owner projection shared by desktop and web hosts.
 //!
-//! The Engine owns operation and turn facts. Apps may bind this session-scoped
-//! projection to an authenticated account and serve it to another client; the
-//! account identity is intentionally not supplied by the Engine.
+//! The Engine owns operation and turn facts: it emits
+//! `operation_activity_started` / `operation_activity_completed` with an
+//! [`OwnerActivityKind`] and [`OwnerOperationOutcome`], never a tool name,
+//! argument, command or result. Apps may bind this session-scoped projection
+//! to an authenticated account and serve it to another client; the account
+//! identity is intentionally not supplied by the Engine.
+//!
+//! Known limits:
+//! - Operation events only carry `Reading`, `Editing`, `Searching`,
+//!   `Testing`, `Executing`, `Browsing`, `Computer`, `Memory` or `Tool`.
+//!   `Thinking`, `Responding` and `Delegating` are derived by the reducer
+//!   from message, reasoning and agent lifecycle events.
+//! - [`EngineOwnerProjection`] itself is computed today by the pet reducer
+//!   (`pet/src/core/pet-engine.ts`, bundled into the TUI pet worker), and
+//!   validated here on the way back. No Rust producer exists yet; a host
+//!   that needs it outside the pet must decide whether the runtime produces
+//!   it in Rust rather than adding a second reducer.
+//! - Code-mode (`execute_tools`) nested calls do not report activity yet.
 
 use serde::{Deserialize, Serialize};
 
@@ -113,14 +128,10 @@ impl EngineOwnerProjection {
     pub fn is_valid(&self) -> bool {
         self.schema_version == 1
             && self.session_id.as_ref().is_none_or(|id| {
-                !id.is_empty()
-                    && id.len() <= 256
-                    && id.bytes().all(|byte| !byte.is_ascii_control())
+                !id.is_empty() && id.len() <= 256 && id.bytes().all(|byte| !byte.is_ascii_control())
             })
             && self.turn_id.as_ref().is_none_or(|id| {
-                !id.is_empty()
-                    && id.len() <= 256
-                    && id.bytes().all(|byte| !byte.is_ascii_control())
+                !id.is_empty() && id.len() <= 256 && id.bytes().all(|byte| !byte.is_ascii_control())
             })
             && self.active_spans.len() <= 4
             && self.parallel_agent_count <= 100_000
@@ -134,9 +145,10 @@ impl EngineOwnerProjection {
                         .observed_at_ms
                         .is_none_or(|observed_at| span.started_at_ms <= observed_at)
             })
-            && self.failed_tool_age.as_ref().is_none_or(|failure| {
-                failure.age_ms.is_finite() && failure.age_ms >= 0.0
-            })
+            && self
+                .failed_tool_age
+                .as_ref()
+                .is_none_or(|failure| failure.age_ms.is_finite() && failure.age_ms >= 0.0)
             && (self.turn_outcome.is_none() || self.turn_id.is_some())
             && match self.freshness {
                 OwnerFreshness::Missing => {

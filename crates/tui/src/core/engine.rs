@@ -2051,6 +2051,7 @@ impl Engine {
                     self.tx_event.clone(),
                     Some(self.cancel_token.clone()),
                     tool_name.clone(),
+                    Some(tool_id.clone()),
                     tool_input.clone(),
                     self.session.workspace.clone(),
                     Some(&registry),
@@ -8298,7 +8299,7 @@ pub(crate) mod reviewer;
 mod streaming;
 mod token_estimate_cache;
 pub(crate) mod tool_catalog;
-pub(crate) mod tool_execution;
+mod tool_execution;
 mod tool_media;
 mod tool_preparation;
 mod tool_setup;

@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use codewhale_protocol::engine_owner::OwnerActivityKind;
 use serde_json::{Value, json};
 
 use crate::client::CodewhaleClient;
@@ -333,36 +332,11 @@ impl ToolSpec for RlmTool {
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         match self.resolve_action(&input)? {
-            "session_objects" => super::spec::with_operation_activity(
-                context,
-                OwnerActivityKind::Memory,
-                self.execute_session_objects(context),
-            )
-            .await,
-            "open" => super::spec::with_operation_activity(
-                context,
-                OwnerActivityKind::Tool,
-                self.execute_open(&input, context),
-            )
-            .await,
-            "eval" => super::spec::with_operation_activity(
-                context,
-                OwnerActivityKind::Executing,
-                self.execute_eval(&input, context),
-            )
-            .await,
-            "configure" => super::spec::with_operation_activity(
-                context,
-                OwnerActivityKind::Tool,
-                self.execute_configure(&input, context),
-            )
-            .await,
-            "close" => super::spec::with_operation_activity(
-                context,
-                OwnerActivityKind::Tool,
-                self.execute_close(&input, context),
-            )
-            .await,
+            "session_objects" => self.execute_session_objects(context).await,
+            "open" => self.execute_open(&input, context).await,
+            "eval" => self.execute_eval(&input, context).await,
+            "configure" => self.execute_configure(&input, context).await,
+            "close" => self.execute_close(&input, context).await,
             action => Err(ToolError::invalid_input(format!(
                 "rlm: invalid action `{action}`"
             ))),

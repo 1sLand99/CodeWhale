@@ -9,7 +9,6 @@
 //! family is read-only end to end *except* fetch; `merge_tree` is a pure read.
 
 use async_trait::async_trait;
-use codewhale_protocol::engine_owner::OwnerActivityKind;
 use serde_json::{Value, json};
 
 use super::canonical_action::required_action;
@@ -17,7 +16,6 @@ use super::git::{GitCommitPlanTool, GitDiffTool, GitStatusTool};
 use super::git_history::{GitBlameTool, GitFetchTool, GitLogTool, GitMergeTreeTool, GitShowTool};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
-    with_operation_activity,
 };
 
 pub struct GitTool {
@@ -202,14 +200,14 @@ impl ToolSpec for GitTool {
         let input = self.strip_action(input)?;
 
         match action.as_str() {
-            "status" => with_operation_activity(context, OwnerActivityKind::Reading, GitStatusTool.execute(input, context)).await,
-            "diff" => with_operation_activity(context, OwnerActivityKind::Reading, GitDiffTool.execute(input, context)).await,
-            "log" => with_operation_activity(context, OwnerActivityKind::Reading, GitLogTool.execute(input, context)).await,
-            "show" => with_operation_activity(context, OwnerActivityKind::Reading, GitShowTool.execute(input, context)).await,
-            "blame" => with_operation_activity(context, OwnerActivityKind::Reading, GitBlameTool.execute(input, context)).await,
-            "commit_plan" => with_operation_activity(context, OwnerActivityKind::Reading, GitCommitPlanTool.execute(input, context)).await,
-            "fetch" => with_operation_activity(context, OwnerActivityKind::Tool, GitFetchTool.execute(input, context)).await,
-            "merge_tree" => with_operation_activity(context, OwnerActivityKind::Reading, GitMergeTreeTool.execute(input, context)).await,
+            "status" => GitStatusTool.execute(input, context).await,
+            "diff" => GitDiffTool.execute(input, context).await,
+            "log" => GitLogTool.execute(input, context).await,
+            "show" => GitShowTool.execute(input, context).await,
+            "blame" => GitBlameTool.execute(input, context).await,
+            "commit_plan" => GitCommitPlanTool.execute(input, context).await,
+            "fetch" => GitFetchTool.execute(input, context).await,
+            "merge_tree" => GitMergeTreeTool.execute(input, context).await,
             other => Err(ToolError::invalid_input(format!(
                 "Unknown Git action \"{other}\"; nothing was run. Pass one of: {}.",
                 Self::ACTIONS.join(", ")

@@ -7,7 +7,6 @@
 //! - `ToolCapability`: Capabilities and requirements of tools
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -184,60 +183,6 @@ pub type SharedFileReadTracker = Arc<Mutex<FileReadTracker>>;
 
 pub(crate) fn new_shared_file_read_tracker() -> SharedFileReadTracker {
     Arc::new(Mutex::new(FileReadTracker::default()))
-}
-
-/// Narrow callback used by wrapper tools to report an underlying operation
-/// only after their normal registry/action resolution has selected it.
-#[async_trait::async_trait]
-pub(crate) trait OperationActivityReporter: Send + Sync {
-    async fn started(
-        &self,
-        span_id: String,
-        activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
-    );
-    async fn completed(
-        &self,
-        span_id: String,
-        activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
-        outcome: codewhale_protocol::engine_owner::OwnerOperationOutcome,
-    );
-}
-
-/// Report only after a wrapper's dispatcher has selected the concrete arm.
-/// The span id is opaque and never appears in the user-facing projection.
-pub(crate) async fn with_operation_activity(
-    context: &ToolContext,
-    activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
-    operation: impl Future<Output = Result<ToolResult, ToolError>>,
-) -> Result<ToolResult, ToolError> {
-    let Some(reporter) = context.operation_activity_reporter.as_ref() else {
-        return operation.await;
-    };
-    let reporter = Arc::clone(reporter);
-    let span_id = format!("resolved:{}", uuid::Uuid::new_v4());
-    reporter.started(span_id.clone(), activity_kind).await;
-    let result = operation.await;
-    let outcome = match &result {
-        Ok(result) if result.success => {
-            codewhale_protocol::engine_owner::OwnerOperationOutcome::Succeeded
-        }
-        Ok(_) => codewhale_protocol::engine_owner::OwnerOperationOutcome::Failed,
-        Err(ToolError::Cancelled { .. }) => {
-            codewhale_protocol::engine_owner::OwnerOperationOutcome::Cancelled
-        }
-        Err(
-            ToolError::InvalidInput { .. }
-            | ToolError::MissingField { .. }
-            | ToolError::PathEscape { .. }
-            | ToolError::NotAvailable { .. }
-            | ToolError::PermissionDenied { .. },
-        ) => codewhale_protocol::engine_owner::OwnerOperationOutcome::Denied,
-        Err(ToolError::ExecutionFailed { .. } | ToolError::Timeout { .. }) => {
-            codewhale_protocol::engine_owner::OwnerOperationOutcome::Failed
-        }
-    };
-    reporter.completed(span_id, activity_kind, outcome).await;
-    result
 }
 
 fn file_read_snapshot(path: &Path) -> Result<FileReadSnapshot, ToolError> {
@@ -657,9 +602,6 @@ pub struct ToolExecutionState {
     /// with the originating transcript position.
     pub(crate) origin_tool_call_id: Option<String>,
     pub(crate) origin_turn_id: Option<String>,
-    /// Set only for an Engine-dispatched wrapper call. It forwards typed
-    /// activity from resolved nested operations without exposing arguments.
-    pub(crate) operation_activity_reporter: Option<Arc<dyn OperationActivityReporter>>,
     /// Outer process authority cap installed by Fleet/headless dispatch.
     /// `None` for ordinary interactive/root sessions.
     pub(crate) tool_authority: Option<Arc<ToolAuthorityEnvelope>>,
@@ -838,7 +780,6 @@ impl ToolContext {
                 owner_agent_name: None,
                 origin_tool_call_id: None,
                 origin_turn_id: None,
-                operation_activity_reporter: None,
                 tool_authority,
                 trust_mode,
                 sandbox_policy: SandboxPolicy::None,

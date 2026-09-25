@@ -5,7 +5,6 @@
 //! without teaching new sessions the older action-family schema.
 
 use async_trait::async_trait;
-use codewhale_protocol::engine_owner::OwnerActivityKind;
 use serde_json::{Value, json};
 
 use super::apply_patch::ApplyPatchTool;
@@ -15,7 +14,7 @@ use super::file_search::FileSearchTool;
 use super::search::GrepFilesTool;
 use super::spec::{
     ApprovalRequirement, RichToolResult, ToolCapability, ToolContext, ToolError, ToolResult,
-    ToolSpec, with_operation_activity,
+    ToolSpec,
 };
 
 /// Lift a parameter description out of the tool that implements the action.
@@ -478,54 +477,19 @@ impl ToolSpec for FileTool {
         let input = self.strip_action(input)?;
 
         match action.as_str() {
-            "read" => with_operation_activity(
-                context,
-                OwnerActivityKind::Reading,
-                ReadFileTool.execute(input, context),
-            )
-            .await,
-            "list" => with_operation_activity(
-                context,
-                OwnerActivityKind::Reading,
-                ListDirTool.execute(input, context),
-            )
-            .await,
+            "read" => ReadFileTool.execute(input, context).await,
+            "list" => ListDirTool.execute(input, context).await,
             // The cross-action spellings the wrapper advertises
             // (`max_results` on search_name, `query`/`limit` on
             // search_content) used to be copied here. They are alias-table
             // entries on the implementing tools now — one mechanism, applied
             // before the same unknown-parameter check every other action runs,
             // and a direct call to the inner tool behaves identically.
-            "search_name" => with_operation_activity(
-                context,
-                OwnerActivityKind::Searching,
-                FileSearchTool.execute(input, context),
-            )
-            .await,
-            "search_content" => with_operation_activity(
-                context,
-                OwnerActivityKind::Searching,
-                GrepFilesTool.execute(input, context),
-            )
-            .await,
-            "write" => with_operation_activity(
-                context,
-                OwnerActivityKind::Editing,
-                WriteFileTool.execute(input, context),
-            )
-            .await,
-            "edit" => with_operation_activity(
-                context,
-                OwnerActivityKind::Editing,
-                EditFileTool.execute(input, context),
-            )
-            .await,
-            "patch" => with_operation_activity(
-                context,
-                OwnerActivityKind::Editing,
-                ApplyPatchTool.execute(input, context),
-            )
-            .await,
+            "search_name" => FileSearchTool.execute(input, context).await,
+            "search_content" => GrepFilesTool.execute(input, context).await,
+            "write" => WriteFileTool.execute(input, context).await,
+            "edit" => EditFileTool.execute(input, context).await,
+            "patch" => ApplyPatchTool.execute(input, context).await,
             other => Err(ToolError::invalid_input(format!(
                 "Unknown File action \"{other}\"; nothing was run. Pass one of: {}.",
                 self.available_actions().join(", ")

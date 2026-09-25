@@ -14,7 +14,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Paragraph},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     io::{self, Write},
     sync::{Arc, Mutex},
@@ -122,9 +122,13 @@ impl PetWatch {
     }
     pub fn observe(&mut self, event: &Event, session: Option<&str>, _now: Instant) {
         if self.session.as_deref() != session {
-            let keep_worker = self.worker.is_some() || self.enabled;
+            // A live view follows the session switch: restart it for the new
+            // session and forward the event that switched, so the reducer
+            // sees the turn that opened it. Without a live view, the next
+            // render starts one; turn tracking below still records the turn.
+            let had_worker = self.worker.is_some();
             self.reset(session.map(str::to_owned));
-            if keep_worker {
+            if had_worker {
                 self.ensure(self.session.clone());
             }
         }
@@ -218,40 +222,68 @@ impl PetWatch {
 fn metadata(event: &Event, turn_id: Option<&str>) -> Option<String> {
     let value = match event {
         Event::TurnStarted { turn_id, .. } => json!({"event":"turn_started","turn_id":turn_id}),
-        Event::TurnComplete { status, .. } => json!({
-            "event":"turn_complete",
-            "turn_id":turn_id,
-            "turn_outcome":match status {
-                TurnOutcomeStatus::Completed => "completed",
-                TurnOutcomeStatus::Interrupted => "interrupted",
-                TurnOutcomeStatus::Failed => "failed",
+        Event::TurnComplete { status, .. } => {
+            let mut value = json!({
+                "event":"turn_complete",
+                "turn_outcome":match status {
+                    TurnOutcomeStatus::Completed => "completed",
+                    TurnOutcomeStatus::Interrupted => "interrupted",
+                    TurnOutcomeStatus::Failed => "failed",
+                }
+            });
+            // An untracked turn omits the id; the reducer rejects `null`, and
+            // without an id a completed turn cannot claim Done.
+            if let Some(turn_id) = turn_id {
+                value["turn_id"] = json!(turn_id);
             }
-        }),
+            value
+        }
         Event::MessageStarted { index } => json!({"event":"message_started","index":index}),
-        Event::MessageDelta { index, .. } => json!({"event":"response_delta","index":index,"channel":"text"}),
+        Event::MessageDelta { index, .. } => {
+            json!({"event":"response_delta","index":index,"channel":"text"})
+        }
         Event::MessageComplete { index } => json!({"event":"message_complete","index":index}),
         Event::ThinkingStarted { index } => json!({"event":"thinking_started","index":index}),
-        Event::ThinkingDelta { index, .. } => json!({"event":"response_delta","index":index,"channel":"reasoning"}),
+        Event::ThinkingDelta { index, .. } => {
+            json!({"event":"response_delta","index":index,"channel":"reasoning"})
+        }
         Event::ThinkingComplete { index } => json!({"event":"thinking_complete","index":index}),
-        Event::OperationActivityStarted { span_id, activity_kind } => json!({
+        Event::OperationActivityStarted {
+            span_id,
+            activity_kind,
+        } => json!({
             "event":"operation_activity_started",
             "span_id":span_id,
             "activity_kind":activity_kind
         }),
-        Event::OperationActivityCompleted { span_id, activity_kind, outcome } => json!({
+        Event::OperationActivityCompleted {
+            span_id,
+            activity_kind,
+            outcome,
+        } => json!({
             "event":"operation_activity_completed",
             "span_id":span_id,
             "activity_kind":activity_kind,
             "outcome":outcome
         }),
         Event::ToolCallHeartbeat => json!({"event":"tool_call_heartbeat"}),
-        // A human approval denial clears the authoritative waiting state. It
-        // carries only the Engine call id and typed outcome; the tool name and
-        // error text remain in the normal Engine transcript path.
-        Event::ToolCallComplete { id, result: Err(crate::tools::spec::ToolError::PermissionDenied { .. }), .. } => json!({
+        // A denied (by a human or by policy) or cancelled call ends any wait
+        // on it. Only the Engine call id and typed outcome cross; the tool
+        // name and error text stay in the transcript. Approvals that run are
+        // cleared by their operation start and by the shell's typed
+        // `waiting` flag on every tick.
+        Event::ToolCallComplete {
+            id,
+            result: Err(crate::tools::spec::ToolError::PermissionDenied { .. }),
+            ..
+        } => json!({
             "event":"approval_resolved","id":id,"outcome":"denied"
         }),
-        Event::ToolCallComplete { id, result: Err(crate::tools::spec::ToolError::Cancelled { .. }), .. } => json!({
+        Event::ToolCallComplete {
+            id,
+            result: Err(crate::tools::spec::ToolError::Cancelled { .. }),
+            ..
+        } => json!({
             "event":"approval_resolved","id":id,"outcome":"cancelled"
         }),
         Event::AgentSpawned { id, .. } => json!({"event":"agent_spawned","id":id}),
@@ -689,6 +721,7 @@ pub(crate) fn clear_images(output: &mut impl Write) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn work_completion_reveals_existing_answer_without_sending_text_to_owner() {
@@ -867,9 +900,8 @@ mod tests {
 
     #[test]
     fn only_completed_turns_set_the_pet_done_state() {
-        let mut app = crate::test_support::test_app_with_options(
-            crate::test_support::test_tui_options("."),
-        );
+        let mut app =
+            crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
         app.onboarding = crate::tui::app::OnboardingState::None;
         app.redaction_gate = false;
         app.pet_watch.detach_for_test();
@@ -917,27 +949,86 @@ mod tests {
     }
 
     #[test]
-    fn foreground_projection_forwards_only_typed_owner_metadata() {
-        let call = metadata(&Event::ToolCallStarted {
-            id: "call-a".into(),
-            name: "exec_command".into(),
-            input: json!({"command":"PRIVATE TOOL INPUT"}),
-        }, Some("turn-a"));
-        assert!(call.is_none(), "tool names and inputs are not activity facts");
+    fn session_switch_resets_the_view_and_tracks_the_switching_turn() {
+        let mut watch = PetWatch::default();
+        watch.detach_for_test();
+        watch.session = Some("session-a".into());
+        watch.active_turn_id = Some("turn-a".into());
+        watch.work_complete = true;
 
-        let thought = metadata(&Event::ThinkingDelta {
-            index: 2,
-            content: "PRIVATE REASONING".into(),
-        }, None)
+        watch.observe(
+            &Event::TurnStarted {
+                turn_id: "turn-b".into(),
+                created_at: chrono::Utc::now(),
+                route: None,
+            },
+            Some("session-b"),
+            Instant::now(),
+        );
+        assert_eq!(watch.session.as_deref(), Some("session-b"));
+        // The event that switched sessions is not dropped: its turn is the
+        // one a later `turn_complete` must carry to claim Done.
+        assert_eq!(watch.active_turn_id.as_deref(), Some("turn-b"));
+        assert!(!watch.work_complete, "Done never survives a session switch");
+        assert!(!watch.failed, "a switch clears a prior failure");
+        assert!(
+            watch.worker.is_none(),
+            "with no live view running, an Engine event never starts one"
+        );
+
+        let done = metadata(
+            &Event::TurnComplete {
+                usage: Default::default(),
+                parent_route_usage: Default::default(),
+                routed_usage_dropped_records: 0,
+                status: TurnOutcomeStatus::Completed,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            },
+            watch.active_turn_id.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&done).unwrap(),
+            json!({"event":"turn_complete","turn_id":"turn-b","turn_outcome":"completed"})
+        );
+    }
+
+    #[test]
+    fn foreground_projection_forwards_only_typed_owner_metadata() {
+        let call = metadata(
+            &Event::ToolCallStarted {
+                id: "call-a".into(),
+                name: "exec_command".into(),
+                input: json!({"command":"PRIVATE TOOL INPUT"}),
+            },
+            Some("turn-a"),
+        );
+        assert!(
+            call.is_none(),
+            "tool names and inputs are not activity facts"
+        );
+
+        let thought = metadata(
+            &Event::ThinkingDelta {
+                index: 2,
+                content: "PRIVATE REASONING".into(),
+            },
+            None,
+        )
         .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&thought).unwrap(),
             json!({"event":"response_delta","index":2,"channel":"reasoning"})
         );
-        let message = metadata(&Event::MessageDelta {
-            index: 3,
-            content: "PRIVATE MESSAGE".into(),
-        }, None)
+        let message = metadata(
+            &Event::MessageDelta {
+                index: 3,
+                content: "PRIVATE MESSAGE".into(),
+            },
+            None,
+        )
         .unwrap();
 
         let operation = metadata(
@@ -1016,16 +1107,19 @@ mod tests {
         use crate::core::events::AgentProgressEventMeta;
         use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus};
 
-        let spawned = metadata(&Event::AgentSpawned {
-            owner_session_id: "session-a".into(),
-            id: "agent-1".into(),
-            prompt: "PRIVATE CHILD PROMPT".into(),
-            worker_status: Some(AgentWorkerStatus::Running),
-            parent_run_id: Some("run-9".into()),
-            spawn_depth: 2,
-            model: "PRIVATE CHILD MODEL".into(),
-            route_source: Some("task.model".into()),
-        }, None)
+        let spawned = metadata(
+            &Event::AgentSpawned {
+                owner_session_id: "session-a".into(),
+                id: "agent-1".into(),
+                prompt: "PRIVATE CHILD PROMPT".into(),
+                worker_status: Some(AgentWorkerStatus::Running),
+                parent_run_id: Some("run-9".into()),
+                spawn_depth: 2,
+                model: "PRIVATE CHILD MODEL".into(),
+                route_source: Some("task.model".into()),
+            },
+            None,
+        )
         .expect("agent spawns are observed");
         assert_eq!(
             serde_json::from_str::<Value>(&spawned).unwrap(),
@@ -1033,36 +1127,42 @@ mod tests {
         );
 
         // The JS finishes a span when progress reports a terminal status.
-        let progress = metadata(&Event::AgentProgress {
-            owner_session_id: "session-a".into(),
-            id: "agent-1".into(),
-            status: "PRIVATE PROGRESS TEXT".into(),
-            activity: AgentProgressEventMeta {
-                worker_status: AgentWorkerStatus::Completed,
-                step: Some(3),
-                tool_name: Some("exec_command".into()),
-                routine_wait: false,
-                approval_id: None,
+        let progress = metadata(
+            &Event::AgentProgress {
+                owner_session_id: "session-a".into(),
+                id: "agent-1".into(),
+                status: "PRIVATE PROGRESS TEXT".into(),
+                activity: AgentProgressEventMeta {
+                    worker_status: AgentWorkerStatus::Completed,
+                    step: Some(3),
+                    tool_name: Some("exec_command".into()),
+                    routine_wait: false,
+                    approval_id: None,
+                },
+                parent_run_id: Some("run-9".into()),
+                spawn_depth: 2,
             },
-            parent_run_id: Some("run-9".into()),
-            spawn_depth: 2,
-        }, None)
+            None,
+        )
         .expect("agent progress is observed");
         assert_eq!(
             serde_json::from_str::<Value>(&progress).unwrap(),
             json!({"event":"agent_progress","id":"agent-1","worker_status":"completed"})
         );
 
-        let complete = metadata(&Event::AgentComplete {
-            owner_session_id: "session-a".into(),
-            id: "agent-1".into(),
-            result: "PRIVATE CHILD RESULT".into(),
-            outcome: Some(SubAgentStatus::Completed),
-            parent_run_id: Some("run-9".into()),
-            spawn_depth: Some(2),
-            continuable: Some(false),
-            usage: None,
-        }, None)
+        let complete = metadata(
+            &Event::AgentComplete {
+                owner_session_id: "session-a".into(),
+                id: "agent-1".into(),
+                result: "PRIVATE CHILD RESULT".into(),
+                outcome: Some(SubAgentStatus::Completed),
+                parent_run_id: Some("run-9".into()),
+                spawn_depth: Some(2),
+                continuable: Some(false),
+                usage: None,
+            },
+            None,
+        )
         .expect("agent completions are observed");
         assert_eq!(
             serde_json::from_str::<Value>(&complete).unwrap(),

@@ -244,35 +244,10 @@ impl ToolInvoker for CodemodeInvoker {
             return Err(self.refused(name, started, err.to_string()));
         }
 
-        let activity_kind = (!crate::tools::canonical_action::is_action_family(name))
-            .then(|| crate::core::engine::tool_execution::owner_activity_kind_for_operation(name));
-        let activity_span_id = activity_kind.map(|_| format!("codemode:{}", uuid::Uuid::new_v4()));
-        if let (Some(span_id), Some(activity_kind), Some(reporter)) = (
-            activity_span_id.as_ref(),
-            activity_kind,
-            self.context.operation_activity_reporter.as_ref(),
-        ) {
-            reporter
-                .started(span_id.clone(), activity_kind)
-                .await;
-        }
-
-        let invoked = spec
+        match spec
             .execute_rich(request.input.clone(), &self.context)
-            .await;
-        if let (Some(span_id), Some(activity_kind), Some(reporter)) = (
-            activity_span_id,
-            activity_kind,
-            self.context.operation_activity_reporter.as_ref(),
-        ) {
-            let outcome = crate::core::engine::tool_execution::owner_operation_outcome(
-                &invoked,
-                false,
-            );
-            reporter.completed(span_id, activity_kind, outcome).await;
-        }
-
-        match invoked {
+            .await
+        {
             Ok(rich) => {
                 let result = rich.into_result();
                 // Stable envelope: the tool's text content (parsed as JSON
