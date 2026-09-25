@@ -801,15 +801,22 @@ async fn sandboxed_host_cannot_read_codewhale_secrets_or_write_outside_its_data_
     );
     for denied in [token, backup, tokens.join("codex.json")] {
         let secret = probe(&read, &denied, &context).await;
-        assert_eq!(secret["ok"], false, "{}: {secret}", denied.display());
-        assert!(!secret.to_string().contains("s3cret"), "{secret}");
+        assert_eq!(secret["ok"], false, "{} was readable", denied.display());
+        assert!(
+            !secret.to_string().contains("s3cret"),
+            "{} leaked its contents",
+            denied.display()
+        );
     }
     // A store created after the host started is denied by name.
     let state = fixture.root.join("state");
     std::fs::create_dir_all(&state).unwrap();
     std::fs::write(state.join("late.json"), "s3cret-late").unwrap();
     let late = probe(&read, &state.join("late.json"), &context).await;
-    assert_eq!(late["ok"], false, "{late}");
+    assert_eq!(
+        late["ok"], false,
+        "a store created after start was readable"
+    );
     // The Codex credential file Codewhale itself reads, when this machine has
     // one. Only `ok` is reported, never the content.
     let codex_auth = crate::oauth::auth_file_path();
