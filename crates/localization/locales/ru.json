@@ -1100,7 +1100,7 @@
   "CtxMenuCopyRow": "Копировать строку",
   "CtxMenuStopAgent": "Остановить агента…",
   "CtxMenuStopWork": "Остановить…",
-  "CtxMenuConfirmArmed": "Нажмите Enter ещё раз для подтверждения",
+  "CtxMenuConfirmArmed": "{label}: Enter или щелчок ещё раз для подтверждения",
   "WindowPinActive": "Окно закреплено как мини-окно поверх всех",
   "WindowPinReleased": "Окно восстановлено",
   "WindowPinFailed": "Не удалось изменить окно или подтвердить изменение. Подробности см. в журнале.",

@@ -1100,7 +1100,7 @@
   "CtxMenuCopyRow": "Salin baris",
   "CtxMenuStopAgent": "Hentikan agen…",
   "CtxMenuStopWork": "Hentikan…",
-  "CtxMenuConfirmArmed": "Tekan Enter lagi untuk mengonfirmasi",
+  "CtxMenuConfirmArmed": "{label}: Enter atau klik lagi untuk mengonfirmasi",
   "WindowPinActive": "Jendela disematkan sebagai mini window di atas",
   "WindowPinReleased": "Jendela dipulihkan",
   "WindowPinFailed": "Perubahan jendela gagal atau tidak dapat dikonfirmasi. Lihat log untuk detailnya.",

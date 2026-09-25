@@ -1123,7 +1123,7 @@
   "CtxMenuCopyRow": "행 복사",
   "CtxMenuStopAgent": "에이전트 중지…",
   "CtxMenuStopWork": "중지…",
-  "CtxMenuConfirmArmed": "확인하려면 Enter를 한 번 더 누르세요",
+  "CtxMenuConfirmArmed": "{label}: 확인하려면 Enter 또는 한 번 더 클릭",
   "WindowPinActive": "항상 위 미니 창으로 고정됨",
   "WindowPinReleased": "창이 복원됨",
   "WindowPinFailed": "창 변경에 실패했거나 확인할 수 없습니다. 자세한 내용은 로그를 확인하세요.",

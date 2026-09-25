@@ -875,7 +875,7 @@
   "CtxMenuCopyRow": "複製此列",
   "CtxMenuStopAgent": "停止代理…",
   "CtxMenuStopWork": "停止…",
-  "CtxMenuConfirmArmed": "再按一次 Enter 確認",
+  "CtxMenuConfirmArmed": "{label}：按 Enter 或再次點擊確認",
   "WindowPinActive": "已置頂小窗",
   "WindowPinReleased": "已還原視窗",
   "WindowPinFailed": "視窗變更失敗或無法確認。請查看記錄瞭解詳情。",

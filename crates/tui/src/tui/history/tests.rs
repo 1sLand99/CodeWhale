@@ -2787,6 +2787,40 @@ fn file_line_reference_refuses_links_out_of_the_workspace() {
     );
 }
 
+/// The two escapes the review named: a directory link to `/` and a file link
+/// into `~/.ssh`. Neither may resolve, whether or not the target exists.
+#[cfg(unix)]
+#[test]
+fn file_line_reference_refuses_links_to_root_and_ssh() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    std::os::unix::fs::symlink("/", workspace.join("rootfs")).unwrap();
+    let ssh = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
+        .join(".ssh");
+    std::os::unix::fs::symlink(ssh.join("id_ed25519"), workspace.join("key.rs")).unwrap();
+    std::os::unix::fs::symlink(&ssh, workspace.join("ssh")).unwrap();
+
+    for line in [
+        "rootfs/etc/hosts:1",
+        "./rootfs/etc/hosts:1",
+        "key.rs:1",
+        "ssh/config:1",
+        "ssh/id_ed25519:1",
+    ] {
+        assert_eq!(
+            super::file_line_reference(line, workspace),
+            None,
+            "{line:?}"
+        );
+    }
+    let absolute = workspace.join("rootfs/etc/hosts");
+    assert_eq!(
+        super::workspace_file(workspace, absolute.to_str().unwrap()),
+        None,
+        "an absolute path through the link"
+    );
+}
+
 #[test]
 fn first_file_line_reference_skips_unresolvable_and_malformed_rows() {
     let dir = tempfile::tempdir().unwrap();

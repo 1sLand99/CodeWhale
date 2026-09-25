@@ -84,10 +84,14 @@ impl ContextMenuEntry {
     }
 
     /// Require a second activation. `armed_label` replaces the row label
-    /// while the entry waits for it ("Press Enter again to confirm").
+    /// while the entry waits for it, and says what confirms it ("Stop agent:
+    /// Enter or click again to confirm").
     #[must_use]
+    /// A `{label}` in `armed_label` becomes this row's label (without a
+    /// trailing `…`), so the armed row still names what it will do.
     pub fn confirm(mut self, armed_label: impl Into<String>) -> Self {
-        self.confirm_label = Some(armed_label.into());
+        let label = self.label.trim_end_matches('…').trim_end();
+        self.confirm_label = Some(armed_label.into().replace("{label}", label));
         self
     }
 }
@@ -96,6 +100,11 @@ impl ContextMenuEntry {
 const RESERVED_KEYS: [char; 3] = ['j', 'k', 'q'];
 /// Letters handed to entries past the ninth, after digits run out.
 const BACKFILL_LETTERS: &str = "abcdfghilmnorstuvwxz";
+/// A second click on an armed row sooner than this is the tail of a
+/// double-click, not a decision, so it does not confirm. Same window the
+/// composer uses to tell a double-click from two clicks.
+const CONFIRM_CLICK_GUARD: std::time::Duration =
+    std::time::Duration::from_millis(crate::tui::mouse_ui::DOUBLE_CLICK_MS);
 
 /// One painted row of the menu body, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +122,9 @@ pub struct ContextMenuView {
     selected: usize,
     /// Entry waiting for its confirming second activation.
     armed: Option<usize>,
+    /// When `armed` was set, so a double-click cannot arm and confirm a
+    /// destructive row in one gesture.
+    armed_at: Option<Instant>,
     /// First entry drawn when the menu is taller than the screen. Kept in a
     /// `Cell` because render (`&self`) is where the height is known.
     scroll: Cell<usize>,
@@ -145,6 +157,7 @@ impl ContextMenuView {
             entries,
             selected,
             armed: None,
+            armed_at: None,
             scroll: Cell::new(0),
             column,
             row,
@@ -171,6 +184,9 @@ impl ContextMenuView {
         }
         self.selected = idx;
         if entry.confirm_label.is_some() && !(confirm && self.armed == Some(idx)) {
+            if self.armed != Some(idx) {
+                self.armed_at = Some(Instant::now());
+            }
             self.armed = Some(idx);
             return ViewAction::None;
         }
@@ -452,6 +468,16 @@ impl ModalView for ContextMenuView {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(idx) = self.clicked_entry(mouse) {
+                    // The second half of a double-click lands on the row the
+                    // first half just armed; it keeps the row armed and
+                    // waits for a deliberate click or Enter.
+                    let double_click_tail = self.armed == Some(idx)
+                        && self
+                            .armed_at
+                            .is_some_and(|at| at.elapsed() < CONFIRM_CLICK_GUARD);
+                    if double_click_tail {
+                        return ViewAction::None;
+                    }
                     return self.activate(idx, true);
                 }
                 // The title, dividers, overflow markers and detail row are
@@ -910,7 +936,7 @@ mod tests {
         let entries = vec![
             ContextMenuEntry::new("Copy", "", ContextMenuAction::CopySelection),
             ContextMenuEntry::new("Stop agent…", "", ContextMenuAction::Paste)
-                .confirm("Press Enter again to confirm")
+                .confirm("{label}: Enter or click again to confirm")
                 .with_hint("s"),
         ];
         let mut view = ContextMenuView::new_with_motion(entries, 0, 0, String::new(), true);
@@ -920,7 +946,11 @@ mod tests {
             ViewAction::None
         ));
         assert_eq!(view.armed, Some(1));
-        assert_eq!(view.label_for(1), "Press Enter again to confirm");
+        assert_eq!(
+            view.label_for(1),
+            "Stop agent: Enter or click again to confirm",
+            "the armed row names its action and what confirms it"
+        );
         assert!(
             matches!(view.handle_key(key(KeyCode::Char('s'))), ViewAction::None),
             "a letter never confirms"
@@ -948,6 +978,55 @@ mod tests {
             view.handle_key(key(KeyCode::Enter)),
             ViewAction::None
         ));
+    }
+
+    /// A double-click on a destructive row used to arm it and confirm it in
+    /// one gesture. The second click of a double-click is now ignored; a
+    /// later, separate click (or Enter) still confirms.
+    #[test]
+    fn a_double_click_does_not_confirm_a_destructive_row() {
+        let entries = vec![
+            ContextMenuEntry::new("Copy", "", ContextMenuAction::CopySelection),
+            ContextMenuEntry::new("Stop agent…", "", ContextMenuAction::Paste)
+                .confirm("{label}: Enter or click again to confirm"),
+        ];
+        let mut view = ContextMenuView::new_with_motion(entries, 0, 0, String::new(), true);
+        let rect = Rect::new(0, 0, 40, 6);
+        view.last_rect.set(Some(rect));
+        let stop_row = rect.y + 2;
+        assert_eq!(view.entry_at_row(stop_row, rect), Some(1));
+
+        assert!(matches!(
+            view.handle_mouse(click(2, stop_row)),
+            ViewAction::None
+        ));
+        assert_eq!(view.armed, Some(1));
+        assert!(
+            matches!(view.handle_mouse(click(2, stop_row)), ViewAction::None),
+            "the second click of a double-click must not confirm"
+        );
+        assert_eq!(view.armed, Some(1), "the row stays armed");
+
+        // A deliberate click after the double-click window confirms.
+        view.armed_at = Instant::now().checked_sub(CONFIRM_CLICK_GUARD * 2);
+        assert_eq!(
+            emitted(view.handle_mouse(click(2, stop_row))),
+            Some(ContextMenuAction::Paste)
+        );
+
+        // Enter confirms at once: a key press is never a double-click.
+        let entries = vec![
+            ContextMenuEntry::new("Stop", "", ContextMenuAction::Paste)
+                .confirm("{label}: Enter or click again to confirm"),
+        ];
+        let mut view = ContextMenuView::new_with_motion(entries, 0, 0, String::new(), true);
+        view.last_rect.set(Some(rect));
+        view.handle_mouse(click(2, rect.y + 1));
+        assert_eq!(view.armed, Some(0));
+        assert_eq!(
+            emitted(view.handle_key(key(KeyCode::Enter))),
+            Some(ContextMenuAction::Paste)
+        );
     }
 
     /// T9: a menu taller than the screen used to be cut off. It now shows a

@@ -1100,7 +1100,7 @@
   "CtxMenuCopyRow": "Copier la ligne",
   "CtxMenuStopAgent": "Arrêter l'agent…",
   "CtxMenuStopWork": "Arrêter…",
-  "CtxMenuConfirmArmed": "Appuyez de nouveau sur Entrée pour confirmer",
+  "CtxMenuConfirmArmed": "{label} : Entrée ou cliquez à nouveau pour confirmer",
   "WindowPinActive": "Fenêtre épinglée en mini-fenêtre au premier plan",
   "WindowPinReleased": "Fenêtre restaurée",
   "WindowPinFailed": "La modification de la fenêtre a échoué ou n’a pas pu être confirmée. Consultez le journal pour plus de détails.",

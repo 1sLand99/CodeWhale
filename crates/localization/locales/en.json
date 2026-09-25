@@ -1123,7 +1123,7 @@
   "CtxMenuCopyRow": "Copy row",
   "CtxMenuStopAgent": "Stop agent…",
   "CtxMenuStopWork": "Stop…",
-  "CtxMenuConfirmArmed": "Press Enter again to confirm",
+  "CtxMenuConfirmArmed": "{label}: Enter or click again to confirm",
   "WindowPinActive": "Window pinned on top",
   "WindowPinReleased": "Window restored",
   "WindowPinFailed": "Window change failed or could not be confirmed. Check the log for details.",

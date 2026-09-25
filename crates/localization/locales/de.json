@@ -1100,7 +1100,7 @@
   "CtxMenuCopyRow": "Zeile kopieren",
   "CtxMenuStopAgent": "Agent stoppen…",
   "CtxMenuStopWork": "Stoppen…",
-  "CtxMenuConfirmArmed": "Zum Bestätigen erneut Enter drücken",
+  "CtxMenuConfirmArmed": "{label}: Enter oder erneut klicken zum Bestätigen",
   "WindowPinActive": "Fenster als Mini-Fenster oben fixiert",
   "WindowPinReleased": "Fenster wiederhergestellt",
   "WindowPinFailed": "Die Fensteränderung ist fehlgeschlagen oder konnte nicht bestätigt werden. Details stehen im Protokoll.",

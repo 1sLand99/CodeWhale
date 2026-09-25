@@ -12,7 +12,9 @@ pub(crate) struct ComposerClickTrace {
     count: u8,
 }
 
-const COMPOSER_DOUBLE_CLICK_MS: u128 = 400;
+/// Two clicks closer than this are one double-click (composer word select,
+/// and the context menu's guard against confirming a destructive row).
+pub(crate) const DOUBLE_CLICK_MS: u64 = 400;
 const COMPOSER_CLICK_SLOP_CELLS: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +32,7 @@ fn classify_composer_click(
     let at = Instant::now();
     let next = match trace.as_ref() {
         Some(prev)
-            if at.duration_since(prev.at).as_millis() <= COMPOSER_DOUBLE_CLICK_MS
+            if at.duration_since(prev.at).as_millis() <= u128::from(DOUBLE_CLICK_MS)
                 && prev.row.abs_diff(row) <= COMPOSER_CLICK_SLOP_CELLS
                 && prev.column.abs_diff(column) <= COMPOSER_CLICK_SLOP_CELLS =>
         {
@@ -1885,6 +1887,23 @@ pub(crate) fn apply_context_menu_action(
 /// through the same suspend path the composer and `/hooks edit` use, one at a
 /// time, and we wait for it. It used to be spawned detached while the TUI
 /// still held raw mode, the alt screen and mouse capture (#6235).
+/// The path `open_file_in_editor` may hand to the editor: `path` only while it
+/// is still a regular file inside `workspace` reached without links
+/// (`history::workspace_file`), else the refusal to show.
+fn editor_target(
+    workspace: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    path.to_str()
+        .and_then(|raw| crate::tui::history::workspace_file(workspace, raw))
+        .ok_or_else(|| {
+            format!(
+                "Did not open {}: it is no longer a file inside the workspace",
+                path.display()
+            )
+        })
+}
+
 pub(crate) fn open_file_in_editor(
     terminal: &mut ratatui::Terminal<crate::tui::color_compat::ColorCompatBackend<std::io::Stdout>>,
     app: &mut App,
@@ -1893,15 +1912,12 @@ pub(crate) fn open_file_in_editor(
 ) {
     // The menu checked this path when it was built; a link can be swapped in
     // before the click, so check again right before the editor gets it.
-    let Some(path) = path
-        .to_str()
-        .and_then(|raw| crate::tui::history::workspace_file(&app.workspace, raw))
-    else {
-        app.status_message = Some(format!(
-            "Did not open {}: it is no longer a file inside the workspace",
-            path.display()
-        ));
-        return;
+    let path = match editor_target(&app.workspace, path) {
+        Ok(path) => path,
+        Err(refusal) => {
+            app.status_message = Some(refusal);
+            return;
+        }
     };
     let path = path.as_path();
     let outcome = crate::tui::external_editor::spawn_editor_for_path(
@@ -3367,6 +3383,38 @@ mod tests {
             Some("No selection to clear"),
             "nothing cleared is not reported as cleared"
         );
+    }
+
+    /// The menu resolved the file when it opened; a link swapped in before
+    /// the click (to `/` or `~/.ssh`) must be refused at launch.
+    #[cfg(unix)]
+    #[test]
+    fn editor_target_rechecks_links_swapped_in_after_the_menu_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path();
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let file = workspace.join("src/a.rs");
+        std::fs::write(&file, "fn a() {}\n").unwrap();
+        assert_eq!(super::editor_target(workspace, &file), Ok(file.clone()));
+
+        // The file becomes a link into ~/.ssh.
+        std::fs::remove_file(&file).unwrap();
+        let ssh =
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
+                .join(".ssh/id_ed25519");
+        std::os::unix::fs::symlink(&ssh, &file).unwrap();
+        let refusal = super::editor_target(workspace, &file).unwrap_err();
+        assert!(
+            refusal.contains("no longer a file inside the workspace"),
+            "{refusal}"
+        );
+
+        // The directory becomes a link to /.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_dir(workspace.join("src")).unwrap();
+        std::os::unix::fs::symlink("/", workspace.join("src")).unwrap();
+        assert!(super::editor_target(workspace, &workspace.join("src/etc/hosts")).is_err());
+        assert!(super::editor_target(workspace, std::path::Path::new("/etc/hosts")).is_err());
     }
 
     /// N9: an OSC 52 / tmux write is never acknowledged, so its receipt says

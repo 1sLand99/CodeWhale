@@ -1100,7 +1100,7 @@
   "CtxMenuCopyRow": "Copia la fila",
   "CtxMenuStopAgent": "Atura l'agent…",
   "CtxMenuStopWork": "Atura…",
-  "CtxMenuConfirmArmed": "Prem Enter un altre cop per confirmar",
+  "CtxMenuConfirmArmed": "{label}: Enter o torna a fer clic per confirmar",
   "WindowPinActive": "Finestra fixada com a mini finestra sempre a sobre",
   "WindowPinReleased": "Finestra restaurada",
   "WindowPinFailed": "El canvi de la finestra ha fallat o no s’ha pogut confirmar. Consulta el registre per obtenir més informació.",

@@ -1100,7 +1100,7 @@
   "CtxMenuCopyRow": "Копіювати рядок",
   "CtxMenuStopAgent": "Зупинити агента…",
   "CtxMenuStopWork": "Зупинити…",
-  "CtxMenuConfirmArmed": "Натисніть Enter ще раз, щоб підтвердити",
+  "CtxMenuConfirmArmed": "{label}: Enter або клацніть ще раз, щоб підтвердити",
   "WindowPinActive": "Вікно закріплено як міні-вікно поверх усіх",
   "WindowPinReleased": "Вікно відновлено",
   "WindowPinFailed": "Не вдалося змінити вікно або підтвердити зміну. Докладні відомості дивіться в журналі.",

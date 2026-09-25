@@ -1123,7 +1123,7 @@
   "CtxMenuCopyRow": "Copiar linha",
   "CtxMenuStopAgent": "Parar agente…",
   "CtxMenuStopWork": "Parar…",
-  "CtxMenuConfirmArmed": "Pressione Enter de novo para confirmar",
+  "CtxMenuConfirmArmed": "{label}: Enter ou clique de novo para confirmar",
   "WindowPinActive": "Janela fixada como mini-janela sempre no topo",
   "WindowPinReleased": "Janela restaurada",
   "WindowPinFailed": "A alteração da janela falhou ou não pôde ser confirmada. Consulte o registro para mais detalhes.",

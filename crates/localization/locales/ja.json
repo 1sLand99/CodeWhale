@@ -1123,7 +1123,7 @@
   "CtxMenuCopyRow": "行をコピー",
   "CtxMenuStopAgent": "エージェントを停止…",
   "CtxMenuStopWork": "停止…",
-  "CtxMenuConfirmArmed": "もう一度 Enter で確定",
+  "CtxMenuConfirmArmed": "{label}: Enter かもう一度クリックで確定",
   "WindowPinActive": "最前面のミニウィンドウとして固定しました",
   "WindowPinReleased": "ウィンドウを復元しました",
   "WindowPinFailed": "ウィンドウの変更に失敗したか、確認できませんでした。詳細はログを確認してください。",
