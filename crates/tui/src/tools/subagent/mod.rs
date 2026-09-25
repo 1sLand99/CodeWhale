@@ -92,6 +92,7 @@ use coord::{
 
 pub mod advisor;
 mod budget_handback;
+mod cloud_proposal;
 pub mod coord;
 mod delivery;
 mod governor;
@@ -10095,6 +10096,11 @@ impl ToolSpec for AgentTool {
                     "type": "string",
                     "description": "The focused task to give the worker. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots."
                 },
+                "runtime": {
+                    "type": "string",
+                    "enum": ["local", "cloud"],
+                    "description": "For action=start. local (default) runs the agent here. cloud only proposes a long job for a cloud sandbox that raises a branch and opens a PR: it starts nothing and spends nothing, and returns a job the person confirms with /dispatch confirm <id>. Never confirm it yourself. Pass only prompt, plus remote (github, cnb or gitee) when the repository has several forges."
+                },
                 "detached": {
                     "type": "boolean",
                     "description": "Default children continue after ordinary parent turn completion and remain explicitly cancellable. true additionally opts this subtree out of parent-turn cancellation; its own budgets still apply."
@@ -10275,6 +10281,11 @@ impl ToolSpec for AgentTool {
                 | AgentToolAction::Peek
                 | AgentToolAction::Wait,
             ) => ApprovalRequirement::Auto,
+            // A cloud proposal spawns and spends nothing; the person's
+            // `/dispatch confirm` is its gate.
+            Ok(AgentToolAction::Start) if cloud_proposal::is_cloud_start(input) => {
+                ApprovalRequirement::Auto
+            }
             Ok(AgentToolAction::Start) if start_requests_read_only_role(input) => {
                 ApprovalRequirement::Auto
             }
@@ -10327,7 +10338,17 @@ impl ToolSpec for AgentTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let action = parse_agent_tool_action(&input)?;
         match action {
-            AgentToolAction::Start => {}
+            AgentToolAction::Start => {
+                if cloud_proposal::parse_start_runtime(&input)?
+                    == cloud_proposal::StartRuntime::Cloud
+                {
+                    return cloud_proposal::propose_cloud_run(
+                        &input,
+                        &context.workspace,
+                        self.runtime.spawn_depth,
+                    );
+                }
+            }
             AgentToolAction::Roster => {
                 let mut runtime = self.runtime.clone();
                 refresh_spawn_route_sources(&mut runtime);

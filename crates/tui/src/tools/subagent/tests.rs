@@ -5845,6 +5845,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "profile",
         "prompt",
         "resume_from",
+        "runtime",
         "thinking",
         "type",
         "until",
