@@ -7,10 +7,10 @@ html {
 }
 
 body {
-  /* The sheet: one opaque paper field. The descent into the water is drawn
-     by the waterline band and the ocean column, never by a page gradient. */
-  background: var(--paper);
-  color: var(--ink);
+  /* The twilight floor: one opaque field in the page's appearance. The one
+     descent into the stage is a hard horizon, never a page gradient. */
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--font-body);
   font-feature-settings: "ss01", "cv11", "tnum";
   max-width: 100%;
@@ -27,26 +27,8 @@ main, header, footer, nav { position: relative; z-index: 1; }
    with a little negative tracking on the big headings. Code uses the system
    monospace stack. No serif, no all-caps, no wide tracking. */
 .font-display { font-family: var(--font-display); font-weight: 600; }
-.font-condensed { font-family: var(--font-display); font-weight: 600; }
 .font-cjk { font-family: var(--font-cjk); }
 
-/* CJK paragraph rhythm — looser leading, wider tracking for body; tighter for headings */
-.cjk-body {
-  line-height: 1.9;
-  letter-spacing: 0.02em;
-  word-break: break-all;
-}
-.cjk-heading {
-  letter-spacing: -0.01em;
-}
-.cjk-prose p {
-  line-height: 1.9;
-  letter-spacing: 0.02em;
-}
-/* Full-width punctuation should use CJK spacing */
-.cjk-prose {
-  font-feature-settings: "halt", "pwid";
-}
 .font-mono { font-family: var(--font-mono); }
 
 /* ---------- the ` · ` chain ---------- */
@@ -166,16 +148,6 @@ html[lang="ko"] h3 {
   padding-block: var(--section-pad);
 }
 
-.double-rule {
-  background-image:
-    linear-gradient(var(--hairline), var(--hairline)),
-    linear-gradient(var(--hairline), var(--hairline));
-  background-size: 100% 1px, 100% 1px;
-  background-position: top, bottom;
-  background-repeat: no-repeat;
-  padding: 0.45rem 0;
-}
-
 .col-rule > * + * {
   border-left: 1px solid var(--hairline);
 }
@@ -244,73 +216,64 @@ html[lang="ko"] h3 {
 
 /* ---------- numbers ---------- */
 .tabular { font-variant-numeric: tabular-nums; }
-.bignum {
-  font-family: var(--font-body);
-  font-weight: 600;
-  font-size: 2.2rem;
-  line-height: 1;
-  letter-spacing: -0.04em;
-  font-variant-numeric: tabular-nums;
-}
 
 /* ---------- code blocks ---------- */
+/* Code is set into the floor: the recessed surface, no border, the page's
+   own ink. Prompts and comments recede to muted; keys stay in the text ink
+   at 500. Nothing here is decorative colour. */
 pre.code-block {
-  background: var(--code-bg);
-  color: var(--code-fg);
+  background: var(--surface);
+  color: var(--text);
   max-width: 100%;
   min-width: 0;
-  padding: 1rem 1.1rem;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
   font-family: var(--font-mono);
   font-size: var(--text-mono);
   line-height: 1.55;
-  border: 1px solid var(--stage-line);
+  border: 0;
   border-radius: var(--radius-surface);
   overflow-x: auto;
   position: relative;
   white-space: pre;
+  tab-size: 2;
   -webkit-overflow-scrolling: touch;
 }
-pre.code-block::before {
-  content: "";
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 1px;
-  background: var(--hairline);
-}
-pre.code-block .prompt { color: var(--action-on-dark); }
-pre.code-block .comment { color: var(--gpui-stage-ink-dim); }
-pre.code-block .key { color: var(--signal-gold); }
-
-@media (max-width: 640px) {
-  pre.code-block { padding: 0.85rem 0.95rem; }
-}
+pre.code-block .prompt,
+pre.code-block .comment { color: var(--muted); }
+pre.code-block .key { color: var(--text); font-weight: 500; }
 
 code.inline {
-  background: var(--paper-deep);
-  border: 1px solid var(--hairline);
-  padding: 0.05rem 0.32rem;
+  background: var(--surface);
+  padding: 0.0625rem 0.3125rem;
   font-family: var(--font-mono);
-  font-size: 0.85em;
+  font-size: 0.875em;
   border-radius: var(--radius-control);
+  overflow-wrap: anywhere;
 }
 
 
 /* ---------- search ---------- */
+/* The legacy search input takes the search-field recipe: a recessed
+   field whose edge identifies it (--line-strong, 3:1), ringed on focus. No
+   hover colour: only focus goes blue. */
 .search-input {
+  width: 100%;
+  min-height: 2.5rem;
   font-family: var(--font-body);
-  font-size: 1rem;
-  padding: 0.75rem 2.5rem 0.75rem 1rem;
-  background: var(--paper);
-  color: var(--ink);
-  border: 1px solid var(--hairline);
-  transition: border-color var(--dur-state) var(--ease-spring);
+  font-size: var(--text-body);
+  padding-block: var(--space-2);
+  padding-inline: var(--space-3) var(--space-6);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  transition: border-color var(--dur-state) var(--ease-out);
 }
-.search-input::placeholder { color: var(--ink-mute); }
-.search-input:focus { border-color: var(--ring); }
+.search-input::placeholder { color: var(--muted); }
+.search-input:focus-visible { border-color: var(--ring); }
 
 mark.search-highlight {
-  background: var(--indigo-pale);
-  color: var(--indigo-deep);
-  padding: 0.02em 0.08em;
-  border-radius: var(--radius-control);
+  background: var(--selection);
+  color: inherit;
 }

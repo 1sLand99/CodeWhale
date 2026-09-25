@@ -102,7 +102,7 @@ def gpui_tokens(data):
         "BG": "background", "TEXT": "foreground", "PANEL": "surface",
         "TEXT_MUTED": "muted_foreground", "BORDER": "border", "SIDEBAR": "sidebar",
         "PRIMARY": "primary", "ON_PRIMARY": "primary_foreground", "ACCENT": "hover",
-        "LIST_ACTIVE": "selected",
+        "LIST_ACTIVE": "selected", "ATTENTION": "attention",
     }
     return [
         (f"{prefix}_{name}", tuple(bytes.fromhex(palette[key])))
