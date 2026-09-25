@@ -553,19 +553,11 @@ fn render_workbar(f: &mut Frame, app: &App, area: Rect) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or_default();
-    let lines = crate::tui::widgets::workbar::lines(
-        &runs,
-        area.width,
-        usize::from(area.height),
-        now_ms,
-        &app.ui_theme,
-        app.ui_locale,
-    );
     let buf = f.buffer_mut();
     Block::default()
         .style(Style::default().bg(app.ui_theme.footer_bg))
         .render(area, buf);
-    ratatui::widgets::Paragraph::new(lines).render(area, buf);
+    crate::tui::widgets::workbar::render(area, buf, &runs, now_ms, &app.ui_theme, app.ui_locale);
 }
 
 /// Register the chrome that already answers a click, so it also answers the

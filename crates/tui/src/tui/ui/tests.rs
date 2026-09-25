@@ -295,16 +295,20 @@ fn workbar_rows_sit_under_the_status_row_one_per_workflow() {
         "the status row keeps Esc and names the manage key: {:?}",
         rows[status]
     );
+    // The workbar sits between two rules: rule, one row per run, rule.
+    let rule = "─".repeat(usize::from(width));
+    assert_eq!(rows[status + 1], rule, "rule above the workbar");
     assert!(
-        rows[status + 1].contains("Audit the parser") && rows[status + 1].contains("1/3 so far"),
+        rows[status + 2].contains("Audit the parser") && rows[status + 2].contains("1/3 so far"),
         "first workbar row: {:?}",
-        rows[status + 1]
-    );
-    assert!(
-        rows[status + 2].contains("Port the fixtures") && rows[status + 2].contains("0/3 so far"),
-        "second workbar row: {:?}",
         rows[status + 2]
     );
+    assert!(
+        rows[status + 3].contains("Port the fixtures") && rows[status + 3].contains("0/3 so far"),
+        "second workbar row: {:?}",
+        rows[status + 3]
+    );
+    assert_eq!(rows[status + 4], rule, "rule below the workbar");
     assert!(
         rows[..usize::from(composer.y)]
             .iter()
@@ -313,7 +317,7 @@ fn workbar_rows_sit_under_the_status_row_one_per_workflow() {
     );
     assert_eq!(
         app.viewport.last_workbar_area.map(|area| area.height),
-        Some(2)
+        Some(4)
     );
 }
 

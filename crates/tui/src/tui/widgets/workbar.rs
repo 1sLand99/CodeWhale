@@ -1,11 +1,13 @@
 //! The workbar: live workflow progress under the composer.
 //!
 //! The transcript carries one line when a workflow starts and one when it
-//! finishes (`history.rs`); everything in between lives here, one row per
-//! run, directly under the posture bar:
+//! finishes (`history.rs`); everything in between lives here, under the
+//! composer and its posture bar, one row per run between two rules:
 //!
 //! ```text
+//! ────────────────────────────────────────────────────────────────────────────
 //!  • Compare Cline with Codewhale  ████████░░░░░░░░░░░░  4/10 so far  2m14s  ↓1.2M  ⚠ 1 failed · 2 queued
+//! ────────────────────────────────────────────────────────────────────────────
 //! ```
 //!
 //! Row grammar: status mark · name · 20-cell bar · settled/total · elapsed ·
@@ -50,7 +52,9 @@ pub(crate) struct WorkbarRun<'a> {
     pub queued: usize,
 }
 
-/// Rows the workbar wants for `runs` runs, before the frame's budget.
+/// Rows the workbar wants for `runs` runs, before the frame's budget: one
+/// per run (folded past [`MAX_RUN_ROWS`]) between a rule above and a rule
+/// below. No runs, no rows.
 #[must_use]
 pub(crate) fn desired_rows(runs: usize) -> u16 {
     let rows = if runs > MAX_RUN_ROWS {
@@ -58,7 +62,49 @@ pub(crate) fn desired_rows(runs: usize) -> u16 {
     } else {
         runs
     };
-    u16::try_from(rows).unwrap_or(u16::MAX)
+    let rules = if rows > 0 { 2 } else { 0 };
+    u16::try_from(rows + rules).unwrap_or(u16::MAX)
+}
+
+/// Paint the workbar into `area`: a rule, one row per run, a rule. A band
+/// too short for rules and a run keeps the runs and drops the rules.
+pub(crate) fn render(
+    area: ratatui::layout::Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    runs: &[WorkbarRun<'_>],
+    now_ms: u64,
+    theme: &UiTheme,
+    locale: Locale,
+) {
+    use ratatui::widgets::{Paragraph, Widget};
+    if area.width == 0 || area.height == 0 || runs.is_empty() {
+        return;
+    }
+    let ruled = area.height >= 3;
+    let row_area = if ruled {
+        ratatui::layout::Rect {
+            y: area.y + 1,
+            height: area.height - 2,
+            ..area
+        }
+    } else {
+        area
+    };
+    if ruled {
+        let rule = "─".repeat(usize::from(area.width));
+        let style = Style::default().fg(theme.border);
+        buf.set_string(area.x, area.y, &rule, style);
+        buf.set_string(area.x, area.bottom() - 1, &rule, style);
+    }
+    let rows = lines(
+        runs,
+        row_area.width,
+        usize::from(row_area.height),
+        now_ms,
+        theme,
+        locale,
+    );
+    Paragraph::new(rows).render(row_area, buf);
 }
 
 /// Paint `runs` into at most `max_rows` lines of `width` columns. When the
@@ -586,11 +632,167 @@ mod tests {
             .iter()
             .map(|panel| WorkbarRun { panel, queued: 0 })
             .collect();
-        assert_eq!(desired_rows(runs.len()), MAX_RUN_ROWS as u16 + 1);
-        let snapshot = render(&runs, 100, desired_rows(runs.len()));
+        // Six run rows, the fold row, and the two rules.
+        assert_eq!(desired_rows(runs.len()), MAX_RUN_ROWS as u16 + 3);
+        let snapshot = render(&runs, 100, MAX_RUN_ROWS as u16 + 1);
         let rows: Vec<&str> = snapshot.lines().collect();
         assert_eq!(rows.len(), MAX_RUN_ROWS + 1);
         assert_eq!(rows[MAX_RUN_ROWS], " +6 more · ↓ to manage");
+    }
+
+    fn settled(
+        label: &str,
+        status: WorkflowPanelLifecycle,
+        agents: usize,
+        done: usize,
+    ) -> WorkflowPanel {
+        let mut panel = run(label, NOW - 60_000, agents, done);
+        panel.apply_event(WorkflowPanelEvent::RunCompleted {
+            status,
+            error: None,
+            at_ms: NOW - 1_000,
+        });
+        panel
+    }
+
+    fn render_band(runs: &[WorkbarRun<'_>], width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let area = ratatui::layout::Rect::new(0, 0, width, height);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                super::render(
+                    area,
+                    frame.buffer_mut(),
+                    runs,
+                    NOW,
+                    &codewhale_palette::UI_THEME,
+                    Locale::En,
+                );
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        let area = buf.area;
+        (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_band_is_one_row_per_run_between_two_rules() {
+        let live = run("Audit the parser", NOW - 30_000, 4, 1);
+        let done = settled("Port fixtures", WorkflowPanelLifecycle::Succeeded, 2, 2);
+        let runs = [
+            WorkbarRun {
+                panel: &live,
+                queued: 3,
+            },
+            WorkbarRun {
+                panel: &done,
+                queued: 0,
+            },
+        ];
+        assert_eq!(desired_rows(runs.len()), 4);
+        assert_eq!(desired_rows(0), 0);
+        let rows = buffer_rows(&render_band(&runs, 90, desired_rows(runs.len())));
+        let rule = "─".repeat(90);
+        assert_eq!(
+            rows,
+            vec![
+                rule.clone(),
+                " • Audit the parser  █████░░░░░░░░░░░░░░░  1/4 so far  30s  · 3 queued"
+                    .to_string(),
+                " ✓ Port fixtures     ████████████████████  2/2         59s".to_string(),
+                rule,
+            ]
+        );
+
+        // Too short for rules and a run: the run keeps the row.
+        let rows = buffer_rows(&render_band(&runs[..1], 90, 2));
+        assert!(rows[0].contains("Audit the parser"), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.starts_with('─')), "{rows:?}");
+    }
+
+    /// NO_COLOR / 16-colour / ASCII terminals: every state still reads. Under
+    /// monochrome the text is unchanged and each state keeps its own mark;
+    /// at 16 colours the state inks stay apart; ASCII-safe marks stay apart
+    /// except failed/stopped, which their words tell apart.
+    #[test]
+    fn states_read_on_no_color_sixteen_colour_and_ascii_terminals() {
+        use crate::tui::color_compat::{adapt_cell_colors, adapt_cell_symbol_for_ascii};
+        use codewhale_palette::{ColorDepth, PaletteMode, ThemeId};
+        let theme = codewhale_palette::UI_THEME;
+        let running = run("running", NOW - 10_000, 4, 1);
+        let ok = settled("ok", WorkflowPanelLifecycle::Succeeded, 2, 2);
+        let gaps = settled("gaps", WorkflowPanelLifecycle::Degraded, 2, 1);
+        let failed = settled("failed", WorkflowPanelLifecycle::Failed, 2, 0);
+        let stopped = settled("stopped", WorkflowPanelLifecycle::Cancelled, 2, 0);
+        let panels = [&running, &ok, &gaps, &failed, &stopped];
+        let runs: Vec<WorkbarRun<'_>> = panels
+            .iter()
+            .map(|panel| WorkbarRun { panel, queued: 0 })
+            .collect();
+        let source = render_band(&runs, 100, desired_rows(runs.len()));
+        let text = buffer_rows(&source);
+        let marks: Vec<String> = text[1..=5]
+            .iter()
+            .map(|row| row.chars().nth(1).expect("mark").to_string())
+            .collect();
+        for (index, mark) in marks.iter().enumerate() {
+            assert!(
+                !marks[index + 1..].contains(mark),
+                "state marks collide: {marks:?}"
+            );
+        }
+        assert!(text[3].contains("finished with gaps"), "{text:?}");
+        assert!(text[4].contains("failed"), "{text:?}");
+        assert!(text[5].contains("stopped"), "{text:?}");
+
+        let adapted = |depth: ColorDepth| {
+            let mut buf = source.clone();
+            for cell in buf.content.iter_mut() {
+                adapt_cell_colors(cell, depth, PaletteMode::Dark, ThemeId::Whale, &theme, None);
+            }
+            buf
+        };
+        let mono = adapted(ColorDepth::Monochrome);
+        assert_eq!(buffer_rows(&mono), text, "monochrome changes no text");
+        let ansi16 = adapted(ColorDepth::Ansi16);
+        let mark_ink: Vec<ratatui::style::Color> = (1..=4).map(|y| ansi16[(1, y)].fg).collect();
+        for (index, ink) in mark_ink.iter().enumerate() {
+            assert!(
+                !mark_ink[index + 1..].contains(ink),
+                "16-colour state inks collide: {mark_ink:?}"
+            );
+        }
+
+        let mut ascii = source.clone();
+        for cell in ascii.content.iter_mut() {
+            adapt_cell_symbol_for_ascii(cell);
+        }
+        let ascii_rows = buffer_rows(&ascii);
+        assert!(
+            ascii_rows.iter().all(|row| row.is_ascii()),
+            "{ascii_rows:?}"
+        );
+        let ascii_marks: Vec<char> = ascii_rows[1..=4]
+            .iter()
+            .map(|row| row.chars().nth(1).expect("mark"))
+            .collect();
+        for (index, mark) in ascii_marks.iter().enumerate() {
+            assert!(
+                !ascii_marks[index + 1..].contains(mark),
+                "ASCII marks collide: {ascii_marks:?}"
+            );
+        }
     }
 
     #[test]
