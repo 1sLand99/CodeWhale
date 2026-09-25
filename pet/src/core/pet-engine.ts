@@ -4,7 +4,8 @@ import { compilePetTelemetry, PET_BIN_MS, type PetBucket } from './pet-telemetry
 
 // Engine emits a liveness pulse every 10 seconds for a running operation.
 // Keep a small scheduling margin so one delayed pulse does not erase a valid
-// long operation; after that, the projection becomes generic.
+// long operation from the owner projection; after that, it becomes generic.
+// The physics tape keeps its own, shorter coverage rule (see `pulse`).
 export const ENGINE_OWNER_STALE_MS = 12_000;
 export type OwnerActivityKind = 'reading' | 'editing' | 'searching' | 'testing' | 'executing'
   | 'browsing' | 'computer' | 'memory' | 'tool' | 'thinking' | 'responding' | 'delegating';
@@ -93,7 +94,10 @@ export class PetEngineTelemetry {
     const active = fresh
       ? [...this.active.values()]
         .filter(span => at >= span.startedAtMs && at - span.event.endTime <= ENGINE_OWNER_STALE_MS)
-        .sort((a, b) => b.startedAtMs - a.startedAtMs || a.key.localeCompare(b.key))
+        // The parent's own work leads; delegated agents are counted in
+        // `parallelAgentCount` and only lead when nothing else is active.
+        .sort((a, b) => Number(a.group === 'agent') - Number(b.group === 'agent')
+          || b.startedAtMs - a.startedAtMs || a.key.localeCompare(b.key))
       : [];
     const agents = active.filter(span => span.group === 'agent').length;
     const terminalFresh = fresh && this.terminalAt !== undefined
@@ -105,7 +109,6 @@ export class PetEngineTelemetry {
       else if (terminalFresh && this.turnOutcome) authoritativePresence = 'idle';
       else if (active.length > 0 || this.turnId) authoritativePresence = 'working';
     }
-    const terminal = this.turnOutcome !== undefined && this.turnId !== undefined;
     const activityKind = fresh && authoritativePresence !== 'needs_you'
       && authoritativePresence !== 'done' && authoritativePresence !== 'idle'
       ? active[0]?.activityKind
@@ -171,15 +174,17 @@ export class PetEngineTelemetry {
   private pulse(key: string, at: number): void {
     const span = this.active.get(key);
     if (!span) return;
-    if (at - span.event.endTime > ENGINE_OWNER_STALE_MS) {
+    // A resumed stream does not assert tape coverage across its silent
+    // interval; the span itself (and its start) stays active.
+    if (at - span.event.endTime > PET_BIN_MS * 2) {
       const event = this.add(span.event.name, span.event.category, at, span.event.agentId, true);
-      this.active.set(key, { ...span, startedAtMs: at, event });
+      this.active.set(key, { ...span, event });
     } else {
       span.event.endTime = at;
     }
   }
 
-  private finish(key: string, at: number, status: 'success' | 'error' | 'unknown' = 'success'): ActiveSpan | undefined {
+  private finish(key: string, at: number, status: 'success' | 'unknown' = 'success'): ActiveSpan | undefined {
     if (!this.active.has(key)) return undefined;
     this.pulse(key, at);
     const span = this.active.get(key);
@@ -303,8 +308,10 @@ export class PetEngineTelemetry {
         if (!OPERATION_OUTCOMES.includes(event.outcome as OwnerOperationOutcome))
           throw new Error('Missing Engine operation outcome.');
         const outcome = event.outcome as OwnerOperationOutcome;
+        // A failure is recorded once, as its own onset event below; marking
+        // the span `error` too would count it twice on the tape.
         const completed = this.finish(`operation:${spanId}`, at,
-          outcome === 'failed' ? 'error' : outcome === 'succeeded' ? 'success' : 'unknown');
+          outcome === 'succeeded' ? 'success' : 'unknown');
         if (completed && this.addOnce(this.completedSpans, spanId, 4096)) {
           if (outcome === 'failed') {
             this.add('operation_failed', 'error', at).status = 'error';
