@@ -1624,6 +1624,12 @@ impl HookExecutor {
         &self.config
     }
 
+    /// The workspace hooks run in unless a hook names its own directory.
+    #[must_use]
+    pub fn default_working_dir(&self) -> &std::path::Path {
+        &self.default_working_dir
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }

@@ -1320,6 +1320,20 @@ also how a client sees model-spawned work.
   respect: a `binding: "host"` row is never submitted as a model prompt, and
   a user command shadowing a builtin name wins that spelling.
 
+**Hooks**
+- `GET /v1/hooks[?thread_id=...]` — `{workspace, enabled, hooks: [...],
+  problems: [...]}`: the hook set Runtime API threads run for that workspace
+  (the server workspace, or the named thread's). Per entry: `name`, `event`,
+  `command` (credential-shaped values masked), `background`, `timeout_secs`,
+  and `source` (`global` user config, `plugin` reviewed plugin, `project`
+  trusted and approved `.codewhale/hooks.toml`). `problems` lists hooks
+  rejected or warned about at load, one line each.
+
+  Every Runtime thread builds its engine with this set: `tool_call_before`
+  can deny a call, `shell_env` applies to shell tools, and `tool_call_after`
+  and `on_error` (for a failed tool) fire as observers, as they do in the TUI.
+  Clients read this route instead of keeping a hook table of their own.
+
 **Context** (per-thread context pressure, APPS-90)
 - `GET /v1/threads/{id}/context` — `input_tokens` (the conservative live
   estimate the visible meter uses), `billed_input_tokens` (last

@@ -6801,6 +6801,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
+            hook_executor: None,
             client_preflight_required: false,
         },
     );
@@ -6822,6 +6823,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
+            hook_executor: None,
             client_preflight_required: false,
         },
     );
@@ -18272,6 +18274,67 @@ fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Resul
     assert_eq!(
         manager.approval_decision_timeout(),
         Some(Duration::from_secs(45))
+    );
+    Ok(())
+}
+
+/// B4: a Runtime thread's tool completion fires `tool_call_after`, and a
+/// failed call also fires `on_error`, through the thread's executor.
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_tool_completion_fires_after_and_error_hooks() -> Result<()> {
+    use crate::hooks::{Hook, HookEvent, HooksConfig};
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("hooks.log");
+    let append = |label: &str| {
+        format!(
+            "printf '%s %s %s\\n' {label} \"$CODEWHALE_TOOL_CALL_ID\" \"$DEEPSEEK_TOOL_SUCCESS\" >> {}",
+            log.display()
+        )
+    };
+    let manager = test_manager(test_runtime_dir())?;
+    let mut config = Config::default();
+    config.hooks = Some(HooksConfig {
+        hooks: vec![
+            Hook::new(HookEvent::ToolCallAfter, &append("after")),
+            Hook::new(HookEvent::OnError, &append("error")),
+        ],
+        enabled: true,
+        ..HooksConfig::default()
+    });
+    let hooks = manager.hook_executor_for_workspace(&config, dir.path(), None);
+    fire_runtime_tool_completion_hooks(
+        &hooks,
+        "thr_1",
+        "call-ok",
+        "exec_command",
+        &Ok(crate::tools::spec::ToolResult::success("fine")),
+    );
+    fire_runtime_tool_completion_hooks(
+        &hooks,
+        "thr_1",
+        "call-bad",
+        "exec_command",
+        &Ok(crate::tools::spec::ToolResult::error("exit 1")),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.lines().count() >= 3 || Instant::now() >= deadline {
+            break text;
+        }
+        sleep(Duration::from_millis(20)).await;
+    };
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            "after call-bad false",
+            "after call-ok true",
+            "error call-bad false"
+        ],
+        "{text}"
     );
     Ok(())
 }
