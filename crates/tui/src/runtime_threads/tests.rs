@@ -18246,11 +18246,13 @@ fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Resul
     let manager = test_manager(test_runtime_dir())?;
     assert_eq!(manager.approval_decision_timeout(), None);
 
-    let mut config = Config::default();
-    config.tools = Some(crate::config::ToolsConfig {
-        user_input_timeout_seconds: Some(300),
-        ..Default::default()
-    });
+    let mut config = Config {
+        tools: Some(crate::config::ToolsConfig {
+            user_input_timeout_seconds: Some(300),
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
     let manager = RuntimeThreadManager::open(
         config.clone(),
         PathBuf::from("."),
@@ -18293,15 +18295,17 @@ async fn runtime_tool_completion_fires_after_and_error_hooks() -> Result<()> {
         )
     };
     let manager = test_manager(test_runtime_dir())?;
-    let mut config = Config::default();
-    config.hooks = Some(HooksConfig {
-        hooks: vec![
-            Hook::new(HookEvent::ToolCallAfter, &append("after")),
-            Hook::new(HookEvent::OnError, &append("error")),
-        ],
-        enabled: true,
-        ..HooksConfig::default()
-    });
+    let config = Config {
+        hooks: Some(HooksConfig {
+            hooks: vec![
+                Hook::new(HookEvent::ToolCallAfter, &append("after")),
+                Hook::new(HookEvent::OnError, &append("error")),
+            ],
+            enabled: true,
+            ..HooksConfig::default()
+        }),
+        ..Config::default()
+    };
     let hooks = manager.hook_executor_for_workspace(&config, dir.path(), None);
     fire_runtime_tool_completion_hooks(
         &hooks,

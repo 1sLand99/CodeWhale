@@ -151,8 +151,8 @@ async fn get_v1_hooks_serves_the_runtime_hook_set() -> Result<()> {
     let sessions_dir = root.join("sessions");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace)?;
-    let mut config = Config::default();
-    config.hooks = Some(crate::hooks::HooksConfig {
+    let config = Config {
+        hooks: Some(crate::hooks::HooksConfig {
         hooks: vec![
             crate::hooks::Hook::new(
                 crate::hooks::HookEvent::ToolCallAfter,
@@ -162,7 +162,9 @@ async fn get_v1_hooks_serves_the_runtime_hook_set() -> Result<()> {
         ],
         enabled: true,
         ..crate::hooks::HooksConfig::default()
-    });
+    }),
+        ..Config::default()
+    };
 
     let Some((addr, _runtime_threads, handle)) =
         spawn_test_server_with_root_token_mobile_workspace_and_overrides(
