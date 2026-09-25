@@ -60,6 +60,9 @@ pub(crate) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     // re-pin every time a skill was used, against ~134 pinned bytes to have
     // it eager beside the index the prefix already carries.
     "load_skill",
+    // A question is a user decision, not a catalog discovery task. Keep the
+    // existing posture/host gate; only remove the discovery hop.
+    "request_user_input",
 ];
 
 const CORE_ACTION_TOOL_FALLBACKS: &[CoreActionToolFallback] = &[

@@ -12,11 +12,6 @@ use crate::core::events::Event;
 use crate::tools::spec::ToolError;
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 
-/// Absent `[tools] user_input_timeout_seconds` waits until the person
-/// answers or cancels, the same as an approval. A question that expires
-/// on its own is the model deciding the answer. An explicit value still
-/// bounds the wait; `0` is the same indefinite wait.
-
 /// How often a parked wait says it is still parked.
 ///
 /// A wait with no deadline and no periodic line is indistinguishable from a

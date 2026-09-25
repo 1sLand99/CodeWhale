@@ -10962,7 +10962,7 @@ fn core_primitives_and_todo_write_default_to_eager() {
 
 #[test]
 fn default_active_contract_keeps_discovery_and_core_tools_eager() {
-    const EXPECTED_NATIVE: [&str; 11] = [
+    const EXPECTED_NATIVE: [&str; 12] = [
         "read",
         "write",
         "edit",
@@ -10974,6 +10974,7 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
         "get_goal",
         "update_goal",
         "load_skill",
+        "request_user_input",
     ];
     assert_eq!(
         default_active_native_tool_names(),
@@ -11021,6 +11022,7 @@ fn non_yolo_mode_retains_default_defer_policy() {
         "agent",
         "todo_write",
         "load_skill",
+        REQUEST_USER_INPUT_NAME,
     ] {
         assert!(!should_default_defer_tool(core, &always_load));
     }
@@ -11030,7 +11032,6 @@ fn non_yolo_mode_retains_default_defer_policy() {
         "Git",
         "Run",
         "remember",
-        REQUEST_USER_INPUT_NAME,
         "read_file",
         "edit_file",
         "apply_patch",
@@ -12325,7 +12326,7 @@ fn model_tool_catalog_defers_non_core_native_tools_in_act_mode() {
 }
 
 #[test]
-fn request_user_input_stays_deferred_but_can_be_dynamically_activated() {
+fn request_user_input_is_eager_when_the_host_allows_questions() {
     let always_load = HashSet::new();
     let catalog = build_model_tool_catalog(
         vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
@@ -12339,19 +12340,18 @@ fn request_user_input_stays_deferred_but_can_be_dynamically_activated() {
             .iter()
             .find(|tool| tool.name == REQUEST_USER_INPUT_NAME)
             .and_then(|tool| tool.defer_loading),
-        Some(true)
+        Some(false)
     );
 
-    let mut active = initial_active_tools(&catalog);
-    assert!(!active.contains(REQUEST_USER_INPUT_NAME));
-    active.insert(REQUEST_USER_INPUT_NAME.to_string());
+    let active = initial_active_tools(&catalog);
+    assert!(active.contains(REQUEST_USER_INPUT_NAME));
 
     let active_tools = active_tools_for_step(&catalog, &active);
     assert!(
         active_tools
             .iter()
             .any(|tool| tool.name == REQUEST_USER_INPUT_NAME),
-        "dynamic active tools should expose the question modal without making it eager by default"
+        "the question modal should be available without a discovery call"
     );
 }
 
@@ -20230,37 +20230,7 @@ fn tool_search_activates_discovered_deferred_tools() {
 
 #[test]
 fn tool_search_scenario() {
-    // Scenario consolidation of: tool_search_can_discover_request_user_input_modal_tool, tool_search_defaults_to_eight_results_for_regex_and_bm25, tool_search_respects_and_caps_max_results, tool_search_schema_exposes_max_results_default_and_cap
-    // from tool_search_can_discover_request_user_input_modal_tool
-    {
-        let always_load = HashSet::new();
-        let mut catalog = build_model_tool_catalog(
-            vec![api_tool(REQUEST_USER_INPUT_NAME)],
-            Vec::new(),
-            AppMode::Agent,
-            &always_load,
-        );
-        ensure_advanced_tooling(
-            &mut catalog,
-            AppMode::Agent,
-            &always_load,
-            crate::core::engine::tool_catalog::ToolMode::Direct,
-        );
-
-        let mut active = initial_active_tools(&catalog);
-        assert!(!active.contains(REQUEST_USER_INPUT_NAME));
-
-        let result = execute_tool_search(
-            TOOL_SEARCH_NAME,
-            &json!({"query":"ask user question"}),
-            &catalog,
-            &mut active,
-        )
-        .expect("search succeeds");
-
-        assert!(result.success);
-        assert!(active.contains(REQUEST_USER_INPUT_NAME));
-    }
+    // Scenario consolidation of: tool_search_defaults_to_eight_results_for_regex_and_bm25, tool_search_respects_and_caps_max_results, tool_search_schema_exposes_max_results_default_and_cap
     // from tool_search_defaults_to_eight_results_for_regex_and_bm25
     {
         let catalog = tool_search_catalog_with_matches(25);
