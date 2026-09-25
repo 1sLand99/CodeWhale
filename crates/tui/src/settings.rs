@@ -2612,7 +2612,7 @@ fn normalize_reasoning_effort_setting(value: &str) -> Result<Option<String>> {
 }
 
 /// Parse a boolean value from various formats
-fn parse_bool(value: &str) -> Result<bool> {
+pub(crate) fn parse_bool(value: &str) -> Result<bool> {
     match value.to_lowercase().as_str() {
         "on" | "true" | "yes" | "1" | "enabled" => Ok(true),
         "off" | "false" | "no" | "0" | "disabled" => Ok(false),
@@ -5630,7 +5630,19 @@ zai = ["GLM-5.2", "GLM-5.3"]
         ];
         for (spellings, value) in cases {
             let canonical = spellings[0];
+            // `config set`, `/config` and `config doctor` route and suggest
+            // from the schema by this canonical key; a `/set` spelling with
+            // no declaration would be settable but unplaceable.
+            assert!(
+                codewhale_config::setting(canonical).is_some(),
+                "`/set {canonical}` is accepted but undeclared in SETTINGS_SCHEMA"
+            );
             for spelling in *spellings {
+                assert_eq!(
+                    Settings::canonical_key(spelling),
+                    Some(canonical),
+                    "{spelling}"
+                );
                 let mut settings = Settings::default();
                 assert_eq!(settings.provenance(canonical), Layer::Default);
                 settings
@@ -5647,6 +5659,11 @@ zai = ["GLM-5.2", "GLM-5.3"]
                     "{spelling} does not resolve to its own layer"
                 );
             }
+        }
+        // `default_model` has no provenance case above; check its spellings too.
+        for spelling in ["default_model", "model"] {
+            let canonical = Settings::canonical_key(spelling).expect("model spelling");
+            assert!(codewhale_config::setting(canonical).is_some(), "{spelling}");
         }
     }
 

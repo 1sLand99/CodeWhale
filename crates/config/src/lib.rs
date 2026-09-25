@@ -2981,6 +2981,15 @@ impl ConfigToml {
             "telemetry_endpoint" => self.telemetry_endpoint = Some(value.to_string()),
             "approval_policy" => self.approval_policy = Some(value.to_string()),
             "sandbox_mode" => self.sandbox_mode = Some(value.to_string()),
+            // The TUI reader (`ReasoningEffort::parse_strict`) owns this
+            // vocabulary and accepts aliases the schema's option list does
+            // not name (`none`, `mid`, `maximum`, ...), so the schema check
+            // below would refuse values that take effect. `codewhale config
+            // set` validates against that reader before calling here.
+            "reasoning_effort" => {
+                self.extras
+                    .insert(key.to_string(), toml::Value::String(value.to_string()));
+            }
             "hook_sinks.unix_socket_path" => {
                 self.hook_sinks
                     .get_or_insert_with(HookSinksToml::default)

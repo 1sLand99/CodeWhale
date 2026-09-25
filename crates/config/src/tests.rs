@@ -9638,6 +9638,16 @@ fn declared_setting_writes_keep_schema_type_and_refuse_bad_values() {
         "refusals change nothing"
     );
 
+    // `reasoning_effort` keeps its reader's aliases, which the schema's
+    // option list does not name; the TUI reader validates them.
+    for alias in ["none", "mid", "maximum", "minimum"] {
+        config.set_value("reasoning_effort", alias).unwrap();
+        assert_eq!(
+            config.extras["reasoning_effort"],
+            toml::Value::String(alias.into())
+        );
+    }
+
     // Undeclared keys keep the string fallthrough; `config set` refuses the
     // ones nothing reads before calling here.
     config.set_value("skills_dir", "/tmp/skills").unwrap();

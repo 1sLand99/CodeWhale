@@ -191,6 +191,82 @@ pub fn settings_value(key: &str) -> Result<Option<String>> {
     Ok(Settings::load_persisted()?.value(key))
 }
 
+/// The canonical settings.toml keys: each declared setting that `/set`
+/// accepts under its own name. Internal flags, actions, receipts and retired
+/// schema defs are not settable and are left out, so `/config <key>` and its
+/// did-you-mean only ever name a key a user can change.
+pub(crate) fn settings_toml_keys() -> impl Iterator<Item = &'static str> {
+    SETTINGS_SCHEMA
+        .iter()
+        .map(|def| def.key)
+        .filter(|key| Settings::canonical_key(key) == Some(*key))
+}
+
+/// The TOML value `codewhale config set` stores for a config.toml root key
+/// whose reader needs more than `ConfigToml::set_value`'s string fallthrough,
+/// or `Ok(None)` when that fallthrough is already right.
+///
+/// - `reasoning_effort` is checked against its reader,
+///   [`ReasoningEffort::parse_strict`], and stored in canonical spelling.
+/// - A root field the TUI [`Config`] reads but `SETTINGS_SCHEMA` does not
+///   declare (`yolo`, `max_subagents`, `mcp_oauth_callback_port`, ...) is
+///   typed by that field's own deserializer: a string in a boolean or
+///   integer field fails the TUI's strict parse of the whole file, so the
+///   value is stored as the first of string, boolean, integer or number the
+///   field accepts, and refused when it accepts none.
+///
+/// [`ReasoningEffort::parse_strict`]: crate::reasoning_preference::ReasoningEffort::parse_strict
+pub fn config_toml_value(key: &str, value: &str) -> Result<Option<toml::Value>> {
+    let key = key.trim();
+    if key == "reasoning_effort" {
+        let effort = crate::reasoning_preference::ReasoningEffort::parse_strict(value)
+            .map_err(|error| anyhow::anyhow!("invalid value for '{key}': {error}"))?;
+        return Ok(Some(toml::Value::String(effort.as_setting().to_string())));
+    }
+    if key.contains('.')
+        || codewhale_config::setting(key).is_some()
+        || !tui_config_fields().contains(&key)
+        || is_config_toml_typed_field(key)
+    {
+        return Ok(None);
+    }
+    let text = toml::Value::String(value.to_string());
+    if tui_config_accepts(key, &text) {
+        return Ok(None);
+    }
+    let trimmed = value.trim();
+    let candidates = [
+        crate::settings::parse_bool(trimmed)
+            .ok()
+            .map(toml::Value::Boolean),
+        trimmed.parse::<i64>().ok().map(toml::Value::Integer),
+        trimmed
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
+            .map(toml::Value::Float),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| tui_config_accepts(key, candidate))
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid value '{value}' for '{key}': its config.toml reader does not accept \
+                 it. Edit `{key}` in config.toml with a TOML value of the documented type. \
+                 No value was changed."
+            )
+        })
+}
+
+/// Whether the TUI [`Config`] deserializes `value` at root key `key`.
+fn tui_config_accepts(key: &str, value: &toml::Value) -> bool {
+    let mut probe = toml::Table::new();
+    probe.insert(key.to_string(), value.clone());
+    toml::Value::Table(probe).try_into::<Config>().is_ok()
+}
+
 /// One line per config.toml root key that nothing reads, for `config doctor`.
 /// A settings.toml key is named as misplaced so the fix is obvious.
 #[must_use]
@@ -276,6 +352,76 @@ mod tests {
 
         let message = unknown_config_key_message("zzqqxxyy");
         assert!(!message.contains("Did you mean"), "{message}");
+    }
+
+    #[test]
+    fn config_toml_value_types_fields_by_their_reader() {
+        // Typed TUI fields the schema does not declare get their field's type.
+        assert_eq!(
+            config_toml_value("yolo", "true").unwrap(),
+            Some(toml::Value::Boolean(true))
+        );
+        assert_eq!(
+            config_toml_value("strict_tool_mode", "off").unwrap(),
+            Some(toml::Value::Boolean(false))
+        );
+        assert_eq!(
+            config_toml_value("max_subagents", " 4 ").unwrap(),
+            Some(toml::Value::Integer(4))
+        );
+        assert_eq!(
+            config_toml_value("mcp_oauth_callback_port", "8765").unwrap(),
+            Some(toml::Value::Integer(8765))
+        );
+        // A value the field cannot hold is refused, not stored as text.
+        for (key, value) in [
+            ("yolo", "flase"),
+            ("max_subagents", "lots"),
+            ("mcp_oauth_callback_port", "70000"),
+        ] {
+            let error = config_toml_value(key, value).expect_err(key);
+            assert!(
+                format!("{error:#}").contains(&format!("invalid value '{value}' for '{key}'")),
+                "{error:#}"
+            );
+        }
+        // String fields, schema-declared keys and dotted keys keep
+        // `ConfigToml::set_value`.
+        assert_eq!(
+            config_toml_value("skills_dir", "/tmp/skills").unwrap(),
+            None
+        );
+        assert_eq!(config_toml_value("allow_shell", "on").unwrap(), None);
+        assert_eq!(
+            config_toml_value("providers.deepseek.model", "x").unwrap(),
+            None
+        );
+
+        // `reasoning_effort` accepts its reader's aliases, canonicalized.
+        for (alias, canonical) in [("none", "off"), ("mid", "medium"), ("maximum", "max")] {
+            assert_eq!(
+                config_toml_value("reasoning_effort", alias).unwrap(),
+                Some(toml::Value::String(canonical.into())),
+                "{alias}"
+            );
+        }
+        assert!(config_toml_value("reasoning_effort", "bogus").is_err());
+    }
+
+    #[test]
+    fn settings_toml_keys_are_user_settable_only() {
+        let keys: Vec<&str> = settings_toml_keys().collect();
+        assert!(keys.contains(&"calm_mode"), "{keys:?}");
+        assert!(keys.contains(&"auto_compact"), "{keys:?}");
+        for internal in [
+            "feature_intro_shown",
+            "yolo_deprecation_shown",
+            "mcp_open",
+            "fast_model",
+            "effective_auto_compact",
+        ] {
+            assert!(!keys.contains(&internal), "{internal} is not settable");
+        }
     }
 
     #[test]

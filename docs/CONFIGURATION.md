@@ -24,10 +24,14 @@ and nested values apply the same recursive credential redaction as `config dump`
 `config set` supports its named scalar keys and the provider, route, and
 notification commands. It refuses a key that nothing reads and suggests the
 nearest real key (`config set calm_mod on` names `calm_mode`). A settings.toml
-key such as `calm_mode` or `tool_collapse` is validated and written to
-settings.toml, not config.toml; `config get` reads it back from there. A
-declared setting written to config.toml is checked against its declared type
-and stored as a TOML boolean or number (#6563). Other dotted writes fail before
+key such as `calm_mode` or `tool_collapse` is validated and written to the
+user-global settings.toml, not config.toml; `config get` reads it back from
+there even when an old config.toml copy (which nothing reads) is still present,
+and names that copy so you can `config unset` it. Settings keys have no project
+scope, so `--project` refuses them. A config.toml key is checked against the
+type its reader expects and stored as a TOML boolean or number where the
+reader needs one (`yolo = true`, `max_subagents = 4`); `reasoning_effort`
+accepts the same aliases as `/effort` (#6563). Other dotted writes fail before
 modifying the file and name the TOML table to edit. For example, set a tools
 timeout in the file as:
 
