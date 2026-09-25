@@ -4660,19 +4660,12 @@ impl Engine {
         tool_registry: Option<&crate::tools::ToolRegistry>,
         mcp_pool: Option<Arc<AsyncMutex<McpPool>>>,
         mut context: crate::tools::ToolContext,
-        mut mode: AppMode,
+        mode: AppMode,
     ) -> (Result<RichToolResult, ToolError>, bool) {
-        // The program may use what is left of the turn's own wall clock;
-        // both clocks stop while a person decides an approval.
-        let remaining = self
-            .turn_wall_clock
-            .budget()
-            .saturating_sub(self.turn_wall_clock.spent())
-            .max(Duration::from_secs(1));
         let (gate, mut requests) = crate::tools::codemode::NestedCallGate::new(
             mcp_pool.clone(),
             self.tx_event.clone(),
-            remaining,
+            self.nested_program_deadline(),
         );
         context.execution.nested_call_gate = Some(gate);
         let cancel = self.cancel_token.clone();
@@ -4710,13 +4703,23 @@ impl Engine {
                             tool_catalog,
                             active_tool_names,
                             tool_registry,
-                            &mut mode,
+                            mode,
                         )
                         .await;
                     let _ = request.reply.send(verdict);
                 }
             }
         }
+    }
+
+    /// Run deadline for an `execute_tools` program: what is left of the
+    /// turn's own wall clock (never a fixed constant, #6509). Both clocks
+    /// stop while a person decides an approval.
+    fn nested_program_deadline(&self) -> Duration {
+        self.turn_wall_clock
+            .budget()
+            .saturating_sub(self.turn_wall_clock.spent())
+            .max(Duration::from_secs(1))
     }
 
     /// Decide one nested `execute_tools` call through the direct-call gate.
@@ -4731,7 +4734,7 @@ impl Engine {
         tool_catalog: &[codewhale_models::Tool],
         active_tool_names: &mut std::collections::HashSet<String>,
         tool_registry: Option<&crate::tools::ToolRegistry>,
-        mode: &mut AppMode,
+        mode: AppMode,
     ) -> crate::tools::codemode::NestedCallVerdict {
         use crate::tools::codemode::{NestedCallVerdict, NestedDecision};
 
@@ -4741,7 +4744,6 @@ impl Engine {
         // planned under a stale posture, and let the model retry directly.
         if !nested_gate_env.authority_changed && self.apply_pending_runtime_authority().await {
             nested_gate_env.authority_changed = true;
-            *mode = self.current_mode;
         }
         if nested_gate_env.authority_changed {
             return NestedCallVerdict::Refused {
@@ -4749,18 +4751,6 @@ impl Engine {
                     "Permissions changed while this execute_tools program was running; the nested call did not run. Return from the program and retry the remaining calls with the current permissions.",
                 ),
                 decision: NestedDecision::Refused,
-            };
-        }
-
-        // Discovery inside a program describes tools without activating
-        // them, so the session-pinned tool array never changes.
-        if is_tool_search_tool(&name) {
-            return match super::tool_catalog::describe_tools_for_program(&input, tool_catalog) {
-                Ok(result) => NestedCallVerdict::Answered { result },
-                Err(error) => NestedCallVerdict::Refused {
-                    error,
-                    decision: NestedDecision::Refused,
-                },
             };
         }
 
@@ -4774,7 +4764,11 @@ impl Engine {
             input_buffer: String::new(),
             input_parse_error: None,
         }];
-        let PlannedToolCalls { plans, .. } = self
+        let PlannedToolCalls {
+            plans,
+            mut hook_contexts,
+            ..
+        } = self
             .plan_tool_calls(
                 nested_gate_env.client,
                 nested_gate_env.turn,
@@ -4784,7 +4778,7 @@ impl Engine {
                 tool_registry,
                 active_tool_names,
                 nested_gate_env.tool_call_budget,
-                *mode,
+                mode,
                 nested_gate_env.fleet_denial_guard,
                 ToolCallSource::CodeMode,
             )
@@ -4801,8 +4795,25 @@ impl Engine {
                 decision: NestedDecision::Refused,
             };
         }
+        let hook_context = hook_contexts.remove(&nested_id);
         if let Some(result) = plan.guard_result {
-            return NestedCallVerdict::Answered { result };
+            return NestedCallVerdict::Answered {
+                result,
+                hook_context,
+            };
+        }
+        // Planning resolves a near-miss name (`Agent` -> `agent`) and hooks
+        // may rewrite the input, so the direct-only refusals the program's
+        // raw request passed are checked again on what would actually run.
+        if let Some(note) =
+            crate::tools::codemode::refusal_before_gate(&plan.name, &plan.input, true)
+        {
+            // Admitted by planning but never executed: hand the slot back.
+            nested_gate_env.tool_call_budget.refund();
+            return NestedCallVerdict::Refused {
+                error: ToolError::permission_denied(note),
+                decision: NestedDecision::Refused,
+            };
         }
 
         let decision = if plan.approval_required {
@@ -4874,7 +4885,6 @@ impl Engine {
         let posture_before_drain = self.applied_runtime_authority();
         if self.apply_pending_runtime_authority().await {
             nested_gate_env.authority_changed = true;
-            *mode = self.current_mode;
             if decision != NestedDecision::Approved
                 || self
                     .applied_runtime_authority()
@@ -4887,6 +4897,24 @@ impl Engine {
                     decision: NestedDecision::Refused,
                 };
             }
+        }
+
+        // Discovery inside a program went through the same gates as a direct
+        // search (budget, allow/deny lists, hooks) but only describes tools:
+        // nothing is activated, so the session-pinned tool array and prefix
+        // never change.
+        if is_tool_search_tool(&plan.name) {
+            return match super::tool_catalog::describe_tools_for_program(&plan.input, tool_catalog)
+            {
+                Ok(result) => NestedCallVerdict::Answered {
+                    result,
+                    hook_context,
+                },
+                Err(error) => NestedCallVerdict::Refused {
+                    error,
+                    decision: NestedDecision::Refused,
+                },
+            };
         }
 
         // Same `/undo` snapshot rule as a direct file write (#384).
@@ -4912,6 +4940,7 @@ impl Engine {
             input: plan.input,
             supports_parallel: plan.supports_parallel,
             decision,
+            hook_context,
         }
     }
 

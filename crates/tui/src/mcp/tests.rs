@@ -8604,3 +8604,64 @@ fn computer_use_duplicate_warning_needs_the_builtin_bundle_enabled() {
     );
     assert!(duplicate_computer_use_servers(&config).is_empty());
 }
+
+#[test]
+fn computer_use_duplicate_warning_names_user_copies_of_the_enabled_bundle() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plugin_base = dir.path().join("plugins/computer-use");
+    fs::create_dir_all(plugin_base.join("mcp")).expect("plugin dirs");
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"computer-use\"\nversion = \"1.0.0\"\n",
+    )
+    .expect("plugin manifest");
+    let (_, authority) = active_plugin_fixture(&plugin_base);
+    let mut builtin = stdio_server(vec![
+        plugin_base
+            .join("mcp/server.mjs")
+            .to_string_lossy()
+            .to_string(),
+    ]);
+    builtin.reviewed_plugin = Some(
+        ReviewedPluginMcpSource::from_authority(
+            authority,
+            None,
+            Arc::new(crate::plugins::HostEnvironment::default()),
+        )
+        .expect("reviewed source"),
+    );
+
+    let mut config = McpConfig::default();
+    config
+        .servers
+        .insert("plugin-computer-use".to_string(), builtin);
+    config.servers.insert(
+        "codewhale-cu".to_string(),
+        stdio_server(vec!["/opt/computer-use/mcp/server.mjs".to_string()]),
+    );
+    config.servers.insert(
+        "browser-tools".to_string(),
+        stdio_server(vec!["/opt/tools/mcp/server.mjs".to_string()]),
+    );
+    let mut disabled_copy = stdio_server(vec!["/srv/computer_use/mcp/server.mjs".to_string()]);
+    disabled_copy.enabled = false;
+    config.servers.insert("old-cu".to_string(), disabled_copy);
+
+    // Only the enabled user copy is named, with the argument that gave it
+    // away; the bundle itself, other plugins and disabled entries are not.
+    assert_eq!(
+        duplicate_computer_use_servers(&config),
+        vec![(
+            "codewhale-cu".to_string(),
+            "/opt/computer-use/mcp/server.mjs".to_string()
+        )]
+    );
+
+    // Disabling the built-in bundle removes the warning.
+    config
+        .servers
+        .get_mut("plugin-computer-use")
+        .expect("bundle entry")
+        .enabled = false;
+    assert!(duplicate_computer_use_servers(&config).is_empty());
+}

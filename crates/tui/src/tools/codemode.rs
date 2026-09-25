@@ -26,10 +26,13 @@
 //!
 //! Receipts (#6509): the host records every nested call when it starts, so a
 //! program that hits its deadline still reports what finished, what was
-//! refused, and what was in flight. Oversized nested results keep their
-//! `{content, metadata, truncated}` envelope; `truncated` names the original
-//! size and the spillover file holding the full output instead of silently
-//! swapping the value for a preview.
+//! refused, and what was in flight. Oversized nested results keep the
+//! `{content, metadata, truncated}` keys, and the cut is never silent:
+//! `truncated` names the original size and the spillover file holding the
+//! full output, and `content` becomes the leading text of the raw output
+//! (a JSON result cannot stay parsed once cut), so a script checks
+//! `truncated` before reading fields. A failed call's text is bounded and
+//! spilled the same way.
 //!
 //! KV-cache effect: `[features] code_mode` (on by default) makes
 //! `execute_tools` eager from the first request of a session; with the flag
@@ -126,8 +129,10 @@ pub fn execute_tools_tool_definition() -> Tool {
              the user decides, and a denied or refused call throws inside the program (catch \
              it to continue). Inside a program, tools.call('tool_search', {query}) returns \
              matching tool names with their input schemas without loading them into the \
-             conversation. Each result is {content, metadata, truncated}; truncated is \
-             non-null when a result was cut and names its full size and saved copy. Not \
+             conversation. Each result is {content, metadata, truncated}. When a result is \
+             cut, truncated names its full size and saved copy and content is the leading \
+             text of the raw output instead of parsed JSON, so check truncated before \
+             reading fields. Not \
              available inside programs: agent, workflow, request_user_input, nested \
              execute_tools, interactive shells, sandbox escalation, Computer Use consent or \
              scripts, and MCP sign-in. At most 50 nested calls, 4 concurrent; the return \
@@ -179,9 +184,15 @@ pub(crate) enum NestedCallVerdict {
         input: Value,
         supports_parallel: bool,
         decision: NestedDecision,
+        /// `additionalContext` from tool_call_before hooks (#3026), recorded
+        /// on the call's receipt so it reaches the model.
+        hook_context: Option<String>,
     },
-    /// The engine answered in place (describe-only `tool_search`).
-    Answered { result: ToolResult },
+    /// The engine answered in place (describe-only `tool_search`, a guard).
+    Answered {
+        result: ToolResult,
+        hook_context: Option<String>,
+    },
     /// Do not run it; the error is what the program sees.
     Refused {
         error: ToolError,
@@ -248,9 +259,11 @@ impl NestedCallGate {
     }
 }
 
-/// Refusals decided from the request alone, before the gate: calls that need
-/// the turn loop itself or their own approval card stay direct.
-fn refusal_before_gate(name: &str, input: &Value, gated: bool) -> Option<String> {
+/// Refusals decided from the request alone: calls that need the turn loop
+/// itself or their own approval card stay direct. Checked on the name the
+/// program sent, and again by the turn loop on the name planning resolved it
+/// to (`Agent` resolves to `agent`) and the final, hook-rewritten input.
+pub(crate) fn refusal_before_gate(name: &str, input: &Value, gated: bool) -> Option<String> {
     if PROHIBITED_NESTED.contains(&name) || (!gated && name == "tool_search") {
         return Some(format!(
             "`{name}` is not available inside execute_tools programs; call it directly (use workflow/task() for fan-out)"
@@ -319,6 +332,10 @@ struct CallReceipt {
     bytes: usize,
     truncated: Option<Truncation>,
     note: Option<String>,
+    /// `additionalContext` a tool_call_before hook attached to this call,
+    /// the same text a direct call appends to its result (#3026).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hook_context: Option<String>,
 }
 
 /// Run clock that stops while the program waits on the gate, so a person
@@ -467,6 +484,7 @@ impl CodemodeInvoker {
             bytes: 0,
             truncated: None,
             note: None,
+            hook_context: None,
         });
         seq
     }
@@ -595,8 +613,18 @@ impl CodemodeInvoker {
         match outcome {
             Ok(rich) => {
                 let result = rich.into_result();
-                let (payload, raw_len, truncated) = self.bounded_envelope(seq, name, &result);
                 let success = result.success;
+                let (payload, raw_len, truncated) = if success {
+                    self.bounded_envelope(seq, name, &result)
+                } else {
+                    let raw_len = result.content.len();
+                    let (text, truncated) = bound_text(
+                        result.content,
+                        PER_CALL_RESULT_CAP_BYTES,
+                        &self.spill_id(seq, name),
+                    );
+                    (text, raw_len, truncated)
+                };
                 self.finish(seq, |receipt| {
                     receipt.decision = Some(decision);
                     receipt.status = if success {
@@ -611,11 +639,7 @@ impl CodemodeInvoker {
                 });
                 Ok(ToolCallResponse {
                     ok: success,
-                    result: if success {
-                        payload
-                    } else {
-                        Value::String(result.content)
-                    },
+                    result: payload,
                 })
             }
             Err(err) => {
@@ -642,15 +666,22 @@ impl CodemodeInvoker {
                         Err(DriverError::Unavailable(message))
                     }
                     ToolError::ExecutionFailed { .. } => {
+                        let bytes = message.len();
+                        let (text, truncated) = bound_text(
+                            message,
+                            PER_CALL_RESULT_CAP_BYTES,
+                            &self.spill_id(seq, name),
+                        );
                         self.finish(seq, |receipt| {
                             receipt.decision = Some(decision);
                             receipt.status = CallStatus::Failed;
                             receipt.elapsed_ms = elapsed_ms;
-                            receipt.bytes = message.len();
+                            receipt.bytes = bytes;
+                            receipt.truncated = truncated;
                         });
                         Ok(ToolCallResponse {
                             ok: false,
-                            result: Value::String(message),
+                            result: text,
                         })
                     }
                 }
@@ -658,11 +689,16 @@ impl CodemodeInvoker {
         }
     }
 
+    /// Spillover id for one nested call's full output.
+    fn spill_id(&self, seq: usize, name: &str) -> String {
+        format!("{}-nested-{seq}-{name}", self.spill_prefix)
+    }
+
     /// Stable envelope: the tool's text content (parsed as JSON when it is
     /// JSON), its structured metadata, and `truncated` (null unless cut).
     /// An oversized result keeps the same keys: `content` becomes the head
-    /// of the text and `truncated` says how much there was and where the
-    /// whole output was saved.
+    /// of the raw text (no longer parsed JSON) and `truncated` says how much
+    /// there was and where the whole output was saved.
     fn bounded_envelope(
         &self,
         seq: usize,
@@ -677,8 +713,7 @@ impl CodemodeInvoker {
         if raw.len() <= PER_CALL_RESULT_CAP_BYTES {
             return (payload, raw.len(), None);
         }
-        let spill_id = format!("{}-nested-{seq}-{name}", self.spill_prefix);
-        let spill_path = spill(&spill_id, &raw);
+        let spill_path = spill(&self.spill_id(seq, name), &raw);
         let metadata_len = metadata.to_string().len();
         let metadata = if metadata_len <= PER_CALL_RESULT_CAP_BYTES / 4 {
             metadata
@@ -720,7 +755,7 @@ impl ToolInvoker for CodemodeInvoker {
             return Err(self.refused(seq, started, NestedDecision::Refused, note));
         }
 
-        let (name, input, supports_parallel, decision) = match self.gate.as_ref() {
+        let (name, input, supports_parallel, decision, hook_context) = match self.gate.as_ref() {
             Some(gate) => {
                 let verdict = {
                     let _paused = self.pause();
@@ -732,8 +767,13 @@ impl ToolInvoker for CodemodeInvoker {
                         input,
                         supports_parallel,
                         decision,
-                    } => (name, input, supports_parallel, decision),
-                    NestedCallVerdict::Answered { result } => {
+                        hook_context,
+                    } => (name, input, supports_parallel, decision, hook_context),
+                    NestedCallVerdict::Answered {
+                        result,
+                        hook_context,
+                    } => {
+                        self.finish(seq, |receipt| receipt.hook_context = hook_context);
                         return self.deliver(
                             seq,
                             started,
@@ -751,12 +791,15 @@ impl ToolInvoker for CodemodeInvoker {
                 if let Err(note) = self.ungated_admission(&tool, &input) {
                     return Err(self.refused(seq, started, NestedDecision::Refused, note));
                 }
-                (tool.clone(), input, true, NestedDecision::Auto)
+                (tool.clone(), input, true, NestedDecision::Auto, None)
             }
         };
-        if name != tool {
-            self.finish(seq, |receipt| receipt.tool = name.clone());
-        }
+        self.finish(seq, |receipt| {
+            if name != tool {
+                receipt.tool = name.clone();
+            }
+            receipt.hook_context = hook_context;
+        });
 
         let outcome = if supports_parallel {
             let _shared = self.order.read().await;
@@ -854,11 +897,20 @@ fn bound_json(value: Value, cap: usize, spill_id: &str) -> (Value, Option<Trunca
     if raw.len() <= cap {
         return (value, None);
     }
-    let head = char_prefix(&raw, cap / 2);
+    bound_text(raw, cap, spill_id)
+}
+
+/// Bound `text` to `cap` bytes: an oversized text becomes its head, the
+/// whole text is saved, and the truncation record says so.
+fn bound_text(text: String, cap: usize, spill_id: &str) -> (Value, Option<Truncation>) {
+    if text.len() <= cap {
+        return (Value::String(text), None);
+    }
+    let head = char_prefix(&text, cap / 2);
     let truncation = Truncation {
-        original_bytes: raw.len(),
+        original_bytes: text.len(),
         kept_bytes: head.len(),
-        spill_path: spill(spill_id, &raw),
+        spill_path: spill(spill_id, &text),
     };
     (Value::String(head), Some(truncation))
 }
@@ -1203,6 +1255,7 @@ mod tests {
             input: input.clone(),
             supports_parallel: true,
             decision: NestedDecision::Auto,
+            hook_context: None,
         }
     }
 
@@ -1256,12 +1309,14 @@ mod tests {
         }
         async fn execute(
             &self,
-            _input: Value,
+            input: Value,
             _context: &ToolContext,
         ) -> Result<ToolResult, ToolError> {
-            Ok(ToolResult::success(
-                "y".repeat(PER_CALL_RESULT_CAP_BYTES * 2),
-            ))
+            let text = "y".repeat(PER_CALL_RESULT_CAP_BYTES * 2);
+            if input.get("fail").and_then(Value::as_bool) == Some(true) {
+                return Ok(ToolResult::error(text));
+            }
+            Ok(ToolResult::success(text))
         }
     }
 
@@ -1496,7 +1551,11 @@ mod tests {
             .with_tool(Arc::new(HugeTool))
             .build(context.clone());
         let code = "const r = await tools.call('huge', {}); \
-                    return { keys: Object.keys(r).sort(), cut: r.truncated, head: r.content.length };";
+                    let failed = null; \
+                    try { await tools.call('huge', { fail: true }); } \
+                    catch (e) { failed = String(e.message || e).length; } \
+                    return { keys: Object.keys(r).sort(), cut: r.truncated, \
+                             head: r.content.length, kind: typeof r.content, failed };";
         let result = execute_tools_tool(&json!({ "code": code }), &registry, &context)
             .await
             .unwrap();
@@ -1512,7 +1571,21 @@ mod tests {
             returned["cut"]["original_bytes"].as_u64().unwrap() > PER_CALL_RESULT_CAP_BYTES as u64
         );
         assert_eq!(returned["head"], json!(PER_CALL_RESULT_CAP_BYTES / 2));
+        assert_eq!(returned["kind"], "string", "a cut result is its raw head");
         assert!(returned["cut"]["spill_path"].as_str().is_some(), "{body}");
         assert!(body["calls"][0]["truncated"]["original_bytes"].is_u64());
+        // A failed call's text is bounded and spilled the same way.
+        assert_eq!(returned["failed"], json!(PER_CALL_RESULT_CAP_BYTES / 2));
+        assert_eq!(body["calls"][1]["status"], "failed");
+        assert_eq!(
+            body["calls"][1]["truncated"]["original_bytes"],
+            json!(PER_CALL_RESULT_CAP_BYTES * 2)
+        );
+        assert!(
+            body["calls"][1]["truncated"]["spill_path"]
+                .as_str()
+                .is_some(),
+            "{body}"
+        );
     }
 }
