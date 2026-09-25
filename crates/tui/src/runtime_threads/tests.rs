@@ -4077,6 +4077,170 @@ async fn create_thread_uses_requested_named_custom_provider_default_model() -> R
     Ok(())
 }
 
+fn two_custom_route_config() -> Config {
+    let mut custom = std::collections::HashMap::new();
+    for (name, base_url, model) in [
+        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+    ] {
+        custom.insert(
+            name.to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn update_thread_switches_provider_and_keeps_the_loaded_engine() -> Result<()> {
+    let config = two_custom_route_config();
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(thread.model, "model-a");
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+
+    // Unknown and blank providers are refused and change nothing.
+    for (kind, id) in [
+        (Some("custom-z"), None),
+        (Some(" "), None),
+        (Some("custom"), Some("custom-z")),
+    ] {
+        let err = manager
+            .update_thread(
+                &thread.id,
+                UpdateThreadRequest {
+                    model_provider: kind.map(str::to_string),
+                    model_provider_id: id.map(str::to_string),
+                    ..UpdateThreadRequest::default()
+                },
+            )
+            .await
+            .expect_err("unresolvable provider must be refused");
+        assert!(!err.to_string().is_empty());
+    }
+    let unchanged = manager.get_thread(&thread.id).await?;
+    assert_eq!(unchanged.model_provider_id.as_deref(), Some("custom-a"));
+    assert_eq!(unchanged.model, "model-a");
+
+    // A route name switches like `/provider custom-b`: the thread takes that
+    // provider's default model.
+    let switched = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                model_provider: Some("custom-b".to_string()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert_eq!(switched.model_provider.as_deref(), Some("custom"));
+    assert_eq!(switched.model_provider_id.as_deref(), Some("custom-b"));
+    assert_eq!(switched.model, "model-b");
+    let route = manager.resolved_route_for_thread(&config, &switched)?;
+    assert_eq!(route.identity.key, "custom-b");
+
+    // The same engine (and so the same conversation) serves the next turn,
+    // now on the new route.
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "after switch".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert_eq!(turn.effective_provider_id.as_deref(), Some("custom-b"));
+    assert_eq!(turn.effective_model.as_deref(), Some("model-b"));
+    match harness.rx_op.recv().await {
+        Some(Op::SendMessage(TurnSpec { route, .. })) => {
+            assert_eq!(route.identity.key, "custom-b");
+            assert_eq!(route.model, "model-b");
+        }
+        other => panic!("expected send on the switched route, got {other:?}"),
+    }
+
+    // The exact-id form with an explicit model, as JSON clients send it.
+    let patch: UpdateThreadRequest = serde_json::from_value(serde_json::json!({
+        "model_provider": "custom",
+        "model_provider_id": "custom-a",
+        "model": "model-a-large"
+    }))?;
+    let back = manager.update_thread(&thread.id, patch).await?;
+    assert_eq!(back.model_provider_id.as_deref(), Some("custom-a"));
+    assert_eq!(back.model, "model-a-large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn start_turn_provider_override_routes_one_turn_only() -> Result<()> {
+    let manager = RuntimeThreadManager::open(
+        two_custom_route_config(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let request: StartTurnRequest = serde_json::from_value(serde_json::json!({
+        "prompt": "one turn on B",
+        "model_provider": "custom",
+        "model_provider_id": "custom-b"
+    }))?;
+    let turn = manager.start_turn(&thread.id, request).await?;
+    assert_eq!(turn.effective_provider.as_deref(), Some("custom"));
+    assert_eq!(turn.effective_provider_id.as_deref(), Some("custom-b"));
+    assert_eq!(turn.effective_model.as_deref(), Some("model-b"));
+    match harness.rx_op.recv().await {
+        Some(Op::SendMessage(TurnSpec { route, .. })) => {
+            assert_eq!(route.identity.key, "custom-b");
+        }
+        other => panic!("expected send on the override route, got {other:?}"),
+    }
+    let saved = manager.get_thread(&thread.id).await?;
+    assert_eq!(saved.model_provider_id.as_deref(), Some("custom-a"));
+    assert_eq!(saved.model, "model-a");
+
+    let err = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "bad".to_string(),
+                model_provider: Some("custom-z".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unknown per-turn provider is refused");
+    assert!(!err.to_string().is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn create_thread_scenario() -> Result<()> {
     // Scenario consolidation of: create_thread_uses_requested_non_current_builtin_default_model, create_thread_defaults_auto_approve_to_false

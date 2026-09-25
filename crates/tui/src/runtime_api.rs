@@ -5979,6 +5979,8 @@ async fn retry_thread_turn(
                 auto_approve: None,
                 dynamic_tools: Vec::new(),
                 environment_id: None,
+                model_provider: None,
+                model_provider_id: None,
             },
         )
         .await
