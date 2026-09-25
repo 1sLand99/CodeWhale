@@ -16,6 +16,10 @@ Planned for Codewhale v0.10.1: a reliability and first-run release. Turns that
 stall now say so, approvals keep what you approved, plugin suggestions are
 quieter, and Fleet runs can be checked before they spend anything.
 
+### Contributors
+
+- **[@dajiaohuang](https://github.com/dajiaohuang)** — `codewhale config set` checks a known setting's value against its schema type before saving it ([#6568](https://github.com/Hmbown/Codewhale/pull/6568)).
+
 ### Added
 
 - Official model routing: `/router` (also `/model router`) sets up the Auto
@@ -27,6 +31,13 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- The installation page is generated from `docs/INSTALL.md`, so the website
+  and the guide can no longer disagree; broken anchors and unsafe links fail
+  the build ([#6450](https://github.com/Hmbown/Codewhale/pull/6450)).
+- `codewhale config set` refuses a value of the wrong type for a known setting
+  (a word for an on/off switch, text for a number, a choice outside the list)
+  instead of saving it ([#6568](https://github.com/Hmbown/Codewhale/pull/6568),
+  thanks @dajiaohuang).
 - A turn that stops producing output now reports itself: the turn loop records
   its phase and last progress, and an overdue phase surfaces instead of
   hanging silently until the stream idle timeout. A delegated agent's final result is
