@@ -2973,26 +2973,49 @@ fn tool_value_style() -> Style {
 /// Returns the first match rather than every match: a click is one request to
 /// open one file.
 pub(crate) fn first_file_line_reference(text: &str, workspace: &Path) -> Option<(PathBuf, u32)> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some((before, after)) = trimmed.rsplit_once(':') else {
-            continue;
-        };
-        if after.is_empty() || !after.chars().all(|c| c.is_ascii_digit()) {
-            continue;
+    text.lines()
+        .find_map(|line| file_line_reference(line, workspace))
+}
+
+/// The first `path:line` on one line of text that names a file inside the
+/// workspace, as `(absolute path, line)`.
+///
+/// Accepts the forms tools and models print: `src/a.rs:12`, `src/a.rs:12:5`,
+/// `--> src/a.rs:12:5` (rustc), `` `src/a.rs:12` `` and a reference inside a
+/// sentence or brackets. The text is model output, so it is not trusted to
+/// name a file: every candidate goes through
+/// [`crate::snapshot::workspace_relative_path`] — the gate file-revert already
+/// trusts — which refuses `..` and absolute paths outside the workspace.
+pub(crate) fn file_line_reference(line: &str, workspace: &Path) -> Option<(PathBuf, u32)> {
+    line.split_whitespace().find_map(|token| {
+        // Leading `.` stays: `./src/a.rs` is relative, not `/src/a.rs`.
+        let token = token
+            .trim_start_matches(|c: char| matches!(c, '`' | '\'' | '"' | '(' | '[' | '<'))
+            .trim_end_matches(|c: char| {
+                matches!(c, '`' | '\'' | '"' | ')' | ']' | '>' | ',' | ';' | '.')
+            });
+        let (path_str, line_no) = split_path_line(token)?;
+        if !looks_like_file_path(path_str) {
+            return None;
         }
-        let path_str = before.trim();
-        if path_str.is_empty() || !looks_like_file_path(path_str) {
-            continue;
+        let path_str = path_str.strip_prefix("./").unwrap_or(path_str);
+        let relative = crate::snapshot::workspace_relative_path(workspace, path_str)?;
+        let absolute = workspace.join(relative);
+        absolute.is_file().then_some((absolute, line_no))
+    })
+}
+
+/// Split `path:N`, `path:N:C` or `path:N:text` at the first all-digit
+/// segment after the path. Earlier colons stay in the path (`C:\x.rs:3`).
+fn split_path_line(token: &str) -> Option<(&str, u32)> {
+    let mut offset = 0;
+    for (index, part) in token.split(':').enumerate() {
+        if index > 0 && !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) {
+            let path = token[..offset].strip_suffix(':')?;
+            let line = part.parse().ok().filter(|line| *line > 0)?;
+            return (!path.is_empty()).then_some((path, line));
         }
-        let abs_path = if Path::new(path_str).is_absolute() {
-            PathBuf::from(path_str)
-        } else {
-            workspace.join(path_str)
-        };
-        if abs_path.is_file() {
-            return Some((abs_path, after.parse().unwrap_or(1)));
-        }
+        offset += part.len() + 1;
     }
     None
 }

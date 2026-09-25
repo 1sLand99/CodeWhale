@@ -2689,6 +2689,68 @@ fn first_file_line_reference_returns_one_match_and_resolves_it() {
     assert_eq!(line, 12);
 }
 
+/// The forms tools and models print: rustc's `-->` locator with a column,
+/// a backticked reference, and one inside a sentence with punctuation.
+#[test]
+fn file_line_reference_reads_common_forms_on_one_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/a.rs"), "fn a() {}\n").unwrap();
+    let expected = Some((workspace.join("src/a.rs"), 12));
+
+    for line in [
+        "  --> src/a.rs:12:5",
+        "see `src/a.rs:12` for the loop",
+        "the bug is in (src/a.rs:12), again.",
+        "src/a.rs:12: error: mismatched types",
+        "./src/a.rs:12",
+    ] {
+        assert_eq!(
+            super::file_line_reference(line, workspace),
+            expected,
+            "{line:?}"
+        );
+    }
+    assert_eq!(super::file_line_reference("src/a.rs:0", workspace), None);
+}
+
+/// Model output is not trusted to name a file: an absolute path outside the
+/// workspace and a `../` escape both used to open in `$EDITOR`.
+#[test]
+fn file_line_reference_refuses_paths_outside_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("ws");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/in.rs"), "fn a() {}\n").unwrap();
+    let outside = root.path().join("outside.rs");
+    std::fs::write(&outside, "secret\n").unwrap();
+
+    let absolute_outside = format!("{}:3", outside.display());
+    assert_eq!(
+        super::file_line_reference(&absolute_outside, &workspace),
+        None
+    );
+    assert_eq!(
+        super::file_line_reference("../outside.rs:3", &workspace),
+        None
+    );
+    assert_eq!(
+        super::first_file_line_reference(
+            &format!("{absolute_outside}\n../outside.rs:1\n"),
+            &workspace
+        ),
+        None
+    );
+
+    let absolute_inside = format!("{}:4", workspace.join("src/in.rs").display());
+    assert_eq!(
+        super::file_line_reference(&absolute_inside, &workspace),
+        Some((workspace.join("src/in.rs"), 4)),
+        "an absolute path inside the workspace still opens"
+    );
+}
+
 #[test]
 fn first_file_line_reference_skips_unresolvable_and_malformed_rows() {
     let dir = tempfile::tempdir().unwrap();

@@ -1347,6 +1347,20 @@ pub enum MessageId {
     CtxMenuWindowUnpin,
     /// Right-click menu: description for the window-pin entry.
     CtxMenuWindowPinDesc,
+    /// Right-click menu: a work-surface row's own command, `{command}`.
+    CtxMenuRunCommand,
+    CtxMenuOpen,
+    /// Right-click menu on an agent row: the one agent destination.
+    CtxMenuFocusAgent,
+    CtxMenuFocusAgentDesc,
+    CtxMenuCopyId,
+    CtxMenuCopyRow,
+    CtxMenuStopAgent,
+    /// Right-click menu: stop a work item (job, task, workflow run).
+    CtxMenuStopWork,
+    /// Right-click menu: label an armed destructive row shows until the
+    /// second activation runs it.
+    CtxMenuConfirmArmed,
     /// `/pin` command description (always-on-top mini-window toggle).
     CmdPinDescription,
     /// Status toast: host window is now the always-on-top mini window.
@@ -3783,6 +3797,15 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CtxMenuWindowPin,
     MessageId::CtxMenuWindowUnpin,
     MessageId::CtxMenuWindowPinDesc,
+    MessageId::CtxMenuRunCommand,
+    MessageId::CtxMenuOpen,
+    MessageId::CtxMenuFocusAgent,
+    MessageId::CtxMenuFocusAgentDesc,
+    MessageId::CtxMenuCopyId,
+    MessageId::CtxMenuCopyRow,
+    MessageId::CtxMenuStopAgent,
+    MessageId::CtxMenuStopWork,
+    MessageId::CtxMenuConfirmArmed,
     MessageId::CmdPinDescription,
     MessageId::WindowPinActive,
     MessageId::WindowPinReleased,
