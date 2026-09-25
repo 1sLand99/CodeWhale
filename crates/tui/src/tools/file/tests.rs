@@ -533,6 +533,47 @@ async fn contract_edit_preserves_bom_and_crlf_without_prior_read() {
     );
 }
 
+/// B6: bytes that are not UTF-8 survive an edit elsewhere in the file.
+#[tokio::test]
+async fn contract_edit_keeps_non_utf8_bytes() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("latin1.txt");
+    let mut original = b"caf\xe9 \xff\xfe tail\n".to_vec();
+    original.extend_from_slice(b"change me\n");
+    std::fs::write(&path, &original).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    EditFileTool::execute_contract_edits(
+        json!({"path": "latin1.txt", "edits": [{"oldText": "change me", "newText": "changed"}]}),
+        &context,
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        std::fs::read(&path).expect("updated"),
+        b"caf\xe9 \xff\xfe tail\nchanged\n".to_vec()
+    );
+}
+
+/// B6: in a file with mixed line endings, only the lines an edit wrote take
+/// the dominant ending; every untouched line keeps its own.
+#[tokio::test]
+async fn contract_edit_keeps_untouched_line_endings() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("mixed.txt");
+    std::fs::write(&path, "one\r\ntwo\nthree\r\nfour\rfive\n").expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    EditFileTool::execute_contract_edits(
+        json!({"path": "mixed.txt", "edits": [{"oldText": "three", "newText": "THREE\nand more"}]}),
+        &context,
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("updated"),
+        "one\r\ntwo\nTHREE\r\nand more\r\nfour\rfive\n"
+    );
+}
+
 #[tokio::test]
 async fn queued_parallel_contract_edits_preserve_both_changes() {
     let temporary = tempfile::tempdir().expect("tempdir");
