@@ -208,6 +208,10 @@ pub struct ProviderPickerView {
     external_revoke_return: Stage,
     /// Validated key held only in memory until the confirm stage persists it.
     pending_api_key: Option<String>,
+    /// Set by the first key press or click. A background discovery (the
+    /// first-run Ollama probe) must not switch provider and close the picker
+    /// under someone who has started choosing or typing a key.
+    interacted: bool,
     /// Catalog models offered during the model-pick stage.
     model_options: Vec<String>,
     model_selected_idx: usize,
@@ -1682,6 +1686,11 @@ impl ProviderPickerView {
     fn key_entry_is_oauth_locked(&self) -> bool {
         self.selected_provider().credential_help().acquisition == CredentialAcquisition::OAuth
     }
+    /// Whether the person has pressed a key or clicked in this picker.
+    pub(crate) fn interacted(&self) -> bool {
+        self.interacted
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn new(active: ApiProvider, config: &Config) -> Self {
@@ -1776,6 +1785,7 @@ impl ProviderPickerView {
             chatgpt_auth_choice: ChatgptAuthChoice::SignInWithChatgpt,
             external_consent_choice: ExternalConsentChoice::Disabled,
             external_revoke_return: Stage::List,
+            interacted: false,
             pending_api_key: None,
             model_options: Vec::new(),
             model_selected_idx: 0,
@@ -4289,6 +4299,7 @@ impl ModalView for ProviderPickerView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        self.interacted = true;
         self.last_choice_mouse_selected = None;
         self.hovered_choice = None;
         if self.stage == Stage::List
@@ -4820,6 +4831,9 @@ impl ModalView for ProviderPickerView {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            self.interacted = true;
+        }
         let over_catalog = matches!(self.stage, Stage::List)
             && self
                 .catalog_action_hitbox

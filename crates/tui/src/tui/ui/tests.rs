@@ -236,6 +236,10 @@ fn workbar_rows_sit_under_the_status_row_one_per_workflow() {
     app.launch.visible = false;
     app.ui_locale = codewhale_localization::Locale::En;
     app.onboarding_needs_api_key = false;
+    // Pin the widest posture chip (`files: workspace (unenforced)`), which
+    // Linux and Windows hosts paint and macOS does not, so every host sheds
+    // the status row the same way.
+    app.sandbox_backend = None;
     app.current_session_id = Some("session-wb".to_string());
     app.history.push(HistoryCell::User {
         content: "Established conversation".to_string(),
@@ -274,7 +278,7 @@ fn workbar_rows_sit_under_the_status_row_one_per_workflow() {
     app.turn_started_at = Some(Instant::now());
 
     let config = Config::default();
-    let (width, height) = (100u16, 30u16);
+    let (width, height) = (140u16, 30u16);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| {
@@ -10838,6 +10842,37 @@ api_key = "arcee-key"
     let pending = app.pending_route_save.as_ref().expect("pending save");
     assert_eq!(pending.provider_identity, "xiaomi-mimo");
     assert_eq!(pending.model, "mimo-v2.5-pro");
+}
+
+/// The first-run Ollama probe answers in the background. Once the person has
+/// pressed a key in the provider picker (choosing a provider, typing a key),
+/// the probe must not switch to Ollama and close the picker under them.
+#[test]
+fn local_ollama_probe_leaves_a_picker_the_person_is_using_alone() {
+    let config = Config::default();
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    app.onboarding_needs_api_key = true;
+    app.onboarding = OnboardingState::Provider;
+    app.view_stack.push(ProviderPickerView::new_for_onboarding(
+        ApiProvider::Deepseek,
+        None,
+        &config,
+        None,
+    ));
+    assert!(
+        crate::local_ollama::should_adopt_live_local_ollama(&mut app),
+        "an untouched first-run picker still adopts a live local model"
+    );
+
+    let _ = app
+        .view_stack
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert!(
+        !crate::local_ollama::should_adopt_live_local_ollama(&mut app),
+        "a picker the person has used is not closed by the background probe"
+    );
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ProviderPicker));
 }
 
 /// The provider step is the first run's explicit startup-route decision, not

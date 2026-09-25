@@ -179,12 +179,10 @@ impl RowCells {
         let (settled, total) = panel.done_total();
         let (failed, _) = panel.failure_cancel_counts();
         let lifecycle = panel.lifecycle;
-        let filled = if total == 0 {
-            0
-        } else {
-            (settled * BAR_CELLS + total / 2) / total
-        }
-        .min(BAR_CELLS);
+        let filled = (settled * BAR_CELLS + total / 2)
+            .checked_div(total)
+            .unwrap_or(0)
+            .min(BAR_CELLS);
         let progress = if total == 0 {
             tr(locale, MessageId::WorkflowNoTasksYet).into_owned()
         } else if lifecycle.is_running() {
