@@ -1432,6 +1432,7 @@
   "ProviderKeyUnreachable": "このキーを確認するためにプロバイダーへ接続できませんでした。接続を確認してから、もう一度お試しください。",
   "ProviderKeyCheckFailed": "このキーを確認できませんでした: {reason}",
   "LocalModelAdopted": "このコンピューターで動くモデル {model}（Ollama）を使用しています。別のモデルを選ぶには F3 を押してください。",
+  "ProviderPickerNotReopened": "プロバイダー一覧を再度開けませんでした。F3 を押して開いてください。",
   "LaunchRunCommand": "{command} を実行",
   "LaunchMcpConnectedOne": "MCP サーバー 1 台接続済み",
   "LaunchMcpConnectedMany": "MCP サーバー {count} 台接続済み",

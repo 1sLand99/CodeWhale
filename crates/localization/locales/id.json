@@ -1409,6 +1409,7 @@
   "ProviderKeyUnreachable": "Tidak dapat menghubungi penyedia untuk memeriksa kunci ini. Periksa koneksi Anda, lalu coba lagi.",
   "ProviderKeyCheckFailed": "Tidak dapat memeriksa kunci ini: {reason}",
   "LocalModelAdopted": "Memakai {model}, model yang berjalan di komputer ini (Ollama). Tekan F3 untuk memilih yang lain.",
+  "ProviderPickerNotReopened": "Daftar penyedia tidak dapat dibuka lagi. Tekan F3 untuk membukanya.",
   "LaunchRunCommand": "jalankan {command}",
   "LaunchMcpConnectedOne": "1 server MCP terhubung",
   "LaunchMcpConnectedMany": "{count} server MCP terhubung",

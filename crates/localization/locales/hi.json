@@ -1409,6 +1409,7 @@
   "ProviderKeyUnreachable": "यह कुंजी जाँचने के लिए प्रदाता तक नहीं पहुँच सके। अपना कनेक्शन जाँचें, फिर दोबारा कोशिश करें।",
   "ProviderKeyCheckFailed": "यह कुंजी जाँची नहीं जा सकी: {reason}",
   "LocalModelAdopted": "{model} इस्तेमाल हो रहा है, जो इसी कंप्यूटर पर चलने वाला मॉडल है (Ollama)। दूसरा चुनने के लिए F3 दबाएँ।",
+  "ProviderPickerNotReopened": "प्रदाता सूची दोबारा नहीं खुल सकी। इसे खोलने के लिए F3 दबाएँ।",
   "LaunchRunCommand": "{command} चलाएँ",
   "LaunchMcpConnectedOne": "1 MCP सर्वर कनेक्टेड",
   "LaunchMcpConnectedMany": "{count} MCP सर्वर कनेक्टेड",

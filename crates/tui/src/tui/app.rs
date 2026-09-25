@@ -78,7 +78,8 @@ pub use types::{
     ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
 pub(crate) use types::{
-    CacheReplayTarget, GoalControlIntent, PendingGoalControl, WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
+    CacheReplayTarget, GoalControlIntent, PendingGoalControl, UnansweredSubmission,
+    WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
 };
 
 // === Types ===
@@ -2471,6 +2472,9 @@ pub struct App {
     /// Most recent user prompt accepted for an active engine turn. Ctrl+C can
     /// restore this into an empty composer after cancelling that turn.
     pub last_submitted_prompt: Option<String>,
+    /// The dispatched message of the turn in flight, until that turn ends.
+    /// A credential rejection the engine marks unsent hands it back (#6566).
+    pub unanswered_submission: Option<UnansweredSubmission>,
     /// Startup prompt should be submitted automatically after the engine is ready.
     pub auto_submit_initial_input: bool,
     /// Two-tap quit confirmation. When set, a prior Ctrl+C in idle state has
@@ -4548,15 +4552,43 @@ impl App {
     /// Record the label a workflow gave a child (#6565). It replaces whatever
     /// label the child got before the workflow event arrived — a counter
     /// placeholder or a role-derived name — so no surface keeps the old one.
+    ///
+    /// A script can give parallel tasks the same label ("review"). The person
+    /// still has to tell them apart on the approval card and in the footer,
+    /// so a label another agent already shows gets a sequence suffix
+    /// ("review · 2"), the way unnamed children get role counters.
     pub(crate) fn note_workflow_agent_label(&mut self, agent_id: &str, label: &str) {
         let label = label.trim();
         if agent_id.trim().is_empty() || label.is_empty() {
             return;
         }
+        let already_given = self
+            .workflow_agent_labels
+            .get(agent_id)
+            .is_some_and(|given| {
+                given == label
+                    || given
+                        .strip_prefix(label)
+                        .and_then(|rest| rest.strip_prefix(" · "))
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            });
+        if already_given {
+            return;
+        }
+        let shown_by_another = |candidate: &str| {
+            self.agent_label_map
+                .iter()
+                .any(|(id, shown)| id != agent_id && shown == candidate)
+        };
+        let mut unique = label.to_string();
+        let mut sequence = 1u64;
+        while shown_by_another(&unique) {
+            sequence += 1;
+            unique = format!("{label} · {sequence}");
+        }
         self.workflow_agent_labels
-            .insert(agent_id.to_string(), label.to_string());
-        self.agent_label_map
-            .insert(agent_id.to_string(), label.to_string());
+            .insert(agent_id.to_string(), unique.clone());
+        self.agent_label_map.insert(agent_id.to_string(), unique);
     }
 
     /// The name this agent was given: its workflow task label, else its

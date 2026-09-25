@@ -1409,6 +1409,7 @@
   "ProviderKeyUnreachable": "No s'ha pogut contactar amb el proveïdor per comprovar aquesta clau. Comproveu la connexió i torneu-ho a provar.",
   "ProviderKeyCheckFailed": "No s'ha pogut comprovar aquesta clau: {reason}",
   "LocalModelAdopted": "S'està usant {model}, un model que s'executa en aquest ordinador (Ollama). Prem F3 per triar-ne un altre.",
+  "ProviderPickerNotReopened": "No s'ha pogut tornar a obrir la llista de proveïdors. Prem F3 per obrir-la.",
   "LaunchRunCommand": "executa {command}",
   "LaunchMcpConnectedOne": "1 servidor MCP connectat",
   "LaunchMcpConnectedMany": "{count} servidors MCP connectats",

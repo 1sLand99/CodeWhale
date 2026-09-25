@@ -1135,6 +1135,7 @@ impl App {
             user_scrolled_during_stream: false,
             last_send_at: None,
             last_submitted_prompt: None,
+            unanswered_submission: None,
             auto_submit_initial_input,
             quit_armed_until: None,
             prefix_change_count: 0,

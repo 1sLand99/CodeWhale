@@ -1432,6 +1432,7 @@
   "ProviderKeyUnreachable": "No se pudo contactar al proveedor para revisar esta clave. Revisa tu conexión y vuelve a intentarlo.",
   "ProviderKeyCheckFailed": "No se pudo revisar esta clave: {reason}",
   "LocalModelAdopted": "Usando {model}, un modelo que se ejecuta en esta computadora (Ollama). Presiona F3 para elegir otro.",
+  "ProviderPickerNotReopened": "No se pudo volver a abrir la lista de proveedores. Presiona F3 para abrirla.",
   "LaunchRunCommand": "ejecuta {command}",
   "LaunchMcpConnectedOne": "1 servidor MCP conectado",
   "LaunchMcpConnectedMany": "{count} servidores MCP conectados",

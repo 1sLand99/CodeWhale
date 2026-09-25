@@ -1432,6 +1432,7 @@
   "ProviderKeyUnreachable": "Không liên lạc được với nhà cung cấp để kiểm tra khóa này. Kiểm tra kết nối rồi thử lại.",
   "ProviderKeyCheckFailed": "Không kiểm tra được khóa này: {reason}",
   "LocalModelAdopted": "Đang dùng {model}, một mô hình chạy trên máy tính này (Ollama). Nhấn F3 để chọn mô hình khác.",
+  "ProviderPickerNotReopened": "Không mở lại được danh sách nhà cung cấp. Nhấn F3 để mở.",
   "LaunchRunCommand": "chạy {command}",
   "LaunchMcpConnectedOne": "1 máy chủ MCP đã kết nối",
   "LaunchMcpConnectedMany": "{count} máy chủ MCP đã kết nối",

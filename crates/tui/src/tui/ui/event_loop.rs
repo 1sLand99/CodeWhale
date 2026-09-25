@@ -2568,6 +2568,7 @@ pub(crate) async fn run_event_loop(
                         // (#6190).
                         crate::tui::ui::dispatch::settle_unaccepted_steers_at_turn_end(app);
                         let completed_turn = app.active_turn.take();
+                        app.unanswered_submission = None;
                         // The in-flight provisional estimate hands off to the
                         // authoritative cumulative price accrued below; the
                         // high-water mark keeps the displayed total monotonic
@@ -6882,7 +6883,7 @@ fn telemetry_notice_may_enter_transcript(app: &App) -> bool {
 }
 
 /// Switch a first-run / missing-key session onto a live local Ollama tag.
-async fn adopt_live_local_ollama_catalog(
+pub(super) async fn adopt_live_local_ollama_catalog(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,

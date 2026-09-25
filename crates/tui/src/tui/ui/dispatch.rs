@@ -979,6 +979,10 @@ pub(crate) fn build_dispatch_success_closure(
             // last_send_at was already anchored in the sync prepare phase so
             // the tail-flash starts together with the visible user cell.
             app.last_submitted_prompt = Some(prepare.message.display.clone());
+            app.unanswered_submission = Some(crate::tui::app::UnansweredSubmission {
+                message: prepare.message.clone(),
+                history_cell: prepare.history_cell,
+            });
             app.clear_receipt();
             app.tool_evidence.clear();
 

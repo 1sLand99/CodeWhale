@@ -2033,28 +2033,27 @@ impl<'a> ApprovalWidget<'a> {
     /// `render` and `inline_region` use this so the painted band and the
     /// dimmed backdrop region always agree.
     ///
-    /// The save preview after the essential body is optional: when the band
-    /// cannot hold it, it is dropped here, before sizing, so the band neither
-    /// keeps blank rows for it nor calls the request "truncated" when only
-    /// the preview was cut (#6566).
+    /// The save preview says what a persistent rule would cover while the
+    /// controls offer to save it, so it is never dropped. A band too short
+    /// for the full preview gets one line per rule instead of calling the
+    /// request "truncated" (#6566); if even that does not fit, the render's
+    /// truncation hint says so and points at the details.
     fn build_inline_content(&self, area: Rect) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-        let (mut body, essential_len, controls) = self.build_inline_parts(area);
-        if body.len() > essential_len {
-            let region = inline_region_for(area, &body, &controls);
-            let inner_height = region.height.saturating_sub(1);
-            let control_rows = measure_wrapped_rows(&controls, region.width).min(inner_height);
-            let body_height = inner_height.saturating_sub(control_rows);
-            if measure_wrapped_rows(&body, region.width) > body_height {
-                body.truncate(essential_len);
-            }
+        let (body, essential_len, controls) = self.build_inline_parts(area, false);
+        if body.len() == essential_len || inline_body_fits(area, &body, &controls) {
+            return (body, controls);
         }
-        (body, controls)
+        let (compact, _, controls) = self.build_inline_parts(area, true);
+        (compact, controls)
     }
 
-    /// The body, how many of its leading lines are essential, and the
-    /// controls. Lines after the essential prefix are the optional save
-    /// preview.
-    fn build_inline_parts(&self, area: Rect) -> (Vec<Line<'static>>, usize, Vec<Line<'static>>) {
+    /// The body, how many of its leading lines come before the save preview,
+    /// and the controls. `compact_save_preview` puts each rule on one line.
+    fn build_inline_parts(
+        &self,
+        area: Rect,
+        compact_save_preview: bool,
+    ) -> (Vec<Line<'static>>, usize, Vec<Line<'static>>) {
         let risk = self.request.risk;
         let stakes = self.request.stakes();
         let locale = self.view.locale();
@@ -2290,6 +2289,7 @@ impl<'a> ApprovalWidget<'a> {
                 &preview,
                 palette_colors.shortcut,
                 area.width,
+                compact_save_preview,
             );
         }
         if let Some(preview) = self.request.allow_rule_save_preview() {
@@ -2298,6 +2298,7 @@ impl<'a> ApprovalWidget<'a> {
                 &preview,
                 palette_colors.shortcut,
                 area.width,
+                compact_save_preview,
             );
         }
 
@@ -2496,6 +2497,14 @@ impl Renderable for ApprovalWidget<'_> {
     fn desired_height(&self, _width: u16) -> u16 {
         1
     }
+}
+
+/// Whether `body` fits the band `inline_region_for` gives it above `controls`.
+fn inline_body_fits(area: Rect, body: &[Line<'static>], controls: &[Line<'static>]) -> bool {
+    let region = inline_region_for(area, body, controls);
+    let inner_height = region.height.saturating_sub(1);
+    let control_rows = measure_wrapped_rows(controls, region.width).min(inner_height);
+    measure_wrapped_rows(body, region.width) <= inner_height.saturating_sub(control_rows)
 }
 
 /// Bottom-anchored band the inline approval prompt occupies within `area`.
@@ -2817,7 +2826,36 @@ fn push_permission_rule_save_preview(
     preview: &crate::tui::approval::PermissionRuleSavePreview,
     shortcut: Color,
     card_width: u16,
+    compact: bool,
 ) {
+    if compact {
+        // One line: what saving does, then what it covers, with the count of
+        // entries that did not fit kept visible after any ellipsis.
+        let summary = preview.summary();
+        let more = if preview.omitted > 0 {
+            format!(" +{} more", preview.omitted)
+        } else {
+            String::new()
+        };
+        let budget = (card_width as usize)
+            .saturating_sub(10 + summary.chars().count() + 3 + more.chars().count())
+            .max(12);
+        let entries =
+            crate::utils::truncate_with_ellipsis(&preview.entries.join("; "), budget, "...");
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "Save:   ",
+                Style::default().fg(shortcut).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(summary, Style::default().fg(palette::TEXT_BODY)),
+            Span::styled(
+                format!(" · {entries}{more}"),
+                Style::default().fg(palette::TEXT_SECONDARY),
+            ),
+        ]));
+        return;
+    }
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
@@ -9043,10 +9081,11 @@ diff --git a/src/b.rs b/src/b.rs\n\
         );
     }
 
-    /// #6566: when all that does not fit is the optional save preview, the
-    /// card drops it and does not claim the request was truncated.
+    /// #6566: when the full save preview does not fit, the card shows one
+    /// line per rule. What a saved rule covers stays on screen next to the
+    /// controls that save it, and the request is not called truncated.
     #[test]
-    fn approval_card_drops_the_save_preview_before_saying_truncated() {
+    fn approval_card_keeps_a_one_line_save_preview_when_the_full_one_does_not_fit() {
         let request = crate::tui::approval::ApprovalRequest::new(
             "approval-1",
             "apply_patch",
@@ -9066,8 +9105,17 @@ diff --git a/src/b.rs b/src/b.rs\n\
         let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
 
         assert!(rendered.contains("src/a.rs"), "{rendered}");
-        assert!(!rendered.contains("always ask first"), "{rendered}");
+        assert!(rendered.contains("always ask first · change src/a.rs"), "{rendered}");
+        assert!(rendered.contains("+1 more"), "{rendered}");
         assert!(!rendered.contains("truncated"), "{rendered}");
+
+        // Too short for even that: the preview is never dropped silently;
+        // the card says it is cut and where the full details are.
+        let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 14));
+        assert!(
+            rendered.contains("always ask first") || rendered.contains("truncated"),
+            "{rendered}"
+        );
     }
 
     #[test]

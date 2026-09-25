@@ -216,6 +216,14 @@ pub(crate) fn apply_engine_error_to_app(
     app.streaming_state.reset();
     app.streaming_message_index = None;
     app.streaming_thinking_active_entry = None;
+    // Before the error line lands, so the question's bubble is still the last
+    // cell and can come out with it. A draft the person already started in
+    // the composer is left alone, and so is the bubble that holds their text.
+    let unsent_message = if credential_rejected_before_output && app.input.is_empty() {
+        take_back_unsent_submission(app)
+    } else {
+        None
+    };
 
     // #455 (observer-only): fire `on_error` hooks so operators can
     // page on auth / billing / invalid-request failures without
@@ -245,8 +253,14 @@ pub(crate) fn apply_engine_error_to_app(
         // #6566: the provider refused the key before any model output, so the
         // engine takes the question back out of the session. Give it back to
         // the person with the one next step, instead of an error with no way
-        // forward and a message they must retype.
-        app.restore_last_submitted_prompt_if_empty();
+        // forward and a message they must retype. The whole message comes
+        // back, a skill it invoked included.
+        match unsent_message {
+            Some(message) => app.restore_unsent_message(message),
+            None => {
+                app.restore_last_submitted_prompt_if_empty();
+            }
+        }
         app.add_message(HistoryCell::System {
             content: app.tr(MessageId::AuthRejectedRecovery).into_owned(),
         });
@@ -3354,7 +3368,7 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
                 app.status_message = Some(format!(
                     "{} {}",
                     app.tr(MessageId::ProviderConnectionChecked),
-                    "The guided setup could not be re-opened."
+                    app.tr(MessageId::ProviderPickerNotReopened)
                 ));
             }
             app.needs_redraw = true;
@@ -3391,7 +3405,10 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
                 app.view_stack.push(picker);
                 app.status_message = Some(plain);
             } else {
-                app.status_message = Some(format!("{plain} The provider could not be re-opened."));
+                app.status_message = Some(format!(
+                    "{plain} {}",
+                    app.tr(MessageId::ProviderPickerNotReopened)
+                ));
             }
             app.needs_redraw = true;
         }

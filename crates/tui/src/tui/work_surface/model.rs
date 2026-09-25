@@ -1801,7 +1801,7 @@ fn live_activity_facts(app: &App, agent_id: &str) -> Vec<String> {
     if let Some(detail) = detail {
         facts.push(detail.to_string());
     }
-    let said = |fact: &str| detail.is_some_and(|detail| detail.contains(fact));
+    let said = |fact: &str| detail.is_some_and(|detail| names_whole(detail, fact));
     if let Some(tool) = activity.and_then(|activity| activity.current_tool.as_deref())
         && !said(tool)
     {
@@ -1820,6 +1820,18 @@ fn live_activity_facts(app: &App, agent_id: &str) -> Vec<String> {
         facts.push(format!("{files} files changed"));
     }
     facts
+}
+
+/// Whether `text` names `fact` as a whole token: "step 1" is not said by
+/// "step 10", nor a tool `read` by "read_file".
+fn names_whole(text: &str, fact: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    !fact.is_empty()
+        && text.match_indices(fact).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + fact.len()..].chars().next();
+            !before.is_some_and(is_word) && !after.is_some_and(is_word)
+        })
 }
 
 /// Has this agent stopped working? Typed live activity wins over the worker
@@ -2893,6 +2905,18 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::tools::spec::ToolResult;
+
+    /// #6565: a fact is dropped from a dock row only when the detail names
+    /// that exact fact, never a longer one that contains it.
+    #[test]
+    fn a_fact_is_said_only_by_its_whole_name() {
+        assert!(names_whole("step 6: finished tool 'read_file'", "step 6"));
+        assert!(names_whole("step 6: finished tool 'read_file'", "read_file"));
+        assert!(!names_whole("step 10: finished tool 'read_file'", "step 1"));
+        assert!(!names_whole("finished tool 'read_file'", "read"));
+        assert!(names_whole("read then step 1", "step 1"));
+        assert!(!names_whole("anything", ""));
+    }
     use crate::tui::app::TuiOptions;
     use crate::tui::tool_routing::{handle_tool_call_complete, handle_tool_call_started};
     use crate::work_graph::{CompatTodoBinding, OperationBinding, WorkNodeId};

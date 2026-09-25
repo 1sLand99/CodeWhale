@@ -750,10 +750,7 @@ pub(crate) fn restore_message_submit_denial(
     app.dispatch_in_flight = false;
     match recovery {
         DispatchRecovery::Immediate | DispatchRecovery::Initial => {
-            app.input.clone_from(&message.display);
-            app.cursor_position = app.input.chars().count();
-            app.active_skill = message.skill_instruction;
-            app.active_skill_provenance = message.skill_provenance;
+            app.restore_unsent_message(message);
         }
         DispatchRecovery::Draft => {
             restore_queued_or_draft_message(app, recovery, message);
@@ -916,10 +913,7 @@ pub(crate) fn keep_unsent_message_for_connect(app: &mut App, message: QueuedMess
         error = %error,
         "user message not sent: no usable credential; restored to composer"
     );
-    app.input = message.display;
-    app.cursor_position = app.input.chars().count();
-    app.active_skill = message.skill_instruction;
-    app.active_skill_provenance = message.skill_provenance;
+    app.restore_unsent_message(message);
 
     let new_user = app.onboarding_had_provider_step;
     let mut content = app.tr(MessageId::DispatchNotSentNoModel).into_owned();
@@ -963,6 +957,24 @@ pub(crate) fn keep_unsent_message_for_connect(app: &mut App, message: QueuedMess
         Some(App::STICKY_ERROR_TTL_MS),
     );
     app.needs_redraw = true;
+}
+
+/// The engine reported this turn's message as never sent: a key rejected
+/// before any model output (#6566). Take the message back, and its bubble
+/// out of the live transcript when nothing has landed after it, so sending it
+/// again shows it once. `None` when no dispatched message is on record.
+pub(crate) fn take_back_unsent_submission(app: &mut App) -> Option<QueuedMessage> {
+    let submission = app.unanswered_submission.take()?;
+    let cell = submission.history_cell;
+    let bubble_is_last = cell + 1 == app.history.len()
+        && matches!(
+            &app.history[cell],
+            HistoryCell::User { content } if content == &submission.message.display
+        );
+    if bubble_is_last {
+        app.truncate_history_to(cell);
+    }
+    Some(submission.message)
 }
 
 pub(crate) fn restore_failed_immediate_submit(

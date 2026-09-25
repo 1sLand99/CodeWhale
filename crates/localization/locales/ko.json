@@ -1432,6 +1432,7 @@
   "ProviderKeyUnreachable": "이 키를 확인하려 했지만 제공자에 연결하지 못했습니다. 연결을 확인한 뒤 다시 시도하세요.",
   "ProviderKeyCheckFailed": "이 키를 확인하지 못했습니다: {reason}",
   "LocalModelAdopted": "이 컴퓨터에서 실행 중인 모델 {model}(Ollama)을 사용합니다. 다른 모델을 고르려면 F3를 누르세요.",
+  "ProviderPickerNotReopened": "제공자 목록을 다시 열지 못했습니다. F3를 눌러 여세요.",
   "LaunchRunCommand": "{command} 실행",
   "LaunchMcpConnectedOne": "MCP 서버 1개 연결됨",
   "LaunchMcpConnectedMany": "MCP 서버 {count}개 연결됨",

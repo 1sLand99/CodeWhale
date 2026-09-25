@@ -1432,6 +1432,7 @@
   "ProviderKeyUnreachable": "Could not reach the provider to check this key. Check your connection, then try again.",
   "ProviderKeyCheckFailed": "Could not check this key: {reason}",
   "LocalModelAdopted": "Using {model}, a model running on this computer (Ollama). Press F3 to choose another.",
+  "ProviderPickerNotReopened": "The provider list could not be reopened. Press F3 to open it.",
   "LaunchRunCommand": "run {command}",
   "LaunchMcpConnectedOne": "1 MCP server connected",
   "LaunchMcpConnectedMany": "{count} MCP servers connected",

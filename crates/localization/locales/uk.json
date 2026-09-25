@@ -1409,6 +1409,7 @@
   "ProviderKeyUnreachable": "Не вдалося зв'язатися з провайдером, щоб перевірити ключ. Перевірте з'єднання і спробуйте ще раз.",
   "ProviderKeyCheckFailed": "Не вдалося перевірити ключ: {reason}",
   "LocalModelAdopted": "Використовується {model} — модель, що працює на цьому комп'ютері (Ollama). Натисніть F3, щоб вибрати іншу.",
+  "ProviderPickerNotReopened": "Не вдалося знову відкрити список провайдерів. Натисніть F3, щоб відкрити його.",
   "LaunchRunCommand": "виконайте {command}",
   "LaunchMcpConnectedOne": "підключено 1 сервер MCP",
   "LaunchMcpConnectedMany": "підключено серверів MCP: {count}",

@@ -1432,6 +1432,7 @@
   "ProviderKeyUnreachable": "无法连接提供商来检查此密钥。请检查网络连接，然后重试。",
   "ProviderKeyCheckFailed": "无法检查此密钥：{reason}",
   "LocalModelAdopted": "正在使用 {model}，这是在本机运行的模型（Ollama）。按 F3 可选择其他模型。",
+  "ProviderPickerNotReopened": "无法重新打开提供方列表。按 F3 打开。",
   "LaunchRunCommand": "运行 {command}",
   "LaunchMcpConnectedOne": "已连接 1 个 MCP 服务器",
   "LaunchMcpConnectedMany": "已连接 {count} 个 MCP 服务器",
