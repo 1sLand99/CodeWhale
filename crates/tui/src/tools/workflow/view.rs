@@ -290,9 +290,7 @@ fn row_state(status: IrWorkflowRunStatus) -> RowState {
         IrWorkflowRunStatus::Succeeded => RowState::Finished,
         IrWorkflowRunStatus::Cancelled => RowState::Cancelled,
         IrWorkflowRunStatus::Pending | IrWorkflowRunStatus::Running => RowState::Running,
-        IrWorkflowRunStatus::Failed
-        | IrWorkflowRunStatus::BudgetExceeded
-        | IrWorkflowRunStatus::ReplayDiverged => RowState::Failed,
+        IrWorkflowRunStatus::Failed | IrWorkflowRunStatus::BudgetExceeded => RowState::Failed,
     }
 }
 
