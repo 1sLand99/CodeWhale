@@ -5130,18 +5130,26 @@ impl RuntimeThreadManager {
             });
         match restored {
             Some((restored_kind, restored_id, model)) => {
-                let identity = thread_config
-                    .resolve_persisted_provider_identity(
-                        restored_kind.as_deref(),
-                        restored_id.as_deref(),
-                    )
-                    .map_err(|reason| anyhow!(reason))?;
-                // A later provider switch outranks what an earlier Auto turn
-                // picked on the previous provider.
-                if identity.key == provider_identity.key {
-                    resolve_runtime_thread_route_for_identity(config, &identity, Some(&model))
-                } else {
-                    resolve_runtime_thread_route_for_identity(config, &provider_identity, None)
+                let identity = thread_config.resolve_persisted_provider_identity(
+                    restored_kind.as_deref(),
+                    restored_id.as_deref(),
+                );
+                // The saved thread provider is the authority. An earlier Auto
+                // pick is restored only when it was made on that same
+                // provider; a pick from before a provider switch, from a
+                // one-turn override, or from a provider no longer configured
+                // is ignored and the saved provider's default route applies.
+                match identity {
+                    Ok(identity)
+                        if identity.provider == provider_identity.provider
+                            && identity.key == provider_identity.key
+                            && identity.exact_id == provider_identity.exact_id =>
+                    {
+                        resolve_runtime_thread_route_for_identity(config, &identity, Some(&model))
+                    }
+                    _ => {
+                        resolve_runtime_thread_route_for_identity(config, &provider_identity, None)
+                    }
                 }
             }
             None => resolve_runtime_thread_route_for_identity(config, &provider_identity, None),
@@ -5214,6 +5222,18 @@ impl RuntimeThreadManager {
                 Some(&engine_model),
             ) {
                 Ok(route) => validated.push((thread_id, engine, route, active_turn_id)),
+                // An idle engine still carries the route of its last turn,
+                // which may predate a provider switch or have been a one-turn
+                // override. Its next turn resolves the saved thread route, so
+                // that is the route the new config has to serve.
+                Err(err) if active_turn_id.is_none() => match self
+                    .store
+                    .load_thread(&thread_id)
+                    .and_then(|thread| self.resolved_route_for_thread(&new_config, &thread))
+                {
+                    Ok(route) => validated.push((thread_id, engine, route, active_turn_id)),
+                    Err(_) => failures.push(format!("{thread_id}: {err}")),
+                },
                 Err(err) => failures.push(format!("{thread_id}: {err}")),
             }
         }

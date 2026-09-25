@@ -3645,13 +3645,14 @@ async fn thread_records_and_create_requests_preserve_provider_kind_id_pairing() 
     restored_turn.effective_provider_id = None;
     restored_turn.effective_model = Some("custom-openai-model".to_string());
     manager.store.save_turn(&restored_turn)?;
-    let turn_error = manager
-        .resolved_route_for_thread(&config, &auto_thread)
-        .expect_err("restored built-in turn must not be captured by custom endpoint")
-        .to_string();
-    assert!(
-        turn_error.contains("requires built-in 'openai'"),
-        "{turn_error}"
+    // A restored built-in pick is not the thread's saved provider, so it is
+    // ignored rather than captured: the thread keeps its exact custom route.
+    let ignored = manager.resolved_route_for_thread(&config, &auto_thread)?;
+    assert_eq!(ignored.identity.provider, ApiProvider::Custom);
+    assert_eq!(ignored.identity.key, "openai");
+    assert_eq!(
+        ignored.config.active_route_base_url(),
+        "http://127.0.0.1:18183/v1"
     );
 
     restored_turn.effective_provider = Some("custom".to_string());
@@ -4238,6 +4239,97 @@ async fn start_turn_provider_override_routes_one_turn_only() -> Result<()> {
         .await
         .expect_err("unknown per-turn provider is refused");
     assert!(!err.to_string().is_empty());
+    Ok(())
+}
+
+/// `two_custom_route_config` with `custom-a` removed, as a user would after
+/// moving every thread to `custom-b`.
+fn only_custom_b_config() -> Config {
+    let mut config = two_custom_route_config();
+    config.provider = Some("custom-b".to_string());
+    if let Some(providers) = config.providers.as_mut() {
+        providers.custom.remove("custom-a");
+    }
+    config
+}
+
+#[tokio::test]
+async fn auto_thread_follows_a_provider_switch_even_after_the_old_provider_is_removed() -> Result<()>
+{
+    let config = two_custom_route_config();
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: Some("auto".to_string()),
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    // An earlier Auto turn picked a model on custom-a.
+    let mut earlier = sample_turn(&thread.id, "turn_auto_on_a", RuntimeTurnStatus::Completed);
+    earlier.effective_provider = Some("custom".to_string());
+    earlier.effective_provider_id = Some("custom-a".to_string());
+    earlier.effective_model = Some("model-a".to_string());
+    manager.store.save_turn(&earlier)?;
+    let before = manager.resolved_route_for_thread(&config, &thread)?;
+    assert_eq!(before.identity.key, "custom-a");
+    assert_eq!(before.model, "model-a");
+
+    let switched = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                model_provider: Some("custom-b".to_string()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert_eq!(switched.model, "auto");
+    let route = manager.resolved_route_for_thread(&config, &switched)?;
+    assert_eq!(route.identity.key, "custom-b");
+    assert_eq!(route.model, "model-b");
+
+    // The earlier pick names a provider that is gone; the thread still routes
+    // through its saved provider instead of failing on history.
+    let route = manager.resolved_route_for_thread(&only_custom_b_config(), &switched)?;
+    assert_eq!(route.identity.key, "custom-b");
+    assert_eq!(route.model, "model-b");
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_reload_accepts_removing_the_provider_an_idle_thread_switched_away_from()
+-> Result<()> {
+    let manager = RuntimeThreadManager::open(
+        two_custom_route_config(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    // The loaded engine still carries custom-a until its next turn.
+    let _harness = install_mock_engine(&manager, &thread.id).await;
+    manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                model_provider: Some("custom-b".to_string()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    manager.reload_config(only_custom_b_config()).await?;
+    let saved = manager.get_thread(&thread.id).await?;
+    let route = manager.resolved_route_for_thread(&manager.read_config(), &saved)?;
+    assert_eq!(route.identity.key, "custom-b");
     Ok(())
 }
 
