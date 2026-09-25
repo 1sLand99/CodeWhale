@@ -11040,10 +11040,10 @@ async fn spawn_subagent_from_input(
         }
         None => resolve_spawn_route_profile(&runtime, &mut spawn_request, &spawn_roster(&runtime))?,
     };
-    // Role resolution runs before classification so the bounded-write contract
-    // sees the effective role: read-only roles stay ergonomic while a
-    // manager/builder role can never acquire an implicit repository-wide
-    // write claim.
+    // Role resolution runs before classification so the write contract sees
+    // the effective role: read-only roles stay ergonomic, and a write-capable
+    // role with no declared scope claims the workspace root ('.'), which the
+    // coordination ledger then arbitrates against live peers.
     validate_spawn_write_contract(&mut spawn_request, false)?;
 
     if runtime.would_exceed_depth() {
