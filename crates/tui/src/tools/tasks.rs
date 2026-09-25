@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::command_safety::{SafetyLevel, analyze_command};
 use crate::dependencies::ExternalTool;
 use crate::task_manager::{
     NewTaskRequest, TaskArtifactRef, TaskAttemptRecord, TaskCancelDisposition, TaskGateRecord,
@@ -25,6 +24,7 @@ use crate::work_graph::{
     CancelOutcome, OperationIntent, OperationObservation, OperationOwnerSnapshot, OwnerState,
     task_owner_snapshot,
 };
+use codewhale_execpolicy::command_safety::{SafetyLevel, analyze_command};
 
 const MAX_SUMMARY_CHARS: usize = 900;
 const DEFAULT_GATE_TIMEOUT_MS: u64 = 120_000;
@@ -225,6 +225,18 @@ impl ToolSpec for TasksTool {
                 json!({ "type": "string", "description": "Work prompt for the durable task (action=create)." }),
             );
             properties.insert(
+                "name".to_string(),
+                json!({ "type": "string", "description": "Short run name shown in queues; omit to derive from the prompt. (action=create)" }),
+            );
+            properties.insert(
+                "model_provider".to_string(),
+                json!({ "type": "string", "description": "Provider kind for the pinned model. Omit to inherit the configured provider." }),
+            );
+            properties.insert(
+                "model_provider_id".to_string(),
+                json!({ "type": "string", "description": "Exact configured provider id, including named custom routes. Keeps the model on that route." }),
+            );
+            properties.insert(
                 "model".to_string(),
                 json!({ "type": "string", "description": "(action=create)" }),
             );
@@ -351,6 +363,11 @@ impl ToolSpec for TasksTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(
+            context,
+            self.name(),
+            &json!({"action": self.resolve_action(&input)?}),
+        )?;
         match self.resolve_action(&input)? {
             "create" => self.execute_create(&input, context).await,
             "list" => self.execute_list(&input, context).await,
@@ -377,6 +394,8 @@ fn legacy_action_schema(action: &str) -> Value {
             "properties": {
                 "prompt": { "type": "string", "description": "Work prompt for the durable task." },
                 "model": { "type": "string" },
+                "model_provider": { "type": "string", "description": "Provider kind for the pinned model." },
+                "model_provider_id": { "type": "string", "description": "Exact configured provider id." },
                 "workspace": { "type": "string", "description": "Workspace path; defaults to current workspace." },
                 "mode": { "type": "string", "enum": ["agent", "plan", "operate"] },
                 "allow_shell": { "type": "boolean" },
@@ -460,7 +479,10 @@ impl TasksTool {
         let prompt = required_str(input, "prompt")?.to_string();
         let req = NewTaskRequest {
             prompt: prompt.clone(),
+            name: optional_str(input, "name")?.map(ToString::to_string),
             model: optional_str(input, "model")?.map(ToString::to_string),
+            model_provider: optional_str(input, "model_provider")?.map(ToString::to_string),
+            model_provider_id: optional_str(input, "model_provider_id")?.map(ToString::to_string),
             workspace: Some(workspace),
             mode: optional_str(input, "mode")?.map(ToString::to_string),
             // Authority declarations: read strictly. A malformed value that
@@ -468,11 +490,18 @@ impl TasksTool {
             allow_shell: optional_bool_opt(input, "allow_shell")?,
             trust_mode: optional_bool_opt(input, "trust_mode")?,
             auto_approve: optional_bool_opt(input, "auto_approve")?,
+            // The task runs on the posture this session is in. The bits above
+            // are declarations the engine only reads when no posture is given,
+            // and a task started from a session must not run under authority
+            // that session was never granted.
+            permission_posture: Some(
+                crate::runtime_policy::approval_wire(context.approval_mode).to_string(),
+            ),
             owner_session_id: Some(context.state_namespace.clone()),
         };
         let task_id = crate::task_manager::TaskManager::new_task_id();
-        if let Some(work) = context.runtime.work.as_ref() {
-            work.register_operation(
+        if let Some(work) = context.runtime.work.as_ref()
+            && let Err(err) = work.register_operation(
                 &context.state_namespace,
                 OperationIntent::new(
                     format!("task:{task_id}"),
@@ -482,7 +511,15 @@ impl TasksTool {
                     &task_id,
                 ),
             )
-            .map_err(ToolError::execution_failed)?;
+        {
+            // Bookkeeping must not veto the task: every later reconcile is
+            // guarded by `has_operation_binding`, so an unbound task merely
+            // goes unreported on the Work surface.
+            tracing::warn!(
+                task_id = %task_id,
+                error = %err,
+                "task work-graph registration skipped; running unbound"
+            );
         }
         let task = match manager.add_task_with_id(req, task_id.clone()).await {
             Ok(task) => task,
@@ -521,7 +558,8 @@ impl TasksTool {
         let limit = optional_u64(input, "limit", 20)?.clamp(1, 100) as usize;
         let tasks = manager
             .list_tasks_for_owner(Some(limit), None, &context.state_namespace)
-            .await;
+            .await
+            .map_err(|error| ToolError::execution_failed(error.to_string()))?;
         ToolResult::json(&json!({
             "summary": format!("{} durable task(s)", tasks.len()),
             "tasks": tasks,
@@ -597,6 +635,12 @@ impl TasksTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, "task_gate_run", input)?;
+        if context.shell_policy != crate::worker_profile::ShellPolicy::Full {
+            return Err(ToolError::permission_denied(
+                "Gate commands require full shell permission.",
+            ));
+        }
         let gate = required_str(input, "gate")?.to_string();
         let command = required_str(input, "command")?.to_string();
         let timeout_ms = optional_u64(input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS)?
@@ -898,6 +942,7 @@ impl ToolSpec for TaskShellStartTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, self.name(), &input)?;
         let mut shell_input = json!({
             "command": required_str(&input, "command")?,
             "background": true,
@@ -937,7 +982,7 @@ impl ToolSpec for TaskShellWaitTool {
         json!({
             "type": "object",
             "properties": {
-                "task_id": { "type": "string", "description": "Background shell task id returned by task_shell_start or `Bash`." },
+                "task_id": { "type": "string", "description": "Background shell task id returned by task_shell_start." },
                 "wait": { "type": "boolean", "default": false },
                 "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 },
                 "gate": { "type": "string", "enum": ["fmt", "check", "clippy", "test", "custom"] },
@@ -957,6 +1002,7 @@ impl ToolSpec for TaskShellWaitTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, self.name(), &input)?;
         let shell_input = task_shell_wait_input(input.clone());
         let result = BashTool::alias("exec_shell_wait", "wait")
             .execute(shell_input, context)
@@ -1059,6 +1105,7 @@ fn task_result_with_lifecycle_warning(
         "summary": format!("{label}: {} ({:?})", task.id, task.status),
         "task": task,
         "lifecycle_warning": lifecycle_warning,
+        "execution_ownership": if task.execution_scope.is_some() { "scope_bound" } else { "unverified" },
     }))
     .map_err(|e| ToolError::execution_failed(e.to_string()))
 }
@@ -1513,6 +1560,69 @@ mod tests {
             .execute(json!({"task_id": task_id}), &context)
             .await
             .expect("cancel background shell");
+    }
+
+    /// Creating a task from a session runs it on the posture that session
+    /// holds: `auto_approve` is a legacy bit the engine only reads when no
+    /// posture is given, so a task cannot talk itself into more authority than
+    /// the session that asked for it was granted.
+    #[tokio::test]
+    async fn create_pins_the_session_posture_on_the_task() {
+        struct NoopExecutor;
+
+        #[async_trait::async_trait]
+        impl crate::task_manager::TaskExecutor for NoopExecutor {
+            async fn execute(
+                &self,
+                _task: crate::task_manager::ExecutionTask,
+                _events: tokio::sync::mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
+                _cancel: tokio_util::sync::CancellationToken,
+            ) -> crate::task_manager::TaskExecutionResult {
+                crate::task_manager::TaskExecutionResult {
+                    status: crate::task_manager::TaskStatus::Completed,
+                    result_text: Some("noop".to_string()),
+                    error: None,
+                    terminal_reason: crate::task_manager::TaskTerminalReason::Completed,
+                }
+            }
+        }
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = crate::task_manager::TaskManager::start_with_executor(
+            crate::task_manager::TaskManagerConfig {
+                data_dir: workspace.path().to_path_buf(),
+                worker_count: 1,
+                default_workspace: workspace.path().to_path_buf(),
+                default_model: "deepseek-v4-pro".to_string(),
+                default_mode: "agent".to_string(),
+                allow_shell: false,
+                trust_mode: false,
+                execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+            },
+            std::sync::Arc::new(NoopExecutor),
+        )
+        .await
+        .expect("task manager");
+
+        let mut context = ToolContext::new(workspace.path());
+        context.approval_mode = codewhale_execpolicy::ApprovalMode::Auto;
+        context.runtime.task_manager = Some(manager.clone());
+
+        TasksTool::new("tasks")
+            .execute(
+                json!({"action": "create", "prompt": "run the sweep", "auto_approve": true}),
+                &context,
+            )
+            .await
+            .expect("create accepted");
+
+        let queued = manager.list_tasks(Some(1)).await.expect("queued task");
+        let created = manager.get_task(&queued[0].id).await.expect("created task");
+        assert_eq!(
+            created.permission_posture.as_deref(),
+            Some("auto_review"),
+            "the task runs under its session's posture, not the model's legacy bit"
+        );
     }
 
     #[test]

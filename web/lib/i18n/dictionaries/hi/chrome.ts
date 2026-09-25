@@ -23,12 +23,9 @@ export const chrome: ChromeDict = {
   navCommunity: "समुदाय",
   navContribute: "योगदान",
 
-  navDocsSecondary: "Docs",
-  navStartSecondary: "Start",
-  navInstallSecondary: "Install",
-  navFaqSecondary: "FAQ",
-  navCommunitySecondary: "Community",
-  navContributeSecondary: "Contribute",
+  navProduct: "उत्पाद",
+  navModels: "मॉडल",
+  navPlugins: "प्लगइन",
 
   skipToContent: "मुख्य सामग्री पर जाएँ",
 
@@ -38,17 +35,12 @@ export const chrome: ChromeDict = {
   installCta: "इंस्टॉल करें →",
 
   authSignIn: "साइन इन करें",
-  authRegister: "रजिस्टर करें",
-  authGroupAria: "खाता",
 
   wordmarkSeal: "深",
   wordmarkTag: "कोई भी मॉडल, आपकी मशीन पर",
 
   issueLabel: "{date} का अंक",
   dateLocale: "hi-IN",
-
-  starsAria: "GitHub स्टार",
-  githubFallback: "GitHub",
 
   tickerLiveLabel: "लाइव",
   tickerLiveTag: "LIVE",
@@ -69,11 +61,11 @@ export const chrome: ChromeDict = {
   themeAuto: "ऑटो",
   themeLight: "लाइट",
   themeDark: "डार्क",
-  themeAria: "दस्तावेज़ीकरण थीम: {mode} (बदलने के लिए क्लिक करें)",
-  themeTitle: "दस्तावेज़ीकरण थीम · ऑटो / लाइट / डार्क",
+  themeAria: "थीम: {mode} (बदलने के लिए क्लिक करें)",
+  themeTitle: "थीम · ऑटो / लाइट / डार्क",
 
   footerTagline:
-    "गहराई में Codewhale उतरता है, आपको नहीं उतरना पड़ता — ओपन सोर्स रनटाइम के लिए दस्तावेज़, सोर्स और समुदाय।",
+    "अपनी पसंद के मॉडल से जो चाहें बनाएँ और रोज़मर्रा के काम स्वचालित करें।",
   footerProduct: "उत्पाद",
   footerProject: "प्रोजेक्ट",
   footerDocs: "दस्तावेज़ीकरण",
@@ -85,7 +77,6 @@ export const chrome: ChromeDict = {
   footerIssues: "Issues",
   footerContribute: "योगदान दें",
   footerLicense: "MIT लाइसेंस",
-  footerPricing: "मूल्य",
   footerTerms: "सेवा की शर्तें",
   footerPrivacy: "गोपनीयता",
   footerChangelog: "परिवर्तन लॉग",

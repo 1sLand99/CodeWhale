@@ -405,7 +405,7 @@ pub(super) fn generated_whale_name_base<'a>(agent_id: &str, name: &'a str) -> Op
     // A user-authored label that happens to be a whale word for some other id
     // remains explicit. An exact deterministic match is inherently ambiguous
     // and stays classified as generated for backward compatibility.
-    crate::localization::Locale::shipped()
+    codewhale_localization::Locale::shipped()
         .iter()
         .any(|locale| whale_name_for_id_in_locale(agent_id, locale.tag()) == base)
         .then_some(base)

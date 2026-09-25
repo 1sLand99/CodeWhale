@@ -2,10 +2,10 @@
 
 use crate::audit::log_sensitive_event;
 use crate::core::engine::EngineHandle;
-use crate::localization::MessageId;
 use crate::tui::app::{App, StatusToastLevel};
-use crate::tui::approval::ApprovalMode;
 use crate::tui::history::HistoryCell;
+use codewhale_execpolicy::ApprovalMode;
+use codewhale_localization::MessageId;
 
 pub(super) fn is_session_approved_for_tool(
     app: &App,
@@ -23,6 +23,23 @@ pub(super) fn is_session_denied_for_key(app: &App, approval_key: &str) -> bool {
     app.approval_session_denied.contains(approval_key)
 }
 
+/// A Deny holds for the rest of the user turn it was given in: the model's
+/// retry loop must not re-prompt for the same call, but the user's next
+/// message is a new intent and may deserve a different answer.
+pub(super) fn end_turn_scoped_denials(app: &mut App) {
+    app.approval_session_denied.clear();
+}
+
+/// A different conversation (a session switch or resume) inherits neither
+/// this conversation's denials nor its "approve for session" grants: both
+/// describe work the user was looking at here. `/new` and `/clear` do the
+/// same in `reset_conversation_state`.
+pub(super) fn reset_approval_scope_for_new_conversation(app: &mut App) {
+    app.approval_session_denied.clear();
+    app.approval_session_approved.clear();
+    crate::tui::pending_requests::clear_all(app);
+}
+
 pub(super) fn session_denied_notice(app: &App, tool_name: &str) -> String {
     app.tr(MessageId::ApprovalAutoDeniedSession)
         .replace("{tool}", tool_name)
@@ -30,7 +47,6 @@ pub(super) fn session_denied_notice(app: &App, tool_name: &str) -> String {
 
 pub(super) fn surface_session_denied_notice(app: &mut App, tool_name: &str) {
     let notice = session_denied_notice(app, tool_name);
-    app.status_message = Some(notice.clone());
     app.push_status_toast(notice.clone(), StatusToastLevel::Warning, Some(12_000));
 
     // Tool completion and turn completion can replace the one-line status
@@ -110,6 +126,88 @@ pub(super) fn resolve_ui_approval_disposition(
         is_session_denied_for_key(app, approval_key),
         approval_force_prompt,
     )
+}
+
+/// Answer, explicitly, a request that must not open a card here, so nothing
+/// waits on a card that never shows (approvals C1):
+///
+/// - a child agent's approval from another conversation (the agent is known
+///   to belong elsewhere) is answered `unavailable`;
+/// - while the parent is idle or its turn was cancelled locally, a request
+///   the parent owns can only be stale: an approval or sandbox elevation is
+///   answered `unavailable`, a question is cancelled. Neither is recorded
+///   as the person's denial.
+///
+/// A child agent's request from this conversation is never stale on the
+/// idle/cancel basis: the child is still running and waiting on the person,
+/// so it falls through to the normal handler. Returns `true` when the event
+/// was consumed here.
+pub(super) async fn resolve_stale_parent_request(
+    app: &App,
+    engine_handle: &EngineHandle,
+    event: &crate::core::events::Event,
+) -> bool {
+    use crate::core::events::Event;
+    if let Event::ApprovalRequired { id, tool_name, .. } = event
+        && crate::tui::pending_requests::is_foreign_child_request(app, id)
+    {
+        log_sensitive_event(
+            "tool.approval.foreign_session_child_resolved",
+            serde_json::json!({
+                "tool_name": tool_name,
+                "session_id": app.current_session_id,
+            }),
+        );
+        let _ = engine_handle.deny_tool_call_unavailable(id.clone()).await;
+        return true;
+    }
+    if !(app.suppress_stream_events_until_turn_complete || !app.is_loading) {
+        return false;
+    }
+    match event {
+        Event::ApprovalRequired { id, tool_name, .. }
+            if !crate::tools::subagent::SubAgentManager::is_child_approval_id(id) =>
+        {
+            log_sensitive_event(
+                "tool.approval.stale_parent_resolved",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle.deny_tool_call_unavailable(id.clone()).await;
+            true
+        }
+        Event::ElevationRequired {
+            tool_id, tool_name, ..
+        } => {
+            log_sensitive_event(
+                "tool.sandbox.stale_elevation_resolved",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle
+                .deny_tool_call_unavailable(tool_id.clone())
+                .await;
+            true
+        }
+        Event::UserInputRequired { id, .. }
+            if !crate::tools::subagent::SubAgentManager::is_child_approval_id(id) =>
+        {
+            log_sensitive_event(
+                "tool.user_input.stale_parent_resolved",
+                serde_json::json!({
+                    "tool_id": id,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle.cancel_user_input(id.clone()).await;
+            true
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn should_suppress_user_input_prompt(app: &App) -> bool {

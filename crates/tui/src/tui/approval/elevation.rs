@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::localization::Locale;
 use crate::sandbox::SandboxPolicy;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use crate::tui::widgets::{ElevationWidget, Renderable};
+use codewhale_localization::Locale;
 
 /// Options for elevating sandbox permissions after a denial.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,16 +44,12 @@ impl ElevationOption {
     #[cfg(test)]
     pub fn description(&self) -> &'static str {
         match self {
-            ElevationOption::WithNetwork => {
-                "Retry this tool call with outbound network access for downloads and HTTP requests"
-            }
-            ElevationOption::WithWriteAccess(_) => {
-                "Retry this tool call with additional writable filesystem scope"
-            }
+            ElevationOption::WithNetwork => "Retry with outbound network (downloads and HTTP)",
+            ElevationOption::WithWriteAccess(_) => "Retry with a wider writable scope",
             ElevationOption::FullAccess => {
                 "Retry without sandbox limits; grants unrestricted filesystem and network access"
             }
-            ElevationOption::Abort => "Cancel this tool execution",
+            ElevationOption::Abort => "Cancel this run",
         }
     }
 
@@ -117,7 +113,7 @@ impl ElevationRequest {
     }
 
     /// Create a generic elevation request.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn generic(tool_id: &str, tool_name: &str, denial_reason: &str) -> Self {
         Self {
             tool_id: tool_id.to_string(),
@@ -175,13 +171,13 @@ impl ElevationView {
     }
 
     /// Get the request for rendering.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn request(&self) -> &ElevationRequest {
         &self.request
     }
 
     /// Get the currently selected index.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn selected(&self) -> usize {
         self.selected
     }

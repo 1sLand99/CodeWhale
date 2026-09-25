@@ -131,15 +131,15 @@ afterEach(() => {
 });
 
 describe.skipIf(process.platform === "win32")("public installer compatibility contract", () => {
-  it("refreshes a v0.9.4 legacy TUI command from verified consolidated bytes", () => {
-    const { installDir, legacyPath, result, runtime } = installFixture(true);
+  it("preserves a different legacy TUI command and directs migration to a fresh directory", () => {
+    const { installDir, legacyPath, result } = installFixture(true, { expectedStatus: 1 });
 
-    expect(readFileSync(path.join(installDir, "codewhale"))).toEqual(runtime);
-    expect(readFileSync(path.join(installDir, "codew"))).toEqual(runtime);
-    expect(readFileSync(legacyPath)).toEqual(runtime);
-    expect(result.stdout).toContain("Refreshed legacy compatibility command:");
-    expect(result.stdout).toContain("codewhale 0.9.5 (fixture)");
-    expect(result.stdout).not.toContain("0.9.4");
+    expect(existsSync(path.join(installDir, "codewhale"))).toBe(false);
+    expect(existsSync(path.join(installDir, "codew"))).toBe(false);
+    expect(readFileSync(legacyPath)).toEqual(executable("codewhale-tui 0.9.4 (legacy fixture)"));
+    expect(result.stderr).toContain(legacyPath);
+    expect(result.stderr).toContain("mktemp -d");
+    expect(result.stderr).toContain("No existing file was changed");
   });
 
   it("does not create the retired TUI command for a clean v0.9.5 install", () => {

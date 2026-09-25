@@ -11,7 +11,6 @@ const SPANS: Record<string, string> = {
   accountLogin: "codewhale account login",
   profile: "--profile",
   cloud: "codewhale cloud …",
-  fileStoreEnv: "CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE",
   keys: "codewhale account keys list|set|remove",
   portable: "codewhale config export --portable",
 };
@@ -80,9 +79,8 @@ codewhale --model deepseek-v4-flash`}</pre>
         </div>
       </section>
 
-      <section id="source" className="hairline-t pt-8">
-        <p className="text-sm text-ink-mute">{t.sourceNote}</p>
-      </section>
+      {/* Maintainer pointer: kept out of the rendered copy (experience mark 5). */}
+      <div hidden data-source-note={t.sourceNote} />
     </section>
   );
 }

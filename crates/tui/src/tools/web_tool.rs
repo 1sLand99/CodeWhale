@@ -174,8 +174,13 @@ impl ToolSpec for WebTool {
         vec![ToolCapability::ReadOnly, ToolCapability::Network]
     }
 
-    fn approval_requirement_for(&self, _input: &Value) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
+    fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
+        match self.resolve_action(input) {
+            "fetch" => FetchUrlTool.approval_requirement_for(input),
+            "search" => WebSearchTool.approval_requirement_for(input),
+            "wait" => WaitForDevServerTool.approval_requirement_for(input),
+            _ => ApprovalRequirement::Required,
+        }
     }
 
     fn is_read_only_for(&self, _input: &Value) -> bool {

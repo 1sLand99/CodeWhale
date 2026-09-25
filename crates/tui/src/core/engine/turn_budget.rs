@@ -1,26 +1,13 @@
-//! Finite turn budgets (R1, v0.9.12 Phase 1).
+//! Turn budgets shared by interactive hosts and headless execution.
 //!
-//! An agent loop with no finite bound can spend real money forever. Before
-//! R1 the parent turn had exactly one hard ceiling — the per-step stream
-//! caps in [`super::streaming`] — while the model-step ceiling defaulted to
-//! `u32::MAX` at every production call site and no cumulative per-turn
-//! wall-clock budget existed at all. This module is the single home for the
-//! four bounds R1 makes finite:
+//! Model steps are uncapped by default. Explicit positive limits still
+//! apply; a fixed step counter is not a measure of useful progress.
+//! Cumulative wall-clock and per-step stream budgets remain finite.
 //!
-//! 1. `max_steps` — model steps in one turn.
-//! 2. The cumulative per-turn wall clock.
-//! 3. `exec --max-turns` — the same step ceiling for headless runs.
-//! 4. The per-step stream caps (content bytes, stream duration).
-//!
-//! ## No `0`-means-unlimited sentinel
-//!
-//! Every resolver here rejects `0` and falls back to the finite default
-//! rather than reading it as "unlimited". That sentinel is exactly the bug
-//! class R1 exists to close: a `0` that skips the cap check turns a
-//! misconfiguration (or a typo) into an unbounded spend. There is also no
-//! "unlimited" value at all — a caller who genuinely wants a turn to run
-//! practically forever raises the knob to its documented maximum, which is
-//! large but still finite and still terminates.
+//! `EngineConfig` retains its integer representation for embedders:
+//! `u32::MAX` represents no model-step limit. `TurnContext::step_limit`
+//! resolves that representation to `None` before checking a ceiling or
+//! emitting diagnostics. It is not a very large finite fallback.
 //!
 //! ## Honesty at the limit
 //!
@@ -31,25 +18,14 @@
 
 use std::time::{Duration, Instant};
 
-/// Default ceiling on model steps within a single turn.
-///
-/// A "step" is one accepted provider response, so this bounds how many
-/// billable requests one user message can trigger. 200 is far above what an
-/// ordinary interactive turn spends and still finite: a runaway tool loop
-/// stops here instead of spending until the operator notices.
-pub const DEFAULT_MAX_MODEL_STEPS: u32 = 200;
+/// No model-step limit unless the caller configures one. This is the
+/// compatibility representation, not a ceiling checked at `u32::MAX`.
+pub const DEFAULT_MAX_MODEL_STEPS: u32 = u32::MAX;
 /// Smallest accepted model-step ceiling. One step still lets the model
 /// answer once.
 pub const MIN_MAX_MODEL_STEPS: u32 = 1;
-/// Largest accepted model-step ceiling. Deliberately large enough to serve
-/// as the "effectively unlimited" escape hatch while remaining finite, so
-/// no configuration path can produce an unbounded loop.
+/// Largest explicitly configured model-step ceiling.
 pub const MAX_MAX_MODEL_STEPS: u32 = 100_000;
-
-/// Default headless `exec --max-turns`. Same ceiling as the interactive
-/// engine: a non-interactive run has nobody watching it, so it must not be
-/// looser than the one a human is sitting in front of.
-pub const DEFAULT_EXEC_MAX_TURNS: u32 = DEFAULT_MAX_MODEL_STEPS;
 
 /// Default cumulative per-turn wall-clock budget, in seconds.
 ///
@@ -82,10 +58,10 @@ pub const MAX_STREAM_MAX_DURATION_SECS: u64 = 86_400;
 
 /// Resolve a configured model-step ceiling.
 ///
-/// `None` and `0` both resolve to [`DEFAULT_MAX_MODEL_STEPS`]: `0` is
-/// treated as an invalid value, never as "unlimited". Positive values clamp
-/// into `MIN_MAX_MODEL_STEPS..=MAX_MAX_MODEL_STEPS`, so even the largest
-/// configurable turn terminates.
+/// `None` and `0` select the uncapped default. Explicit positive values
+/// clamp into `MIN_MAX_MODEL_STEPS..=MAX_MAX_MODEL_STEPS`. Resolve raw input
+/// once: passing an already resolved default back as an explicit value
+/// would incorrectly install the maximum configurable ceiling.
 #[must_use]
 pub fn resolve_max_model_steps(raw: Option<u32>) -> u32 {
     match raw {
@@ -230,11 +206,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_step_defaults_are_finite_and_reject_the_zero_sentinel() {
+    fn model_step_defaults_do_not_install_a_ceiling() {
         assert_eq!(resolve_max_model_steps(None), DEFAULT_MAX_MODEL_STEPS);
-        // `0` is invalid, not "unlimited" — the trap R1 exists to close.
         assert_eq!(resolve_max_model_steps(Some(0)), DEFAULT_MAX_MODEL_STEPS);
-        const { assert!(DEFAULT_MAX_MODEL_STEPS < u32::MAX) };
+        assert_eq!(DEFAULT_MAX_MODEL_STEPS, u32::MAX);
         const { assert!(MAX_MAX_MODEL_STEPS < u32::MAX) };
     }
 
@@ -245,7 +220,7 @@ mod tests {
         assert_eq!(
             resolve_max_model_steps(Some(u32::MAX)),
             MAX_MAX_MODEL_STEPS,
-            "the escape hatch is large but still finite"
+            "explicit positive overrides retain the configured ceiling"
         );
     }
 

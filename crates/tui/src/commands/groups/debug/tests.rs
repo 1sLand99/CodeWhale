@@ -3,10 +3,10 @@ use super::tokens::{context, cost, system_prompt, tokens};
 use super::undo::{patch_undo, prune_undone_tool_context, retry, undo_conversation};
 use crate::client::CacheWarmupKey;
 use crate::config::Config;
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, SystemBlock, SystemPrompt, Tool};
 use crate::tui::app::{App, AppAction, TuiOptions, TurnCacheRecord};
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, SystemBlock, SystemPrompt, Tool};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -16,7 +16,7 @@ fn create_test_app() -> App {
         ..crate::test_support::test_tui_options(PathBuf::from("/tmp/test-workspace"))
     };
     let mut app = App::new(options, &Config::default());
-    app.ui_locale = crate::localization::Locale::En;
+    app.ui_locale = codewhale_localization::Locale::En;
     app.cost_currency = crate::pricing::CostCurrency::Usd;
     app.api_provider = crate::config::ApiProvider::Deepseek;
     app
@@ -50,7 +50,7 @@ fn test_tokens_shows_usage_info() {
     app.session.last_completion_tokens = Some(25);
     app.session.last_prompt_cache_hit_tokens = Some(70);
     app.session.last_prompt_cache_miss_tokens = Some(30);
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "test".to_string(),
@@ -139,7 +139,7 @@ fn cost_report_states_its_coverage_and_names_what_it_excludes() {
     use crate::pricing::audit_turn_cost_for_provider_at;
 
     let mut app = create_test_app();
-    let write_heavy = crate::models::Usage {
+    let write_heavy = codewhale_models::Usage {
         input_tokens: 1_000_000,
         output_tokens: 100_000,
         prompt_cache_hit_tokens: Some(200_000),
@@ -189,7 +189,7 @@ fn cost_report_states_its_coverage_and_names_what_it_excludes() {
     assert!(msg.contains("estimate, not a bill"), "{msg}");
     assert!(msg.contains("Excluded: 1"), "{msg}");
     assert!(msg.contains("Priced subtotal:"), "{msg}");
-    assert!(msg.contains("missing_class_price"), "{msg}");
+    assert!(msg.contains("token class rate unavailable"), "{msg}");
     assert!(msg.contains("cache_write"), "{msg}");
 
     // A run with no unpriced turns says so without an exclusion note.
@@ -207,7 +207,7 @@ fn cost_report_states_its_coverage_and_names_what_it_excludes() {
 #[test]
 fn cost_coverage_is_currency_specific_for_mixed_deepseek_openai() {
     let mut app = create_test_app();
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 10_000,
         output_tokens: 1_000,
         ..Default::default()
@@ -333,7 +333,7 @@ fn reset_cost_coverage_clears_every_counter() {
     use crate::pricing::audit_turn_cost_for_provider_at;
 
     let mut app = create_test_app();
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 1_000_000,
         output_tokens: 100_000,
         prompt_cache_write_tokens: Some(100_000),
@@ -390,7 +390,7 @@ fn tokens_report_says_estimate_and_exposes_coverage_and_cache_write() {
     app.record_turn_cost_audit(&crate::pricing::audit_turn_cost_for_provider_at(
         crate::config::ApiProvider::Moonshot,
         "kimi-k2.7-code",
-        &crate::models::Usage {
+        &codewhale_models::Usage {
             input_tokens: 1_000_000,
             output_tokens: 100_000,
             prompt_cache_write_tokens: Some(100_000),
@@ -479,7 +479,7 @@ fn cache_inspect_reports_hashes_without_prompt_text() {
             "Base policy\n\n<project_instructions source=\"AGENTS.md\">\nSECRET_PROJECT_RULE\n</project_instructions>"
                 .to_string(),
         ));
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "SECRET_USER_TASK".to_string(),
@@ -507,7 +507,7 @@ fn cache_inspect_uses_last_request_tool_catalog() {
     let mut app = create_test_app();
     app.system_prompt = Some(SystemPrompt::Text("Base policy".to_string()));
     app.session.last_tool_catalog = Some(vec![test_tool("read_file")]);
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "Current task".to_string(),
@@ -531,7 +531,7 @@ fn cache_inspect_json_reports_tool_catalog_hash_and_layer_sizes() {
     let mut app = create_test_app();
     app.system_prompt = Some(SystemPrompt::Text("Base policy".to_string()));
     app.session.last_tool_catalog = Some(vec![test_tool("read_file")]);
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "Current task".to_string(),
@@ -566,7 +566,7 @@ fn cache_inspect_json_keys_auto_replay_to_the_last_concrete_route() {
     let mut app = create_test_app();
     app.model = "auto".to_string();
     app.auto_model = true;
-    app.reasoning_effort = crate::tui::app::ReasoningEffort::Off;
+    app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::Off;
     app.last_effective_provider = Some(crate::config::ApiProvider::OpenaiCodex);
     app.last_effective_provider_identity =
         Some(crate::config::ApiProvider::OpenaiCodex.as_str().to_string());
@@ -689,16 +689,16 @@ fn cache_inspect_reports_divergence_from_previous_request() {
     app.system_prompt = Some(SystemPrompt::Text(
         "Base policy\n\n## Environment\n\n- shell: powershell".to_string(),
     ));
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "Prior answer".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "First task".to_string(),
             cache_control: None,
         }],
@@ -709,8 +709,8 @@ fn cache_inspect_reports_divergence_from_previous_request() {
         .expect("first inspect output");
     assert!(first.contains("Static base prefix stability: no previous request"));
 
-    if let Some(last) = app.api_messages.last_mut()
-        && let Some(crate::models::ContentBlock::Text { text, .. }) = last.content.first_mut()
+    if let Some(last) = app.api_messages_mut().last_mut()
+        && let Some(codewhale_models::ContentBlock::Text { text, .. }) = last.content.first_mut()
     {
         *text = "Second task".to_string();
     }
@@ -727,7 +727,7 @@ fn cache_inspect_reports_divergence_from_previous_request() {
 fn cache_inspect_displays_tool_result_budget_metadata() {
     let mut app = create_test_app();
     let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "tool-1".to_string(),
@@ -737,7 +737,7 @@ fn cache_inspect_displays_tool_result_budget_metadata() {
             thought_signature: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "tool-1".to_string(),
@@ -746,7 +746,7 @@ fn cache_inspect_displays_tool_result_budget_metadata() {
             content_blocks: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "tool-2".to_string(),
@@ -756,7 +756,7 @@ fn cache_inspect_displays_tool_result_budget_metadata() {
             thought_signature: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "tool-2".to_string(),
@@ -789,7 +789,7 @@ fn cache_inspect_displays_turn_meta_dedup_metadata() {
         "<turn_meta>\nCurrent local date: 2026-05-09\n{}\n</turn_meta>",
         "Working set: src/lib.rs\n".repeat(20)
     );
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![
             ContentBlock::Text {
@@ -802,7 +802,7 @@ fn cache_inspect_displays_turn_meta_dedup_metadata() {
             },
         ],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![
             ContentBlock::Text {
@@ -919,7 +919,7 @@ fn cache_history_shows_cache_write_tokens_and_explains_unpriced_turns() {
     use crate::pricing::audit_turn_cost_for_provider_at;
 
     let mut app = create_test_app();
-    let write_heavy = crate::models::Usage {
+    let write_heavy = codewhale_models::Usage {
         input_tokens: 1_000_000,
         output_tokens: 100_000,
         prompt_cache_hit_tokens: Some(200_000),
@@ -976,7 +976,7 @@ fn cache_history_shows_cache_write_tokens_and_explains_unpriced_turns() {
     assert!(msg.contains("sum_reasoning: 50000"), "{msg}");
     // The priced turn shows money; the unpriced one shows why it does not.
     assert!(msg.contains("$1.3450"), "{msg}");
-    assert!(msg.contains("missing_class_price"), "{msg}");
+    assert!(msg.contains("token class rate unavailable"), "{msg}");
     assert!(msg.contains("cache_write"), "{msg}");
 }
 
@@ -1081,7 +1081,7 @@ fn turn_cache_history_is_capped_at_50() {
 #[test]
 fn test_context_shows_usage_stats() {
     let mut app = create_test_app();
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "Hello".to_string(),
@@ -1103,7 +1103,7 @@ fn test_context_shows_usage_stats() {
 #[test]
 fn test_context_report_subcommands_return_source_map() {
     let mut app = create_test_app();
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "Hello".to_string(),
@@ -1156,11 +1156,11 @@ fn test_undo_conversation_removes_last_exchange() {
         content: "Hi".to_string(),
         streaming: false,
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![],
     });
@@ -1181,7 +1181,7 @@ fn test_undo_conversation_nothing_to_undo() {
     let mut app = create_test_app();
     // Clear any default history
     app.history.clear();
-    app.api_messages.clear();
+    app.api_messages_mut().clear();
     let result = undo_conversation(&mut app);
     assert!(result.message.is_some());
     let msg = result.message.unwrap();
@@ -1286,7 +1286,7 @@ fn test_patch_undo_requests_session_resync_after_restore() {
     app.workspace = workspace.clone();
     app.yolo = true;
     app.current_session_id = Some("test-session".to_string());
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "please edit a.txt".to_string(),
@@ -1303,7 +1303,8 @@ fn test_patch_undo_requests_session_resync_after_restore() {
             ref messages,
             ref workspace,
             ..
-        }) if messages == &app.api_messages && workspace == &app.workspace
+        }) if messages.as_slice() == app.api_messages.as_slice()
+            && workspace == &app.workspace
     ));
 }
 
@@ -1450,14 +1451,14 @@ fn test_patch_undo_prunes_tool_turn_context() {
     });
     app.tool_cells.insert("call-1".to_string(), 2);
 
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "please edit a.txt".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![
             ContentBlock::Text {
@@ -1473,7 +1474,7 @@ fn test_patch_undo_prunes_tool_turn_context() {
             },
         ],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call-1".to_string(),
@@ -1482,7 +1483,7 @@ fn test_patch_undo_prunes_tool_turn_context() {
             content_blocks: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "Done, file is fixed now.".to_string(),
@@ -1567,14 +1568,14 @@ fn test_patch_undo_prunes_pre_turn_context() {
         content: "Done, file is fixed now.".to_string(),
         streaming: false,
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "please edit a.txt".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "Done, file is fixed now.".to_string(),
@@ -1633,14 +1634,14 @@ fn test_prune_undone_tool_context_preserves_prior_tool_pairs() {
     app.tool_cells.insert("call-a".to_string(), 2);
     app.tool_cells.insert("call-b".to_string(), 3);
 
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "edit two files".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![
             ContentBlock::Text {
@@ -1663,7 +1664,7 @@ fn test_prune_undone_tool_context_preserves_prior_tool_pairs() {
             },
         ],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call-a".to_string(),
@@ -1672,7 +1673,7 @@ fn test_prune_undone_tool_context_preserves_prior_tool_pairs() {
             content_blocks: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call-b".to_string(),
@@ -1681,7 +1682,7 @@ fn test_prune_undone_tool_context_preserves_prior_tool_pairs() {
             content_blocks: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "Done.".to_string(),
@@ -2122,4 +2123,50 @@ fn test_patch_undo_never_crosses_session_boundary() {
         repeated.message
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "b-before");
+}
+
+/// `/undo` used to report only `Removed N message(s)` when the snapshot repo
+/// could not be opened, implying a file rollback that never happened. The
+/// conversation-only fallback must say so, and say why.
+#[test]
+fn test_undo_reports_that_files_were_not_reverted_when_the_repo_is_unavailable() {
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+    use tempfile::tempdir;
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp.path());
+    let _profile = EnvVarGuard::set("USERPROFILE", tmp.path());
+
+    // The home directory itself is refused by the snapshot safety gate, so
+    // `patch_undo` cannot open a repo at all.
+    let mut app = create_test_app();
+    app.workspace = tmp.path().to_path_buf();
+    app.current_session_id = Some("test-session".to_string());
+    app.yolo = true;
+    app.history.push(HistoryCell::User {
+        content: "change something".to_string(),
+    });
+    app.api_messages_mut().push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "change something".to_string(),
+            cache_control: None,
+        }],
+    });
+
+    let result = super::dispatch(&mut app, "undo", None).expect("undo is dispatched here");
+    let message = result.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("Removed 1 message(s)"),
+        "conversation undo still runs: {message}"
+    );
+    assert!(
+        message.contains(super::undo::FILES_NOT_REVERTED_NOTE),
+        "the user must be told files were not reverted: {message}"
+    );
+    assert!(
+        message.contains(super::undo::SNAPSHOT_REPO_UNAVAILABLE_PREFIX),
+        "the reason must travel with the fallback: {message}"
+    );
 }

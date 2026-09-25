@@ -1,7 +1,7 @@
 /**
  * <GettingStartedSteps> — renders the shared new-user path from
- * web/lib/content/getting-started.ts: install → first offline session →
- * provider connection → pod setup.
+ * web/lib/content/getting-started.ts: install → provider connection →
+ * first task → optional Fleet setup.
  *
  * Used by the homepage band and the /docs/guide page so the path reads
  * identically in both places. Server component, SSG-safe.
@@ -13,10 +13,7 @@ import { pickText } from "@/lib/i18n/dictionaries";
 
 export function GettingStartedSteps({ locale = "en" }: { locale?: string }) {
   return (
-    // data-reveal-group: the homepage's <RevealOnScroll> settles the four
-    // steps in sequence. On /docs/guide no observer is mounted and the
-    // attribute is inert — the list renders complete and static, as before.
-    <ol className="gs-steps" data-reveal-group>
+    <ol className="gs-steps">
       {GETTING_STARTED_STEPS.map((step, index) => (
         <li key={step.id} data-step-id={step.id}>
           <span className="gs-step-index" aria-hidden="true">

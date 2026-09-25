@@ -3,15 +3,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use anyhow::Result;
+use codewhale_config::AppMode;
 
 use crate::commands::{self, CommandInfo, CommandResult};
 use crate::config::{ApiProvider, Config};
-use crate::localization::{Locale, MessageId, tr};
 use crate::provider_lake::all_catalog_models_for_provider;
-use crate::tui::app::{App, AppAction, AppMode};
+use crate::tui::app::{App, AppAction};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };
+use codewhale_localization::{Locale, MessageId, tr};
 
 pub const HOTBAR_COMPACT_LABEL_MAX_WIDTH: usize = 7;
 
@@ -571,7 +572,7 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
             "session.compact",
             "compact",
             "Compact session",
-            "Compact the current conversation context.",
+            "Shrink this conversation to free context.",
             AppHotbarKind::SessionCompact,
         ));
         registry.register(AppHotbarAction::new(
@@ -599,7 +600,7 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
             "reasoning.cycle",
             "reason",
             "Cycle reasoning",
-            "Cycle the configured reasoning effort for the active provider.",
+            "Step through reasoning levels for the active provider.",
             AppHotbarKind::ReasoningCycle,
         ));
         registry.register(AppHotbarAction::new(
@@ -627,7 +628,7 @@ impl HotbarActionSource for BuiltinHotbarActionSource {
             "trust.toggle",
             "trust",
             "Toggle trust",
-            "Enable or disable workspace trust mode.",
+            "Turn workspace trust on or off.",
             AppHotbarKind::TrustToggle,
         ));
     }
@@ -645,6 +646,13 @@ impl HotbarActionSource for SlashCommandHotbarActionSource {
     }
 
     fn register_actions(&self, registry: &mut HotbarActionRegistry) {
+        // Every command registers, including unlisted ones. The hotbar is a
+        // binding substrate, not a discovery surface: `codewhale-lane`'s
+        // control-plane descriptors resolve their `slash.<verb>` action id
+        // through this registry, so dropping an unlisted command here breaks
+        // a real contract (`control_plane_commands_are_bound_and_bare_dispatch_is_read_only`).
+        // Unlisted governs what is *advertised* — the slash menu, `/help`,
+        // and the command palette.
         for info in commands::command_infos() {
             registry.register(SlashHotbarAction::new(info));
         }
@@ -968,7 +976,7 @@ impl HotbarAction for AppHotbarAction {
             AppHotbarKind::SessionCompact => app.is_compacting || app.manual_compaction_queued,
             AppHotbarKind::Mode(mode) => app.mode == mode,
             AppHotbarKind::ReasoningCycle => {
-                app.reasoning_effort != crate::tui::app::ReasoningEffort::Off
+                app.reasoning_effort != crate::reasoning_preference::ReasoningEffort::Off
             }
             AppHotbarKind::SidebarToggle => {
                 app.work_surface.placement != crate::tui::work_surface::WorkSurfacePlacement::Off
@@ -1432,7 +1440,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::config::{ApiProvider, Config};
-    use crate::tui::app::{ReasoningEffort, TuiOptions};
+    use crate::reasoning_preference::ReasoningEffort;
+    use crate::tui::app::TuiOptions;
     use crate::tui::views::ModalKind;
 
     use super::*;
@@ -1448,7 +1457,7 @@ mod tests {
             ..crate::test_support::test_tui_options(workspace)
         };
         let mut app = App::new(options, config);
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app
     }
 
@@ -1809,7 +1818,26 @@ mod tests {
             .map(|action| action.id().to_string())
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(hotbar_slash_ids, palette_slash_ids);
+        // The hotbar is a binding substrate and registers every command; the
+        // palette is a browsing surface and omits the unlisted ones. So the
+        // palette is a subset, and the difference is exactly the unlisted set.
+        let unlisted_ids = commands::command_infos()
+            .iter()
+            .filter(|info| info.is_unlisted())
+            .map(|info| format!("slash.{}", info.name))
+            .collect::<BTreeSet<_>>();
+        assert!(
+            palette_slash_ids.is_subset(&hotbar_slash_ids),
+            "the palette must not offer a command the hotbar cannot bind"
+        );
+        assert_eq!(
+            hotbar_slash_ids
+                .difference(&palette_slash_ids)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            unlisted_ids,
+            "the only commands the hotbar has and the palette hides are the unlisted ones"
+        );
     }
 
     #[test]
@@ -2542,6 +2570,13 @@ mod tests {
 
     #[test]
     fn reasoning_cycle_uses_codex_effort_tiers() {
+        // Codex tiers are now per-model, read from the OAuth roster. Point
+        // CODEX_HOME at an empty directory so this exercises the static
+        // fallback ladder instead of whatever roster the developer's own
+        // machine happens to have cached.
+        let _lock = crate::test_support::lock_test_env();
+        let codex_home = tempfile::TempDir::new().expect("codex home");
+        let _codex_home = crate::test_support::EnvVarGuard::set("CODEX_HOME", codex_home.path());
         let registry = HotbarActionRegistry::with_builtins();
         let reasoning = registry.get("reasoning.cycle").expect("reasoning action");
         let mut app = test_app();
@@ -2552,7 +2587,7 @@ mod tests {
         for (expected_effort, expected_label) in [
             (ReasoningEffort::Medium, "medium"),
             (ReasoningEffort::High, "high"),
-            (ReasoningEffort::Max, "xhigh"),
+            (ReasoningEffort::Max, "max"),
             (ReasoningEffort::Low, "low"),
         ] {
             assert!(matches!(

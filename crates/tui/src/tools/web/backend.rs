@@ -37,6 +37,7 @@ pub(crate) enum ConfiguredSearchBackend<'a> {
     Baidu(BackendContext<'a>),
     Volcengine(BackendContext<'a>),
     Sofya(BackendContext<'a>),
+    Serply(BackendContext<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -61,6 +62,7 @@ impl<'a> ConfiguredSearchBackend<'a> {
             SearchProvider::Baidu => Self::Baidu(backend),
             SearchProvider::Volcengine => Self::Volcengine(backend),
             SearchProvider::Sofya => Self::Sofya(backend),
+            SearchProvider::Serply => Self::Serply(backend),
         }
     }
 
@@ -76,6 +78,7 @@ impl<'a> ConfiguredSearchBackend<'a> {
             Self::Baidu(_) => SearchProvider::Baidu,
             Self::Volcengine(_) => SearchProvider::Volcengine,
             Self::Sofya(_) => SearchProvider::Sofya,
+            Self::Serply(_) => SearchProvider::Serply,
         }
     }
 
@@ -90,7 +93,8 @@ impl<'a> ConfiguredSearchBackend<'a> {
             | Self::Searxng(context)
             | Self::Baidu(context)
             | Self::Volcengine(context)
-            | Self::Sofya(context) => context,
+            | Self::Sofya(context)
+            | Self::Serply(context) => context,
         }
     }
 }
@@ -288,13 +292,33 @@ impl SearchBackend for ConfiguredSearchBackend<'_> {
             SearchProvider::Baidu => BackendId::Baidu,
             SearchProvider::Volcengine => BackendId::Volcengine,
             SearchProvider::Sofya => BackendId::Sofya,
+            SearchProvider::Serply => BackendId::Serply,
         }
     }
 
     fn capabilities(&self) -> QueryCapabilities {
-        // All current adapters enforce result count. Other knobs are either
-        // post-filtered by the shared harness or reported as not honored.
-        QueryCapabilities::count_only()
+        // All current adapters enforce result count. Recency and locale are
+        // forwarded where the backend's API takes them (see `QueryFilters` in
+        // `web_search.rs`); every other knob is post-filtered by the shared
+        // harness or reported as not honored.
+        let (recency, locale) = match self.provider() {
+            SearchProvider::Firecrawl | SearchProvider::Searxng => (true, true),
+            SearchProvider::Tavily => (true, false),
+            SearchProvider::Serply => (false, true),
+            _ => (false, false),
+        };
+        let state = |supported: bool| {
+            if supported {
+                QueryCapabilityState::Supported
+            } else {
+                QueryCapabilityState::Unsupported
+            }
+        };
+        QueryCapabilities {
+            recency: state(recency),
+            locale: state(locale),
+            ..QueryCapabilities::count_only()
+        }
     }
 
     async fn search(
@@ -516,6 +540,7 @@ mod tests {
             (SearchProvider::Baidu, BackendId::Baidu),
             (SearchProvider::Volcengine, BackendId::Volcengine),
             (SearchProvider::Sofya, BackendId::Sofya),
+            (SearchProvider::Serply, BackendId::Serply),
         ];
 
         for (provider, expected) in cases {
@@ -645,7 +670,8 @@ mod tests {
             codewhale_config::route::CapabilityState::Supported;
         context.provider_native_search = Some(
             crate::client::ProviderNativeSearchClient::new(
-                crate::client::DeepSeekClient::new(&moonshot_config).expect("test Moonshot client"),
+                crate::client::CodewhaleClient::new(&moonshot_config)
+                    .expect("test Moonshot client"),
             )
             .expect("Moonshot native adapter"),
         );
@@ -685,7 +711,7 @@ mod tests {
             codewhale_config::route::CapabilityState::Supported;
         xai_context.provider_native_search = Some(
             crate::client::ProviderNativeSearchClient::new(
-                crate::client::DeepSeekClient::new(&xai_config).expect("test xAI client"),
+                crate::client::CodewhaleClient::new(&xai_config).expect("test xAI client"),
             )
             .expect("xAI native adapter"),
         );

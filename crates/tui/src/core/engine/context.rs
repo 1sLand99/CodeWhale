@@ -6,31 +6,15 @@
 
 use crate::config::ApiProvider;
 use crate::context_budget::ContextBudget;
-use crate::models::SystemPrompt;
 #[cfg(test)]
 pub(super) use crate::route_budget::effective_max_output_tokens;
 pub(super) use crate::route_budget::effective_max_output_tokens_for_route;
 use crate::tools::spec::ToolResult;
 use codewhale_config::route::RouteLimits;
+use codewhale_models::SystemPrompt;
 use serde_json::Value;
-/// Keep this many most recent messages when emergency trimming is required.
-pub(super) const MIN_RECENT_MESSAGES_TO_KEEP: usize = 4;
 /// Allow a few emergency recovery attempts before failing the turn.
 pub(super) const MAX_CONTEXT_RECOVERY_ATTEMPTS: u8 = 2;
-/// Emergency-recovery trim target: this fraction of the input budget below
-/// the budget itself. Trimming exactly to the budget lands the session a few
-/// hundred tokens under the preflight line, so the next turn step's output
-/// re-crosses it and recovery runs again — a per-step "trim a few oldest"
-/// thrash that eats the transcript from the front and invalidates the provider
-/// prefix cache each time. The margin buys several steps of regrowth headroom.
-pub(super) const EMERGENCY_TRIM_MARGIN_DIVISOR: usize = 5;
-
-/// Local-trim target for emergency context recovery, strictly below the input
-/// budget so one recovery buys regrowth headroom instead of landing on the
-/// preflight line.
-pub(super) fn emergency_trim_budget(input_budget: usize) -> usize {
-    input_budget.saturating_sub(input_budget / EMERGENCY_TRIM_MARGIN_DIVISOR)
-}
 /// Hard cap for any tool output inserted into model context.
 const TOOL_RESULT_CONTEXT_HARD_LIMIT_CHARS: usize = 12_000;
 /// Soft cap for known noisy tools inserted into model context.
@@ -200,6 +184,16 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
     lines.join("\n")
 }
 
+/// A payload is a sub-agent snapshot when it carries the identity/status shape
+/// this summarizer knows how to render (`agent_id`/`agent_type`, optionally
+/// wrapped in a `snapshot` field).
+fn looks_like_subagent_snapshot(value: &serde_json::Value) -> bool {
+    let value = value.get("snapshot").unwrap_or(value);
+    value
+        .as_object()
+        .is_some_and(|obj| obj.contains_key("agent_id") || obj.contains_key("agent_type"))
+}
+
 fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Option<String> {
     if tool_name != "agent" {
         return None;
@@ -211,6 +205,20 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
         serde_json::Value::Object(_) => vec![&parsed],
         _ => return None,
     };
+
+    // Coordination envelopes (`wait`, `status`, `claim`, ...) carry typed
+    // fields the parent needs verbatim: `settled`, `still_running`,
+    // `timed_out`, `waited_ms`, `note`. Projecting them through the snapshot
+    // renderer replaced every one with `unknown (agent) status=unknown` and
+    // dropped the real payload. Summarize only snapshot-shaped results; let
+    // anything else fall through to the generic bounded path.
+    if snapshots.is_empty()
+        || !snapshots
+            .iter()
+            .all(|value| looks_like_subagent_snapshot(value))
+    {
+        return None;
+    }
 
     let mut out = String::from("[sub-agent result summarized for parent context]\n");
     out.push_str(
@@ -473,6 +481,24 @@ pub(crate) fn compact_tool_result_for_route(
         return raw.to_string();
     }
 
+    // The `read` primitive already bounds itself to an explicit per-call byte
+    // budget and, when that budget truncates the file, ends with a footer
+    // naming the exact offset to continue from. Compacting it a second time
+    // would drop content the caller deliberately budgeted for *and* delete the
+    // continuation contract, leaving the model with a head/tail snippet and no
+    // way to page. A result that stayed inside its declared budget therefore
+    // passes through; one that somehow exceeded it still falls through to the
+    // ordinary limits below.
+    if output
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("read_budget_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|budget| raw.len() as u64 <= budget)
+    {
+        return raw.to_string();
+    }
+
     if let Some(summary) = compact_subagent_tool_result_for_context(tool_name, raw) {
         return summary;
     }
@@ -580,7 +606,77 @@ pub(super) fn is_context_length_error_message(message: &str) -> bool {
         || lower.contains("context_length")
         || lower.contains("prompt is too long")
         || lower.contains("context window")
+        // llama.cpp: "the request exceeds the available context size".
+        || lower.contains("available context size")
         || (lower.contains("requested") && lower.contains("tokens") && lower.contains("maximum"))
+}
+
+/// The turn is over: the input still exceeds the route's input budget after
+/// the bounded recovery. Say what ran and name the levers that exist where
+/// the message is read — an interactive session has `/compact` and `/clear`;
+/// a headless host (`exec`, app-server, CI) has neither (#6374).
+pub(super) fn context_overflow_exhausted_message(
+    interactive: bool,
+    emergency_compactions: u32,
+    estimated_input: usize,
+    input_budget: usize,
+) -> String {
+    let passes = match emergency_compactions {
+        1 => "1 emergency compaction pass".to_string(),
+        n => format!("{n} emergency compaction passes"),
+    };
+    let levers = if interactive {
+        "Run /compact to summarize further or /clear to start over; a larger context route or a lower output cap also raises the input budget."
+    } else {
+        "Shorten the input or choose a larger context route; a lower output cap (CODEWHALE_MAX_OUTPUT_TOKENS) or a lower [compaction] retained_user_message_tokens raises the usable input budget."
+    };
+    format!(
+        "Context is still above this route's input budget after {passes} \
+         (~{estimated_input} tokens estimated, ~{input_budget} budget). {levers}"
+    )
+}
+
+/// The single error line for a request that cannot fit the route and has
+/// too little earlier conversation to summarize (experience mark 2). It names the real
+/// cause and one next step instead of blaming a compaction that never had
+/// anything to work with.
+pub(super) fn context_does_not_fit_message(
+    interactive: bool,
+    local_ollama: bool,
+    model: &str,
+    estimated_input: usize,
+    input_budget: usize,
+    prefix_tokens: usize,
+) -> String {
+    let pick = |what: &str| {
+        if interactive {
+            format!("Pick {what}: /model.")
+        } else {
+            format!("Choose {what}.")
+        }
+    };
+    if local_ollama && crate::local_ollama::looks_like_non_chat_tag(model) {
+        return format!("{model} can't chat. {}", pick("a chat model"));
+    }
+    let larger = if local_ollama {
+        "a larger model, or raise num_ctx"
+    } else {
+        "a larger model"
+    };
+    if prefix_tokens >= input_budget {
+        format!(
+            "{model}'s context window (~{input_budget} tokens usable) is smaller than \
+             Codewhale's working instructions (~{prefix_tokens} tokens). {}",
+            pick(larger)
+        )
+    } else {
+        format!(
+            "This message (~{estimated_input} tokens with Codewhale's instructions) does not \
+             fit {model}'s window (~{input_budget} tokens usable), and there is not enough \
+             earlier conversation to summarize. Shorten it, or {}",
+            pick(larger).to_lowercase()
+        )
+    }
 }
 
 pub(super) fn is_image_input_rejection_message(message: &str) -> bool {
@@ -603,17 +699,7 @@ pub(super) fn is_image_input_rejection_message(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{emergency_trim_budget, is_image_input_rejection_message};
-
-    #[test]
-    fn emergency_trim_budget_leaves_a_hysteresis_margin() {
-        assert_eq!(emergency_trim_budget(246_784), 197_428);
-        // Tiny budgets lose most of the margin to integer division but never
-        // trim past the line itself.
-        assert_eq!(emergency_trim_budget(10), 8);
-        assert_eq!(emergency_trim_budget(4), 4);
-        assert_eq!(emergency_trim_budget(0), 0);
-    }
+    use super::is_image_input_rejection_message;
 
     #[test]
     fn image_rejection_classifier_matches_provider_400s() {

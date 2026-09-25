@@ -11,8 +11,8 @@ mod status;
 
 use crate::commands::CommandResult;
 use crate::commands::traits::{Command, CommandGroup, CommandInfo, FunctionCommand};
-use crate::localization::MessageId;
 use crate::tui::app::App;
+use codewhale_localization::MessageId;
 
 pub struct ConfigCommands;
 
@@ -25,6 +25,7 @@ impl CommandGroup for ConfigCommands {
             Box::new(FunctionCommand::new(&LOGIN_INFO, run_login)),
             Box::new(FunctionCommand::new(&AUTH_INFO, run_auth)),
             Box::new(FunctionCommand::new(&RAIL_INFO, run_rail)),
+            Box::new(FunctionCommand::new(&PET_INFO, run_pet)),
             Box::new(FunctionCommand::new(&SETTINGS_INFO, run_settings)),
             Box::new(FunctionCommand::new(&STATUS_INFO, run_status)),
             Box::new(FunctionCommand::new(&STATUSLINE_INFO, run_statusline)),
@@ -41,16 +42,14 @@ impl CommandGroup for ConfigCommands {
 
 static CONFIG_INFO: CommandInfo = CommandInfo {
     name: "config",
-    // /experiments is a discoverable entry to the same view: the Experimental
-    // section exposes the Workflow, goal, and sub-agent opt-ins (#3182).
-    aliases: &["experiments", "experimental"],
+    aliases: &[],
     usage: "/config [ask-rules|status|<key> [value]]",
     description_id: MessageId::CmdConfigDescription,
 };
 static IMPORT_CLAUDE_INFO: CommandInfo = CommandInfo {
     name: "import-claude",
     aliases: &["import_claude"],
-    usage: "/import-claude",
+    usage: "/import-claude [--apply]",
     description_id: MessageId::CmdImportClaudeDescription,
 };
 static PERMISSIONS_INFO: CommandInfo = CommandInfo {
@@ -78,6 +77,12 @@ static RAIL_INFO: CommandInfo = CommandInfo {
     aliases: &["rail", "sidebar"],
     usage: "/workbar [bottom|top|left|right|off|tasks|agents|context|pinned] [--save]",
     description_id: MessageId::CmdSidebarDescription,
+};
+static PET_INFO: CommandInfo = CommandInfo {
+    name: "pet",
+    aliases: &[],
+    usage: "/pet [on|off|status|appearance|window|source|export|sound on|off]",
+    description_id: MessageId::CmdPetDescription,
 };
 static SETTINGS_INFO: CommandInfo = CommandInfo {
     name: "settings",
@@ -161,6 +166,9 @@ fn run_auth(app: &mut App, arg: Option<&str>) -> CommandResult {
 fn run_rail(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "workbar", arg)
 }
+fn run_pet(app: &mut App, arg: Option<&str>) -> CommandResult {
+    run_registered(app, "pet", arg)
+}
 fn run_settings(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "settings", arg)
 }
@@ -197,7 +205,7 @@ pub(in crate::commands) fn dispatch(
     arg: Option<&str>,
 ) -> Option<CommandResult> {
     let result = match command {
-        "config" | "experiments" | "experimental" => config::config_command(app, arg),
+        "config" => config::config_command(app, arg),
         "permissions" | "permission-rules" | "permission_rules" => {
             permissions::permissions_command(app, arg)
         }
@@ -215,6 +223,7 @@ pub(in crate::commands) fn dispatch(
             _ => CommandResult::error("Usage: /auth xai-device|chatgpt|chatgpt-revoke"),
         },
         "workbar" | "rail" | "sidebar" => config::sidebar(app, arg),
+        "pet" => config::pet(app, arg),
         "settings" => config::settings_command(app, arg),
         "status" => status::status(app),
         "statusline" => config::status_line(app),
@@ -256,31 +265,22 @@ pub(in crate::commands) fn workflow_settings(app: &App) -> CommandResult {
             on(cfg.require_approval_for_writes)
         ),
         format!(
-            "auto_start_child_limit = {}  · larger automatic plans ask first or use /workflow",
-            cfg.auto_start_child_limit
-        ),
-        format!(
             "max_children = {} · max_concurrent = {} · max_depth = {}  · hard ceilings for one run",
             cfg.max_children, cfg.max_concurrent, cfg.max_depth
         ),
         format!(
-            "default_token_budget = {}  · shared admission hint for a run and its children",
+            "default_token_budget = {}  · shared admission cap for a run and its children (0 = none)",
             cfg.default_token_budget
-        ),
-        format!(
-            "max_parallel_writes_without_worktree = {}  · 0 forces worktree isolation for parallel writes",
-            cfg.max_parallel_writes_without_worktree
-        ),
-        format!(
-            "persist_completed_activity = {} · persist_completed_across_restarts = {}  · keep finished runs visible / across restarts (journal: .codewhale/workflow-runs.jsonl)",
-            on(cfg.persist_completed_activity),
-            on(cfg.persist_completed_across_restarts)
         ),
         String::new(),
         "[goal] — config.toml".to_string(),
         format!(
             "max_continuations = {}  · automatic continuation passes before a goal pauses; 0 = unlimited (completion, blocked, or you stop it)",
             app.goal_max_continuations
+        ),
+        format!(
+            "enforce_token_budget = {}  · true = a goal's token budget is a hard stop; false = advisory telemetry",
+            on(app.goal_enforce_token_budget)
         ),
     ];
     CommandResult::message(lines.join("\n"))

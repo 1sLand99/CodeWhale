@@ -4,7 +4,7 @@
 //! like a to-do or a sub-agent — a view is a subset of one row grammar, not
 //! a second widget system.
 
-use crate::tui::agent_roster::format_tokens;
+use crate::agent_roster::format_tokens;
 use crate::tui::app::{App, SidebarRowAction};
 
 use super::model::{RailPanel, WorkRow, WorkRowId, WorkTone};
@@ -165,9 +165,9 @@ fn message_split(app: &App) -> (u64, u64, usize) {
             && message.content.iter().all(|block| {
                 matches!(
                     block,
-                    crate::models::ContentBlock::ToolResult { .. }
-                        | crate::models::ContentBlock::ToolSearchToolResult { .. }
-                        | crate::models::ContentBlock::CodeExecutionToolResult { .. }
+                    codewhale_models::ContentBlock::ToolResult { .. }
+                        | codewhale_models::ContentBlock::ToolSearchToolResult { .. }
+                        | codewhale_models::ContentBlock::CodeExecutionToolResult { .. }
                 )
             });
         if all_tool_results {
@@ -200,7 +200,7 @@ pub(super) fn price_rows(app: &mut App) -> Vec<WorkRow> {
         primary_action: Some(SidebarRowAction::Command("/cost".to_string())),
         agent: None,
     });
-    let roster = app.agent_roster.clone();
+    let roster = app.current_agent_roster().to_vec();
     let priced: Vec<_> = roster
         .iter()
         .filter(|row| row.cost_microusd.is_some())

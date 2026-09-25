@@ -11,7 +11,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::mcp::{McpPool, McpServerConfig, McpTool};
+use crate::mcp::{McpPool, McpServerConfig};
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
@@ -60,6 +60,8 @@ pub fn parse_mcp_command(input: &str) -> Result<ParsedMcpServer> {
                 oauth: None,
                 oauth_resource: None,
                 reviewed_plugin: None,
+                runtime_added: false,
+                allow_private_network: false,
             },
         });
     }
@@ -97,6 +99,8 @@ pub fn parse_mcp_command(input: &str) -> Result<ParsedMcpServer> {
             oauth: None,
             oauth_resource: None,
             reviewed_plugin: None,
+            runtime_added: false,
+            allow_private_network: false,
         },
     })
 }
@@ -218,6 +222,8 @@ impl ToolSpec for StartRuntimeMcpServer {
          (like 'https://...'), call this tool immediately to start the server \
          and register its tools. Do NOT suggest editing config files. \
          Accepts a local command (stdio) or a remote URL (HTTP/SSE). \
+         To reconnect an existing configured server after login, pass only its exact name \
+         and omit server; this keeps its saved credentials and configuration. \
          After the server starts, the response lists each tool's callable name. \
          You MUST copy those exact names when calling the tools. \
          Do NOT construct or guess tool names yourself."
@@ -229,14 +235,14 @@ impl ToolSpec for StartRuntimeMcpServer {
             "properties": {
                 "server": {
                     "type": "string",
-                    "description": "MCP server command or URL"
+                    "description": "New MCP server command or URL; omit to reconnect a configured server by name"
                 },
                 "name": {
                     "type": "string",
-                    "description": "Optional server name (auto-inferred if omitted)"
+                    "description": "Exact configured name for reconnect; optional name for a new server"
                 }
             },
-            "required": ["server"]
+            "anyOf": [{"required": ["server"]}, {"required": ["name"]}]
         })
     }
 
@@ -248,13 +254,36 @@ impl ToolSpec for StartRuntimeMcpServer {
         ApprovalRequirement::Required
     }
 
-    async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let custom_name = input.get("name").and_then(|v| v.as_str());
+        if input.get("server").is_none() {
+            let name = custom_name
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| {
+                    ToolError::invalid_input("Provide server or an existing configured name")
+                })?;
+            // The exact configured key owns its credentials and trust. Do not
+            // sanitize it into an alias, replace its config, or reconnect siblings.
+            if McpPool::server_denied_by(&context.disallowed_tools, name) {
+                return Err(ToolError::not_available(format!(
+                    "Failed to find MCP server: {name}"
+                )));
+            }
+            let mut pool = self.pool.lock().await;
+            let conn = pool.retry_connection(name).await.map_err(|error| {
+                ToolError::execution_failed(connect_failure_message(name, &error))
+            })?;
+            let transport = if conn.config().url.is_some() {
+                "http"
+            } else {
+                "stdio"
+            };
+            return Ok(connected_result(&pool, name, transport, context));
+        }
         let server = input
             .get("server")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::invalid_input("Missing required field: server"))?;
-
-        let custom_name = input.get("name").and_then(|v| v.as_str());
+            .ok_or_else(|| ToolError::invalid_input("server must be a command or URL string"))?;
         let mut parsed =
             parse_mcp_command(server).map_err(|e| ToolError::invalid_input(e.to_string()))?;
         // Host-supplied override (used by the Registry launcher, whose
@@ -328,6 +357,12 @@ impl ToolSpec for StartRuntimeMcpServer {
             "stdio"
         };
 
+        // Ancestor restrictions stay request-local because children share the pool.
+        if McpPool::server_denied_by(&context.disallowed_tools, &server_name) {
+            return Err(ToolError::not_available(format!(
+                "Failed to find MCP server: {server_name}"
+            )));
+        }
         // Register server config, connect, and collect tool info
         let mut pool = self.pool.lock().await;
         pool.add_runtime_server_config(server_name.clone(), parsed.config)
@@ -341,40 +376,51 @@ impl ToolSpec for StartRuntimeMcpServer {
             }
         };
 
-        let mcp_tools: Vec<McpTool> = conn.tools().to_vec();
-
-        // Build tool list with fully qualified names (mcp_{server}_{tool})
-        // so the LLM can call them directly without guessing the naming convention.
-        let tools_list: Vec<String> = mcp_tools
-            .iter()
-            .map(|t| {
-                let qualified = format!("mcp_{}_{}", server_name, t.name);
-                format!(
-                    "- {} → {}",
-                    qualified,
-                    t.description.as_deref().unwrap_or("no description")
-                )
-            })
-            .collect();
-
-        let result = serde_json::to_string(&json!({
-            "status": "connected",
-            "transport": transport,
-            "server": server_name,
-            "new_tools": mcp_tools.len(),
-            "total_mcp_tools": pool.all_tools().len(),
-            "message": format!(
-                "MCP server '{}' connected via {}. {} tools discovered.\n\n\
-                 Callable tools (use these exact names):\n{}",
-                server_name, transport, mcp_tools.len(), tools_list.join("\n")
-            )
-        }))
-        .unwrap_or_else(|_| "{}".to_string());
-
-        let mut output = ToolResult::success(result);
-        output.metadata = Some(json!({ "mcp_catalog_changed": true }));
-        Ok(output)
+        let _ = conn;
+        Ok(connected_result(&pool, &server_name, transport, context))
     }
+}
+
+/// Shared receipt for both new servers and configured-name reconnects.
+fn connected_result(
+    pool: &McpPool,
+    server_name: &str,
+    transport: &str,
+    context: &ToolContext,
+) -> ToolResult {
+    let owners = pool.resolved_tool_servers();
+    let tools_list: Vec<String> = pool
+        .all_tools()
+        .into_iter()
+        .filter(|(name, _)| {
+            owners.get(name).map(String::as_str) == Some(server_name)
+                && !crate::core::engine::tool_catalog::tool_matches_any_rule(
+                    &context.disallowed_tools,
+                    name,
+                )
+        })
+        .map(|(name, tool)| {
+            format!(
+                "- {} → {}",
+                name,
+                tool.description.as_deref().unwrap_or("no description")
+            )
+        })
+        .collect();
+    let result = serde_json::to_string(&json!({
+        "status": "connected",
+        "transport": transport,
+        "server": server_name,
+        "new_tools": tools_list.len(),
+        "total_mcp_tools": pool.all_tools().iter().filter(|(name, _)| !crate::core::engine::tool_catalog::tool_matches_any_rule(&context.disallowed_tools, name)).count(),
+        "message": format!(
+            "MCP server '{}' connected via {}. {} tools discovered.\n\nCallable tools (use these exact names):\n{}",
+            server_name, transport, tools_list.len(), tools_list.join("\n")
+        )
+    })).unwrap_or_else(|_| "{}".to_string());
+    let mut output = ToolResult::success(result);
+    output.metadata = Some(json!({ "mcp_catalog_changed": true }));
+    output
 }
 
 /// Refuse MCP server arguments carrying shell metacharacters.
@@ -433,6 +479,32 @@ fn connect_failure_message(server_name: &str, err: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mcp_ceiling_runtime_registration_respects_child_policy_before_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = Arc::new(AsyncMutex::new(McpPool::new(
+            crate::mcp::McpConfig::default(),
+        )));
+        let tool = StartRuntimeMcpServer::new(Arc::clone(&pool));
+        let mut context = ToolContext::new(directory.path());
+        context.disallowed_tools = vec!["mcp_private-*".to_string()];
+        // The command would execute if the child ceiling were ignored.
+        let error = tool
+            .execute(
+                json!({"server":"node nonexistent-mcp.js", "name":"private_a"}),
+                &context,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to find MCP server: private-a")
+        );
+        assert!(pool.lock().await.server_names().is_empty());
+        assert!(pool.lock().await.connected_servers().is_empty());
+    }
 
     #[test]
     fn parse_command_stdio() {

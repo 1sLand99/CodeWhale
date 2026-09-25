@@ -5,11 +5,11 @@
 
 use crate::compaction::CompactionConfig;
 use crate::config::ApiProvider;
-use crate::models::{Message, SystemPrompt};
 use crate::route_runtime::ResolvedRuntimeRoute;
 use crate::tools::goal::GoalStatus;
-use crate::tui::app::AppMode;
-use crate::tui::approval::ApprovalMode;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::{Message, SystemPrompt};
 use codewhale_protocol::runtime::DynamicToolSpec;
 use std::path::PathBuf;
 
@@ -32,6 +32,42 @@ pub struct SessionSnapshot {
     pub mode: String,
 }
 
+/// Live context-window posture for one thread, computed where the session
+/// state actually lives. Returned by `Op::GetContextBudget` via a oneshot
+/// channel so HTTP clients (GPUI usage panel) never re-derive the engine's
+/// token math or route limits at the API boundary.
+#[derive(Debug, Clone)]
+pub struct SessionContextBudget {
+    /// Total context window for the active route (input + output), in tokens.
+    pub window_tokens: u64,
+    /// Estimated input tokens on the same basis the visible context meter
+    /// and the auto-compaction gate use (`estimate_input_tokens_for_pressure`,
+    /// without the overflow guard's 1.5x inflation). This is the number a
+    /// "context filling up" indicator shows.
+    pub input_tokens: u64,
+    /// Provider-billed prompt tokens from the most recent parent-route
+    /// request that still describes the live message list. `None` when no
+    /// provider count exists yet (fresh session) — never a fabricated zero.
+    pub billed_input_tokens: Option<u64>,
+    /// Output tokens reserved for the turn after route clamps.
+    pub output_cap_tokens: u64,
+    /// Spendable input ceiling (`window - output_cap - headroom`, intersected
+    /// with any provider-published hard input limit).
+    pub input_budget_ceiling: u64,
+    /// Input tokens still available before the reserved boundary.
+    pub available_input_tokens: u64,
+    /// Input level at which compaction is suggested.
+    pub compaction_trigger_tokens: u64,
+    /// `input_tokens / window_tokens` as a percentage (0..=100).
+    pub usage_percent: f64,
+    /// Coarse pressure label (`low`/`moderate`/`high`/`critical`).
+    pub pressure: &'static str,
+    /// Route identity the budget was computed for.
+    pub model: String,
+    pub provider: String,
+    pub model_provider_id: Option<String>,
+}
+
 /// Provider request runtime state surfaced by `/provider`.
 /// Returned by `Op::GetProviderRuntimeStatus` via a oneshot channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +75,24 @@ pub struct ProviderRuntimeStatus {
     pub provider: ApiProvider,
     pub request_concurrency_limit: Option<usize>,
     pub active_provider_requests: usize,
+}
+
+/// Idle Engine snapshot used by a one-shot host before shutting down.
+/// The completion inbox belongs to the Engine; a terminal worker alone does
+/// not prove that its parent has consumed the handback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubAgentSettlement {
+    pub running_children: usize,
+    /// A Workflow can still be coordinating between child phases.
+    pub running_workflows: usize,
+    pub pending_completions: usize,
+}
+
+impl SubAgentSettlement {
+    #[must_use]
+    pub fn is_settled(self) -> bool {
+        self.running_children == 0 && self.running_workflows == 0 && self.pending_completions == 0
+    }
 }
 
 /// Engine-owned MCP snapshot plus the exact event generation it supersedes.
@@ -103,49 +157,64 @@ impl UserInputProvenance {
     }
 }
 
+/// Per-turn authority payload carried by [`Op::SendMessage`]. Extracted from
+/// the enum arm so new per-turn fields accrete here instead of widening the
+/// variant; the serializable twin is `codewhale_protocol::op::TurnSpec`.
+#[derive(Debug)]
+pub struct TurnSpec {
+    /// Admitted allowance for this turn only; never changes session settings.
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
+    pub content: String,
+    /// Inline image bytes validated by Runtime admission; no file references.
+    pub images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+    pub mode: AppMode,
+    /// Exact, structurally resolved route authority for this turn. The
+    /// engine activates its client before mutating turn state; injected
+    /// engines may use their already-supplied client with the same receipt.
+    pub route: Box<ResolvedRuntimeRoute>,
+    /// Compaction policy derived from the same provider route. Carrying it
+    /// atomically avoids a model/limit mismatch before `SendMessage`.
+    pub compaction: Box<CompactionConfig>,
+    /// Auxiliary provider calls completed while planning this exact turn
+    /// (currently Auto's classifier), bounded and paired with their own
+    /// immutable routes. The engine folds their tokens into total usage
+    /// only; they never enter the parent route's billing aggregate.
+    pub initial_routed_usage: Box<crate::cost_status::RuntimeUsageBatch>,
+    pub goal_objective: Option<String>,
+    pub goal_token_budget: Option<u32>,
+    pub goal_status: GoalStatus,
+    /// Reasoning-effort tier: `"off" | "low" | "medium" | "high" | "max"`.
+    /// `None` lets the provider apply its default.
+    pub reasoning_effort: Option<String>,
+    /// True when the user selected auto thinking, even though the UI sends
+    /// a concrete per-turn value to the model API.
+    pub reasoning_effort_auto: bool,
+    /// True when the user selected auto model routing.
+    pub auto_model: bool,
+    pub allow_shell: bool,
+    pub trust_mode: bool,
+    pub auto_approve: bool,
+    pub approval_mode: ApprovalMode,
+    pub translation_enabled: bool,
+    /// Tool restriction from custom slash command frontmatter.
+    /// `None` means the current turn may use the normal tool set.
+    pub allowed_tools: Option<Vec<String>>,
+    /// Runtime-supplied tools available only for this turn.
+    pub dynamic_tools: Vec<DynamicToolSpec>,
+    /// Hook executor for control-plane hooks.
+    /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
+    pub hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
+    pub verbosity: Option<String>,
+    /// Structural input origin. This gates whether the turn may inherit
+    /// YOLO/auto-approval authority; user-shaped text is not enough.
+    pub provenance: UserInputProvenance,
+}
+
 /// Operations that can be submitted to the engine.
 #[derive(Debug)]
 pub enum Op {
     /// Send a message to the AI
-    SendMessage {
-        content: String,
-        mode: AppMode,
-        /// Exact, structurally resolved route authority for this turn. The
-        /// engine activates its client before mutating turn state; injected
-        /// engines may use their already-supplied client with the same receipt.
-        route: Box<ResolvedRuntimeRoute>,
-        /// Compaction policy derived from the same provider route. Carrying it
-        /// atomically avoids a model/limit mismatch before `SendMessage`.
-        compaction: Box<CompactionConfig>,
-        goal_objective: Option<String>,
-        goal_token_budget: Option<u32>,
-        goal_status: GoalStatus,
-        /// Reasoning-effort tier: `"off" | "low" | "medium" | "high" | "max"`.
-        /// `None` lets the provider apply its default.
-        reasoning_effort: Option<String>,
-        /// True when the user selected auto thinking, even though the UI sends
-        /// a concrete per-turn value to the model API.
-        reasoning_effort_auto: bool,
-        /// True when the user selected auto model routing.
-        auto_model: bool,
-        allow_shell: bool,
-        trust_mode: bool,
-        auto_approve: bool,
-        approval_mode: ApprovalMode,
-        translation_enabled: bool,
-        /// Tool restriction from custom slash command frontmatter.
-        /// `None` means the current turn may use the normal tool set.
-        allowed_tools: Option<Vec<String>>,
-        /// Runtime-supplied tools available only for this turn.
-        dynamic_tools: Vec<DynamicToolSpec>,
-        /// Hook executor for control-plane hooks.
-        /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
-        hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
-        verbosity: Option<String>,
-        /// Structural input origin. This gates whether the turn may inherit
-        /// YOLO/auto-approval authority; user-shaped text is not enough.
-        provenance: UserInputProvenance,
-    },
+    SendMessage(TurnSpec),
 
     /// Re-check and dispatch an interactive goal continuation when this
     /// operation reaches the front of the engine queue. Keeping this distinct
@@ -181,6 +250,8 @@ pub enum Op {
         status: GoalStatus,
         /// When `true`, clear the objective entirely (`/goal clear`).
         clear: bool,
+        /// Accepted control revision; None lets direct callers mint it.
+        goal_id: Option<String>,
     },
 
     /// Set (or replace) the active goal objective and immediately start goal
@@ -189,6 +260,8 @@ pub enum Op {
     SetGoalObjective {
         objective: String,
         token_budget: Option<u32>,
+        /// Accepted control revision; None lets direct callers mint it.
+        goal_id: Option<String>,
     },
 
     /// Describe the exact request the next turn would send, without
@@ -209,6 +282,14 @@ pub enum Op {
     /// List current sub-agents and their status
     ListSubAgents,
 
+    /// Inspect child settlement at the Engine's idle operation boundary.
+    /// This does not drain the completion inbox or dispatch a second loop.
+    GetSubAgentSettlement {
+        tx: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<SubAgentSettlement>>>,
+        >,
+    },
+
     /// Cancel a running sub-agent by id or session name.
     CancelSubAgent { agent_id: String },
 
@@ -219,7 +300,6 @@ pub enum Op {
     FollowUpSubAgent { agent_id: String, text: String },
 
     /// Change the operating mode
-    #[allow(dead_code)]
     ChangeMode {
         mode: AppMode,
         allow_shell: bool,
@@ -230,7 +310,6 @@ pub enum Op {
     },
 
     /// Update the model being used and refresh stable prompt context.
-    #[allow(dead_code)]
     SetModel {
         model: String,
         mode: AppMode,
@@ -239,12 +318,6 @@ pub enum Op {
 
     /// Update auto-compaction settings
     SetCompaction { config: CompactionConfig },
-
-    /// Replace the live user permission rules without clearing session-only
-    /// approvals.
-    SetPermissionRuleset {
-        ruleset: codewhale_execpolicy::Ruleset,
-    },
 
     /// Update the SSE idle timeout used for subsequent streamed turns.
     SetStreamChunkTimeout { timeout_secs: u64 },
@@ -303,6 +376,15 @@ pub enum Op {
         tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<SessionSnapshot>>>>,
     },
 
+    /// Get the live context-window budget for this session's route. Computed
+    /// on the engine so `active_route_limits`, the memoized token estimate,
+    /// and the last billed prompt size all come from one authority.
+    GetContextBudget {
+        tx: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Option<SessionContextBudget>>>>,
+        >,
+    },
+
     /// Get active provider request concurrency state for readiness surfaces.
     GetProviderRuntimeStatus {
         tx: std::sync::Arc<
@@ -341,7 +423,7 @@ pub enum Op {
 
     /// Edit the last user message: remove the last user+assistant exchange
     /// from the session, then re-send with the new content.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     EditLastTurn { new_message: String },
 
     /// Enable or disable the background advisor watcher for this session.

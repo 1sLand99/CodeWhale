@@ -37,6 +37,9 @@ pub(crate) const CANONICAL_ACTION_ALIASES: &[(&str, &str, &str)] = &[
     ("Git", "log", "git_log"),
     ("Git", "show", "git_show"),
     ("Git", "blame", "git_blame"),
+    ("Git", "commit_plan", "git_commit_plan"),
+    ("Git", "fetch", "git_fetch"),
+    ("Git", "merge_tree", "git_merge_tree"),
     ("Run", "tests", "run_tests"),
     ("Run", "verifiers", "run_verifiers"),
     ("Web", "search", "web_search"),
@@ -88,6 +91,8 @@ pub(crate) const CANONICAL_ACTION_ALIASES: &[(&str, &str, &str)] = &[
     ("github", "comment", "github_comment"),
     ("github", "close_issue", "github_close_issue"),
     ("github", "close_pr", "github_close_pr"),
+    ("github", "report_draft", "github_report_draft"),
+    ("github", "report_read", "github_report_read"),
 ];
 
 /// The conservative action label policy uses when the model omits `action`.

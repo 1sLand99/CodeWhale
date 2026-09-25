@@ -1,12 +1,10 @@
 pub mod agent_card;
-mod header;
 pub mod key_hint;
 pub mod pending_input_preview;
 mod renderable;
 pub mod tool_card;
 pub mod workflow_panel;
 
-pub use header::header_status_indicator_frame;
 pub use renderable::Renderable;
 
 use std::borrow::Cow;
@@ -16,20 +14,19 @@ use std::time::Duration;
 use crate::commands;
 #[cfg(test)]
 use crate::config::ApiProvider;
-use crate::localization::{Locale, MessageId, tr};
-use crate::palette;
 #[cfg(test)]
 use crate::provider_lake::all_catalog_models_for_provider;
-use crate::tui::app::{App, AppMode, ComposerDensity, ViewportState};
+use crate::tui::app::{App, ComposerDensity, ViewportState};
 use crate::tui::approval::{
-    ApprovalMode, ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel,
-    ToolCategory,
+    ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel, ToolCategory,
 };
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus};
 use crate::tui::menu_style;
 use crate::tui::scrolling::TranscriptLineMeta;
 use crate::tui::ui_text::{grapheme_display_width, text_display_width};
 use crate::tui::underwater::ShellPhase;
+use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -83,6 +80,61 @@ struct TranscriptScrollbar {
     total: usize,
 }
 
+/// A `todo_write` result is a full replacement snapshot, not an incremental
+/// transcript event. Keep only the newest successful snapshot in the visible
+/// transcript while retaining every tool result in history for model context
+/// and persistence.
+fn superseded_todo_write_indices(
+    history: &[HistoryCell],
+    active_entries: &[HistoryCell],
+) -> HashSet<usize> {
+    let mut hidden = HashSet::new();
+    let mut latest = None;
+
+    for (index, cell) in history.iter().chain(active_entries).enumerate() {
+        let HistoryCell::Tool(ToolCell::Generic(tool)) = cell else {
+            continue;
+        };
+        if tool.name != "todo_write" || tool.status != ToolStatus::Success {
+            continue;
+        }
+
+        if let Some(previous) = latest.replace(index) {
+            hidden.insert(previous);
+        }
+    }
+
+    if let Some(index) = latest {
+        let cell = history
+            .get(index)
+            .or_else(|| active_entries.get(index.saturating_sub(history.len())));
+        if cell.is_some_and(todo_write_snapshot_is_empty) {
+            hidden.insert(index);
+        }
+    }
+
+    hidden
+}
+
+fn todo_write_snapshot_is_empty(cell: &HistoryCell) -> bool {
+    let HistoryCell::Tool(ToolCell::Generic(tool)) = cell else {
+        return false;
+    };
+    let Some(output) = tool.output.as_deref() else {
+        return false;
+    };
+    let Some(json_start) = output.find('{') else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&output[json_start..]) else {
+        return false;
+    };
+    value
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(Vec::is_empty)
+}
+
 fn resolve_transcript_viewport_after_layout(
     viewport: &mut ViewportState,
     visible_lines: usize,
@@ -131,7 +183,7 @@ impl ChatWidget {
         // The ordinary shell inherits its host/theme surface. Underwater life
         // is earned by the underwater theme, never painted over a user's
         // terminal simply because the app happens to be active.
-        let underwater_atmosphere = app.theme_id == crate::palette::ThemeId::Underwater;
+        let underwater_atmosphere = app.theme_id == codewhale_palette::ThemeId::Underwater;
         let ocean_ramp = underwater_atmosphere
             .then(|| crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme))
             .flatten();
@@ -145,14 +197,14 @@ impl ChatWidget {
         // The completion breath is authored decorative motion, so it rides the
         // same motion gate as everything else in the water. Both the column's
         // settle flourish and ambient life's presence read this one clock:
-        // presence needs the settle tail past the breath, the column does not.
+        // the pet needs the settle tail too; the column clips only its light pulse.
         let completion_life_clock = (underwater_atmosphere
             && app.motion_policy().allows_decorative())
         .then_some(())
         .and(app.ocean_completion_started_at)
         .map(|started| started.elapsed().as_millis());
         let completion_elapsed_ms = completion_life_clock
-            .filter(|elapsed| *elapsed < crate::tui::ocean::COMPLETION_BREATH_MS);
+            .filter(|elapsed| *elapsed < crate::tui::ocean::COMPLETION_SETTLE_MS);
         let completion_life_active = completion_life_clock
             .is_some_and(|elapsed| elapsed < crate::tui::ocean::COMPLETION_SETTLE_MS);
         let render_empty_state = should_render_empty_state(app);
@@ -253,6 +305,12 @@ impl ChatWidget {
             };
         }
 
+        // Reserve the scrollbar's column before wrapping, so painting it cannot
+        // erase the final character of a line. Keep this width stable when the
+        // history starts/stops scrolling; cached lines and copy metadata must
+        // use the same layout on both sides of that transition.
+        let transcript_width = content_area.width.saturating_sub(1).max(1);
+
         // Per-cell revision caching (fix for issue #78):
         //
         // Every committed history cell carries its own revision counter in
@@ -286,9 +344,10 @@ impl ChatWidget {
             .active_cell
             .as_ref()
             .map_or(&[], |active| active.entries());
+        let superseded_todos = superseded_todo_write_indices(&app.history, active_entries);
 
         let history_len = app.history.len();
-        let tool_runs = if app.tool_collapse_active() {
+        let mut tool_runs = if app.tool_collapse_active() {
             let cache_key_matches = app.tool_run_cache.history_version == app.history_version
                 && app.tool_run_cache.active_cell_revision == app.active_cell_revision
                 && app.tool_run_cache.active_len == active_entries.len()
@@ -312,6 +371,14 @@ impl ChatWidget {
         } else {
             Vec::new()
         };
+        // A collapsed run that crosses a hidden replacement snapshot would
+        // otherwise lose its summary start or count a row the user cannot
+        // see. Leave only that run expanded; unrelated dense runs still use
+        // the normal collapse path.
+        tool_runs.retain(|run| {
+            !(run.start..run.start.saturating_add(run.count))
+                .any(|index| superseded_todos.contains(&index))
+        });
         let collapsed_run_starts: HashSet<usize> = tool_runs
             .iter()
             .filter_map(|run| (!app.expanded_tool_runs.contains(&run.start)).then_some(run.start))
@@ -329,7 +396,9 @@ impl ChatWidget {
         // v0.9.1: do not collapse concurrent sub-agent cards into an Enter-
         // expand shelf. Count lives in header chrome; full cards stay visible;
         // sidebar / SubAgents modal are the drill-in surface.
-        let has_collapsed = !app.collapsed_cells.is_empty() || !collapsed_run_starts.is_empty();
+        let has_collapsed = !app.collapsed_cells.is_empty()
+            || !collapsed_run_starts.is_empty()
+            || !superseded_todos.is_empty();
 
         // Fast path: no collapsed cells — use original slices directly.
         if !has_collapsed {
@@ -360,9 +429,9 @@ impl ChatWidget {
             app.viewport.transcript_cache.ensure_split(
                 &shards,
                 &cell_revisions,
-                content_area.width.max(1),
+                transcript_width,
                 render_options,
-                &app.folded_thinking,
+                &app.thinking_folds,
                 None,
                 provisional_action_owner,
             );
@@ -394,6 +463,9 @@ impl ChatWidget {
                 Vec::with_capacity(history_len + active_entries.len());
 
             for (idx, cell) in app.history.iter().enumerate() {
+                if superseded_todos.contains(&idx) {
+                    continue;
+                }
                 if app.collapsed_cells.contains(&idx) {
                     continue;
                 }
@@ -423,6 +495,9 @@ impl ChatWidget {
                 let active_rev = app.active_cell_revision;
                 for (i, cell) in active_entries.iter().enumerate() {
                     let original_idx = history_len + i;
+                    if superseded_todos.contains(&original_idx) {
+                        continue;
+                    }
                     if app.collapsed_cells.contains(&original_idx) {
                         continue;
                     }
@@ -455,9 +530,9 @@ impl ChatWidget {
             app.viewport.transcript_cache.ensure_filtered(
                 &filtered_cells,
                 &filtered_revs,
-                content_area.width.max(1),
+                transcript_width,
                 render_options,
-                &app.folded_thinking,
+                &app.thinking_folds,
                 Some(&app.collapsed_cell_map),
                 provisional_action_owner,
             );
@@ -1128,7 +1203,7 @@ pub(crate) fn composer_enclosure_enabled(app: &App) -> bool {
     app.composer_border
 }
 
-/// Shared `[↑]` submit rect for the live composer, or `None` when the
+/// Shared `[↵]` submit rect for the live composer, or `None` when the
 /// enclosure cannot host the three-cell affordance.
 ///
 /// The gate is the same `enclosed_composer_panel_fits` predicate the painter
@@ -1143,11 +1218,11 @@ pub(crate) fn active_composer_submit_rect(app: &App, area: Rect) -> Option<Rect>
     Some(crate::tui::composer_chrome::tideline_composer_geometry(area).submit)
 }
 
-/// Restore the rounded corners after the semantic top/bottom passes.
+/// Restore rounded corners after the title-bearing top/bottom passes.
 ///
 /// Ratatui renders a `TOP`-only (or `BOTTOM`-only) block through the corner
 /// cells as horizontal line glyphs. The live composer needs those passes for
-/// its localized titles and independent permission/mode color ramps, so put
+/// its localized titles and shared focus outline, so put
 /// the four rounded joins back afterward rather than replacing its mature
 /// input widget with the unfinished translation scaffold.
 fn render_composer_panel_corners(
@@ -1181,7 +1256,7 @@ fn enclosed_composer_panel_fits(show_panel: bool, area_width: u16, area_height: 
 
 /// Border-aware input plane for the active composer.
 ///
-/// The shared shell's `[↑]` control occupies three cells on the inner row.
+/// The shared shell's `[↵]` control occupies three cells on the inner row.
 /// Keep the text plane to its left, with one blank cell in between, so input
 /// wrapping, cursor placement, and pointer mapping cannot claim painted send
 /// cells. The outer block still owns the trailing breathing cell before its
@@ -1342,11 +1417,17 @@ impl<'a> ComposerWidget<'a> {
         composer_inner_area(area, self.has_panel(area))
     }
 
-    fn mode_color(&self) -> Color {
-        match self.app.mode {
-            AppMode::Agent => self.app.ui_theme.mode_agent,
-            AppMode::Plan => self.app.ui_theme.mode_plan,
-            AppMode::Operate => self.app.ui_theme.mode_operate,
+    fn focus_color(&self) -> Color {
+        use crate::tui::shell_key_routing::Focus;
+        let editing = match self.app.focus() {
+            Focus::Composer => true,
+            Focus::Launch => self.app.launch.menu_selected.is_none(),
+            _ => false,
+        };
+        if editing {
+            self.app.ui_theme.accent_primary
+        } else {
+            self.app.ui_theme.border
         }
     }
 
@@ -1359,7 +1440,11 @@ impl Renderable for ComposerWidget<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         // Slash rows are re-recorded below; clear first so a closed or
         // resized menu cannot keep stale hitboxes from the prior frame.
-        self.app.viewport.last_slash_menu_hitboxes.borrow_mut().clear();
+        self.app
+            .viewport
+            .last_slash_menu_hitboxes
+            .borrow_mut()
+            .clear();
         let background = Style::default().bg(self.app.ui_theme.composer_bg);
         let has_panel = self.has_panel(area);
         let inner_area = self.inner_area(area);
@@ -1401,7 +1486,8 @@ impl Renderable for ComposerWidget<'_> {
                     Span::styled(
                         format!(
                             " {}  ",
-                            self.app.tr(crate::localization::MessageId::HistoryHintMove)
+                            self.app
+                                .tr(codewhale_localization::MessageId::HistoryHintMove)
                         ),
                         Style::default().fg(palette::TEXT_MUTED),
                     ),
@@ -1409,20 +1495,20 @@ impl Renderable for ComposerWidget<'_> {
                         format!(
                             "{}  ",
                             self.app
-                                .tr(crate::localization::MessageId::HistoryHintAccept)
+                                .tr(codewhale_localization::MessageId::HistoryHintAccept)
                         ),
                         Style::default().fg(palette::TEXT_MUTED),
                     ),
                     Span::styled(
                         self.app
-                            .tr(crate::localization::MessageId::HistoryHintRestore),
+                            .tr(codewhale_localization::MessageId::HistoryHintRestore),
                         Style::default().fg(palette::TEXT_MUTED),
                     ),
                 ]))
             } else if !self.slash_menu_entries.is_empty() {
                 Some(Line::from(Span::styled(
                     self.app
-                        .tr(crate::localization::MessageId::ComposerSlashMenuHint),
+                        .tr(codewhale_localization::MessageId::ComposerSlashMenuHint),
                     Style::default().fg(self.app.ui_theme.text_hint),
                 )))
             } else if !input_text.trim().is_empty() {
@@ -1436,35 +1522,26 @@ impl Renderable for ComposerWidget<'_> {
                 None
             };
 
-            // Warm permission ramp: Ask is amber, Auto-Review is Signal Gold,
-            // and Full Access is coral. The bottom edge independently carries
-            // the cool Plan -> Act -> Operate mode ramp.
-            let permission_color = match self.app.approval_mode {
-                ApprovalMode::Suggest | ApprovalMode::Never => self.app.ui_theme.permission_ask,
-                ApprovalMode::Auto => self.app.ui_theme.permission_auto_review,
-                ApprovalMode::Bypass => self.app.ui_theme.permission_full_access,
-            };
-            // Paint the enclosure first so the live composer gets actual
-            // rounded side rails. The semantic top/bottom blocks below keep
-            // their existing permission/mode color ramps and titles while the
-            // neutral rails stay legible on every supported theme.
+            // Focus has one outline. Permission and mode remain explicit in
+            // their footer; repeating both around the input competes with it.
+            let focus_color = self.focus_color();
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(self.app.ui_theme.border))
+                .border_style(Style::default().fg(focus_color))
                 .style(background)
                 .render(area, buf);
             let mut top_border = Block::default()
                 .borders(Borders::TOP)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(permission_color))
+                .border_style(Style::default().fg(focus_color))
                 .style(background);
             if self.app.is_history_search_active() {
                 top_border = top_border.title(Line::from(Span::styled(
                     format!(
                         " {} ",
                         self.app
-                            .tr(crate::localization::MessageId::HistorySearchTitle)
+                            .tr(codewhale_localization::MessageId::HistorySearchTitle)
                     ),
                     Style::default().fg(palette::TEXT_MUTED),
                 )));
@@ -1487,19 +1564,13 @@ impl Renderable for ComposerWidget<'_> {
             let mut bottom_border = Block::default()
                 .borders(Borders::BOTTOM)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(self.mode_color()))
+                .border_style(Style::default().fg(focus_color))
                 .style(background);
             if let Some(hint_line) = hint_line {
                 bottom_border = bottom_border.title_bottom(hint_line);
             }
             bottom_border.render(area, buf);
-            render_composer_panel_corners(
-                area,
-                buf,
-                background,
-                permission_color,
-                self.mode_color(),
-            );
+            render_composer_panel_corners(area, buf, background, focus_color, focus_color);
         } else if area.height >= 2 {
             let mut block = Block::default()
                 .borders(Borders::TOP)
@@ -1612,7 +1683,7 @@ impl Renderable for ComposerWidget<'_> {
             if history_search_matches.is_empty() {
                 lines.push(Line::from(Span::styled(
                     self.app
-                        .tr(crate::localization::MessageId::HistoryNoMatches),
+                        .tr(codewhale_localization::MessageId::HistoryNoMatches),
                     Style::default().fg(palette::TEXT_MUTED),
                 )));
             } else {
@@ -1826,10 +1897,7 @@ impl Renderable for ComposerWidget<'_> {
                         .viewport
                         .last_slash_menu_hitboxes
                         .borrow_mut()
-                        .push((
-                            idx,
-                            Rect::new(inner_area.x, row_y, inner_area.width, 1),
-                        ));
+                        .push((idx, Rect::new(inner_area.x, row_y, inner_area.width, 1)));
                 }
 
                 if name_was_truncated || description_was_truncated {
@@ -1867,14 +1935,18 @@ impl Renderable for ComposerWidget<'_> {
                 .set_style(Style::default().fg(self.app.ui_theme.accent_primary));
         }
 
-        // Restore the shared `[↑]` after caller-owned input so a long draft
+        // Restore the shared `[↵]` after caller-owned input so a long draft
         // cannot erase the one cell target the mouse handler also uses.
         if has_panel {
             crate::tui::composer_chrome::render_tideline_composer_submit(
                 area,
                 buf,
                 &self.app.ui_theme,
-                true,
+                // Display state, not key-routing state: the paste-burst
+                // window reopens on every fast keystroke, so drawing from
+                // `composer_enter_would_submit` strobed the chip while
+                // typing (#6397).
+                self.app.composer_draft_is_submittable(),
                 crate::tui::color_compat::ascii_safe_enabled(),
             );
         }
@@ -1973,7 +2045,8 @@ impl<'a> ApprovalWidget<'a> {
         let critical = matches!(stakes, crate::tui::approval::ApprovalStakes::Critical);
 
         let mut body: Vec<Line<'static>> = Vec::with_capacity(16);
-        // Header: stakes badge + tool identifier.
+        // Header: effect badge + the plain summary of the call (E6). The raw
+        // tool name stays one details chord away in the pager.
         body.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
@@ -1982,7 +2055,7 @@ impl<'a> ApprovalWidget<'a> {
                     if repo_law {
                         tr(locale, MessageId::ApprovalRepoLawBadge)
                     } else {
-                        stakes_badge_text(stakes, locale)
+                        effect_badge_text(self.request, stakes, locale)
                     }
                 ),
                 Style::default()
@@ -1996,16 +2069,29 @@ impl<'a> ApprovalWidget<'a> {
                     format!(
                         "{} · {}",
                         tr(locale, MessageId::ApprovalRepoLawTitle),
-                        self.request.tool_name
+                        approval_heading(self.request, locale)
                     )
                 } else {
-                    self.request.tool_name.clone()
+                    approval_heading(self.request, locale)
                 },
                 Style::default()
                     .fg(palette::WHALE_ACTION)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
+
+        // A child's card names the agent that is waiting (approvals C1).
+        if let Some(owner) = self.request.owner.as_ref() {
+            body.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    approval_owner_header(owner, locale),
+                    Style::default()
+                        .fg(palette::TEXT_SECONDARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
 
         if repo_law {
             body.push(Line::from(vec![
@@ -2130,7 +2216,9 @@ impl<'a> ApprovalWidget<'a> {
         // routine and elevated work the controls speak for themselves; the
         // extra policy prose was noise that made every edit read like an
         // emergency.
-        if critical {
+        // The semantics prose says Esc stops the turn; a child's card hides
+        // on Esc instead, so it never shows that line.
+        if critical && self.request.owner.is_none() {
             push_destructive_approval_semantics(&mut body, locale, false);
         }
 
@@ -2160,7 +2248,7 @@ impl<'a> ApprovalWidget<'a> {
                 ]));
             }
             // Category line — localized risk category.
-            let (cat_label, cat_color) = category_label_for(self.request.category, locale);
+            let (cat_label, cat_color) = category_label_for(self.request, locale);
             body.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(label_type(locale), Style::default().fg(palette::TEXT_HINT)),
@@ -2253,12 +2341,12 @@ impl Renderable for ApprovalWidget<'_> {
                 if repo_law {
                     tr(self.view.locale(), MessageId::ApprovalRepoLawTitle)
                 } else {
-                    Cow::Borrowed(self.request.tool_name.as_str())
+                    Cow::Owned(approval_heading(self.request, self.view.locale()))
                 },
                 if repo_law {
                     tr(self.view.locale(), MessageId::ApprovalRepoLawBadge)
                 } else {
-                    stakes_badge_text(stakes, self.view.locale())
+                    effect_badge_text(self.request, stakes, self.view.locale())
                 },
             );
             let line = Line::from(Span::styled(
@@ -2439,7 +2527,7 @@ fn inline_region_for(area: Rect, body: &[Line<'static>], controls: &[Line<'stati
 /// Terminal rows `lines` occupy under the exact ratatui word-wrap used by the
 /// renderer. Exact measurement keeps localized controls and their mouse
 /// hitboxes aligned without padding the compact approval band.
-fn measure_wrapped_rows(lines: &[Line<'static>], width: u16) -> u16 {
+fn measure_wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
     if width == 0 {
         return lines.len() as u16;
     }
@@ -2499,7 +2587,11 @@ fn build_approval_controls(
     controls.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            footer_controls(locale),
+            if request.owner.is_some() {
+                child_footer_controls(locale)
+            } else {
+                footer_controls(locale)
+            },
             Style::default().fg(palette::TEXT_MUTED),
         ),
         if request.can_save_ask_rule() {
@@ -2572,19 +2664,46 @@ fn approval_option_style(is_selected: bool, color: Color) -> Style {
     }
 }
 
-fn stakes_badge_text(
-    stakes: crate::tui::approval::ApprovalStakes,
-    locale: Locale,
-) -> Cow<'static, str> {
-    use crate::tui::approval::ApprovalStakes;
-    match stakes {
-        ApprovalStakes::Routine => tr(locale, MessageId::ApprovalRiskReview),
-        ApprovalStakes::Elevated => tr(locale, MessageId::ApprovalRiskElevated),
-        ApprovalStakes::Critical => tr(locale, MessageId::ApprovalRiskDestructive),
+/// The approval card's heading: the plain summary of the call (E6), in the
+/// card's language, falling back to the tool name only when no summary was
+/// derived.
+fn approval_heading(request: &ApprovalRequest, locale: Locale) -> String {
+    if request.summary.trim().is_empty() {
+        return request.tool_name.clone();
+    }
+    let summary = request.summary_for_locale(locale);
+    if summary.trim().is_empty() {
+        request.tool_name.clone()
+    } else {
+        summary
     }
 }
 
-fn category_label_for(category: ToolCategory, locale: Locale) -> (Cow<'static, str>, Color) {
+/// Badge naming what the call does, not a risk tier: "Reads only", "Changes
+/// files", "Runs a command", "Uses the network". Anything the stakes
+/// classifier calls destructive or publishing reads "Can't be undone".
+fn effect_badge_text(
+    request: &ApprovalRequest,
+    stakes: crate::tui::approval::ApprovalStakes,
+    locale: Locale,
+) -> Cow<'static, str> {
+    if stakes == crate::tui::approval::ApprovalStakes::Critical {
+        return tr(locale, MessageId::ApprovalRiskDestructive);
+    }
+    let id = match request.category {
+        ToolCategory::Safe | ToolCategory::McpRead => MessageId::ApprovalEffectReadsOnly,
+        ToolCategory::FileWrite => MessageId::ApprovalEffectChangesFiles,
+        ToolCategory::Shell => MessageId::ApprovalEffectRunsCommand,
+        ToolCategory::Network => MessageId::ApprovalEffectUsesNetwork,
+        ToolCategory::McpAction => MessageId::ApprovalEffectConnectedApp,
+        ToolCategory::Agent => MessageId::ApprovalEffectStartsAgent,
+        ToolCategory::Unknown => MessageId::ApprovalEffectUnclassified,
+    };
+    tr(locale, id)
+}
+
+fn category_label_for(request: &ApprovalRequest, locale: Locale) -> (Cow<'static, str>, Color) {
+    let category = request.category;
     let label = match category {
         ToolCategory::Safe => tr(locale, MessageId::ApprovalCategorySafe),
         ToolCategory::FileWrite => tr(locale, MessageId::ApprovalCategoryFileWrite),
@@ -2594,6 +2713,16 @@ fn category_label_for(category: ToolCategory, locale: Locale) -> (Cow<'static, s
         ToolCategory::McpAction => tr(locale, MessageId::ApprovalCategoryMcpAction),
         ToolCategory::Agent => tr(locale, MessageId::ApprovalCategoryAgent),
         ToolCategory::Unknown => tr(locale, MessageId::ApprovalCategoryUnknown),
+    };
+    // "Connected app (github)": name the server the tool comes from.
+    let label = match (
+        category,
+        crate::tui::approval::connected_app_server(&request.tool_name),
+    ) {
+        (ToolCategory::McpRead | ToolCategory::McpAction, Some(server)) => {
+            Cow::Owned(format!("{label} ({server})"))
+        }
+        _ => label,
     };
     let color = match category {
         ToolCategory::Safe => palette::STATUS_SUCCESS,
@@ -2875,8 +3004,8 @@ fn destructive_approval_compact_semantics(locale: Locale) -> (&'static str, &'st
     match locale {
         Locale::ZhHans => ("规则: ", "批准策略要求确认；拒绝跳过本次，Esc 中止整轮。"),
         _ => (
-            "Policy: ",
-            "Approval policy requires review; d denies, Esc aborts.",
+            "Why: ",
+            "Your permissions ask before this; d doesn't allow it, Esc stops the turn.",
         ),
     }
 }
@@ -2892,12 +3021,12 @@ fn destructive_approval_semantics(locale: Locale) -> [(&'static str, &'static st
         ],
         _ => [
             (
-                "Policy: ",
-                "The active approval policy, a review rule, or an explicit ask-rule requires confirmation.",
+                "Why: ",
+                "Your permissions, a review rule, or an ask rule requires confirmation.",
             ),
             (
-                "Cancel: ",
-                "Deny rejects only this tool call; Esc aborts the whole turn.",
+                "Stop: ",
+                "Don't allow skips only this step; Esc stops the whole turn.",
             ),
         ],
     }
@@ -2908,6 +3037,31 @@ fn footer_controls(locale: Locale) -> Cow<'static, str> {
     // is never advertised as a details shortcut (TUI-DOG-002).
     let details = crate::tui::shell_key_routing::tool_details_chord();
     Cow::Owned(tr(locale, MessageId::ApprovalControlsHint).replace("{details}", details.as_ref()))
+}
+
+/// Controls hint for a child's card: Esc hides it, `g` opens the agent.
+fn child_footer_controls(locale: Locale) -> Cow<'static, str> {
+    let details = crate::tui::shell_key_routing::tool_details_chord();
+    Cow::Owned(format!(
+        "{}  ·  {}",
+        tr(locale, MessageId::ApprovalControlsHintChild).replace("{details}", details.as_ref()),
+        tr(locale, MessageId::ApprovalGoToAgent)
+    ))
+}
+
+/// "Agent: {agent} · {role}", dropping the role segment when the roster does
+/// not know the agent's role yet.
+fn approval_owner_header(owner: &crate::tui::approval::ApprovalOwner, locale: Locale) -> String {
+    let template = tr(locale, MessageId::ApprovalOwnerHeader);
+    let with_agent = template.replace("{agent}", &owner.label);
+    match owner.role.as_deref() {
+        Some(role) => with_agent.replace("{role}", role),
+        None => with_agent
+            .replace(" · {role}", "")
+            .replace("{role}", "")
+            .trim_end()
+            .to_string(),
+    }
 }
 
 fn save_ask_rule_hint(locale: Locale) -> Cow<'static, str> {
@@ -2978,6 +3132,11 @@ fn approval_options_for_request(
         workflow_approval_options(risk, locale).to_vec()
     } else {
         let mut options = approval_options_for(risk, locale).to_vec();
+        if request.owner.is_some() {
+            // Must match `ApprovalOption::CHILD_ORDER`: no "Stop this turn".
+            options.pop();
+            return options;
+        }
         if request.can_save_allow_rule() {
             options.insert(
                 2,
@@ -3037,7 +3196,7 @@ pub struct ElevationWidget<'a> {
 }
 
 impl<'a> ElevationWidget<'a> {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn new(request: &'a ElevationRequest, selected: usize, locale: Locale) -> Self {
         Self {
             request,
@@ -3064,19 +3223,10 @@ impl<'a> ElevationWidget<'a> {
 
 impl Renderable for ElevationWidget<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        use crate::localization::MessageId;
-        use crate::localization::tr;
+        use codewhale_localization::MessageId;
+        use codewhale_localization::tr;
 
         let popup_width = 70.min(area.width.saturating_sub(4));
-        let popup_height = 22.min(area.height.saturating_sub(4));
-        let popup_area = Rect {
-            x: (area.width.saturating_sub(popup_width)) / 2,
-            y: (area.height.saturating_sub(popup_height)) / 2,
-            width: popup_width,
-            height: popup_height,
-        };
-
-        Clear.render(popup_area, buf);
 
         let mut lines = vec![
             Line::from(""),
@@ -3208,6 +3358,74 @@ impl Renderable for ElevationWidget<'_> {
             ]));
         }
 
+        // Reserve the options before the explanation. `Abort` is the last row of
+        // that list, so a card sized to its preamble hides the safe exit with no
+        // scroll rail and no hint that anything is missing. The denial detail is
+        // what gets shortened; the choices never do.
+        //
+        // `Padding::uniform(1)` inside `Borders::ALL` costs two rows and two
+        // columns on each axis.
+        const CHROME: u16 = 4;
+        let inner_width = popup_width.saturating_sub(CHROME);
+        let max_inner_height = area.height.saturating_sub(2).saturating_sub(CHROME);
+
+        let mut option_lines = lines.split_off(option_start);
+        // Each option is a label row followed by a description row. On a terminal
+        // too small for both, the description is chrome and the choice is
+        // content, so the descriptions go first and every option keeps its row.
+        let mut rows_per_option = 2usize;
+        if measure_wrapped_rows(&option_lines, inner_width) > max_inner_height {
+            option_lines = option_lines
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, line)| (idx % 2 == 0).then_some(line))
+                .collect();
+            rows_per_option = 1;
+        }
+        let option_rows = measure_wrapped_rows(&option_lines, inner_width);
+        // Trim the denial detail down to the title rather than the option list.
+        let mut truncated = false;
+        while lines.len() > 2
+            && measure_wrapped_rows(&lines, inner_width).saturating_add(option_rows)
+                > max_inner_height
+        {
+            lines.pop();
+            truncated = true;
+        }
+        if truncated {
+            lines.push(Line::from(Span::styled(
+                approval_truncation_hint(self.locale),
+                Style::default().fg(palette::TEXT_MUTED),
+            )));
+        }
+
+        // Row offsets are measured after wrapping, not counted in source lines:
+        // a description that wraps used to push every hitbox below it out of
+        // step with the row the pointer was actually over.
+        let option_row_offsets = {
+            let mut offsets = Vec::with_capacity(self.request.options.len());
+            let mut row = measure_wrapped_rows(&lines, inner_width);
+            for pair in option_lines.chunks(rows_per_option) {
+                let height = measure_wrapped_rows(pair, inner_width);
+                offsets.push((row, height));
+                row = row.saturating_add(height);
+            }
+            offsets
+        };
+        lines.extend(option_lines);
+
+        let popup_height = measure_wrapped_rows(&lines, inner_width)
+            .saturating_add(CHROME)
+            .min(area.height.saturating_sub(2));
+        let popup_area = Rect {
+            x: (area.width.saturating_sub(popup_width)) / 2,
+            y: (area.height.saturating_sub(popup_height)) / 2,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        Clear.render(popup_area, buf);
+
         let title = tr(self.locale, MessageId::ElevationTitleRequired);
         let block = Block::default()
             .title(title)
@@ -3219,11 +3437,10 @@ impl Renderable for ElevationWidget<'_> {
         if let Some(hitboxes) = self.hitboxes {
             hitboxes.borrow_mut().clear();
             let content = block.inner(popup_area);
-            for i in 0..self.request.options.len() {
-                let y = content
-                    .y
-                    .saturating_add(u16::try_from(option_start + i * 2).unwrap_or(u16::MAX));
-                let height = 2u16.min(content.y.saturating_add(content.height).saturating_sub(y));
+            let content_bottom = content.y.saturating_add(content.height);
+            for (offset, rows) in option_row_offsets {
+                let y = content.y.saturating_add(offset);
+                let height = rows.min(content_bottom.saturating_sub(y));
                 if height > 0 {
                     hitboxes
                         .borrow_mut()
@@ -3403,6 +3620,9 @@ fn apply_selection_to_line(
 /// [`crate::tui::ui::render`] and thread the result, so the reservation and
 /// the render can never disagree inside a single frame.
 pub(crate) fn should_render_empty_state(app: &App) -> bool {
+    if app.launch.visible && app.launch.return_to_session {
+        return true;
+    }
     let active_is_empty = app
         .active_cell
         .as_ref()
@@ -3556,7 +3776,7 @@ fn composer_height(
     let has_panel = enclosed_composer_panel_fits(show_panel, area_width, available_height);
     // Measure through the same border- and submit-aware plane that rendering,
     // cursor placement, the frame viewport, and mouse mapping use. A draft
-    // that wraps here therefore cannot consume the painted `[↑]` cells later.
+    // that wraps here therefore cannot consume the painted `[↵]` cells later.
     let measurement_area = Rect::new(0, 0, area_width, if has_panel { 3 } else { 1 });
     let content_width =
         composer_content_geometry(composer_inner_area(measurement_area, has_panel), false)
@@ -3609,7 +3829,7 @@ pub(crate) fn slash_completion_hints(
     input: &str,
     limit: usize,
     cached_skills: &[(String, String)],
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     workspace: Option<&std::path::Path>,
     api_provider: ApiProvider,
 ) -> Vec<SlashMenuEntry> {
@@ -3624,11 +3844,76 @@ pub(crate) fn slash_completion_hints(
     )
 }
 
+/// Slash-menu rows for `/<command> ` and `/<command> <partial>`.
+///
+/// Once the name is typed the menu used to go blank, so `/workspace
+/// worktrees` — the only route to the git worktree manager — was unfindable
+/// without already knowing it (#5952). The rows come from the registry's own
+/// `usage` string: the usage line itself as the head row, then the literal
+/// subcommands that line declares, filtered by what has been typed. There is
+/// no second place argument documentation is written down.
+fn command_argument_hints(trimmed_input: &str, limit: usize) -> Vec<SlashMenuEntry> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Some((command_token, rest)) = trimmed_input
+        .trim_start_matches('/')
+        .split_once(char::is_whitespace)
+    else {
+        return Vec::new();
+    };
+    let Some(info) = commands::get_command_info(command_token) else {
+        return Vec::new();
+    };
+    if !info.show_in_slash_completion(command_token) {
+        return Vec::new();
+    }
+    // Only the first argument word is a subcommand. Once a second word is
+    // being typed the usage line has nothing left to offer, so the menu gets
+    // out of the way exactly as it does today.
+    let arg_prefix = rest.trim_start();
+    if arg_prefix.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let arg_prefix_lower = arg_prefix.to_ascii_lowercase();
+
+    let canonical = format!("/{}", info.name);
+    let mut entries: Vec<SlashMenuEntry> = Vec::new();
+    // The head row states what the command accepts. Its name is the command
+    // itself, so selecting it re-inserts what is already typed — the row can
+    // be arrowed through without losing the argument being written. It is
+    // dropped once filtering starts so Tab still completes a single match.
+    if arg_prefix.is_empty() && info.usage != canonical {
+        entries.push(SlashMenuEntry {
+            name: canonical.clone(),
+            description: info.usage.to_string(),
+            is_skill: false,
+            alias_hint: None,
+        });
+    }
+    for subcommand in info.subcommands() {
+        if !subcommand.starts_with(&arg_prefix_lower) {
+            continue;
+        }
+        entries.push(SlashMenuEntry {
+            name: format!("{canonical} {subcommand}"),
+            // The subcommand is the whole row: the command's own description
+            // is already one row up on the head row, and repeating it beside
+            // every verb would say the same sentence a dozen times.
+            description: String::new(),
+            is_skill: false,
+            alias_hint: None,
+        });
+    }
+    entries.truncate(limit);
+    entries
+}
+
 pub(crate) fn slash_completion_hints_with_model_candidates(
     input: &str,
     limit: usize,
     cached_skills: &[(String, String)],
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     workspace: Option<&std::path::Path>,
     model_candidates: &[String],
 ) -> Vec<SlashMenuEntry> {
@@ -3667,7 +3952,7 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
         && completing_skill_arg.is_none()
         && completing_model_arg.is_none()
     {
-        return Vec::new();
+        return command_argument_hints(trimmed, limit);
     }
     let mut entries: Vec<SlashMenuEntry> = Vec::new();
     let prefix_lower = prefix.to_ascii_lowercase();
@@ -3878,21 +4163,17 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
         }
     }
 
-    // A bare slash is an invitation, not a manual. Keep the root list to the
-    // small task-oriented set while leaving every command available once the
-    // user types a prefix or searches Help. User commands retain token
-    // ownership, but do not flood the empty root.
+    // A bare slash is an invitation, not a manual — but an invitation you
+    // cannot walk past is a dead end. The small task-oriented set is sorted
+    // to the head below (`root_rank`) instead of being the only thing kept,
+    // so the first six rows are unchanged and arrowing down reaches every
+    // other command. Founder live-test: "I like how we prioritize the slash
+    // thing but it should still be able to find all of them."
     if prefix_lower.is_empty() {
-        entries.retain(|entry| {
-            let key = entry.name.trim_start_matches('/');
-            commands::traits::BARE_SLASH_DISCOVERY_COMMANDS
-                .iter()
-                .any(|name| {
-                    key == *name
-                        || commands::get_command_info(key)
-                            .is_some_and(|info| info.aliases.contains(name))
-                })
-        });
+        // Skills are the exception, and for a different reason: they are user
+        // content with their own triggers (`$name`, `/skill`), and there can
+        // be hundreds. Commands are what this menu is for.
+        entries.retain(|entry| !entry.is_skill);
         for entry in &mut entries {
             if entry.name == "/subagents" {
                 entry.name = "/agents".to_string();
@@ -4019,7 +4300,7 @@ fn push_command_entry(
     name: &str,
     command_key: &str,
     prefix_lower: &str,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     user_commands: &[&commands::user_registry::UserCommandMetadata],
 ) {
     let user_command = user_commands
@@ -4244,7 +4525,7 @@ fn cursor_row_col_in_lines(
         .nth(offset)
         .map(|(b, _)| b)
         .unwrap_or(line.len());
-    let col = line[..byte_end].width();
+    let col = visible_str_width(&line[..byte_end]);
     (row, col)
 }
 
@@ -4327,6 +4608,28 @@ pub fn wrap_input_lines_for_mouse(input: &str, width: usize) -> Vec<(usize, Stri
 ///   the end of the preceding line rather than being swallowed.
 /// * **Every line fits.** A word longer than `width` — a URL, a path, a
 ///   base64 blob — has no usable break point and still breaks hard.
+///
+/// Display width as painted: ratatui strips control characters, so they
+/// occupy no cells. Non-control graphemes keep plain unicode width, matching
+/// the long-standing wrap/click/caret contract.
+pub(crate) fn visible_grapheme_width(grapheme: &str) -> usize {
+    if grapheme.chars().any(|c| c.is_control()) {
+        0
+    } else {
+        grapheme.width()
+    }
+}
+
+/// Plain unicode width with painted control handling: strip control
+/// graphemes first so emoji and wide-glyph measurement keeps the exact
+/// [`UnicodeWidthStr`] semantics on the remainder.
+fn visible_str_width(text: &str) -> usize {
+    text.graphemes(true)
+        .filter(|grapheme| !grapheme.chars().any(|c| c.is_control()))
+        .collect::<String>()
+        .width()
+}
+
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
@@ -4352,7 +4655,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 Some((byte, _)) if byte < current.len() => {
                     let remainder = current.split_off(byte);
                     lines.push(std::mem::replace(&mut current, remainder));
-                    current_width = current.width();
+                    current_width = visible_str_width(&current);
                 }
                 _ => {
                     lines.push(std::mem::take(&mut current));
@@ -4370,7 +4673,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
 
-        let grapheme_width = grapheme.width();
+        let grapheme_width = visible_grapheme_width(grapheme);
         if current_width + grapheme_width > width && current_width != 0 {
             flush!();
         }
@@ -4443,31 +4746,30 @@ fn line_spans_with_selection<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_REVISION_DOMAIN, ApprovalMode, ApprovalWidget, COMPOSER_PANEL_HEIGHT,
-        COMPOSER_PLACEHOLDER, ChatWidget, ComposerWidget, Renderable, SlashMenuEntry,
-        active_composer_submit_rect, active_entry_revision, apply_detail_target_highlight,
-        apply_selection_to_line, apply_send_flash, approval_palette, approval_truncation_hint,
-        build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
-        composer_height, composer_inner_area, composer_max_height, composer_submit_hint,
-        composer_top_padding, cursor_row_col, empty_composer_visual_rows,
-        enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
-        history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
-        push_command_entry, receipt_is_settling, revision_in_domain, should_render_empty_state,
-        slash_completion_hints, tool_run_summary_revision, wrap_input_lines,
-        wrap_input_lines_for_mouse, wrap_text,
+        ACTIVE_REVISION_DOMAIN, ApprovalWidget, COMPOSER_PANEL_HEIGHT, COMPOSER_PLACEHOLDER,
+        ChatWidget, ComposerWidget, Renderable, SlashMenuEntry, active_composer_submit_rect,
+        active_entry_revision, apply_detail_target_highlight, apply_selection_to_line,
+        apply_send_flash, approval_palette, approval_truncation_hint, build_empty_state_lines,
+        composer_content_geometry, composer_empty_hint_text, composer_height, composer_inner_area,
+        composer_max_height, composer_submit_hint, composer_top_padding, cursor_row_col,
+        empty_composer_visual_rows, enclosed_composer_panel_fits, fish_flee_offset, fish_heading,
+        fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
+        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
+        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
+        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
-    use crate::localization::Locale;
-    use crate::palette;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
-        App, AppMode, ComposerDensity, QueuedMessage, TaskPanelEntry, TaskPanelEntryKind,
-        ToolCollapseMode, TranscriptSpacing, TuiOptions,
+        App, ComposerDensity, QueuedMessage, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
+        TranscriptSpacing, TuiOptions,
     };
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus,
     };
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
+    use codewhale_localization::Locale;
+    use codewhale_palette as palette;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{
         buffer::Buffer,
@@ -4493,7 +4795,7 @@ mod tests {
         // Most widget fixtures exercise the underwater theme's field. Other
         // themes keep the terminal-owned shell; keep tests that inspect fish
         // and caustics intentional rather than coupled to that choice.
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME;
         app
     }
@@ -5177,6 +5479,17 @@ mod tests {
     }
 
     #[test]
+    fn wrap_and_caret_measure_tabs_as_painted() {
+        // Ratatui strips control characters, so a tab paints no cells. Wrap
+        // budgets, caret columns, and click mapping must all agree on zero;
+        // counting the tab would break the line early and drift the caret
+        // and clicks one cell per tab.
+        assert_eq!(wrap_text("\t0123456789", 11), vec!["\t0123456789"]);
+        assert_eq!(cursor_row_col("a\tb", 3, 80), (0, 2));
+        assert_eq!(cursor_row_col("\ta", 2, 80), (0, 1));
+    }
+
+    #[test]
     fn wrap_input_lines_trailing_newline() {
         let lines = wrap_input_lines("a\n", 10);
         assert_eq!(lines, vec!["a", ""]);
@@ -5219,13 +5532,19 @@ mod tests {
     }
 
     #[test]
-    fn bare_slash_menu_is_bounded_and_the_long_tail_remains_searchable() {
-        let hints = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+    fn bare_slash_menu_leads_with_the_small_set_and_reaches_the_long_tail() {
+        let hints = slash_completion_hints("/", 512, &[], Locale::En, None, ApiProvider::Deepseek);
         let names: Vec<&str> = hints.iter().map(|hint| hint.name.as_str()).collect();
         assert_eq!(
-            names,
-            ["/help", "/setup", "/model", "/settings", "/resume", "/rc",],
-            "bare / should offer the small starting set: {names:?}"
+            names.iter().take(6).copied().collect::<Vec<_>>(),
+            ["/help", "/setup", "/model", "/settings", "/resume", "/rc"],
+            "the small starting set still leads: {names:?}"
+        );
+        // Founder ruling: the ranking is welcome, the truncation is not — a
+        // command you cannot reach from the menu is a command you cannot find.
+        assert!(
+            names.len() > 6,
+            "the long tail follows the starting set: {names:?}"
         );
         assert!(
             slash_completion_hints("/wor", 128, &[], Locale::En, None, ApiProvider::Deepseek)
@@ -5299,6 +5618,36 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_slash_leads_with_the_short_list_and_still_reaches_every_command() {
+        // Founder live-test: "I like how we prioritize the slash thing but it
+        // should still be able to find all of them." The curated six stay at
+        // the head; the rest follow instead of being filtered away, and the
+        // popup scrolls around the selection to reach them.
+        let hints = slash_completion_hints("/", 512, &[], Locale::En, None, ApiProvider::Deepseek);
+        let names: Vec<String> = hints.iter().map(|h| h.name.clone()).collect();
+
+        let head: Vec<String> = crate::commands::traits::BARE_SLASH_DISCOVERY_COMMANDS
+            .iter()
+            .map(|name| format!("/{name}"))
+            .collect();
+        assert_eq!(
+            names.iter().take(head.len()).cloned().collect::<Vec<_>>(),
+            head,
+            "the short task sequence still leads"
+        );
+        assert!(
+            names.len() > head.len(),
+            "a bare slash must reach past the short list: {} entries",
+            names.len()
+        );
+        // A command deliberately outside the short list must be reachable.
+        assert!(
+            names.iter().any(|name| name == "/mcp"),
+            "every command is findable from a bare slash"
+        );
+    }
+
+    #[test]
     fn slash_completion_hints_keep_prefix_match_alphabetical_within_tier() {
         // Within the same rank tier (no exact-alias match), entries fall
         // back to alphabetical name order, same as the prior behavior.
@@ -5328,19 +5677,30 @@ mod tests {
     }
 
     #[test]
-    fn slash_completion_hints_hide_toolbox_commands_until_typed() {
-        let root = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
-        assert!(root.iter().any(|hint| hint.name == "/model"));
-        assert!(!root.iter().any(|hint| hint.name == "/provider"));
-        assert!(!root.iter().any(|hint| hint.name == "/fleet"));
-        assert!(!root.iter().any(|hint| hint.name == "/fleet"));
-        assert!(!root.iter().any(|hint| hint.name == "/config"));
-        assert!(!root.iter().any(|hint| hint.name == "/statusline"));
-        assert!(!root.iter().any(|hint| hint.name == "/rlm"));
-        assert!(!root.iter().any(|hint| hint.name == "/modeldb"));
-        assert!(!root.iter().any(|hint| hint.name == "/models"));
-        assert!(!root.iter().any(|hint| hint.name == "/plugin"));
-        assert!(!root.iter().any(|hint| hint.name == "/subagents"));
+    fn slash_completion_hints_rank_toolbox_commands_below_the_starting_set() {
+        let root = slash_completion_hints("/", 512, &[], Locale::En, None, ApiProvider::Deepseek);
+        let position = |name: &str| root.iter().position(|hint| hint.name == name);
+        // The task-oriented set leads; the toolbox is reachable behind it
+        // rather than hidden until guessed at.
+        assert_eq!(position("/model"), Some(2));
+        for toolbox in [
+            "/provider",
+            "/fleet",
+            "/config",
+            "/statusline",
+            "/rlm",
+            "/modeldb",
+            "/models",
+            "/plugin",
+        ] {
+            let rank = position(toolbox)
+                .unwrap_or_else(|| panic!("{toolbox} must be reachable from a bare slash"));
+            assert!(rank >= 6, "{toolbox} must rank below the starting set");
+        }
+        // `/subagents` is renamed at the root, so its canonical name is the
+        // one that must not appear.
+        assert!(position("/subagents").is_none());
+        assert!(position("/agents").is_some());
 
         let rlm = slash_completion_hints("/rl", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         assert!(rlm.iter().any(|hint| hint.name == "/rlm"));
@@ -5463,6 +5823,126 @@ mod tests {
             .expect("custom command should be present");
 
         assert_eq!(entry.description, "Deploy target  <environment>");
+    }
+
+    /// #5952: `/workspace worktrees` is the only route to the git worktree
+    /// manager, and the menu went blank the moment the space was typed.
+    #[test]
+    fn typing_a_command_and_a_space_states_its_usage_and_lists_its_subcommands() {
+        let hints = slash_completion_hints(
+            "/workspace ",
+            128,
+            &[],
+            Locale::En,
+            None,
+            ApiProvider::Deepseek,
+        );
+
+        let head = hints.first().expect("usage row");
+        assert_eq!(head.name, "/workspace");
+        assert_eq!(head.description, "/workspace [path|worktrees]");
+        assert!(
+            hints.iter().any(|hint| hint.name == "/workspace worktrees"),
+            "worktrees must be offered as a subcommand candidate: {:?}",
+            hints.iter().map(|h| h.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// An alias reaches the same usage line as the canonical name, and the
+    /// rows it offers are still spelled with the canonical name.
+    #[test]
+    fn a_command_alias_states_the_canonical_usage() {
+        let hints =
+            slash_completion_hints("/cwd ", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        assert_eq!(hints[0].name, "/workspace");
+        assert_eq!(hints[0].description, "/workspace [path|worktrees]");
+    }
+
+    /// Once filtering starts the usage row steps aside so a single remaining
+    /// verb is unambiguous — that is what lets Tab complete it.
+    #[test]
+    fn a_partial_subcommand_filters_to_the_verbs_that_match() {
+        let hints = slash_completion_hints(
+            "/workspace wor",
+            128,
+            &[],
+            Locale::En,
+            None,
+            ApiProvider::Deepseek,
+        );
+        assert_eq!(
+            hints
+                .iter()
+                .map(|hint| hint.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/workspace worktrees"]
+        );
+
+        let none = slash_completion_hints(
+            "/workspace zzz",
+            128,
+            &[],
+            Locale::En,
+            None,
+            ApiProvider::Deepseek,
+        );
+        assert!(
+            none.is_empty(),
+            "{:?}",
+            none.iter()
+                .map(|hint| hint.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_command_that_takes_no_arguments_still_closes_the_menu() {
+        let hints =
+            slash_completion_hints("/copy ", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn a_second_argument_word_and_an_unknown_command_offer_nothing() {
+        assert!(
+            slash_completion_hints(
+                "/workspace worktrees ",
+                128,
+                &[],
+                Locale::En,
+                None,
+                ApiProvider::Deepseek,
+            )
+            .is_empty()
+        );
+        assert!(
+            slash_completion_hints(
+                "/nosuchcommand ",
+                128,
+                &[],
+                Locale::En,
+                None,
+                ApiProvider::Deepseek,
+            )
+            .is_empty()
+        );
+    }
+
+    /// `/skill ` and `/model ` own their argument menus; the usage rows must
+    /// not displace them.
+    #[test]
+    fn argument_menus_that_already_exist_keep_their_rows() {
+        let skills = vec![("codereview".to_string(), "Review a diff".to_string())];
+        let hints = slash_completion_hints(
+            "/skill ",
+            128,
+            &skills,
+            Locale::En,
+            None,
+            ApiProvider::Deepseek,
+        );
+        assert!(hints.iter().any(|hint| hint.name == "/skill codereview"));
+        assert!(hints.iter().all(|hint| hint.name != "/skill"));
     }
 
     #[test]
@@ -5732,9 +6212,12 @@ mod tests {
             None,
             ApiProvider::Deepseek,
         );
-        assert!(!hints.iter().any(|hint| hint.name == "/skill"));
-        assert!(!hints.iter().any(|hint| hint.name == "/skills"));
+        // Individual skills stay out of the root: they are user content with
+        // their own triggers (`$name`, `/skill`) and there can be hundreds.
         assert!(!hints.iter().any(|hint| hint.is_skill));
+        // The commands that reach them are commands like any other, and a
+        // bare slash must be able to find every command.
+        assert!(hints.iter().any(|hint| hint.name == "/skill"));
     }
 
     #[test]
@@ -5965,7 +6448,7 @@ mod tests {
     #[test]
     fn composer_height_prefers_panel_shape_when_space_allows() {
         let height = composer_height("", 40, 8, 0, ComposerDensity::Comfortable, true);
-        assert_eq!(height, 3);
+        assert_eq!(height, 4);
     }
 
     #[test]
@@ -5978,7 +6461,7 @@ mod tests {
         let widget = ComposerWidget::new(&app, 8, &slash_menu_entries, &mention_menu_entries);
 
         for (width, expected_panel, expected_height) in
-            [(11, false, 2), (12, true, 3), (13, true, 3), (14, true, 3)]
+            [(11, false, 3), (12, true, 4), (13, true, 4), (14, true, 4)]
         {
             let height = widget.desired_height(width);
             let area = Rect::new(0, 0, width, height);
@@ -5987,8 +6470,8 @@ mod tests {
             assert_eq!(widget.has_panel(area), expected_panel, "width={width}");
             assert_eq!(
                 widget.inner_area(area).height,
-                1,
-                "width={width} auto-fit composer reserves one input row plus \
+                2,
+                "width={width} comfortable composer reserves two input rows plus \
                  every rendered border row"
             );
 
@@ -6003,7 +6486,7 @@ mod tests {
                 let shell = crate::tui::composer_chrome::tideline_composer_geometry(area);
                 assert_eq!(
                     widget.inner_area(area),
-                    Rect::new(1, 1, shell.content.right().saturating_sub(1), 1,),
+                    Rect::new(1, 1, shell.content.right().saturating_sub(1), 2,),
                     "width={width} panel input area must reserve the send control and breathing cell"
                 );
                 assert_eq!(buf[(area.left(), area.top())].symbol(), "\u{256d}");
@@ -6034,7 +6517,7 @@ mod tests {
             } else {
                 assert_eq!(
                     widget.inner_area(area),
-                    Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+                    Rect::new(area.x, area.y.saturating_add(1), area.width, 2),
                     "width={width} compact fallback must keep its full input width"
                 );
                 assert_ne!(buf[(area.left(), area.top())].symbol(), "\u{256d}");
@@ -6045,7 +6528,7 @@ mod tests {
     #[test]
     fn composer_height_wraps_to_the_rounded_panel_content_width() {
         // At the minimum viable panel width, the side rails, prompt gutter,
-        // shared `[↑]` control, and its breathing cell leave three text
+        // shared `[↵]` control, and its breathing cell leave three text
         // columns. Measuring against the old width would render extra lines
         // without allocating their rows.
         let height = composer_height(
@@ -6068,8 +6551,8 @@ mod tests {
         let expanded = height_for("one\ntwo\nthree\nfour\nfive\nsix");
         let collapsed_again = height_for("short");
 
-        // Auto-fit: one input row + top/bottom panel borders.
-        assert_eq!(collapsed, 3);
+        // Comfortable: two input rows + top/bottom panel borders.
+        assert_eq!(collapsed, 4);
         // Six content rows + two borders, still under the Comfortable cap of 9.
         assert_eq!(expanded, 8);
         assert!(expanded > collapsed);
@@ -6080,7 +6563,7 @@ mod tests {
     /// real widget path — typed input, `submit_input`, `clear_input` — not just
     /// through the pure height helper.
     #[test]
-    fn composer_auto_fits_typed_lines_and_returns_to_one_row_on_submit_or_clear() {
+    fn composer_auto_fits_typed_lines_and_returns_to_density_floor_on_submit_or_clear() {
         const WIDTH: u16 = 40;
         const AVAILABLE: u16 = 24;
 
@@ -6098,11 +6581,11 @@ mod tests {
         app.composer_border = true;
         app.composer_density = ComposerDensity::Comfortable;
 
-        // Empty composer: one input row inside the panel borders.
-        assert_eq!(measure(&app), (3, 1), "empty composer");
+        // Empty composer: one input row and one quiet row inside the borders.
+        assert_eq!(measure(&app), (4, 2), "empty composer");
 
         app.insert_str("one line");
-        assert_eq!(measure(&app), (3, 1), "single-line composer");
+        assert_eq!(measure(&app), (4, 2), "single-line composer");
 
         // Typing N lines grows the composer to N input rows while N is under
         // the Comfortable cap of 9 total rows (7 input rows + 2 borders).
@@ -6122,15 +6605,15 @@ mod tests {
         let cap = composer_max_height(ComposerDensity::Comfortable);
         assert_eq!(measure(&app), (cap, cap - 2), "content beyond the cap");
 
-        // Submitting returns the composer to a single input row.
+        // Submitting returns the composer to its stable density floor.
         assert!(app.submit_input().is_some());
-        assert_eq!(measure(&app), (3, 1), "after submit");
+        assert_eq!(measure(&app), (4, 2), "after submit");
 
         // So does clearing a fresh multi-line draft.
         app.insert_str("a\nb\nc\nd");
         assert_eq!(measure(&app), (6, 4), "four-line draft");
         app.clear_input();
-        assert_eq!(measure(&app), (3, 1), "after clear");
+        assert_eq!(measure(&app), (4, 2), "after clear");
     }
 
     #[test]
@@ -6138,10 +6621,10 @@ mod tests {
         let with_border = composer_height("", 40, 8, 0, ComposerDensity::Comfortable, true);
         let without_border = composer_height("", 40, 8, 0, ComposerDensity::Comfortable, false);
 
-        // Quiet composer keeps a single top rule over the one auto-fit
-        // input row; the panel shape adds its bottom border.
-        assert_eq!(with_border, 3);
-        assert_eq!(without_border, 2);
+        // Quiet composer keeps a single top rule over the comfortable
+        // input floor; the panel shape adds its bottom border.
+        assert_eq!(with_border, 4);
+        assert_eq!(without_border, 3);
         assert!(without_border < with_border);
     }
 
@@ -6295,7 +6778,7 @@ mod tests {
         );
         let inner = widget.inner_area(area);
         let quiet_row = cursor_y.saturating_add(1);
-        // The quiet row hosts exactly one thing: the shared `[↑]` affordance
+        // The quiet row hosts exactly one thing: the shared `[↵]` affordance
         // on its recorded hitbox cells. Every other cell stays blank.
         let submit = active_composer_submit_rect(&app, area).expect("enclosed composer submit");
         assert!(
@@ -6305,12 +6788,15 @@ mod tests {
                         submit.y == quiet_row && x >= submit.x && x < submit.x + submit.width;
                     on_submit || buf[(x, quiet_row)].symbol() == " "
                 }),
-            "comfortable composer should keep a quiet content row before the footer, hosting only the shared [↑]: {rendered}"
+            "comfortable composer should keep a quiet content row before the footer, hosting only the shared [↵]: {rendered}"
         );
         let painted: String = (submit.x..submit.x + submit.width)
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
-        assert_eq!(painted, "[↑]", "the quiet row hosts the shared send cells");
+        assert_eq!(
+            painted, "[·]",
+            "the empty composer has an inactive send cue"
+        );
     }
 
     #[test]
@@ -6467,52 +6953,27 @@ mod tests {
     }
 
     #[test]
-    fn composer_border_edges_encode_warm_permission_and_cool_mode_ramps() {
-        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
-        let mention_menu_entries = Vec::<String>::new();
+    fn composer_outline_tracks_focus_without_repeating_permission_or_mode() {
+        let slash = Vec::<SlashMenuEntry>::new();
+        let mentions = Vec::<String>::new();
         let area = Rect::new(0, 0, 40, 5);
-
         for theme_id in palette::SELECTABLE_THEMES {
-            let theme = theme_id.ui_theme();
-            for (approval_mode, expected) in [
-                (ApprovalMode::Suggest, theme.permission_ask),
-                (ApprovalMode::Never, theme.permission_ask),
-                (ApprovalMode::Auto, theme.permission_auto_review),
-                (ApprovalMode::Bypass, theme.permission_full_access),
-            ] {
-                let mut app = create_test_app();
-                app.ui_theme = theme;
-                app.approval_mode = approval_mode;
-                let widget =
-                    ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
+            let mut app = create_test_app();
+            app.ui_theme = theme_id.ui_theme();
+            app.launch.visible = true;
+            for selected in [None, Some(0)] {
+                app.launch.menu_selected = selected;
+                let widget = ComposerWidget::new(&app, 5, &slash, &mentions);
                 let mut buf = Buffer::empty(area);
                 widget.render(area, &mut buf);
-                assert_eq!(
-                    buf[(1, area.top())].fg,
-                    expected,
-                    "{} {approval_mode:?}",
-                    theme_id.name()
-                );
-            }
-
-            for (mode, expected) in [
-                (AppMode::Plan, theme.mode_plan),
-                (AppMode::Agent, theme.mode_agent),
-                (AppMode::Operate, theme.mode_operate),
-            ] {
-                let mut app = create_test_app();
-                app.ui_theme = theme;
-                app.mode = mode;
-                let widget =
-                    ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
-                let mut buf = Buffer::empty(area);
-                widget.render(area, &mut buf);
-                assert_eq!(
-                    buf[(1, area.bottom().saturating_sub(1))].fg,
-                    expected,
-                    "{} {mode:?}",
-                    theme_id.name()
-                );
+                let expected = if selected.is_none() {
+                    app.ui_theme.accent_primary
+                } else {
+                    app.ui_theme.border
+                };
+                for cell in [(1, 0), (1, 4), (0, 1), (39, 1)] {
+                    assert_eq!(buf[cell].fg, expected, "{} {selected:?}", theme_id.name());
+                }
             }
         }
     }
@@ -6539,7 +7000,7 @@ mod tests {
         assert!(!normal_rendered.contains("Draft"));
         assert!(
             !normal_rendered
-                .contains(&*normal_app.tr(crate::localization::MessageId::HistorySearchTitle))
+                .contains(&*normal_app.tr(codewhale_localization::MessageId::HistorySearchTitle))
         );
 
         let mut draft_app = create_test_app();
@@ -6562,7 +7023,7 @@ mod tests {
         search_widget.render(area, &mut search_buf);
         assert!(
             buffer_text(&search_buf, area)
-                .contains(&*search_app.tr(crate::localization::MessageId::HistorySearchTitle))
+                .contains(&*search_app.tr(codewhale_localization::MessageId::HistorySearchTitle))
         );
     }
 
@@ -6575,12 +7036,49 @@ mod tests {
         for (width, height) in [(40_u16, 12), (60, 16), (80, 24), (100, 32), (120, 32)] {
             let rendered = render_composer(&app, width, height);
             assert!(
-                rendered.contains("[↑]"),
+                rendered.contains("[↵]"),
                 "missing send affordance at {width}x{height}:\n{rendered}"
             );
             assert!(
                 !rendered.contains("▚△▞"),
                 "retired crown must stay gone at {width}x{height}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_submit_ink_matches_real_submit_readiness() {
+        let mut app = create_test_app();
+        app.composer_border = true;
+        let slash = Vec::<SlashMenuEntry>::new();
+        let mentions = Vec::<String>::new();
+        let area = Rect::new(0, 0, 80, 8);
+        for draft in ["", "   ", "ship it"] {
+            app.input = draft.to_string();
+            app.cursor_position = app.input.chars().count();
+            let widget = ComposerWidget::new(&app, 8, &slash, &mentions);
+            let mut buf = Buffer::empty(area);
+            widget.render(area, &mut buf);
+            let submit = active_composer_submit_rect(&app, area).unwrap();
+            let ready = app.composer_draft_is_submittable();
+            let painted: String = (submit.x..submit.right())
+                .map(|x| buf[(x, submit.y)].symbol())
+                .collect();
+            assert_eq!(painted, if ready { "[↵]" } else { "[·]" });
+            assert_eq!(
+                buf[(submit.x, submit.y)].modifier.contains(Modifier::BOLD),
+                ready
+            );
+            let role = if ready {
+                codewhale_palette::ChromeInk::Info
+            } else {
+                codewhale_palette::ChromeInk::MetadataDim
+            };
+            assert_eq!(
+                buf[(submit.x, submit.y)].fg,
+                codewhale_palette::chrome_style(&app.ui_theme, role)
+                    .fg
+                    .unwrap()
             );
         }
     }
@@ -6601,7 +7099,7 @@ mod tests {
         let painted: String = (submit.x..submit.x + submit.width)
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
-        assert_eq!(painted, "[↑]", "geometry must cover the painted send cells");
+        assert_eq!(painted, "[↵]", "geometry must cover the painted send cells");
     }
 
     #[test]
@@ -6648,7 +7146,7 @@ mod tests {
         let painted: String = (submit.x..submit.right())
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
-        assert_eq!(painted, "[↑]", "submit stays intact beside the draft");
+        assert_eq!(painted, "[↵]", "submit stays intact beside the draft");
     }
 
     #[test]
@@ -6683,7 +7181,7 @@ mod tests {
         app.cursor_position = app.input.chars().count();
         let rendered = render_composer(&app, 80, 4);
         assert!(
-            !rendered.contains("[↑]"),
+            !rendered.contains("[↵]"),
             "compact composer must shed the send chrome:\n{rendered}"
         );
     }
@@ -6755,7 +7253,7 @@ mod tests {
             height: 3,
         };
 
-        assert_eq!(widget.cursor_pos(area), Some((2, 2)));
+        assert_eq!(widget.cursor_pos(area), Some((2, 1)));
     }
 
     #[test]
@@ -6910,6 +7408,34 @@ mod tests {
     }
 
     #[test]
+    fn dot_whale_gets_the_motion_gated_completion_settle_clock() {
+        let mut app = create_test_app();
+        app.low_motion = false;
+        app.fancy_animations = true;
+        app.ocean_completion_started_at =
+            Some(Instant::now() - std::time::Duration::from_millis(900));
+        let widget = ChatWidget::new(&mut app, Rect::new(0, 0, 100, 24));
+        let age = widget
+            .ocean_column
+            .and_then(|column| column.completion_elapsed_ms());
+        assert!(
+            age.is_some_and(|age| (800..1_400).contains(&age)),
+            "{age:?}"
+        );
+        assert!(widget.life_presence_fixed > 0 && widget.life_presence_fixed < 1_000);
+
+        app.low_motion = true;
+        let still = ChatWidget::new(&mut app, Rect::new(0, 0, 100, 24));
+        assert_eq!(
+            still
+                .ocean_column
+                .and_then(|column| column.completion_elapsed_ms()),
+            None
+        );
+        assert_eq!(still.life_presence_fixed, 0);
+    }
+
+    #[test]
     fn reduced_and_still_modes_clear_the_one_shot_send_flash() {
         for (low_motion, fancy_animations) in [(true, true), (false, false)] {
             let mut app = create_test_app();
@@ -6999,7 +7525,7 @@ mod tests {
         // isolated settings home in parallel, so this visual contract must pin
         // the theme it is actually asserting instead of inheriting a transient
         // non-underwater choice from the process.
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
@@ -7017,10 +7543,11 @@ mod tests {
 
         assert_ne!(buf[(0, 0)].bg, buf[(0, 19)].bg);
         let rendered = buffer_text(&buf, area);
-        // One loose wedge school: an eyed lead plus plain members, all
-        // facing the same way (facing equals travel by construction).
-        let rightward = rendered.matches("><>").count() + rendered.matches("><o>").count();
-        let leftward = rendered.matches("<><").count() + rendered.matches("<o><").count();
+        // One loose wedge school, every member facing the same way (facing
+        // equals travel by construction). The counter knows both silhouette
+        // families: the native braille poses this terminal paints and the
+        // ASCII bodies of `CODEWHALE_ASCII_SAFE=1`.
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
             rightward == 0 || leftward == 0,
             "one school shares one direction:\n{rendered}"
@@ -7030,8 +7557,6 @@ mod tests {
             (4..=7).contains(&fish_count),
             "wide idle water should show one cohesive wedge school (got {fish_count}):\n{rendered}"
         );
-        let leads = rendered.matches("><o>").count() + rendered.matches("<o><").count();
-        assert_eq!(leads, 1, "exactly one eyed lead fish:\n{rendered}");
 
         let context_x = ((100usize - UnicodeWidthStr::width(context.as_str())) / 2) as u16;
         let context_cell = (0..area.height)
@@ -7051,7 +7576,7 @@ mod tests {
     #[test]
     fn terminal_owned_theme_keeps_theme_surface_without_ambient_life() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::Whale;
+        app.theme_id = codewhale_palette::ThemeId::Whale;
         app.ui_theme = palette::UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
@@ -7065,8 +7590,9 @@ mod tests {
         assert_eq!(buf[(0, 0)].bg, base);
         assert_eq!(buf[(0, 19)].bg, base, "flat keeps the plain theme surface");
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "terminal-owned themes must keep a normal shell without decorative fish:\n{rendered}"
         );
     }
@@ -7074,8 +7600,8 @@ mod tests {
     #[test]
     fn solarized_light_keeps_canonical_surface_without_a_field() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::SolarizedLight;
-        app.ui_theme = crate::palette::SOLARIZED_LIGHT_UI_THEME;
+        app.theme_id = codewhale_palette::ThemeId::SolarizedLight;
+        app.ui_theme = codewhale_palette::SOLARIZED_LIGHT_UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
         // The old cyan-tinted ramp produced the reported #e1e9da at row 16
@@ -7097,8 +7623,9 @@ mod tests {
             "Solarized Light must keep canonical Base3 through the viewport"
         );
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "a theme with no painted field earns no ambient life:\n{rendered}"
         );
     }
@@ -7107,7 +7634,7 @@ mod tests {
     fn underwater_custom_background_keeps_field_depth() {
         let mut app = create_test_app();
         let custom = Color::Rgb(0x1a, 0x1b, 0x26);
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME.with_background_color(custom);
 
         let area = Rect::new(0, 0, 100, 30);
@@ -7125,8 +7652,8 @@ mod tests {
     #[test]
     fn terminal_owned_background_stays_visually_quiet_without_deepsea() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::Terminal;
-        app.ui_theme = crate::palette::TERMINAL_UI_THEME;
+        app.theme_id = codewhale_palette::ThemeId::Terminal;
+        app.ui_theme = codewhale_palette::TERMINAL_UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
         let area = Rect::new(0, 0, 100, 20);
@@ -7140,8 +7667,9 @@ mod tests {
             "the Terminal treatment must never paint a background"
         );
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "Terminal must remain a quiet host-owned shell without the selected Deepsea scene:\n{rendered}"
         );
     }
@@ -7161,13 +7689,23 @@ mod tests {
         let mut transcript = Buffer::empty(transcript_area);
         ChatWidget::new(&mut app, transcript_area).render(transcript_area, &mut transcript);
 
-        // Pre-session launch stage (the Tideline startup surface).
+        // The opening screen is the ordinary idle transcript now, so its
+        // content comes from the same empty-state builder every other screen
+        // uses rather than a second surface.
         app.launch.visible = true;
         let launch_area = Rect::new(0, 0, 100, 32);
+        let launch_lines = crate::tui::underwater::empty_state_lines(&app, launch_area);
         let mut launch = Buffer::empty(launch_area);
-        {
-            let startup = crate::tui::underwater::tideline_startup_from_app(&app).ascii_safe(true);
-            crate::tui::underwater::render_tideline_startup(launch_area, &mut launch, &startup);
+        for (row, line) in launch_lines.iter().enumerate() {
+            if let Ok(y) = u16::try_from(row)
+                && y < launch_area.height
+            {
+                ratatui::widgets::Widget::render(
+                    ratatui::widgets::Paragraph::new(line.clone()),
+                    Rect::new(0, y, launch_area.width, 1),
+                    &mut launch,
+                );
+            }
         }
         app.launch.visible = false;
 
@@ -7206,7 +7744,7 @@ mod tests {
     #[test]
     fn reduced_motion_freezes_the_ocean_without_removing_depth() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME;
         app.low_motion = true;
         app.fancy_animations = true;
@@ -7397,8 +7935,9 @@ mod tests {
         // entire width. Browsing still holds the school in the clear water.
         let rows = history_field_rows(4);
         let rendered = rows.join("\n");
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
-            rendered.contains("><>") || rendered.contains("<><"),
+            rightward + leftward > 0,
             "open water below the transcript should hold fish:\n{rendered}"
         );
         for index in 0..4 {
@@ -7434,8 +7973,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
-            rendered.contains("><") || rendered.contains("<o"),
+            rightward + leftward > 0,
             "submitting a message must not empty the ocean:\n{rendered}"
         );
         assert!(rendered.contains("release check 17"), "{rendered}");
@@ -7458,8 +7998,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
-            rendered.contains("><") || rendered.contains("<o"),
+            rightward + leftward > 0,
             "the completion settle must not snap the ocean empty:\n{rendered}"
         );
         assert!(rendered.contains("release receipt"), "{rendered}");
@@ -7484,10 +8025,128 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "a full transcript is not an aquarium:\n{rendered}"
         );
+    }
+
+    fn todo_write_cell(item: Option<&str>) -> HistoryCell {
+        let items = item.map_or_else(
+            || "[]".to_string(),
+            |content| format!(r#"[{{"id":1,"content":"{content}","status":"pending"}}]"#),
+        );
+        let count = usize::from(item.is_some());
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "todo_write".to_string(),
+            status: ToolStatus::Success,
+            input_summary: Some(format!("todos: <{count} items>")),
+            output: Some(format!(
+                "Todo list updated ({count} items, 0% settled)\n{{\"items\":{items},\"completion_pct\":0}}"
+            )),
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        }))
+    }
+
+    #[test]
+    fn todo_write_renders_only_the_latest_successful_snapshot() {
+        let mut app = create_test_app();
+        app.add_message(todo_write_cell(Some("stale task")));
+        app.add_message(HistoryCell::Assistant {
+            content: "working".to_string(),
+            streaming: false,
+        });
+        app.add_message(todo_write_cell(Some("current task")));
+
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        ChatWidget::new(&mut app, area).render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+
+        assert!(!rendered.contains("stale task"), "{rendered}");
+        assert!(rendered.contains("current task"), "{rendered}");
+        assert_eq!(app.collapsed_cell_map, vec![1, 2]);
+    }
+
+    #[test]
+    fn empty_todo_write_hides_the_previous_snapshot() {
+        let mut app = create_test_app();
+        app.add_message(todo_write_cell(Some("finished task")));
+        let active = app.active_cell.get_or_insert_with(ActiveCell::new);
+        active.push_untracked(todo_write_cell(None));
+        app.bump_active_cell_revision();
+
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        ChatWidget::new(&mut app, area).render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+
+        assert!(!rendered.contains("finished task"), "{rendered}");
+        assert!(!rendered.contains("todo_write"), "{rendered}");
+        assert!(app.collapsed_cell_map.is_empty());
+    }
+
+    #[test]
+    fn todo_replacement_preserves_tool_runs_and_full_transcript_history() {
+        use crate::tui::{live_transcript::LiveTranscriptOverlay, views::ModalView};
+
+        let mut app = create_test_app();
+        app.low_motion = true;
+        app.show_tool_details = true;
+        app.tool_collapse_mode = ToolCollapseMode::Compact;
+        app.tool_collapse_threshold = 3;
+        add_dense_tool_run(&mut app);
+        app.add_message(HistoryCell::Assistant {
+            content: "checkpoint".to_string(),
+            streaming: false,
+        });
+        app.add_message(todo_write_cell(Some("stale task")));
+        let active = app.active_cell.get_or_insert_with(ActiveCell::new);
+        active.push_untracked(success_tool_cell("read_file"));
+        active.push_untracked(success_tool_cell("web_search"));
+        app.bump_active_cell_revision();
+
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        ChatWidget::new(&mut app, area).render(area, &mut buf);
+        assert_eq!(app.collapsed_cell_map, vec![0, 3, 4]);
+
+        app.active_cell
+            .as_mut()
+            .unwrap()
+            .push_untracked(todo_write_cell(Some("current task")));
+        app.bump_active_cell_revision();
+        let mut buf = Buffer::empty(area);
+        ChatWidget::new(&mut app, area).render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+        assert_eq!(app.collapsed_cell_map, vec![0, 3, 5, 6, 7]);
+        assert!(
+            rendered.contains("Explored 2 files, 1 search"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("read_file.txt"), "{rendered}");
+        assert!(rendered.contains("web_search.txt"), "{rendered}");
+        assert!(rendered.contains("current task"), "{rendered}");
+        assert!(!rendered.contains("stale task"), "{rendered}");
+
+        let mut repeated = Buffer::empty(area);
+        ChatWidget::new(&mut app, area).render(area, &mut repeated);
+        assert_eq!(buffer_text(&repeated, area), rendered);
+        assert_eq!(app.history.len(), 5);
+        assert_eq!(app.active_cell.as_ref().unwrap().entries().len(), 3);
+
+        let mut overlay = LiveTranscriptOverlay::new();
+        overlay.refresh_from_app(&mut app);
+        let area = Rect::new(0, 0, 100, 60);
+        let mut buf = Buffer::empty(area);
+        ModalView::render(&overlay, area, &mut buf);
+        let full_history = buffer_text(&buf, area);
+        assert!(full_history.contains("stale task"), "{full_history}");
+        assert!(full_history.contains("current task"), "{full_history}");
     }
 
     /// Probe: confirm `cell.lines_with_motion` returns no Line whose total
@@ -7599,7 +8258,7 @@ mod tests {
     fn chat_widget_uses_configured_surface_background() {
         let mut app = create_test_app();
         let custom = ratatui::style::Color::Rgb(26, 27, 38);
-        app.theme_id = crate::palette::ThemeId::Whale;
+        app.theme_id = codewhale_palette::ThemeId::Whale;
         app.ui_theme = palette::UI_THEME.with_background_color(custom);
         app.add_message(HistoryCell::Assistant {
             content: "ready".to_string(),
@@ -7657,47 +8316,89 @@ mod tests {
     /// 1-column gutter rather than overdrawing chat content).
     #[test]
     fn chat_widget_reserves_scrollbar_gutter_when_scrollbar_visible() {
-        let mut app = create_test_app();
-        // Many short messages → forces the scrollbar to be visible.
-        for i in 0..200 {
-            app.add_message(HistoryCell::User {
-                content: format!("user message {i}"),
-            });
-        }
-
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 8,
+        let content_hash = "0123456789abcdef".repeat(4);
+        let capability_hash = "fedcba9876543210".repeat(4);
+        // System continuations paint a left rail as well as the right scrollbar.
+        // Neither decoration is part of a wrapped trust token.
+        let token_text = |text: &str| -> String {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace() && !matches!(ch, '│' | '┃' | '\u{258f}'))
+                .collect()
         };
-        let mut buf = Buffer::empty(area);
-        let widget = ChatWidget::new(&mut app, area);
-        widget.render(area, &mut buf);
-
-        // The rightmost column should host the scrollbar track/thumb.
-        // The penultimate column should still hold normal content (a digit,
-        // letter, or space — never the scrollbar glyph).
-        let scrollbar_track = "│";
-        let scrollbar_thumb = "┃";
-        let mut scrollbar_seen = false;
-        for y in 0..area.height {
-            let last = buf[(area.width - 1, y)].symbol();
-            let penult = buf[(area.width - 2, y)].symbol();
-            if last == scrollbar_track || last == scrollbar_thumb {
-                scrollbar_seen = true;
+        for filtered in [false, true] {
+            let mut app = create_test_app();
+            app.low_motion = true;
+            app.fancy_animations = false;
+            app.use_mouse_capture = false;
+            for i in 0..20 {
+                app.add_message(HistoryCell::User {
+                    content: format!("user message {i}"),
+                });
             }
-            assert!(
-                penult != scrollbar_track && penult != scrollbar_thumb,
-                "scrollbar leaked into column {} (cell {:?}) at row {y}",
-                area.width - 2,
-                penult
-            );
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Content hash:\n{content_hash}\nCapability hash:\n{capability_hash}"
+                ),
+            });
+            if filtered {
+                app.collapsed_cells.insert(0);
+            }
+
+            // Reuse the cache across scrollbar appearance, narrow-pane resizes,
+            // and disappearance. Both ordinary and filtered histories must keep
+            // every trust-token character in the painted terminal cells.
+            for (width, height) in [
+                (40, 100),
+                (40, 16),
+                (58, 16),
+                (60, 16),
+                (80, 16),
+                (40, 16),
+                (40, 100),
+            ] {
+                let area = Rect::new(2, 1, width, height);
+                let mut buf = Buffer::empty(area);
+                let widget = ChatWidget::new(&mut app, area);
+                assert_eq!(widget.scrollbar.is_some(), height == 16);
+                widget.render(area, &mut buf);
+
+                let rendered = buffer_text(&buf, area);
+                let joined = token_text(&rendered);
+                for hash in [&content_hash, &capability_hash] {
+                    assert!(
+                        joined.contains(hash.as_str()),
+                        "lost trust-token characters at {width}x{height}, filtered={filtered}: {rendered:?}"
+                    );
+                    // The decoration filter must still reject actual overpaint:
+                    // replace the last hex cell on this token's first row with
+                    // a scrollbar, as in the reported narrow-pane failure.
+                    let y = (area.y..area.bottom())
+                        .find(|&y| {
+                            buffer_text(&buf, Rect::new(area.x, y, width, 1)).contains(&hash[..16])
+                        })
+                        .expect("the first token segment is visible");
+                    let x = (area.x..area.right())
+                        .rev()
+                        .find(|&x| {
+                            let symbol = buf[(x, y)].symbol();
+                            symbol.len() == 1 && symbol.as_bytes()[0].is_ascii_hexdigit()
+                        })
+                        .expect("the token row contains hex cells");
+                    let mut overpainted = buf.clone();
+                    overpainted[(x, y)].set_symbol("│");
+                    assert!(
+                        !token_text(&buffer_text(&overpainted, area)).contains(hash.as_str()),
+                        "the token check must reject a scrollbar-erased hex cell"
+                    );
+                }
+                if widget.scrollbar.is_some() {
+                    for y in widget.transcript_area.y..widget.transcript_area.bottom() {
+                        assert!(matches!(buf[(area.right() - 1, y)].symbol(), "│" | "┃"));
+                        assert!(!matches!(buf[(area.right() - 2, y)].symbol(), "│" | "┃"));
+                    }
+                }
+            }
         }
-        assert!(
-            scrollbar_seen,
-            "scrollbar should be visible for a long history"
-        );
     }
 
     #[test]
@@ -7974,9 +8675,16 @@ mod tests {
 
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
-        assert!(rendered.contains("REPO LAW"), "{rendered}");
+        assert!(rendered.contains("Repo rule"), "{rendered}");
         assert!(rendered.contains("Repository constitution"), "{rendered}");
-        assert!(rendered.contains("approval-gated postures"), "{rendered}");
+        assert!(
+            rendered.contains("This repo's constitution asks you to confirm this change."),
+            "{rendered}"
+        );
+        // §19: the card says constitution and permissions, never law/posture.
+        for retired in ["REPO LAW", "Repository law", "posture"] {
+            assert!(!rendered.contains(retired), "{retired}: {rendered}");
+        }
         assert!(rendered.contains("Cargo.toml"), "{rendered}");
         assert!((0..area.height).any(|y| {
             let cell = &buf[(1, y)];
@@ -8124,7 +8832,9 @@ mod tests {
             .find(|line| line.contains("[2 / a]"))
             .expect("full approval card should render the session option");
         assert!(
-            full_session_option.to_lowercase().contains("this session")
+            full_session_option
+                .to_lowercase()
+                .contains("this conversation")
                 && !full_session_option.to_lowercase().contains("always"),
             "full approval option must state session scope without saying always:\n{full}"
         );
@@ -8137,7 +8847,9 @@ mod tests {
             .find(|line| line.contains("[2 / a]"))
             .expect("short approval card should render the session option");
         assert!(
-            compact_session_option.to_lowercase().contains("session")
+            compact_session_option
+                .to_lowercase()
+                .contains("conversation")
                 && !compact_session_option.to_lowercase().contains("always"),
             "short-terminal controls must label [2 / a] as session-scoped:\n{compact}"
         );
@@ -8190,10 +8902,7 @@ mod tests {
             rendered.contains("s allow once + always ask exact rule"),
             "{rendered}"
         );
-        assert!(
-            rendered.contains("Always allow this exact rule in this repo"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("Always allow in this repo"), "{rendered}");
         assert!(rendered.contains("Save:"), "{rendered}");
         assert!(rendered.contains("1 ask rule"), "{rendered}");
         assert!(rendered.contains("1 allow rule"), "{rendered}");

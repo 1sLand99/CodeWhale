@@ -19,13 +19,17 @@
 //! Configuration is done via `[[hooks.hooks]]` in config.toml. See
 //! `docs/HOOKS.md` for the per-event contract.
 
+pub(crate) mod authority;
 mod config;
 mod executor;
 
 #[cfg(test)]
 pub use config::ALL_HOOK_EVENTS;
 #[allow(unused_imports)]
-pub use config::{Hook, HookCondition, HookConfigProblem, HookEvent, HookSteering, HooksConfig};
+pub use config::{
+    Hook, HookCondition, HookConfigProblem, HookEvent, HookSteering, HooksConfig,
+    PROJECT_HOOKS_TEMPLATE, workspace_allows_project_hooks,
+};
 pub(crate) use executor::{
     HOOK_CONTEXT_AGGREGATE_MAX_CHARS, HOOK_LABEL_MAX_CHARS, generic_unavailable_detail,
     parse_tool_call_before_stdout, sanitize_hook_denial_reason, sanitize_hook_label,

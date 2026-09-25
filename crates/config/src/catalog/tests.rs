@@ -105,6 +105,173 @@ fn hosted_offering_keeps_prefixed_wire_id_and_explicit_canonical_join() {
 }
 
 #[test]
+fn model_only_rows_use_namespaced_keys_and_preserve_unpriced_facts() {
+    let catalog = ModelsDevCatalog::parse_json(
+        r#"{
+          "models": {
+            "moonshotai/synthetic/chat": {
+              "id": "",
+              "family": "synthetic",
+              "attachment": true,
+              "reasoning": true,
+              "tool_call": true,
+              "structured_output": false,
+              "limit": { "context": 123456, "output": 7890 },
+              "modalities": { "input": ["text", "image"], "output": ["text"] }
+            },
+            "new-vendor/solo": {},
+            "xiaomi/synthetic-chat": {},
+            "bare-model": {},
+            "/missing-provider": {},
+            "missing-model/": {},
+            "new-vendor/voice": {
+              "modalities": { "input": ["text"], "output": ["audio"] }
+            }
+          }
+        }"#,
+    )
+    .expect("fixture parses");
+
+    for live in [false, true] {
+        let (rows, provider, source) = if live {
+            (
+                live_offerings_from_models_dev(&catalog, 1_700),
+                "moonshot",
+                CatalogSource::ModelsDevLive { fetched_at: 1_700 },
+            )
+        } else {
+            (
+                bundled_offerings_from_models_dev(&catalog),
+                "moonshotai",
+                CatalogSource::Bundled,
+            )
+        };
+        assert_eq!(
+            rows.len(),
+            3,
+            "unqualified and audio-only rows stay excluded"
+        );
+        let row = find(&rows, provider, "synthetic/chat");
+        assert_eq!(
+            row.canonical_model.as_deref(),
+            Some("moonshotai/synthetic/chat")
+        );
+        assert_eq!(row.endpoint_key, "chat");
+        assert_eq!(row.family.as_deref(), Some("synthetic"));
+        assert_eq!(
+            row.limit.as_ref().and_then(|limit| limit.context),
+            Some(123456)
+        );
+        assert_eq!(
+            row.limit.as_ref().and_then(|limit| limit.output),
+            Some(7890)
+        );
+        assert_eq!(row.attachment, Some(true));
+        assert_eq!(row.reasoning, Some(true));
+        assert_eq!(row.tool_call, Some(true));
+        assert_eq!(row.structured_output, Some(false));
+        assert_eq!(row.modalities.as_ref().unwrap().input, ["text", "image"]);
+        assert_eq!(row.source, source);
+        assert!(rows.iter().all(|row| {
+            row.cost.is_none()
+                && row.cost_source.is_none()
+                && !row.default_for_provider
+                && row.reasoning_options.is_empty()
+        }));
+        find(
+            &rows,
+            if live { "xiaomi-mimo" } else { "xiaomi" },
+            "synthetic-chat",
+        );
+        find(&rows, "new-vendor", "solo");
+        assert!(crate::ProviderKind::parse("new-vendor").is_none());
+    }
+}
+
+#[test]
+fn model_only_rows_yield_to_provider_facts_and_non_chat_exclusions() {
+    let catalog = ModelsDevCatalog::parse_json(
+        r#"{
+          "models": {
+            "moonshotai/chat": { "reasoning": true },
+            "moonshotai/voice": {},
+            "moonshot/duplicate": {},
+            "moonshotai/duplicate": {}
+          },
+          "providers": {
+            "moonshot": {
+              "id": "moonshot",
+              "models": {
+                "chat": {
+                  "id": "chat",
+                  "base_model": "explicit/chat",
+                  "reasoning": false,
+                  "reasoning_options": [{ "type": "effort", "values": ["high"] }],
+                  "default": true,
+                  "cost": { "input": 2.0 }
+                },
+                "voice": {
+                  "id": "voice",
+                  "modalities": { "input": ["text"], "output": ["audio"] }
+                }
+              }
+            }
+          }
+        }"#,
+    )
+    .expect("fixture parses");
+    let rows = live_offerings_from_models_dev(&catalog, 1_700);
+    assert_eq!(
+        rows.len(),
+        2,
+        "aliases deduplicate; provider exclusions win"
+    );
+    let row = find(&rows, "moonshot", "chat");
+    assert_eq!(row.canonical_model.as_deref(), Some("explicit/chat"));
+    assert_eq!(row.reasoning, Some(false));
+    assert!(row.default_for_provider);
+    assert_eq!(row.cost.as_ref().and_then(|cost| cost.input), Some(2.0));
+    assert_eq!(row.reasoning_options.len(), 1);
+    find(&rows, "moonshot", "duplicate");
+}
+
+#[test]
+fn provider_map_keys_preserve_precedence_when_model_ids_are_missing() {
+    let catalog = ModelsDevCatalog::parse_json(
+        r#"{
+          "models": {
+            "moonshotai/chat": { "reasoning": true },
+            "moonshotai/voice": {},
+            "moonshotai/explicit": { "reasoning": true }
+          },
+          "providers": {
+            "moonshotai": {
+              "models": {
+                " chat ": { "id": " ", "reasoning": false },
+                "voice": { "modalities": { "output": ["audio"] } },
+                "different-map-key": { "id": " explicit ", "reasoning": false },
+                " ": {}
+              }
+            }
+          }
+        }"#,
+    )
+    .expect("fixture parses");
+
+    for (rows, provider) in [
+        (live_offerings_from_models_dev(&catalog, 1_700), "moonshot"),
+        (bundled_offerings_from_models_dev(&catalog), "moonshotai"),
+    ] {
+        assert_eq!(rows.len(), 2, "provider identities and exclusions win");
+        for wire_model_id in ["chat", "explicit"] {
+            let row = find(&rows, provider, wire_model_id);
+            assert_eq!(row.reasoning, Some(false));
+            assert_eq!(row.canonical_model, None);
+        }
+    }
+}
+
+#[test]
 fn to_offering_projects_routing_identity_and_limits() {
     let rows = bundled_offerings_from_models_dev(&fixture());
     let glm = find(&rows, "zhipuai", "glm-5.2").to_offering();
@@ -667,6 +834,33 @@ fn bundled_asset_parses() {
 }
 
 #[test]
+fn bundled_deepseek_flash_routes_support_image_input() {
+    // #6421: the official Vision guide documents deepseek-flash; the pricing
+    // guide maps both legacy Flash names to it (verified 2026-09-23).
+    // https://api-docs.deepseek.com/guides/vision/
+    // https://api-docs.deepseek.com/quick_start/pricing/
+    let rows = bundled_catalog_offerings();
+    for model in [
+        "deepseek-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    ] {
+        let row = find(&rows, "deepseek", model);
+        assert_eq!(
+            crate::models_dev::image_input_support(row.modalities.as_ref()),
+            crate::route::CapabilityState::Supported,
+            "native DeepSeek route {model} must retain its documented vision capability"
+        );
+    }
+    let text_only = find(&rows, "deepseek", "deepseek-v4-pro");
+    assert_eq!(
+        crate::models_dev::image_input_support(text_only.modalities.as_ref()),
+        crate::route::CapabilityState::Unsupported,
+        "a Flash correction must not widen other routes"
+    );
+}
+
+#[test]
 fn bundled_asset_meta_describes_offline_fallback_not_competing_truth() {
     // #4188: the asset must document itself as offline/stale fallback, not a
     // competing curated source of truth alongside live Models.dev.
@@ -985,14 +1179,15 @@ fn live_offerings_normalize_models_dev_provider_aliases() {
       }
     }"#;
     let catalog = ModelsDevCatalog::parse_json(raw).expect("fixture parses");
-    let rows = live_offerings_from_models_dev(&catalog, "fp-models-dev", 1_700);
+    let rows = live_offerings_from_models_dev(&catalog, 1_700);
 
+    // Layer 10, and no endpoint fingerprint: a models.dev row is external
+    // enrichment about a model, not a provider's statement about an endpoint.
+    // Stamping `Live` here put every enriched row above the signed layer that
+    // is supposed to be able to correct it.
     assert_eq!(
         find(&rows, "moonshot", "kimi-k2.5").source,
-        CatalogSource::Live {
-            base_url_fingerprint: "fp-models-dev".into(),
-            fetched_at: 1_700,
-        }
+        CatalogSource::ModelsDevLive { fetched_at: 1_700 }
     );
     find(&rows, "together", "deepseek-ai/DeepSeek-V4-Pro");
     find(&rows, "zai", "glm-5.2");
@@ -1013,8 +1208,12 @@ fn offering(provider: &str, wire: &str, source: CatalogSource) -> CatalogOfferin
     }
 }
 
+/// The layer-25 "signed CWC catalog" this test used to pin is gone: it never
+/// had a fetcher, and signed cloud facts (layer 15, under the provider roster)
+/// is the client's one online catalog authority. What still has to hold on the
+/// same wire is that the provider's own roster outranks models.dev.
 #[test]
-fn codewhale_live_catalog_beats_models_dev_on_the_same_wire() {
+fn provider_live_beats_models_dev_on_the_same_wire() {
     let snapshot = CatalogCompiler::new()
         .with_bundled(vec![offering(
             "command-code",
@@ -1026,11 +1225,11 @@ fn codewhale_live_catalog_beats_models_dev_on_the_same_wire() {
             "deepseek/deepseek-v4-flash",
             CatalogSource::ModelsDevLive { fetched_at: 1 },
         )])
-        .with_codewhale_live(vec![offering(
+        .with_provider_live(vec![offering(
             "command-code",
             "deepseek/deepseek-v4-flash",
-            CatalogSource::CodewhaleLive {
-                revision: "2026-08-31.1".into(),
+            CatalogSource::Live {
+                base_url_fingerprint: "fixture".into(),
                 fetched_at: 2,
             },
         )])
@@ -1042,7 +1241,62 @@ fn codewhale_live_catalog_beats_models_dev_on_the_same_wire() {
     );
     assert!(matches!(
         row.source,
-        CatalogSource::CodewhaleLive { ref revision, fetched_at: 2 }
-            if revision == "2026-08-31.1"
+        CatalogSource::Live { ref base_url_fingerprint, fetched_at: 2 }
+            if base_url_fingerprint == "fixture"
     ));
+}
+
+#[test]
+fn endpoint_is_baseten_recognizes_the_host_not_the_spelling() {
+    assert!(endpoint_is_baseten(BASETEN_BASE_URL));
+    assert!(endpoint_is_baseten(&format!("{BASETEN_BASE_URL}/")));
+    assert!(endpoint_is_baseten("HTTPS://INFERENCE.BASETEN.CO/v1"));
+    assert!(!endpoint_is_baseten("https://api.groq.com/openai/v1"));
+    assert!(!endpoint_is_baseten("https://127.0.0.1:9/v1"));
+    assert!(!endpoint_is_baseten(""));
+}
+
+#[test]
+fn stepfun_bundled_coding_models_preserve_default_and_plan_pricing_boundary() {
+    let rows: Vec<_> = bundled_catalog_offerings()
+        .into_iter()
+        .filter(|row| row.provider == "stepfun")
+        .collect();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.default_for_provider)
+            .unwrap()
+            .wire_model_id,
+        "step-3.7-flash"
+    );
+    for row in &rows {
+        assert_eq!(row.reasoning, Some(true));
+        assert_eq!(row.tool_call, Some(true));
+        assert!(row.cost.is_none(), "Step Plan shares ids, not PAYG billing");
+        assert_eq!(row.modalities.as_ref().unwrap().output, ["text"]);
+    }
+    let step5 = rows
+        .iter()
+        .find(|row| row.wire_model_id == "step-5-preview")
+        .unwrap();
+    assert_eq!(step5.limit.as_ref().unwrap().context, Some(1_000_000));
+    assert_eq!(step5.limit.as_ref().unwrap().output, Some(1_000_000));
+    assert_eq!(
+        step5.modalities.as_ref().unwrap().input,
+        ["text", "image", "video"]
+    );
+    assert_eq!(
+        step5.reasoning_options[0]["values"],
+        serde_json::json!(["low", "medium", "high"])
+    );
+    let march = rows
+        .iter()
+        .find(|row| row.wire_model_id == "step-3.5-flash-2603")
+        .unwrap();
+    assert_eq!(
+        march.reasoning_options[0]["values"],
+        serde_json::json!(["low", "high"])
+    );
+    assert_eq!(march.limit.as_ref().unwrap().output, None);
 }

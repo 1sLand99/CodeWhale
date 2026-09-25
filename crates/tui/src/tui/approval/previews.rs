@@ -8,9 +8,9 @@ use std::borrow::Cow;
 
 use serde_json::Value;
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 use crate::tools::canonical_action::canonical_action_alias;
+use codewhale_localization::{Locale, MessageId, tr};
 
 pub(super) fn file_write_preview_lines(tool_name: &str, params: &Value) -> Option<Vec<String>> {
     match canonical_action_alias(tool_name, params) {

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 use crate::config::ApiProvider;
 use crate::config::VisionModelConfig;
 use crate::llm_client::{LlmError, RetryConfig, sanitize_http_error_body, with_retry};
@@ -18,7 +18,7 @@ use crate::tools::spec::{
 pub struct ImageAnalyzeTool {
     config: VisionModelConfig,
     client: reqwest::Client,
-    route_client: Option<DeepSeekClient>,
+    route_client: Option<CodewhaleClient>,
 }
 
 impl ImageAnalyzeTool {
@@ -31,7 +31,7 @@ impl ImageAnalyzeTool {
     #[must_use]
     pub fn new_with_route_client(
         config: VisionModelConfig,
-        route_client: Option<DeepSeekClient>,
+        route_client: Option<CodewhaleClient>,
     ) -> Self {
         let client = crate::tls::reqwest_client_builder()
             .timeout(Duration::from_secs(120))
@@ -183,6 +183,11 @@ impl ImageAnalyzeTool {
                 |client| client.effective_max_output_tokens(&self.config.model),
             );
         payload[token_limit_field] = json!(route_cap);
+        if let Some(client) = self.route_client.as_ref().filter(|client| {
+            client.base_url().trim_end_matches('/') == configured_base.trim_end_matches('/')
+        }) {
+            client.apply_provider_routing(&mut payload);
+        }
 
         payload
     }
@@ -436,13 +441,59 @@ mod tests {
     }
 
     #[test]
+    fn vision_vendor_pin_requires_the_matching_bound_route() {
+        let _lock = crate::test_support::lock_test_env();
+        let base_url = "http://127.0.0.1:18080/v1";
+        let client = CodewhaleClient::new(&crate::config::Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                openrouter: crate::config::ProviderConfig {
+                    api_key: Some("fixture-openrouter-key".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    model: Some("fixture/vision".to_string()),
+                    vendor: Some("chutes/region-fixture".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        for (vision_base, matched_client, pinned) in [
+            (base_url, Some(client.clone()), true),
+            ("http://127.0.0.1:18081/v1", Some(client.clone()), false),
+            (base_url, None, false),
+        ] {
+            let tool = ImageAnalyzeTool::new_with_route_client(
+                VisionModelConfig {
+                    model: "fixture/vision".to_string(),
+                    api_key: Some("fixture-vision-key".to_string()),
+                    base_url: Some(vision_base.to_string()),
+                },
+                matched_client,
+            );
+            let body = tool.request_payload("describe", "abc123", "image/png");
+            if pinned {
+                assert_eq!(
+                    body["provider"],
+                    json!({
+                        "order": ["chutes/region-fixture"], "allow_fallbacks": false
+                    })
+                );
+            } else {
+                assert!(body.get("provider").is_none());
+            }
+        }
+    }
+
+    #[test]
     fn matched_vision_route_uses_bound_client_window_cap() {
         let _lock = crate::test_support::lock_test_env();
         let _canonical =
             crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "384000");
         let base_url = "http://127.0.0.1:18080/v1".to_string();
         let model = "DeepSeek-V4-Flash".to_string();
-        let client = DeepSeekClient::new(&crate::config::Config {
+        let client = CodewhaleClient::new(&crate::config::Config {
             provider: Some("vllm".to_string()),
             providers: Some(crate::config::ProvidersConfig {
                 vllm: crate::config::ProviderConfig {

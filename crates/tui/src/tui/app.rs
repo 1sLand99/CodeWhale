@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -11,7 +12,9 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use serde_json::Value;
 
-use codewhale_config::{ProviderChain, route::RouteLimits};
+use codewhale_config::{AppMode, ProviderChain, route::RouteLimits};
+use codewhale_core::ContextReference;
+use codewhale_execpolicy::ApprovalMode;
 
 use crate::artifacts::ArtifactRecord;
 use crate::client::{CacheWarmupKey, PromptInspection};
@@ -19,15 +22,11 @@ use crate::compaction::CompactionConfig;
 use crate::config::{
     ApiProvider, ApprovalPolicyControl, Config, DEFAULT_TEXT_MODEL, has_api_key, has_api_key_for,
 };
-use crate::config_ui::ConfigUiMode;
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
 use crate::core::events::TurnRoute;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
-use crate::localization::{Locale, MessageId, resolve_locale, tr};
-use crate::models::{Message, SystemPrompt, Tool, Usage};
-use crate::palette::{self, UiTheme};
 use crate::pricing::{CostCurrency, CostEstimate};
-use crate::resource_telemetry::TokenThroughput;
+use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
 use crate::session_manager::{SessionContextReference, SessionMetadata, SessionWorkState};
 use crate::settings::{InlineDiffMode, Settings};
 use crate::tools::plan::{PlanState, SharedPlanState, new_shared_plan_state};
@@ -36,10 +35,10 @@ use crate::tools::spec::RuntimeToolServices;
 use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult};
 use crate::tools::todo::{SharedTodoList, TodoList, new_shared_todo_list};
 use crate::tui::active_cell::ActiveCell;
-use crate::tui::approval::ApprovalMode;
 use crate::tui::clipboard::{ClipboardContent, ClipboardHandler};
-use crate::tui::file_mention::ContextReference;
-use crate::tui::history::{HistoryCell, TranscriptActionOwner, TranscriptRenderOptions};
+use crate::tui::history::{
+    HistoryCell, ThinkingFold, TranscriptActionOwner, TranscriptRenderOptions,
+};
 use crate::tui::hotbar::HotbarActionRegistry;
 use crate::tui::motion::MotionPolicy;
 use crate::tui::paste_burst::{FlushResult, PasteBurst};
@@ -49,6 +48,9 @@ use crate::tui::shell_key_routing::Focus;
 use crate::tui::streaming::StreamingState;
 use crate::tui::transcript::TranscriptViewCache;
 use crate::tui::views::ViewStack;
+use codewhale_localization::{Locale, MessageId, resolve_locale, tr};
+use codewhale_models::{Message, SystemPrompt, Tool, Usage};
+use codewhale_palette::{self as palette, UiTheme};
 
 mod composer;
 mod init;
@@ -63,18 +65,42 @@ pub(crate) use composer::{
 };
 pub(crate) use status::StatusToastKind;
 pub use status::{StatusToast, StatusToastLevel};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedactionGateNotice {
+    EnterGuidance,
+    WriteFailure,
+}
 pub use types::{
-    AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
-    ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, ScreenMode,
+    AppAction, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
+    ComposerSubmitChord, InflightSteer, InitialInput, McpUiAction, QueuedMessage, ScreenMode,
     SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
     ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
 pub(crate) use types::{
-    CacheReplayTarget, EffectiveReasoningEffort, GoalControlIntent, PendingGoalControl,
-    WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
+    CacheReplayTarget, GoalControlIntent, PendingGoalControl, WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
 };
 
 // === Types ===
+
+/// One login owns one mailbox. A cancelled task can only write its abandoned
+/// mailbox, so a late result cannot complete or clear a later login.
+pub(crate) struct PendingMcpLogin {
+    pub server: String,
+    pub cancel: tokio_util::sync::CancellationToken,
+    pub progress: std::sync::Arc<std::sync::Mutex<Option<McpLoginProgress>>>,
+}
+
+pub(crate) enum McpLoginProgress {
+    AuthorizationUrl(String),
+    Finished(Result<(), String>),
+}
+
+impl Drop for PendingMcpLogin {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
 
 /// Lifecycle identity retained until the matching `TurnComplete` arrives.
 ///
@@ -384,6 +410,16 @@ pub enum AgentCurrentActivityStatus {
     ModelWait,
     RunningTool,
     Waiting,
+    /// Settled because the parent's turn ended before this child did, not
+    /// because it asked anyone anything (#5906).
+    ///
+    /// The runtime parks such a child with a `needs_input` note that reads
+    /// like a question, so every surface used to render it as
+    /// `waiting for input` — indistinguishable from a child a user can
+    /// actually answer. It is its own state here because the recovery is
+    /// different: nobody will answer it, and it is continued through
+    /// `resume_from` (a *new* agent) or dismissed with `cancel`.
+    Parked,
     Done,
     Failed,
     Canceled,
@@ -391,6 +427,11 @@ pub enum AgentCurrentActivityStatus {
 }
 
 impl From<AgentWorkerStatus> for AgentCurrentActivityStatus {
+    /// Never yields [`Self::Parked`]: the worker status vocabulary cannot
+    /// express it (a parked child reports `WaitingForUser` /`Interrupted`
+    /// like any other settled one). Parked is derived from the checkpoint
+    /// flag by `crate::tui::subagent_routing::subagent_is_parked` and layered
+    /// over this mapping there — the one place that distinction is made.
     fn from(status: AgentWorkerStatus) -> Self {
         match status {
             AgentWorkerStatus::Queued => Self::Queued,
@@ -549,8 +590,15 @@ pub struct LaunchRecentSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchRowId {
     NewSession,
+    ReturnToSession,
     Recent(String),
     SeeAll,
+    /// Open the MCP manager from the status summary, including healthy servers.
+    McpManager,
+    /// The MCP problems row: Enter/click types the remedy command into the
+    /// composer (`/mcp login <name>` or `/mcp`) instead of making the user
+    /// retype what the card printed (#6085).
+    McpRemedy,
 }
 
 /// How many recent sessions the startup card lists inline before the
@@ -565,6 +613,8 @@ pub(crate) const LAUNCH_RECENT_INLINE_LIMIT: usize = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchState {
     pub visible: bool,
+    /// Home temporarily covers the current conversation; it does not own a session.
+    pub return_to_session: bool,
     pub status: Option<String>,
     /// Canonical workspace this launch state is scoped to. Recent work is
     /// the workspace's own sessions (archived and empty auto-created ones
@@ -577,18 +627,16 @@ pub struct LaunchState {
     /// All workspace sessions behind the inline list; when this exceeds
     /// `recent.len()` the card paints the see-all overflow row.
     pub total_workspace_sessions: usize,
+    /// Whether this workspace has any sessions at all — including the
+    /// empty auto-created shells `recent` deliberately drops. The card
+    /// must not say "no recent sessions yet" while `/resume` lists them;
+    /// when they exist it shows the see-all row instead of the lie.
+    pub has_scoped_sessions: bool,
     /// Whether launch keys type into the pre-session composer. The composer
     /// is the launch screen's one focus owner, so this is `true` from first
     /// paint. The composer itself is the session `App`'s own
     /// `ComposerState` — this flag only decides where keystrokes go.
     pub composer_focus: bool,
-    /// Composer input-row hitbox from the most recent launch render (the
-    /// docked strip below the option strip). A click here focuses the
-    /// composer, exactly like the Tab key.
-    pub composer_area: Option<Rect>,
-    /// Send-glyph hitbox inside the composer row. A click here submits the
-    /// composed message through the normal dispatch path.
-    pub send_area: Option<Rect>,
     /// Clickable rects for the card's rows from the most recent launch
     /// render, in the same order as
     /// [`crate::tui::underwater::launch_card_rows`].
@@ -607,24 +655,12 @@ pub struct LaunchState {
     /// it has. The first keystroke or a launched command dissolves the card
     /// (founder decision, 2026-09-02).
     pub dissolve_started_ms: Option<u128>,
+    /// One bounded reveal of the canonical mark, anchored at first paint.
+    /// Kept when the launcher is revisited so it never replays on navigation.
+    pub mark_reveal_started_at: Option<Instant>,
     /// Claude Code config was detected on this host (probed once at
     /// construction); drives the launch card's migration notice line.
     pub claude_code_detected: bool,
-    /// Sixel-tier plumbing (`MarkTier::Sixel`), all `None` until used:
-    /// - `sixel_cell_px`: the terminal's cell size in pixels, measured once
-    ///   at startup so the raster encodes to the block's exact pixels.
-    /// - `sixel_terminal_bg`: the probed terminal background, for
-    ///   transparent (`Reset`) theme stages whose ground the terminal owns.
-    /// - `sixel_mark_area`: the block the last launch render reserved, in
-    ///   stage coordinates; reset every frame by the frame renderer.
-    /// - `sixel_emitted`: the live image's block, in the same stage
-    ///   coordinates (identical to screen cells in fullscreen), or `None`
-    ///   when nothing is drawn. Compared against the reservation so the
-    ///   event loop re-emits only on moves and clears on tier exit.
-    pub sixel_cell_px: Option<(u16, u16)>,
-    pub sixel_terminal_bg: Option<Color>,
-    pub sixel_mark_area: Option<Rect>,
-    pub sixel_emitted: Option<Rect>,
 }
 
 /// The launch card's dissolve motion budget. One bounded motion; reduced
@@ -633,13 +669,19 @@ pub(crate) const LAUNCH_CARD_DISSOLVE_MS: u128 = 240;
 
 /// Load the startup card's recent-work list: the workspace's own sessions,
 /// most recent first (`list_sessions` already sorts that way), skipping
-/// archived sessions and empty auto-created ones exactly like the resume
-/// picker and `--continue` do. Returns the inline-capped list plus the
-/// total behind it for the see-all overflow.
-fn load_launch_recent(workspace: &std::path::Path) -> (Vec<LaunchRecentSession>, usize) {
+/// archived sessions and — unlike the resume picker, which lists them —
+/// empty auto-created shells. Returns the inline-capped list, the total
+/// behind it for the see-all overflow, and whether any scoped sessions
+/// exist at all so the card never claims "no recent sessions" while
+/// `/resume` has some.
+fn load_launch_recent(workspace: &std::path::Path) -> (Vec<LaunchRecentSession>, usize, bool) {
     let sessions = crate::session_manager::SessionManager::default_location()
         .and_then(|manager| manager.list_sessions())
         .unwrap_or_default();
+    let any_scoped = sessions.iter().any(|session| {
+        !session.archived
+            && crate::session_manager::workspace_scope_matches(&session.workspace, workspace)
+    });
     let mut scoped: Vec<LaunchRecentSession> = sessions
         .into_iter()
         .filter(|session| {
@@ -656,17 +698,22 @@ fn load_launch_recent(workspace: &std::path::Path) -> (Vec<LaunchRecentSession>,
         .collect();
     let total = scoped.len();
     scoped.truncate(LAUNCH_RECENT_INLINE_LIMIT);
-    (scoped, total)
+    (scoped, total, any_scoped)
 }
 
 impl LaunchState {
     #[must_use]
     pub fn new(visible: bool, workspace: &std::path::Path) -> Self {
-        let (recent, total_workspace_sessions) = load_launch_recent(workspace);
-        // The launch card's migration notice is only painted when it is true:
-        // Claude Code leaves its sessions under `~/.claude/projects`. One
-        // stat at construction, never on the render path.
-        let claude_code_detected = std::env::var_os("HOME")
+        let (recent, total_workspace_sessions, has_scoped_sessions) = load_launch_recent(workspace);
+        // The migration notice answers a question you have exactly once:
+        // "I have Claude Code, what comes over?". It used to key on
+        // `~/.claude/projects` alone, so anyone who keeps Claude Code
+        // installed saw it on every single launch forever. It now retires as
+        // soon as `/import-claude` has been run — that command always writes
+        // its report, so the report is the durable receipt that the question
+        // has been answered. Two stats at construction, never on the render
+        // path.
+        let has_claude_code = std::env::var_os("HOME")
             .as_ref()
             .map(|home| {
                 std::path::Path::new(home)
@@ -675,34 +722,49 @@ impl LaunchState {
                     .is_dir()
             })
             .unwrap_or(false);
+        let import_already_reviewed = codewhale_config::codewhale_home()
+            .map(|home| {
+                home.join("imports")
+                    .join("claude-import-report.md")
+                    .exists()
+            })
+            .unwrap_or(false);
+        let claude_code_detected = has_claude_code && !import_already_reviewed;
         Self {
             visible,
+            return_to_session: false,
             status: None,
             workspace: workspace.to_path_buf(),
             recent,
             total_workspace_sessions,
+            has_scoped_sessions,
             composer_focus: true,
-            composer_area: None,
-            send_area: None,
             row_hitboxes: Vec::new(),
             hovered_row: None,
             menu_selected: None,
             dissolve_started_ms: None,
+            mark_reveal_started_at: None,
             claude_code_detected,
-            sixel_cell_px: None,
-            sixel_terminal_bg: None,
-            sixel_mark_area: None,
-            sixel_emitted: None,
         }
+    }
+
+    /// Leave home without resetting the conversation, draft, or reveal clock.
+    pub fn dismiss(&mut self) {
+        self.visible = false;
+        self.return_to_session = false;
+        self.row_hitboxes.clear();
+        self.menu_selected = None;
+        self.hovered_row = None;
     }
 
     /// Re-read the recent-work list from disk (same filter as
     /// construction). Called when the card is restored after a picker
     /// closes so a session created or renamed behind the picker shows up.
     pub fn refresh_recent(&mut self) {
-        let (recent, total) = load_launch_recent(&self.workspace.clone());
+        let (recent, total, any_scoped) = load_launch_recent(&self.workspace.clone());
         self.recent = recent;
         self.total_workspace_sessions = total;
+        self.has_scoped_sessions = any_scoped;
     }
 
     /// Begin the card dissolve once (idempotent). The first keystroke or a
@@ -724,6 +786,14 @@ impl LaunchState {
         self.hovered_row = None;
         self.status = None;
         self.refresh_recent();
+    }
+
+    /// True while the card is still painting — visible and not fully
+    /// dissolved. Hitboxes and clicks follow the paint, so a dissolved card
+    /// owns no rows.
+    #[must_use]
+    pub fn card_paintable(&self, now_ms: u128, motion_allowed: bool) -> bool {
+        self.visible && self.card_dissolve_progress(now_ms, motion_allowed) < 1.0
     }
 
     /// How far the card has dissolved, `[0.0 intact ..= 1.0 gone]`. Reduced
@@ -816,6 +886,19 @@ pub struct ComposerState {
     /// `selection_anchor` is the fixed end.  Both are char-indexed.
     /// `None` means no selection is active.
     pub selection_anchor: Option<usize>,
+    /// The first character typed into this composer line was `/` (#5925).
+    ///
+    /// A line that began as a command stays a command until Enter: if the
+    /// leading `/` is gone at submit time and no edit removed it, bytes were
+    /// lost between the terminal and the composer, and the line must not be
+    /// re-interpreted as a prose prompt for the model. Composer edits
+    /// re-derive the claim through
+    /// [`ComposerState::resync_command_line_claim`]; `clear_input` drops it.
+    pub(crate) line_began_with_slash: bool,
+    /// Startup consumed bytes it could not replay, so the shell cannot prove
+    /// it saw the whole line (#5925). Set once from the startup input
+    /// receipt; cleared by the first submit it holds.
+    pub(crate) startup_input_unproven: bool,
 }
 
 impl Default for ComposerState {
@@ -845,23 +928,10 @@ impl Default for ComposerState {
             vim_mode: VimMode::Normal,
             vim_pending_d: false,
             selection_anchor: None,
+            line_began_with_slash: false,
+            startup_input_unproven: false,
         }
     }
-}
-
-/// Compatibility name retained for the first Tideline header slice. New
-/// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
-pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
-
-/// A header target painted in the latest frame.
-///
-/// The visible chrome owns placement; input owns dispatch. Keeping the
-/// rectangular target alongside its typed action gives mouse and keyboard
-/// routes one shared destination without a second navigation system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeaderHitbox {
-    pub area: Rect,
-    pub target: HeaderActionTarget,
 }
 
 /// Viewport/scroll state — fields related to transcript scrolling and caching.
@@ -873,6 +943,10 @@ pub struct ViewportState {
     pub transcript_selection: TranscriptSelection,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub transcript_scrollbar_dragging: bool,
+    /// Copy transcript drag selections as Markdown source (see
+    /// `TuiConfig::selection_copy_markdown`). Resolved from config at startup;
+    /// defaults to on.
+    pub selection_copy_markdown: bool,
     pub last_transcript_area: Option<Rect>,
     pub last_composer_area: Option<Rect>,
     /// Selectable targets from the latest painted frame. Cleared before every
@@ -881,9 +955,9 @@ pub struct ViewportState {
     /// Last left-click trace over the composer, for double/triple-click
     /// word/line selection (crossterm does not decode click counts).
     pub composer_click_trace: Option<crate::tui::mouse_ui::ComposerClickTrace>,
-    /// Painted band occupied by the active inline approval. Stored so wheel
-    /// routing can prefer the visible card over side surfaces underneath it.
-    pub last_approval_area: Option<Rect>,
+    /// Painted band occupied by the active approval or question sheet. Stored
+    /// so wheel routing can prefer the prompt over side surfaces underneath it.
+    pub last_prompt_area: Option<Rect>,
     /// WorkflowPanel rect above the composer (#4121), for mouse toggle/cancel.
     pub last_workflow_panel_area: Option<Rect>,
     pub last_workflow_cancel_area: Option<Rect>,
@@ -926,11 +1000,12 @@ impl Default for ViewportState {
             transcript_selection: TranscriptSelection::default(),
             selection_autoscroll: None,
             transcript_scrollbar_dragging: false,
+            selection_copy_markdown: true,
             last_transcript_area: None,
             last_composer_area: None,
             interaction_targets: crate::tui::tideline::InteractionRegistry::default(),
             composer_click_trace: None,
-            last_approval_area: None,
+            last_prompt_area: None,
             last_workflow_panel_area: None,
             last_workflow_cancel_area: None,
             last_infoline_hitboxes: Vec::new(),
@@ -968,6 +1043,9 @@ pub struct HostGoalState {
     /// While `None`, elapsed time keeps growing; once set, the sidebar freezes
     /// the timer at `finished_at - started_at` so completed goals stop ticking.
     pub finished_at: Option<Instant>,
+    /// Latest progress the model reported for the active goal. Runtime-only
+    /// display state; never persisted and never treated as verified.
+    pub progress: Option<crate::tools::goal::GoalProgressReport>,
     pub status: crate::tools::goal::GoalStatus,
 }
 
@@ -1000,7 +1078,6 @@ pub struct SessionState {
     pub displayed_cost_high_water_cny: f64,
     pub last_prompt_tokens: Option<u32>,
     pub last_completion_tokens: Option<u32>,
-    pub last_output_throughput: Option<TokenThroughput>,
     pub last_prompt_cache_hit_tokens: Option<u32>,
     pub last_prompt_cache_miss_tokens: Option<u32>,
     pub last_reasoning_replay_tokens: Option<u32>,
@@ -1185,7 +1262,6 @@ impl Default for SessionState {
             displayed_cost_high_water_cny: 0.0,
             last_prompt_tokens: None,
             last_completion_tokens: None,
-            last_output_throughput: None,
             last_prompt_cache_hit_tokens: None,
             last_prompt_cache_miss_tokens: None,
             last_reasoning_replay_tokens: None,
@@ -1227,7 +1303,6 @@ impl SessionState {
         self.total_cache_write_tokens = 0;
         self.total_output_tokens = 0;
         self.clear_pending_turn_usage();
-        self.last_output_throughput = None;
     }
 
     /// Add one provider-reported model-call receipt to the display-only
@@ -1356,43 +1431,39 @@ pub struct PendingRouteSave {
     pub fleet: Option<(String, crate::fleet::store::FleetScope)>,
 }
 
-/// Write `provider_identity`/`model` to `settings.toml` as the route the next
+/// Write `provider_identity`/`model` to the user-global config as the route the next
 /// launch should open with, and return the line to show the operator.
-///
-/// `default_provider` is what `App::new` consults first, so pinning it is the
-/// half that actually survives a restart; the provider-scoped entry carries the
-/// model. `default_model` is a DeepSeek-only legacy key and is written only for
-/// those providers, matching how startup reads it back.
-fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> String {
+fn persist_route_as_startup_default(
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: &str,
+) -> String {
     let route = format!("{provider_identity}/{model}");
-    match try_persist_route_as_startup_default(provider_identity, model) {
-        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
+    match try_persist_route_as_startup_default(provider, provider_identity, model) {
+        Ok(()) => format!("Remembered {route} as the startup default (config.toml)."),
         Err(err) => format!("Save failed: {err}"),
     }
 }
 
 fn try_persist_route_as_startup_default(
+    provider: ApiProvider,
     provider_identity: &str,
     model: &str,
 ) -> anyhow::Result<()> {
-    crate::settings::Settings::transact(|settings| {
-        settings.default_provider = Some(provider_identity.to_string());
-        settings.set_model_for_provider(provider_identity, model);
-        if matches!(
-            crate::config::ApiProvider::parse(provider_identity),
-            Some(crate::config::ApiProvider::Deepseek)
-                | Some(crate::config::ApiProvider::DeepseekCN)
-        ) {
-            settings.set("default_model", model)?;
-        }
-        Ok(())
-    })
+    let path = crate::config::home_config_path()
+        .ok_or_else(|| anyhow::anyhow!("Cannot resolve the user-global model configuration."))?;
+    crate::config_persistence::persist_provider_selection(
+        Some(&path),
+        provider,
+        provider_identity,
+        Some(model),
+    )
+    .map(|_| ())
 }
 
 pub struct App {
     pub mode: AppMode,
     /// Registered hotbar actions available for future slot config/render layers.
-    #[allow(dead_code)]
     pub hotbar_actions: HotbarActionRegistry,
     /// Composer sub-state (input, cursor, history, menus).
     pub composer: ComposerState,
@@ -1401,6 +1472,7 @@ pub struct App {
     /// Ocean work-surface state. Kept separate from transcript/sidebar state
     /// so the replacement shell can be removed or promoted as one unit.
     pub work_surface: crate::tui::work_surface::WorkSurfaceState,
+    pub pet_watch: crate::tui::pet_watch::PetWatch,
     /// Goal sub-state.
     pub goal: HostGoalState,
     /// Session sub-state (cost, tokens, telemetry).
@@ -1431,7 +1503,22 @@ pub struct App {
     pub(crate) tool_run_cache: ToolRunCache,
     /// Monotonic counter used to issue fresh per-cell revisions.
     pub next_history_revision: u64,
-    pub api_messages: Vec<Message>,
+    /// Engine transcript mirror, shared rather than copied per event
+    /// (#6214 T2). Reads dereference to the `Vec`; mutations go through
+    /// [`App::api_messages_mut`] and copy-on-write only while an engine
+    /// snapshot is outstanding.
+    pub api_messages: Arc<Vec<Message>>,
+    /// When each `api_messages` entry landed, index-aligned. The persisted
+    /// journal's `created_at` reads from these stamps, so a save rewrites
+    /// neither an entry's content nor its time — appends during a turn stay
+    /// spread across the session's real timeline instead of collapsing to
+    /// the save instant. Maintained by the `*_api_messages` helpers; a
+    /// length-mismatched site degrades to save-time stamps, never to a
+    /// dropped message.
+    pub api_message_stamps: Vec<DateTime<Utc>>,
+    /// Full saved history, including inactive branches. API messages remain
+    /// the active projection; snapshots reconcile it without rebuilding IDs.
+    pub session_journal: crate::session_tree::SessionJournal,
     /// User-visible assistant text that crossed typed completion boundaries.
     /// Receipts are aligned to transcript cells because provider context can
     /// be compacted or purged without changing what remains visible.
@@ -1460,6 +1547,8 @@ pub struct App {
     /// Ghost-text follow-up suggestion shown in the composer when empty.
     /// Generated asynchronously after each completed turn; cleared on new input.
     pub prompt_suggestion: Option<String>,
+    /// Read-only view of the current Config, refreshed by its notification delta owner.
+    pub notification_settings: crate::config::NotificationsConfig,
     /// Monotonic turn counter for stale-suggestion protection. Incremented on
     /// each TurnStarted; background suggestion tasks capture the token and
     /// discard their result if the token no longer matches.
@@ -1490,9 +1579,6 @@ pub struct App {
     pub context_pressure_warning_dismissed: Option<crate::context_budget::PressureLevel>,
     /// Last on-disk plugin catalog stamp we already nudged `/plugin reload` for.
     pub plugin_reload_nudge_stamp: Option<crate::plugins::PluginCatalogStamp>,
-    /// Plugin names already toasted for this session's prompt matching.
-    pub plugin_prompt_suggest_names: HashSet<String>,
-    pub plugin_prompt_suggest_count: u8,
     /// Last idle catalog fingerprint poll, so disk changes can surface between turns.
     pub last_plugin_catalog_poll: Option<Instant>,
     /// Live composer plugin CTA (debounce + one match, never auto-install).
@@ -1501,16 +1587,19 @@ pub struct App {
     /// Persisted model selections by provider name. Loaded from settings so
     /// `/model` and the picker can surface saved provider-specific choices.
     pub provider_models: HashMap<String, String>,
-    /// Additive provider-scoped model IDs enabled for the ordinary picker.
-    /// The catalog remains separately discoverable and selecting from it adds
-    /// to this set rather than replacing earlier enabled choices.
-    pub enabled_provider_models: HashMap<String, Vec<String>>,
+    /// Which routes this person actually used recently (#6533): built from
+    /// saved sessions off the UI thread at startup, bumped on route switches.
+    /// The `/model` picker's default view ranks by it.
+    pub route_usage: crate::model_relevance::SharedRouteUsage,
+    /// Non-secret declarations from the loaded config snapshot. Completion
+    /// reads this snapshot without reloading credentials on each keystroke.
+    pub configured_models: Vec<codewhale_config::catalog::configured::ConfiguredModel>,
     /// Exact provider/model pins loaded from settings, in user order.
     pub pinned_models: Vec<crate::settings::PinnedModel>,
-    /// When true, the model is auto-selected based on request complexity
-    /// rather than using a fixed model. The `/model auto` command sets this.
-    /// `dispatch_user_message` calls `auto_model_heuristic` to resolve the
-    /// effective model for each outbound message.
+    /// When true, the model is auto-selected rather than using a fixed
+    /// model. The `/model auto` command sets this. The flash classifier
+    /// picks the per-turn model when available; otherwise the configured
+    /// default model is used (no request-content signal).
     pub auto_model: bool,
     /// Last concrete model chosen while `auto_model` is active.
     pub last_effective_model: Option<String>,
@@ -1574,6 +1663,10 @@ pub struct App {
     pub active_context_window_source: crate::route_runtime::ContextWindowSource,
     /// User-configured provider context-window override for the active route.
     pub active_context_window_override: Option<u32>,
+    /// `[providers.<id>.model_context_windows]` for the active provider
+    /// identity, keyed by exact wire model id (#6108). A hit wins over
+    /// `active_context_window_override` for that model only.
+    pub active_model_context_windows: Option<std::collections::BTreeMap<String, u32>>,
     /// Pending provider transition for transactional rollback when the next
     /// auth failure indicates the new provider cannot be used.
     pub pending_provider_switch: Option<PendingProviderSwitch>,
@@ -1592,6 +1685,9 @@ pub struct App {
     pub workflow_config: codewhale_config::WorkflowConfigToml,
     /// Effective `[goal] max_continuations` backstop; `0` means unlimited.
     pub goal_max_continuations: u32,
+    /// Effective `[goal] enforce_token_budget`; `true` makes a goal's token
+    /// budget a hard stop instead of advisory telemetry (#6013).
+    pub goal_enforce_token_budget: bool,
     /// Typed engine lifecycle state for the cancellable between-turn wait.
     pub goal_continuation_waiting: bool,
     /// Effective explicit/managed filesystem scope captured at startup. The
@@ -1674,11 +1770,23 @@ pub struct App {
     /// fast typing or IME commits could otherwise be mis-classified as a
     /// paste burst (#1322 follow-up).
     pub bracketed_paste_seen: bool,
-    #[allow(dead_code)]
+    /// A non-Windows terminal on the verified `Event::Paste` allowlist may
+    /// skip the rapid-keystroke heuristic from the first keystroke. Windows
+    /// input requires `bracketed_paste_seen`: a terminal name or WT_SESSION
+    /// does not prove that the input backend delivers paste events (#6427).
+    /// Resolved once at startup, so tests and headless runs stay hermetic.
+    pub bracketed_paste_trusted: bool,
     pub system_prompt: Option<SystemPrompt>,
     pub auto_compact: bool,
     pub auto_compact_user_configured: bool,
     pub auto_compact_threshold_percent: f64,
+    /// `[compaction] summary_instructions` resolved at startup (#5956): the
+    /// standing operator suffix appended to every summarizer prompt, manual
+    /// and automatic.
+    pub compaction_summary_instructions: Option<String>,
+    /// `[compaction] retained_user_message_tokens` resolved and clamped at
+    /// startup (#5956).
+    pub compaction_retained_user_message_tokens: usize,
     pub stopped_turn: bool,
     pub calm_mode: bool,
     pub low_motion: bool,
@@ -1721,7 +1829,7 @@ pub struct App {
     pub launch: LaunchState,
     /// Mouse-selected launch action, consumed by the async UI loop.
     pub pending_launch_action: Option<crate::tui::underwater::LaunchAction>,
-    /// Mouse click on the live composer's `[↑]` send target. The async UI loop
+    /// Mouse click on the live composer's `[↵]` send target. The async UI loop
     /// consumes it through the same submit dispatcher as Enter.
     pub pending_composer_submit: Option<ComposerSubmitChord>,
     /// Mouse-selected hotbar slot, consumed by the async UI loop.
@@ -1802,7 +1910,6 @@ pub struct App {
     /// Whether the file-tree pane was actually rendered in the last frame.
     /// Set false when the terminal is too narrow to show the tree.
     pub file_tree_visible: bool,
-    #[allow(dead_code)]
     pub compact_threshold: usize,
     pub max_input_history: usize,
     pub allow_shell: bool,
@@ -1847,9 +1954,12 @@ pub struct App {
     /// boundary (`agent_id` → count), from the latest `AgentList` refresh.
     pub agent_queued_follow_ups: HashMap<String, usize>,
     /// Receipts-only roster of every agent that ran this session (#5479).
-    /// Refreshed wholesale on each `AgentList` event; rendered by `/agents`
-    /// and, in a later slice, by the agents rail.
-    pub agent_roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
+    /// Refreshed wholesale on each `AgentList` event; shared by `/agents`,
+    /// the Agents register and the Price view.
+    pub agent_roster: Vec<crate::agent_roster::AgentRosterRow>,
+    /// Original conversation owner of the retained snapshot. A process boot
+    /// marker or a worker's parent run is not a conversation identity.
+    pub agent_roster_session_id: Option<String>,
     /// `/agents list` asked for a one-shot transcript listing. Cleared by the
     /// `AgentList` handler that prints it.
     pub agent_roster_print_requested: bool,
@@ -1875,8 +1985,23 @@ pub struct App {
     /// (Catppuccin, Tokyo Night, Dracula, Gruvbox) propagate to every
     /// render site, not just the handful that read `app.ui_theme`.
     pub theme_id: palette::ThemeId,
+    /// Normalized persisted selector, including `custom:<name>` overlays.
+    /// `theme_id` remains the resolved base theme for behavior such as the
+    /// underwater surface and color-compatibility backend.
+    pub theme_name: String,
     // Onboarding
     pub onboarding: OnboardingState,
+    /// True while the startup gate for `[redaction] model_bound = "disabled"`
+    /// owns the screen. The gate renders above every other surface and must
+    /// be answered (confirm / keep / quit) before any session starts; see
+    /// `tui::redaction_gate`.
+    pub redaction_gate: bool,
+    /// True while the gate shows its second, final-confirmation stage: the
+    /// user already pressed 1/Y on the first stage and must confirm once more
+    /// before the opt-out actually takes effect.
+    pub redaction_gate_confirming: bool,
+    /// Viewport position for the consent text; clamped by the gate renderer.
+    pub redaction_gate_scroll: std::cell::Cell<usize>,
     pub onboarding_needs_api_key: bool,
     pub onboarding_provider: ApiProvider,
     pub onboarding_workspace_trust_gate: bool,
@@ -1904,7 +2029,6 @@ pub struct App {
     /// Lifecycle event outbox (`[lifecycle_outbox]` config). Disabled
     /// (all emits no-ops) when no path is configured.
     pub lifecycle_outbox: codewhale_hooks::LifecycleOutbox,
-    #[allow(dead_code)]
     pub yolo: bool,
     /// One-shot YOLO→Act+Bypass migration notice for this session (#0.8.68 M6).
     yolo_compat_notified: bool,
@@ -1950,12 +2074,24 @@ pub struct App {
     pub view_stack: ViewStack,
     /// Last `request_user_input` prompt, retained so a failed modal submit can reopen (#1198).
     pub pending_user_input_prompt: Option<(String, crate::tools::user_input::UserInputRequest)>,
+    /// Child-agent approval requests shown to the person and not yet
+    /// answered, keyed by approval id (approvals C1). The footer row, the
+    /// `/agents` re-open, and retiring answered cards all read this store.
+    pub pending_child_requests:
+        std::collections::BTreeMap<String, crate::tui::pending_requests::PendingChildRequest>,
+    /// Which conversation owns each child agent this host has seen, from the
+    /// agent lifecycle events. A request from another conversation's child
+    /// is answered `unavailable` instead of shown here.
+    pub child_agent_sessions: std::collections::HashMap<String, String>,
     /// Esc-Esc backtrack state machine (#133). `Inactive` by default; first
     /// Esc primes, second Esc opens the live-transcript overlay scoped to
     /// previous user messages so the user can rewind a turn.
     pub backtrack: crate::tui::backtrack::BacktrackState,
     /// Current session ID for auto-save updates
     pub current_session_id: Option<String>,
+    /// Exclusive editor ownership, shared with outstanding queue writes.
+    pub(crate) offline_queue_lease:
+        Option<std::sync::Arc<crate::session_manager::OfflineQueueLease>>,
     /// Last non-contended Work snapshot captured in this App. The outer
     /// option distinguishes "never captured" from a captured empty state.
     pub(crate) last_known_work_state: Option<Option<SessionWorkState>>,
@@ -1984,22 +2120,28 @@ pub struct App {
     /// `/config mini_window.keep_*`. The renderer reads this instead of the
     /// parsed Config so runtime changes apply without a restart.
     pub(crate) mini_window: crate::config::MiniWindowConfig,
-    /// Ordered list of footer items the user wants visible. Sourced from
-    /// `tui.status_items` in `~/.deepseek/config.toml` at startup; mutated
-    /// live by `/statusline`. The renderer iterates this slice; no item is
-    /// hardcoded in the footer code path.
+    /// What the bottom chrome shows. Sourced from `tui.status_items` in
+    /// `~/.deepseek/config.toml` at startup; mutated live by `/statusline`.
+    ///
+    /// Read by [`crate::tui::ui::frame::info_segments`] for every segment of
+    /// the metrics line, by `tideline_footer_from_app` for the posture bar's
+    /// mode chip, and by `should_fetch_provider_balance` for the balance
+    /// fetch. Every variant in the list paints exactly one of those; the
+    /// items that painted nothing were retired in #5950 rather than left as
+    /// toggles that lie.
     pub status_items: Vec<crate::config::StatusItem>,
-    /// Optional header items enabled from `tui.header_items` in `config.toml`
-    /// at startup. Built-in header content remains independent of this list.
-    /// Unread since the classic header was superseded by the Tideline info
-    /// line (2026-08-29): the info line carries the context meter by default and the
-    /// token breakdown lives behind `/cost` (spec §3). The field stays so the
-    /// config surface keeps parsing; its reader returns with the classic
-    /// renderer deletion slice.
-    #[allow(dead_code)]
-    pub header_items: Vec<crate::config::HeaderItem>,
+    /// How much of the posture bar to paint (`tui.posture_bar`, #5950):
+    /// full, compact, or hidden. Sourced from `config.toml` at startup and
+    /// mutated live by `/config posture_bar`. `hidden` gives the row to the
+    /// transcript; `compact` starts the bar's shed ladder past the clocks,
+    /// counts and hints. `status_items` composes the row; this sizes it.
+    pub posture_bar: crate::config::ChromeRowPreset,
+    /// The same setting for the metrics line (`tui.metrics_line`, #5950).
+    /// `compact` keeps the route, context, cost and balance and drops the
+    /// telemetry and the help hint.
+    pub metrics_line: crate::config::ChromeRowPreset,
     /// Project documentation (AGENTS.md or CLAUDE.md)
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub project_doc: Option<String>,
     /// Plan state for tracking tasks
     pub plan_state: SharedPlanState,
@@ -2029,6 +2171,10 @@ pub struct App {
     pub mcp_configured_count: usize,
     /// Set after in-TUI MCP config edits because the engine caches its MCP pool.
     pub mcp_reload_required: bool,
+    /// True between an accepted `/mcp` reload (or mutation that rebuilds the
+    /// live pool) and the background pass's finished receipt, so completion
+    /// can post exactly one summary.
+    pub mcp_reload_in_flight: bool,
     /// Tool execution log
     pub tool_log: Vec<String>,
     /// Active skill to apply to next user message
@@ -2141,13 +2287,12 @@ pub struct App {
     /// in-flight input uses Ctrl+Enter for same-turn steering and Enter for
     /// queued follow-ups; Esc only cancels the active turn.
     pub pending_steers: VecDeque<QueuedMessage>,
-    /// Engine-rejected steers (e.g. a tool was already running and couldn't be
-    /// cancelled cleanly). Surfaced in the pending-input preview so the user
-    /// knows the steer was deferred to end-of-turn. Today no engine path
-    /// produces these; the field is scaffolding for a future signalling
-    /// channel and the bucket renders with a rejected-steer label when
-    /// populated.
-    pub rejected_steers: VecDeque<String>,
+    /// Steers accepted by the steer channel but not yet seen in the engine's
+    /// record. Rendered through the same "sending into turn" preview bucket as
+    /// `pending_steers`; promoted to a transcript cell by
+    /// `apply_engine_session_projection`, or queued as a follow-up by
+    /// `TurnComplete` when the turn ended without them (#6190, #6297).
+    pub inflight_steers: VecDeque<InflightSteer>,
     /// Legacy resend flag for pending steer recovery.
     pub submit_pending_steers_after_interrupt: bool,
     /// Start time for current turn
@@ -2206,11 +2351,14 @@ pub struct App {
             Option<(
                 u64,
                 String,
-                crate::localization::Locale,
+                codewhale_localization::Locale,
                 Result<Box<codewhale_config::UserConstitution>, String>,
             )>,
         >,
     >,
+    /// Discovery, registration and the browser callback all run in the
+    /// background. Esc or dropping the app cancels the entire operation.
+    pub(crate) mcp_login: Option<PendingMcpLogin>,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -2229,8 +2377,12 @@ pub struct App {
 
     /// Cached git context snapshot for the footer.
     pub workspace_context: Option<String>,
+    /// Cached linked-worktree identity, refreshed with the branch off the draw path.
+    pub workspace_is_linked_worktree: bool,
     /// Shared cell for async git context updates (#399 S1).
-    pub workspace_context_cell: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub workspace_context_cell: std::sync::Arc<
+        std::sync::Mutex<Option<crate::tui::workspace_context::WorkspaceContextSnapshot>>,
+    >,
     /// Timestamp for cached workspace context.
     pub workspace_context_refreshed_at: Option<Instant>,
     /// Cached size of the memory file, formatted for the Session sidebar.
@@ -2242,6 +2394,8 @@ pub struct App {
     pub memory_size_hint: Option<String>,
     /// Cached background tasks for sidebar rendering.
     pub task_panel: Vec<TaskPanelEntry>,
+    pub task_panel_session_id: Option<String>,
+    pub task_panel_unavailable: bool,
     /// Live scheduled-work projection for the activity band
     /// (AUTOMATION-VISIBILITY-SPEC §2.1), refreshed on the task-panel cadence
     /// by `refresh_automation_panel`. The band reads it;
@@ -2255,6 +2409,11 @@ pub struct App {
         Option<tokio::task::JoinHandle<crate::tui::automation_panel::AutomationScan>>,
     /// Session-local quieting and command detectors for event-driven tips.
     pub behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState,
+    /// Footer-hint use counts, hydrated from `Settings` at startup and
+    /// bumped by `App::note_footer_hint_used`. The posture bar reads this
+    /// every frame, so the counts live here rather than behind a
+    /// settings-file read.
+    pub footer_hint_uses: std::collections::BTreeMap<String, u8>,
     /// Unified Workflow activity surface (#4121). Lives above the composer so
     /// phase/row progress does not flood the chat transcript. Preserved after
     /// completion until the next `RunStarted` replaces it.
@@ -2339,10 +2498,15 @@ pub struct App {
     /// Transcript cells the user has collapsed (hidden from view).
     /// Stores **original** virtual cell indices (pre-filtering).
     pub collapsed_cells: HashSet<usize>,
-    /// Thinking cells the user has folded (showing summary instead of full
-    /// content). Stores **original** virtual cell indices. Toggled by Space
-    /// when the composer is empty and the cursor is on a thinking cell.
-    pub folded_thinking: HashSet<usize>,
+    /// Explicit expand/collapse intents the user has recorded for thinking
+    /// cells, keyed by **original** virtual cell index. Set by Space when the
+    /// composer is empty and the cursor is on a thinking cell.
+    ///
+    /// An absent index means the user has not touched that cell, so the
+    /// display preferences decide it. A present index is absolute, so
+    /// changing `verbose` or `thinking_default_expanded` afterwards leaves
+    /// the user's own choice alone (#5847).
+    pub thinking_folds: HashMap<usize, ThinkingFold>,
     /// Mapping from filtered cell index → original virtual index.
     /// Populated during `ChatWidget::new` by filtering out collapsed cells.
     /// Used by `build_context_menu_entries` to convert line-meta indices
@@ -2430,26 +2594,23 @@ fn default_composer_arrows_scroll_for_platform(use_mouse_capture: bool, _is_wind
     !use_mouse_capture
 }
 
-fn push_enabled_provider_model(
-    enabled: &mut HashMap<String, Vec<String>>,
-    provider: &str,
-    model: &str,
-) {
-    let provider = provider.trim();
-    let model = model.trim();
-    if provider.is_empty() || model.is_empty() || model.eq_ignore_ascii_case("auto") {
-        return;
-    }
-    let models = enabled.entry(provider.to_string()).or_default();
-    if !models
-        .iter()
-        .any(|existing| existing.eq_ignore_ascii_case(model))
-    {
-        models.push(model.to_string());
-    }
-}
-
 impl App {
+    /// A retained roster remains readable only in its owning conversation.
+    pub(crate) fn current_agent_roster(&self) -> &[crate::agent_roster::AgentRosterRow] {
+        if self
+            .current_session_id
+            .as_deref()
+            .is_some_and(|session_id| {
+                !session_id.is_empty()
+                    && self.agent_roster_session_id.as_deref() == Some(session_id)
+            })
+        {
+            &self.agent_roster
+        } else {
+            &[]
+        }
+    }
+
     /// Who owns the keyboard right now.
     ///
     /// The single derivation of [`Focus`], mirroring the order in which the
@@ -2458,6 +2619,9 @@ impl App {
     /// composer has text.
     #[must_use]
     pub fn focus(&self) -> Focus {
+        if self.redaction_gate && self.onboarding == OnboardingState::None {
+            return Focus::RedactionGate;
+        }
         if let Some(kind) = self.view_stack.top_kind() {
             return Focus::Modal(kind);
         }
@@ -2505,8 +2669,8 @@ impl App {
         match choice {
             RouteSaveChoice::UpdateFleet => {
                 let Some((name, scope)) = pending.fleet.clone() else {
-                    return "Nothing to update — no Fleet is selected. Use /fleet save-as to \
-                             save this route as a new Fleet."
+                    return "Nothing to update — no team is selected. Use /fleet save-as to \
+                             save this route as a new team."
                         .to_string();
                 };
                 match crate::fleet::store::load_fleet_in_scope(&name, scope, &self.workspace) {
@@ -2518,15 +2682,15 @@ impl App {
                         });
                         match save_fleet(&fleet, scope, &self.workspace) {
                             Ok(path) => format!(
-                                "Fleet `{}` now runs on {route} — wrote {}",
+                                "Team `{}` now runs on {route} — wrote {}",
                                 fleet.name,
                                 path.display()
                             ),
-                            Err(err) => format!("Fleet update failed: {err}"),
+                            Err(err) => format!("Team update failed: {err}"),
                         }
                     }
                     Err(err) => format!(
-                        "Fleet update failed: {err} — the saved Fleet may have moved. Use \
+                        "Team update failed: {err} — the saved team may have moved. Use \
                          /fleet save-as to persist the route."
                     ),
                 }
@@ -2543,7 +2707,7 @@ impl App {
                     display.clone(),
                     Some("Saved from a session route choice.".to_string()),
                 ) else {
-                    return "Could not create the Fleet.".to_string();
+                    return "Could not create the team.".to_string();
                 };
                 fleet.operator = Some(FleetOperator {
                     provider: pending.provider_identity.clone(),
@@ -2568,7 +2732,7 @@ impl App {
                             Err(err) => format!(" — selection failed: {err}"),
                         };
                         format!(
-                            "Saved route {route} as new Fleet `{}` — wrote {}{selected_note}",
+                            "Saved route {route} as new team `{}` — wrote {}{selected_note}",
                             display,
                             path.display()
                         )
@@ -2577,7 +2741,20 @@ impl App {
                 }
             }
             RouteSaveChoice::SaveAsDefault => {
-                persist_route_as_startup_default(&pending.provider_identity, &pending.model)
+                let active_model = if self.auto_model { "auto" } else { &self.model };
+                if (pending.provider_identity != self.provider_identity_for_persistence()
+                    && Some(pending.provider_identity.as_str())
+                        != self.provider_id_for_persistence())
+                    || pending.model != active_model
+                {
+                    return "Save failed: the pending provider/model route is no longer active."
+                        .to_string();
+                }
+                let provider_id = match self.provider_selector_for_config_persistence() {
+                    Ok(provider_id) => provider_id,
+                    Err(error) => return format!("Save failed: {error}"),
+                };
+                persist_route_as_startup_default(self.api_provider, provider_id, &pending.model)
             }
             RouteSaveChoice::SessionOnly => {
                 format!("Model {route} kept for this session only — nothing was written.")
@@ -2613,12 +2790,16 @@ impl App {
         } else {
             self.model.clone()
         };
-        try_persist_route_as_startup_default(&provider_identity, &model)?;
+        try_persist_route_as_startup_default(
+            self.api_provider,
+            self.provider_selector_for_config_persistence()?,
+            &model,
+        )?;
         // Resolve the prompt only after the write lands. If persistence fails,
         // keep the retry available instead of discarding the operator's route.
         self.pending_route_save = None;
         Ok(format!(
-            "Remembered {provider_identity}/{model} as the startup default (settings.toml)."
+            "Remembered {provider_identity}/{model} as the startup default (config.toml)."
         ))
     }
 
@@ -2643,6 +2824,7 @@ impl App {
     /// complete total.
     #[must_use]
     pub fn cumulative_usage_chip(&self) -> crate::route_billing::UsageChip {
+        use crate::pricing::UnpricedReason;
         let displayed = self.displayed_session_cost_for_currency(self.cost_currency);
         let (priced, unpriced) = match self.cost_display_currency(self.cost_currency) {
             CostCurrency::Usd => (
@@ -2654,14 +2836,28 @@ impl App {
                 self.session.cost_cny_unpriced_turns,
             ),
         };
+        let saved_reasons = match self.cost_display_currency(self.cost_currency) {
+            CostCurrency::Usd => &self.session.cost_unpriced_reasons,
+            CostCurrency::Cny => &self.session.cost_cny_unpriced_reasons,
+        };
+        let mut reasons: Vec<_> = saved_reasons
+            .iter()
+            .map(|reason| UnpricedReason::from_label(reason))
+            .collect();
+        if (self.session.cost_coverage_unknown_legacy || reasons.is_empty())
+            && !reasons.contains(&UnpricedReason::UnrecordedCoverage)
+        {
+            reasons.push(UnpricedReason::UnrecordedCoverage);
+        }
         if self.session.cost_coverage_unknown_legacy {
             return if displayed.is_finite() && displayed > 0.0 {
                 crate::route_billing::UsageChip::PricedSubtotal {
                     amount: self.format_cost_amount(displayed),
                     legacy: true,
+                    reasons,
                 }
             } else {
-                crate::route_billing::UsageChip::Unknown
+                crate::route_billing::UsageChip::Unknown(reasons)
             };
         }
         if unpriced > 0 {
@@ -2669,9 +2865,10 @@ impl App {
                 crate::route_billing::UsageChip::PricedSubtotal {
                     amount: self.format_cost_amount(displayed),
                     legacy: false,
+                    reasons,
                 }
             } else {
-                crate::route_billing::UsageChip::Unknown
+                crate::route_billing::UsageChip::Unknown(reasons)
             };
         }
         if priced > 0 {
@@ -2691,19 +2888,12 @@ impl App {
         )
     }
 
-    pub fn enable_provider_model(&mut self, provider: &str, model: &str) {
-        push_enabled_provider_model(&mut self.enabled_provider_models, provider, model);
-    }
-
-    #[must_use]
-    pub fn provider_model_is_enabled(&self, provider: &str, model: &str) -> bool {
-        self.enabled_provider_models
-            .get(provider)
-            .is_some_and(|models| {
-                models
-                    .iter()
-                    .any(|enabled| enabled.eq_ignore_ascii_case(model))
-            })
+    /// Record that the session is now using `provider` / `model`, so the
+    /// picker's recent section reflects it before any session is saved.
+    pub fn note_route_used(&mut self, provider: &str, model: &str) {
+        if let Ok(mut usage) = self.route_usage.write() {
+            usage.record(provider, model, chrono::Utc::now());
+        }
     }
 
     /// Advance and return the model-draft generation. Call when a draft is
@@ -2737,7 +2927,6 @@ impl App {
     pub(crate) fn clear_model_scoped_telemetry(&mut self) {
         self.session.last_prompt_tokens = None;
         self.session.last_completion_tokens = None;
-        self.session.last_output_throughput = None;
         self.session.last_prompt_cache_hit_tokens = None;
         self.session.last_prompt_cache_miss_tokens = None;
         self.session.last_reasoning_replay_tokens = None;
@@ -2818,10 +3007,10 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Mark the first-run follow-up as seen without inserting a transcript
-    /// message. The empty underwater launch surface owns setup guidance; a
-    /// synthetic history cell would hide that surface before the user sends
-    /// anything.
+    /// Show the one-time Fleet intro as a status line, the first time the
+    /// user opens `/fleet` or enters Operate — never as a first-run push.
+    /// It inserts no transcript message: a synthetic history cell would hide
+    /// the empty launch surface before the user sends anything.
     pub fn maybe_show_feature_intro(&mut self) {
         if self.onboarding != OnboardingState::None {
             return;
@@ -2864,7 +3053,7 @@ impl App {
             settings.set("locale", tag)?;
             Ok(settings.locale.clone())
         })?;
-        self.ui_locale = crate::localization::resolve_locale(&locale);
+        self.ui_locale = codewhale_localization::resolve_locale(&locale);
         self.needs_redraw = true;
         Ok(())
     }
@@ -3095,7 +3284,6 @@ impl App {
                     self.tr(match subject {
                         StartupDefaultSubject::Mode => MessageId::StartupDefaultSubjectMode,
                         StartupDefaultSubject::Thinking => MessageId::StartupDefaultSubjectThinking,
-                        StartupDefaultSubject::Model => MessageId::StartupDefaultSubjectModel,
                     })
                     .into_owned()
                 })
@@ -3185,7 +3373,7 @@ impl App {
     }
 
     /// Cycle through modes in reverse.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cycle_mode_reverse(&mut self) {
         let next = self.mode.previous();
         let outcome = self.select_mode(next);
@@ -3426,15 +3614,17 @@ impl App {
         if self.reject_setting_change_while_busy(MessageId::SettingSubjectPermissions) {
             return None;
         }
-        if self.mode == AppMode::Plan {
-            self.push_status_toast(
-                "Plan is Read Only; switch to Act to change permissions".to_string(),
-                StatusToastLevel::Info,
-                Some(5_000),
-            );
-            self.needs_redraw = true;
-            return None;
-        }
+        // Plan used to refuse the change outright, which welded the two axes
+        // together on the keyboard: Tab cycles the mode, Shift+Tab cycles the
+        // posture, and in Plan the second key silently did nothing. They are
+        // independent settings and both must stay settable.
+        //
+        // Nothing is weakened by allowing it. Plan's read-only guarantee is
+        // derived from the mode, not from the posture: `authority` maps
+        // `(Plan, _, Bypass)` to `SandboxPolicy::ReadOnly` (there is a test
+        // pinning exactly that), and `tool_catalog` gates every write tool on
+        // `mode != AppMode::Plan`. Setting the posture here records the
+        // preference that takes effect on the next Act/Operate turn.
         if allow_root_policy && !self.approval_policy_root_editable {
             return None;
         }
@@ -3467,6 +3657,19 @@ impl App {
     fn finish_approval_posture_change(&mut self, next: ApprovalMode) {
         self.set_agent_approval_posture(next);
         self.needs_redraw = true;
+        // In Plan the new posture is real but dormant, and the footer chip
+        // alone would imply it is live. Say when it starts applying instead of
+        // refusing the change.
+        if self.mode == AppMode::Plan {
+            self.push_status_toast(
+                format!(
+                    "Permissions set to {}. Plan stays Read Only; this applies in Act and Operate.",
+                    next.permission_chip_label()
+                ),
+                StatusToastLevel::Info,
+                Some(5_000),
+            );
+        }
         // Footer permission chip is canonical — no status toast for the new
         // value, only the one-shot rebinding notice.
         self.notify_keybinding_migration_once();
@@ -3678,7 +3881,7 @@ impl App {
 
     /// Add `delta` to the parent-turn session cost and bump the displayed
     /// high-water mark so the footer total never reverses (#244).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn accrue_session_cost(&mut self, delta: f64) {
         self.accrue_session_cost_estimate(CostEstimate::usd_only(delta));
     }
@@ -3902,7 +4105,7 @@ impl App {
 
     /// Add `delta` to the running sub-agent cost and bump the displayed
     /// high-water mark so the footer total never reverses (#244).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn accrue_subagent_cost(&mut self, delta: f64) {
         self.accrue_subagent_cost_estimate(CostEstimate::usd_only(delta));
     }
@@ -3985,7 +4188,7 @@ impl App {
     /// Read the visible session+sub-agent cost. Guaranteed monotonic across
     /// reconciliation events (cache adjustments, provisional → final swaps)
     /// for the lifetime of one session (#244).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn displayed_session_cost(&self) -> f64 {
         self.displayed_session_cost_for_currency(CostCurrency::Usd)
     }
@@ -4068,7 +4271,7 @@ impl App {
     #[must_use]
     pub fn session_cost_label(&self) -> String {
         let chip = self.cumulative_usage_chip();
-        crate::route_billing::format_usage_chip(&chip).unwrap_or_else(|| {
+        crate::route_billing::format_usage_chip(&chip, self.ui_locale).unwrap_or_else(|| {
             self.format_cost_amount(self.displayed_session_cost_for_currency(self.cost_currency))
         })
     }
@@ -4216,7 +4419,7 @@ impl App {
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
             .collect();
-        self.folded_thinking.clear();
+        self.thinking_folds.clear();
         self.expanded_tool_runs = std::mem::take(&mut self.expanded_tool_runs)
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
@@ -4632,9 +4835,108 @@ impl App {
     pub(crate) fn prune_transcript_index_state(&mut self, len: usize) {
         self.transcript_identity_epoch = self.transcript_identity_epoch.wrapping_add(1);
         self.collapsed_cells.retain(|idx| *idx < len);
-        self.folded_thinking.retain(|idx| *idx < len);
+        self.thinking_folds.retain(|idx, _| *idx < len);
         self.expanded_tool_runs.retain(|idx| *idx < len);
         self.collapsed_cell_map.clear();
+    }
+
+    /// Mutable access to the shared transcript mirror. Copy-on-write: an
+    /// exclusive `Arc` mutates in place, a shared one detaches first, so an
+    /// outstanding engine snapshot can never observe the mutation.
+    pub fn api_messages_mut(&mut self) -> &mut Vec<Message> {
+        Arc::make_mut(&mut self.api_messages)
+    }
+
+    /// Append a message and stamp when it landed — the persisted journal's
+    /// `created_at` reads this stamp, so an entry's time is append time, not
+    /// save time.
+    pub fn push_api_message(&mut self, message: Message) {
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
+        self.api_messages_mut().push(message);
+        self.api_message_stamps.push(Utc::now());
+    }
+
+    /// Mirror an engine `SessionUpdated` projection into `api_messages`. The
+    /// unchanged prefix keeps the stamps it already earned — the engine
+    /// mirrors the same messages back in the same order — and only entries
+    /// that are new or were rewritten (compaction) are stamped now, which
+    /// lands within a turn-event of the real append. The shared snapshot is
+    /// installed without copying.
+    pub fn set_api_messages(&mut self, messages: Arc<Vec<Message>>) {
+        let keep = self
+            .api_messages
+            .iter()
+            .zip(messages.iter())
+            .take_while(|(old, new)| old == new)
+            .count()
+            .min(self.api_message_stamps.len());
+        self.api_message_stamps.truncate(keep);
+        self.api_message_stamps
+            .resize_with(messages.len(), Utc::now);
+        self.api_messages = messages;
+    }
+
+    /// Install a resumed conversation, reusing the persisted journal's
+    /// per-entry `created_at` as the stamps so a next save does not rewrite
+    /// history to resume time. Entries without a matching stamp fall back to
+    /// now.
+    pub fn restore_api_messages(
+        &mut self,
+        messages: Vec<Message>,
+        session: &crate::session_manager::SavedSession,
+    ) {
+        self.session_journal = session.journal.clone().unwrap_or_else(|| {
+            crate::session_tree::SessionJournal::from_messages(
+                session.messages.clone(),
+                session.metadata.spawn_depth,
+            )
+        });
+        self.api_message_stamps = session.journal_message_stamps();
+        self.api_message_stamps
+            .resize_with(messages.len(), Utc::now);
+        self.api_messages = Arc::new(messages);
+    }
+
+    /// Append a message with the stamp it earned earlier — used when an
+    /// undo prune re-inserts preserved tool results that were already in the
+    /// log.
+    pub fn push_api_message_stamped(&mut self, message: Message, stamp: DateTime<Utc>) {
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
+        self.api_messages_mut().push(message);
+        self.api_message_stamps.push(stamp);
+    }
+
+    pub fn pop_api_message(&mut self) -> Option<Message> {
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
+        self.api_message_stamps.pop();
+        self.api_messages_mut().pop()
+    }
+
+    /// `created_at` of each `api_messages` entry, paired positionally.
+    /// Preserve messages even if older state lacks a stamp; missing times
+    /// fall back to observation time, as they do when restoring a session.
+    pub fn api_messages_stamped(&self) -> impl Iterator<Item = (&Message, DateTime<Utc>)> {
+        self.api_messages.iter().zip(
+            self.api_message_stamps
+                .iter()
+                .copied()
+                .chain(std::iter::repeat_with(Utc::now)),
+        )
+    }
+
+    pub fn truncate_api_messages(&mut self, new_len: usize) {
+        self.api_messages_mut().truncate(new_len);
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
+    }
+
+    pub fn clear_api_messages(&mut self) {
+        self.session_journal = crate::session_tree::SessionJournal::new();
+        self.api_messages_mut().clear();
+        self.api_message_stamps.clear();
     }
 
     #[must_use]
@@ -4696,7 +4998,6 @@ impl App {
     /// Total number of cells in the *virtual* transcript: `history.len()`
     /// plus active cell entries (if any).
     #[must_use]
-    #[allow(dead_code)] // Reserved for renderers that need a unified cell count.
     pub fn virtual_cell_count(&self) -> usize {
         self.history.len() + self.active_cell.as_ref().map_or(0, ActiveCell::entry_count)
     }
@@ -5051,7 +5352,9 @@ impl App {
         event_run_id: &str,
         event: crate::tui::widgets::workflow_panel::WorkflowPanelEvent,
     ) -> bool {
-        use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelEvent};
+        use crate::tui::widgets::workflow_panel::{
+            WorkflowPanel, WorkflowPanelEvent, WorkflowPanelLifecycle,
+        };
         if event_run_id.trim().is_empty() {
             return false;
         }
@@ -5070,6 +5373,21 @@ impl App {
         }
 
         let budget_only = matches!(&event, WorkflowPanelEvent::BudgetUpdated { .. });
+        // #5528: a failed run must be loud, not just a panel row. Capture the
+        // failure before the event is consumed below; the sticky notice fires
+        // once per run because the live stream and the tool-complete hydration
+        // can both deliver the same terminal event.
+        let run_failure = match &event {
+            WorkflowPanelEvent::RunCompleted {
+                status: WorkflowPanelLifecycle::Failed,
+                error,
+                ..
+            } => Some(error.clone()),
+            _ => None,
+        };
+        let already_failed = self.workflow_panel.as_ref().is_some_and(|panel| {
+            panel.run_id == event_run_id && panel.lifecycle == WorkflowPanelLifecycle::Failed
+        });
         match (&mut self.workflow_panel, &event) {
             (
                 None,
@@ -5106,6 +5424,27 @@ impl App {
         }
         if !budget_only {
             self.needs_redraw = true;
+        }
+        if let Some(error) = run_failure
+            && !already_failed
+        {
+            let detail = error
+                .as_deref()
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty());
+            let message = match detail {
+                Some(detail) => format!(
+                    "{} · {}",
+                    self.tr(MessageId::WorkflowRunFailedToast),
+                    bound_agent_activity_text(detail)
+                ),
+                None => self.tr(MessageId::WorkflowRunFailedToast).into_owned(),
+            };
+            self.set_sticky_status(
+                message,
+                StatusToastLevel::Error,
+                Some(Self::STICKY_ERROR_TTL_MS),
+            );
         }
         true
     }
@@ -5291,6 +5630,8 @@ impl App {
 
     pub fn transcript_render_options(&self) -> TranscriptRenderOptions {
         TranscriptRenderOptions {
+            superseded_work_receipt: false,
+            newest_user_turn: false,
             locale: self.ui_locale,
             show_thinking: self.show_thinking,
             thinking_highlight: self.thinking_highlight,
@@ -5324,7 +5665,7 @@ impl App {
         self.viewport.transcript_selection.clear();
 
         self.viewport.last_transcript_area = None;
-        self.viewport.last_approval_area = None;
+        self.viewport.last_prompt_area = None;
         self.viewport.last_transcript_top = 0;
         // Seed visible height from the resize event so paging keys use a
         // useful page size immediately, before the next render updates it.
@@ -5422,7 +5763,7 @@ impl App {
     /// Park a legacy pending steer. New keyboard handling routes running-turn
     /// drafts through Ctrl+Enter (same-turn steer) or Enter (next-turn
     /// follow-up).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn push_pending_steer(&mut self, message: QueuedMessage) {
         self.pending_steers.push_back(message);
         self.submit_pending_steers_after_interrupt = true;
@@ -5546,15 +5887,18 @@ impl App {
                 .is_some_and(|instant| instant.elapsed() < Self::DOUBLE_TAP_WINDOW)
     }
 
-    /// Pop the most recently queued message when the double-tap window is
-    /// still open. Clears the window so a third Enter does not re-steer.
-    pub fn take_queued_for_double_tap_steer(&mut self) -> Option<QueuedMessage> {
+    /// Drain every queued message when the double-tap window is still
+    /// open, oldest first. Clears the window so a third Enter does not
+    /// re-steer. The posture bar promises "{enter} again to send now" — with
+    /// several follow-ups queued, "now" means all of them in order, not just
+    /// the latest.
+    pub fn take_queued_for_double_tap_steer(&mut self) -> Vec<QueuedMessage> {
         if !self.double_tap_window_open() || self.queued_messages.is_empty() {
-            return None;
+            return Vec::new();
         }
         match self.enter_with_double_tap() {
-            Some(SubmitDisposition::Steer) => self.queued_messages.pop_back(),
-            _ => None,
+            Some(SubmitDisposition::Steer) => self.queued_messages.drain(..).collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -5581,9 +5925,12 @@ impl App {
         self.bump_history_cell(index);
     }
 
-    /// Retry a `try_lock` up to `retries` times with a 1ms pause between
+    /// Retry a `try_lock` up to `retries` times, yielding the thread between
     /// attempts. Returns `Some(guard)` on success, `None` if the lock
-    /// remains contended after all retries.
+    /// remains contended after all retries. Reached from the async UI/event
+    /// paths, so this must not park a Tokio worker with `thread::sleep` —
+    /// `yield_now` covers the microsecond-scale critical sections behind
+    /// these mutexes, and a still-contended lock degrades to `None`.
     fn retry_lock<T>(
         mutex: &tokio::sync::Mutex<T>,
         retries: u32,
@@ -5592,7 +5939,7 @@ impl App {
             if let Ok(guard) = mutex.try_lock() {
                 return Some(guard);
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::yield_now();
         }
         None
     }
@@ -5788,21 +6135,52 @@ impl App {
         self.active_context_window_source = context_window_source;
     }
 
-    pub fn set_active_context_window_override(&mut self, context_window: Option<u32>) {
-        self.active_context_window_override = context_window;
-        if context_window.is_some() {
-            self.active_context_window_source =
-                crate::route_runtime::ContextWindowSource::Configured;
+    /// Refresh the operator-configured windows for the active provider
+    /// identity: the provider-level default plus its per-model table (#6108).
+    pub fn set_active_context_window_override(
+        &mut self,
+        config: &crate::config::Config,
+        provider: ApiProvider,
+    ) {
+        self.active_context_window_override = config.context_window_for_provider_config(provider);
+        self.active_model_context_windows = config.model_context_windows_for(provider).cloned();
+        if let Some(resolution) = self.configured_context_window_for(&self.model.clone()) {
+            self.active_context_window_source = resolution.source;
         }
         if self.active_route_limits.is_none() {
             self.active_route_limits = self.context_window_override_limits();
         }
     }
 
+    /// Effective operator-configured window for an exact wire model id on the
+    /// active provider: a `model_context_windows` hit wins over the provider
+    /// default (#6108). `None` when the operator configured neither rung.
+    pub(crate) fn configured_context_window_for(
+        &self,
+        model: &str,
+    ) -> Option<crate::route_runtime::ContextWindowResolution> {
+        self.active_model_context_windows
+            .as_ref()
+            .and_then(|table| table.get(model).copied())
+            .filter(|window| *window > 0)
+            .map(|tokens| crate::route_runtime::ContextWindowResolution {
+                tokens,
+                source: crate::route_runtime::ContextWindowSource::ConfiguredModel,
+            })
+            .or_else(|| {
+                self.active_context_window_override
+                    .filter(|window| *window > 0)
+                    .map(|tokens| crate::route_runtime::ContextWindowResolution {
+                        tokens,
+                        source: crate::route_runtime::ContextWindowSource::Configured,
+                    })
+            })
+    }
+
     pub fn context_window_override_limits(&self) -> Option<RouteLimits> {
-        self.active_context_window_override
-            .map(|window| RouteLimits {
-                context_tokens: Some(u64::from(window)),
+        self.configured_context_window_for(&self.model)
+            .map(|resolution| RouteLimits {
+                context_tokens: Some(u64::from(resolution.tokens)),
                 ..RouteLimits::default()
             })
     }
@@ -5893,6 +6271,22 @@ impl App {
     #[must_use]
     pub(crate) fn provider_id_for_persistence(&self) -> Option<&str> {
         self.provider_exact_id.as_deref()
+    }
+
+    /// Config selectors retain the exact saved slot, including legacy hosted
+    /// Ollama's `ollama` slot. Session receipts keep their canonical identity.
+    pub(crate) fn provider_selector_for_config_persistence(&self) -> anyhow::Result<&str> {
+        self.provider_id_for_persistence()
+            .or_else(|| {
+                (self.api_provider == ApiProvider::Custom
+                    && self
+                        .provider_identity
+                        .eq_ignore_ascii_case(ApiProvider::Custom.as_str()))
+                .then(|| self.provider_identity_for_persistence())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("The active route has no exact provider config identity.")
+            })
     }
 
     pub(crate) fn set_provider_identity(
@@ -6153,6 +6547,21 @@ impl App {
         Self::reasoning_effort_resolution_label(requested, effective, self.api_provider)
     }
 
+    /// The effort label the metrics line's route segment may state: the
+    /// resolution label when the route can prove an effective tier (or an
+    /// enabled-but-untiered toggle), `None` when it cannot (#5950). A custom
+    /// OpenAI-compatible route with no endpoint receipt is the usual `None`;
+    /// printing `high→effective unavailable` there was a placeholder that
+    /// could never resolve, so the row omits the field instead. `/status`
+    /// and the effort cycle message still state the unavailable case in
+    /// full via [`Self::reasoning_effort_display_label`].
+    #[must_use]
+    pub(crate) fn provable_reasoning_effort_label(&self) -> Option<String> {
+        (self.effective_reasoning_effort_for_active_route(self.reasoning_effort)
+            != EffectiveReasoningEffort::Unavailable)
+            .then(|| self.reasoning_effort_display_label())
+    }
+
     /// Return the concrete provider/model route whose current prompt may be
     /// inspected or replayed.
     ///
@@ -6313,6 +6722,8 @@ impl App {
                 model,
                 route_limits,
             )),
+            summary_instructions: self.compaction_summary_instructions.clone(),
+            retained_user_message_tokens: self.compaction_retained_user_message_tokens,
             ..Default::default()
         }
     }

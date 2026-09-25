@@ -7,7 +7,6 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::models::{ContentBlock, Message};
 use crate::runtime_threads::{
     CreateThreadRequest, RuntimeTurnStatus, ThreadDetail, ThreadListFilter, TurnItemKind,
     TurnItemLifecycleStatus,
@@ -18,9 +17,10 @@ use crate::session_manager::{
 };
 use crate::session_peek::{MAX_PEEK_ENTRIES, SessionPeek, build_peek};
 use crate::session_projection::{SessionQuery, SessionSortMode, SessionSummary, project_sessions};
+use codewhale_models::{ContentBlock, Message};
 
 use super::{ApiError, RuntimeApiState, map_thread_err, truncate_text};
-use crate::models::Role;
+use codewhale_models::Role;
 
 #[derive(Debug, Serialize)]
 pub(super) struct SessionsResponse {
@@ -285,16 +285,67 @@ pub(super) async fn get_session(
     ))))
 }
 
+/// `POST /v1/sessions/{id}/resume-thread` — open a saved session as a live
+/// thread.
+///
+/// Idempotent for a conversation that is already open: when an active thread
+/// already holds this session (and its checkpoint still describes the file),
+/// that thread is returned with `200 OK` instead of minting a second one with
+/// `201 Created`. Minting unconditionally is what made "continue this
+/// conversation" grow the rail by a row per visit.
+///
+/// `req.model` / `req.mode` apply only when a thread is created. An open thread
+/// keeps the route it was opened with — a caller that needs a different route
+/// is creating a conversation, not resuming one.
+///
+/// `message_count` reports the *saved session's* count. A reused thread may hold
+/// more than that: it keeps the turns it ran after the session's last save.
 pub(super) async fn resume_session_thread(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
     Json(req): Json<ResumeSessionRequest>,
 ) -> Result<(StatusCode, Json<ResumeSessionResponse>), ApiError> {
+    let _checkpoint_admission = state.runtime_threads.session_checkpoint_guard().await;
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
     let session = manager
-        .load_session(&id)
-        .map_err(|e| map_session_err(&id, e, "read"))?;
+        .resume_session(&id)
+        .map_err(|e| map_session_err(&id, e, "read"))?
+        .session;
+
+    // Validate imported image bytes before allocating a Runtime thread. This
+    // retains local history's existing bounds; invalid content cannot leave an
+    // empty session, and no path or remote image reference is dereferenced.
+    for message in session
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+    {
+        crate::image_attach::runtime_images_from_blocks(&message.content).map_err(|error| {
+            ApiError::bad_request(format!("Cannot restore session image: {error}"))
+        })?;
+    }
+
+    // The conversation may already be open. Answer with the thread that holds
+    // it rather than adding a second row for the same history (see
+    // `RuntimeThreadManager::thread_holding_session`).
+    if let Some(existing) = state.runtime_threads.thread_holding_session(&id, &session) {
+        let thread_id = existing.id;
+        let message_count = session.messages.len();
+        let summary = format!(
+            "Session '{}' is already open in thread {thread_id} ({message_count} messages)",
+            session.metadata.title
+        );
+        return Ok((
+            StatusCode::OK,
+            Json(ResumeSessionResponse {
+                thread_id,
+                session_id: id.clone(),
+                message_count,
+                summary,
+            }),
+        ));
+    }
 
     let model = req.model.unwrap_or_else(|| session.metadata.model.clone());
     let mode = req.mode.unwrap_or_else(|| {
@@ -333,19 +384,15 @@ pub(super) async fn resume_session_thread(
 
     // Link the session to the new thread so that `ensure_engine_loaded`
     // can restore the full message history from the session file.
-    if let Err(e) = state
+    state
         .runtime_threads
-        .set_thread_session_id(&thread.id, &id)
+        .set_thread_session_checkpoint(&thread.id, &session)
         .await
-    {
-        let session_ref = crate::utils::redacted_identifier_for_log(&id);
-        tracing::warn!(
-            session = %session_ref,
-            thread_id = %thread.id,
-            error = %e,
-            "Failed to link session to thread"
-        );
-    }
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Saved session was read but its Runtime checkpoint could not be bound: {e}"
+            ))
+        })?;
 
     let summary = format!(
         "Resumed session '{}' ({} messages) into thread {}",
@@ -367,6 +414,7 @@ pub(super) async fn create_session_from_thread(
     State(state): State<RuntimeApiState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<CreateSessionResponse>), ApiError> {
+    let _checkpoint_admission = state.runtime_threads.session_checkpoint_guard().await;
     let thread_id = req.thread_id.trim();
     if thread_id.is_empty() {
         return Err(ApiError::bad_request("thread_id is required"));
@@ -435,19 +483,15 @@ pub(super) async fn create_session_from_thread(
 
     // Link the session to the thread so that `ensure_engine_loaded` can
     // restore the full message history from the session file.
-    if let Err(e) = state
+    state
         .runtime_threads
-        .set_thread_session_id(&detail.thread.id, &session_handle)
+        .set_thread_session_checkpoint(&detail.thread.id, &session)
         .await
-    {
-        let session_ref = crate::utils::redacted_identifier_for_log(&session_handle);
-        tracing::warn!(
-            session = %session_ref,
-            thread_id = %detail.thread.id,
-            error = %e,
-            "Failed to link session to thread"
-        );
-    }
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Session was saved but its Runtime checkpoint could not be bound: {e}"
+            ))
+        })?;
 
     Ok((
         StatusCode::CREATED,
@@ -719,6 +763,7 @@ pub(super) async fn save_current_session(
     State(state): State<RuntimeApiState>,
     Json(req): Json<SaveSessionRequest>,
 ) -> Result<Json<SaveSessionResponse>, ApiError> {
+    let _checkpoint_admission = state.runtime_threads.session_checkpoint_guard().await;
     // Find the thread to save.
     let thread_id = match req.thread_id {
         Some(id) => id,
@@ -826,19 +871,15 @@ pub(super) async fn save_current_session(
     // restore the full message history (including thinking/tool blocks)
     // from the session file instead of reconstructing from turns.
     let session_handle = session.metadata.id.clone();
-    if let Err(e) = state
+    state
         .runtime_threads
-        .set_thread_session_id(&thread_id, &session_handle)
+        .set_thread_session_checkpoint(&thread_id, &session)
         .await
-    {
-        let session_ref = crate::utils::redacted_identifier_for_log(&session_handle);
-        tracing::warn!(
-            session = %session_ref,
-            thread_id = %thread_id,
-            error = %e,
-            "Failed to link session to thread"
-        );
-    }
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Session was saved but its Runtime checkpoint could not be bound: {e}"
+            ))
+        })?;
 
     Ok(Json(SaveSessionResponse {
         session_id: session_handle,
@@ -891,13 +932,13 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                 .content
                 .iter()
                 .map(|block| match block {
-                    crate::models::ContentBlock::Text { text, .. } => {
+                    codewhale_models::ContentBlock::Text { text, .. } => {
                         json!({ "type": "text", "text": text })
                     }
-                    crate::models::ContentBlock::Thinking { thinking, .. } => {
+                    codewhale_models::ContentBlock::Thinking { thinking, .. } => {
                         json!({ "type": "thinking", "text": thinking })
                     }
-                    crate::models::ContentBlock::ToolUse {
+                    codewhale_models::ContentBlock::ToolUse {
                         id,
                         name,
                         input,
@@ -909,7 +950,7 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                         }
                         obj
                     }
-                    crate::models::ContentBlock::ToolResult {
+                    codewhale_models::ContentBlock::ToolResult {
                         tool_use_id,
                         content,
                         is_error,
@@ -930,22 +971,22 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                         }
                         obj
                     }
-                    crate::models::ContentBlock::ServerToolUse { id, name, input } => {
+                    codewhale_models::ContentBlock::ServerToolUse { id, name, input } => {
                         json!({ "type": "tool_use", "id": id, "name": name, "input": input })
                     }
-                    crate::models::ContentBlock::ToolSearchToolResult {
+                    codewhale_models::ContentBlock::ToolSearchToolResult {
                         tool_use_id,
                         content,
                     } => {
                         json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": content })
                     }
-                    crate::models::ContentBlock::CodeExecutionToolResult {
+                    codewhale_models::ContentBlock::CodeExecutionToolResult {
                         tool_use_id,
                         content,
                     } => {
                         json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": content })
                     }
-                    crate::models::ContentBlock::ImageUrl { .. } => Value::Null,
+                    codewhale_models::ContentBlock::ImageUrl { .. } => Value::Null,
                 })
                 .collect();
             json!({
@@ -1097,5 +1138,410 @@ mod resume_thread_error_tests {
             "Failed to save runtime thread: permission denied"
         ));
         assert_eq!(storage.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session artifacts (#6163): the oversized tool outputs a session recorded as
+// `ArtifactRecord`s live under `sessions/<id>/artifacts/`. These routes list
+// the records a saved session carries and read one artifact through the same
+// confined opener the workspace file routes use. Nothing is copied anywhere.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub(super) struct SessionArtifactSummary {
+    id: String,
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    kind: crate::artifacts::ArtifactKind,
+    tool_call_id: String,
+    tool_name: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    byte_size: u64,
+    preview: String,
+    /// Session-relative storage path with `/` separators.
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SessionArtifactsResponse {
+    session_id: String,
+    artifacts: Vec<SessionArtifactSummary>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SessionArtifactReadQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SessionArtifactReadResponse {
+    artifact: SessionArtifactSummary,
+    size: u64,
+    revision: String,
+    offset: usize,
+    bytes: usize,
+    truncated: bool,
+    encoding: &'static str,
+    content: String,
+}
+
+fn artifact_summary(record: &crate::artifacts::ArtifactRecord) -> SessionArtifactSummary {
+    SessionArtifactSummary {
+        id: record.id.clone(),
+        session_id: record.session_id.clone(),
+        content_type: None,
+        kind: record.kind.clone(),
+        tool_call_id: record.tool_call_id.clone(),
+        tool_name: record.tool_name.clone(),
+        created_at: record.created_at,
+        byte_size: record.byte_size,
+        preview: record.preview.clone(),
+        path: crate::artifacts::format_artifact_relative_path(&record.storage_path),
+    }
+}
+
+pub(super) async fn list_session_artifacts(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionArtifactsResponse>, ApiError> {
+    let manager = SessionManager::new(state.sessions_dir.clone())
+        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
+    let session = manager
+        .load_session(&id)
+        .map_err(|e| map_session_err(&id, e, "read"))?;
+    Ok(Json(SessionArtifactsResponse {
+        session_id: session.metadata.id.clone(),
+        artifacts: session.artifacts.iter().map(artifact_summary).collect(),
+    }))
+}
+
+pub(super) async fn read_session_artifact(
+    State(state): State<RuntimeApiState>,
+    Path((id, artifact_id)): Path<(String, String)>,
+    Query(query): Query<SessionArtifactReadQuery>,
+) -> Result<Json<SessionArtifactReadResponse>, ApiError> {
+    let (offset, limit) = super::workspace::parse_read_window(query.offset, query.limit)?;
+    tokio::task::spawn_blocking(move || {
+        read_session_artifact_window(&state.sessions_dir, &id, &artifact_id, offset, limit)
+    })
+    .await
+    .map_err(|_| ApiError::internal("session artifact read failed"))?
+    .map(Json)
+}
+
+fn read_session_artifact_window(
+    sessions_dir: &std::path::Path,
+    id: &str,
+    artifact_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<SessionArtifactReadResponse, ApiError> {
+    if !crate::artifacts::is_valid_session_id(id) {
+        return Err(ApiError::bad_request("invalid session id"));
+    }
+    let manager = SessionManager::new(sessions_dir.to_path_buf())
+        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
+    let record = match manager.load_session_snapshot(id) {
+        Ok(session) if session.metadata.id == id => session
+            .artifacts
+            .into_iter()
+            .find(|record| record.id == artifact_id),
+        Ok(_) => return Err(ApiError::forbidden("artifact session owner does not match")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(map_session_err(id, error, "read")),
+    };
+    // The reserved image namespace always requires its immutable manifest,
+    // even if a later SavedSession index also mentions that handle.
+    let image_handle = artifact_id.strip_prefix("art_image_").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
+    let record = record.filter(|_| !image_handle);
+    let (summary, evidence) = if let Some(record) = record {
+        if record.storage_path.is_absolute()
+            || !crate::fleet::files::path_is_confined(&record.storage_path)
+            || (!record.session_id.is_empty() && record.session_id != id)
+        {
+            return Err(ApiError::forbidden(
+                "artifact record is not confined to its session",
+            ));
+        }
+        let mut summary = artifact_summary(&record);
+        summary.session_id = id.to_owned();
+        (summary, None)
+    } else {
+        // Fresh Engine sessions can publish immutable observations before a
+        // SavedSession JSON exists. Only the exact owned image manifest grants
+        // access; arbitrary relative paths and other evidence are not a fallback.
+        if !image_handle {
+            return Err(ApiError::not_found("artifact not found"));
+        }
+        let relative = PathBuf::from(id)
+            .join(crate::tools::large_output_router::evidence_metadata_relative_path(artifact_id));
+        let file = super::workspace::open_confined_file(sessions_dir, &relative, false)?;
+        let evidence = crate::tools::large_output_router::read_evidence_metadata_file(&file)
+            .map_err(|error| super::workspace::map_fs_error(error, "evidence metadata"))?;
+        let expected_path = PathBuf::from(crate::artifacts::ARTIFACTS_DIR_NAME)
+            .join(format!("{artifact_id}.image"));
+        if evidence.origin_session != id
+            || evidence.handle != artifact_id
+            || evidence.storage_path != expected_path
+            || evidence.generation != 1
+            || evidence.encoding != "binary"
+            || evidence.call_id.is_empty()
+        {
+            return Err(ApiError::forbidden(
+                "image evidence owner or path does not match",
+            ));
+        }
+        if evidence.redacted
+            || crate::tools::large_output_router::evidence_is_expired(
+                &evidence,
+                crate::tools::large_output_router::unix_millis_now(),
+            )
+        {
+            return Err(ApiError::forbidden("image evidence is no longer available"));
+        }
+        if evidence.size_bytes > crate::image_attach::MAX_IMAGE_BYTES as u64
+            || !matches!(
+                evidence.content_type.as_str(),
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+        {
+            return Err(ApiError::bad_request("invalid image evidence"));
+        }
+        let created_at = i64::try_from(evidence.created_at_unix_ms)
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .ok_or_else(|| ApiError::bad_request("invalid evidence timestamp"))?;
+        let summary = SessionArtifactSummary {
+            id: artifact_id.to_owned(),
+            session_id: id.to_owned(),
+            content_type: Some(evidence.content_type.clone()),
+            kind: crate::artifacts::ArtifactKind::ToolOutput,
+            tool_call_id: evidence.call_id.clone(),
+            tool_name: evidence.tool_name.clone(),
+            created_at,
+            byte_size: evidence.size_bytes,
+            preview: String::new(),
+            path: crate::artifacts::format_artifact_relative_path(&evidence.storage_path),
+        };
+        (summary, Some(evidence))
+    };
+    let relative = PathBuf::from(id).join(&summary.path);
+    let file = super::workspace::open_confined_file(sessions_dir, &relative, false)?;
+    let read = super::workspace::read_confined_bytes(&file)?;
+    if let Some(evidence) = evidence
+        && (read.size != evidence.size_bytes
+            || read.revision != evidence.digest
+            || crate::image_attach::sniff_media_type(&read.bytes)
+                != Some(evidence.content_type.as_str())
+            || crate::image_attach::decode_and_guard_image(&read.bytes).is_err())
+    {
+        return Err(ApiError::bad_request(
+            "image evidence integrity check failed",
+        ));
+    }
+    let (window, truncated) = super::workspace::read_window(&read.bytes, offset, limit);
+    let (encoding, content) = super::workspace::encode_window(window);
+    Ok(SessionArtifactReadResponse {
+        artifact: summary,
+        size: read.size,
+        revision: read.revision,
+        offset: offset.min(read.bytes.len()),
+        bytes: window.len(),
+        truncated,
+        encoding,
+        content,
+    })
+}
+
+#[cfg(test)]
+mod tool_media_artifact_tests {
+    use super::*;
+    use crate::tools::large_output_router::{
+        EvidenceArtifact, EvidenceRetentionState, evidence_metadata_relative_path, unix_millis_now,
+    };
+    use base64::Engine as _;
+
+    fn fixture(root: &std::path::Path) -> EvidenceArtifact {
+        let id = format!("art_image_{}", "a".repeat(64));
+        let relative = PathBuf::from("artifacts").join(format!("{id}.image"));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 1)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = bytes.into_inner();
+        let now = unix_millis_now();
+        let evidence = EvidenceArtifact {
+            handle: id,
+            digest: crate::hashing::sha256_hex(&bytes),
+            size_bytes: bytes.len() as u64,
+            content_type: "image/png".into(),
+            tool_name: "screenshot".into(),
+            call_id: "image-call".into(),
+            origin_session: "media_owner".into(),
+            generation: 1,
+            redacted: false,
+            encoding: "binary".into(),
+            retention_state: EvidenceRetentionState::Live,
+            created_at_unix_ms: now,
+            retain_until_unix_ms: now + 60_000,
+            storage_path: relative,
+        };
+        std::fs::create_dir_all(root.join("media_owner/artifacts")).unwrap();
+        std::fs::write(root.join("media_owner").join(&evidence.storage_path), bytes).unwrap();
+        save_manifest(root, &evidence);
+        evidence
+    }
+
+    fn save_manifest(root: &std::path::Path, evidence: &EvidenceArtifact) {
+        std::fs::write(
+            root.join("media_owner")
+                .join(evidence_metadata_relative_path(&evidence.handle)),
+            serde_json::to_vec(evidence).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn decode(response: &SessionArtifactReadResponse) -> Vec<u8> {
+        if response.encoding == "base64" {
+            base64::engine::general_purpose::STANDARD
+                .decode(&response.content)
+                .unwrap()
+        } else {
+            response.content.as_bytes().to_vec()
+        }
+    }
+
+    #[test]
+    fn tool_media_artifact_reads_without_saved_session_and_retains_window_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = fixture(temp.path());
+        assert!(!temp.path().join("media_owner.json").exists());
+        let first =
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 7)
+                .unwrap();
+        let rest =
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 7, 1024)
+                .unwrap();
+        assert_eq!(first.artifact.session_id, "media_owner");
+        assert_eq!(first.artifact.tool_call_id, "image-call");
+        assert_eq!(first.artifact.content_type.as_deref(), Some("image/png"));
+        assert_eq!(first.revision, rest.revision);
+        assert!(first.truncated);
+        assert!(!rest.truncated);
+        let mut bytes = decode(&first);
+        bytes.extend(decode(&rest));
+        assert_eq!(crate::hashing::sha256_hex(&bytes), evidence.digest);
+        assert_eq!(
+            read_session_artifact_window(temp.path(), "other_owner", &evidence.handle, 0, 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            read_session_artifact_window(temp.path(), "../media_owner", &evidence.handle, 0, 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn tool_media_artifact_rejects_wrong_owner_expiry_spoofed_mime_and_changed_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = fixture(temp.path());
+        let mut owner = evidence.clone();
+        owner.origin_session = "foreign".into();
+        let mut handle = evidence.clone();
+        handle.handle = "forged".into();
+        let mut path = evidence.clone();
+        path.storage_path = PathBuf::from("../outside.png");
+        let mut generation = evidence.clone();
+        generation.generation = 2;
+        for invalid in [owner, handle, path, generation] {
+            save_manifest(temp.path(), &invalid);
+            assert_eq!(
+                read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 1024)
+                    .unwrap_err()
+                    .status,
+                StatusCode::FORBIDDEN
+            );
+        }
+        let mut expired = evidence.clone();
+        expired.retain_until_unix_ms = 0;
+        save_manifest(temp.path(), &expired);
+        assert_eq!(
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        let mut redacted = evidence.clone();
+        redacted.redacted = true;
+        save_manifest(temp.path(), &redacted);
+        assert_eq!(
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        let mut mime = evidence.clone();
+        mime.content_type = "image/jpeg".into();
+        save_manifest(temp.path(), &mime);
+        assert_eq!(
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+        save_manifest(temp.path(), &evidence);
+        std::fs::write(
+            temp.path().join("media_owner").join(&evidence.storage_path),
+            b"changed",
+        )
+        .unwrap();
+        assert_eq!(
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 1024)
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_media_artifact_rejects_manifest_and_payload_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = fixture(temp.path());
+        let manifest = temp
+            .path()
+            .join("media_owner")
+            .join(evidence_metadata_relative_path(&evidence.handle));
+        let outside = temp.path().join("outside.json");
+        std::fs::rename(&manifest, &outside).unwrap();
+        symlink(&outside, &manifest).unwrap();
+        assert!(
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 1024)
+                .is_err()
+        );
+        std::fs::remove_file(&manifest).unwrap();
+        save_manifest(temp.path(), &evidence);
+        let payload = temp.path().join("media_owner").join(&evidence.storage_path);
+        let outside = temp.path().join("outside.png");
+        std::fs::rename(&payload, &outside).unwrap();
+        symlink(&outside, &payload).unwrap();
+        assert!(
+            read_session_artifact_window(temp.path(), "media_owner", &evidence.handle, 0, 1024)
+                .is_err()
+        );
     }
 }

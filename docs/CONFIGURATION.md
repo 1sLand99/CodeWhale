@@ -15,6 +15,26 @@ explicit control-plane settings. `.env` is read from a stable regular-file
 handle, is capped at 1 MiB, and symbolic links, reparse points, and multiply
 linked files are rejected.
 
+## Reading and checking configuration from the CLI
+
+`codewhale config get <key>` reads scalar keys, whole tables such as `tools`,
+and nested paths such as `tools.user_input_timeout_seconds`. Displayed tables
+and nested values apply the same recursive credential redaction as `config dump`.
+
+`config set` supports its named scalar keys and the provider, route, and
+notification commands. Other dotted writes fail before modifying the file and
+name the TOML table to edit. For example, set a tools timeout in the file as:
+
+```toml
+[tools]
+user_input_timeout_seconds = 0
+```
+
+`codewhale config doctor` checks credential presence and endpoint shape. Settings
+preserved for other runtime readers are not classified as unsupported merely
+because the CLI dispatcher does not own them. A clean result from this command
+does not validate every runtime setting (#6083).
+
 ## Constitution, project instructions, and repo authority
 
 Codewhale has several instruction surfaces. They are deliberately separate so a
@@ -315,8 +335,7 @@ account. `codewhale account login` starts the Codewhale browser device flow;
 session for the selected `--profile`. Account sessions prefer the OS
 credential manager and fall back automatically to the private `0600`
 Codewhale secrets file when no credential manager is available (headless
-hosts, SSH, containers); the former
-`CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE` opt-in is deprecated and ignored.
+hosts, SSH, containers).
 `codewhale account keys list|set|remove` manages the
 signed-in account's BYOK vault without displaying secret values. The older
 `codewhale cloud ...` spelling remains a command alias.
@@ -421,11 +440,11 @@ Anthropic providers, set `provider = "<id>"` or pass
 `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`,
 `openrouter`, `orcarouter`, `xiaomi-mimo`, `novita`, `fireworks`,
 `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`,
-`ollama`, `ollama-cloud`, `huggingface`, `together`, `qianfan`, `openai-codex`,
+`ollama`, `ollama-cloud`, `huggingface`, `modelscope`, `together`, `qianfan`, `openai-codex`,
 `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`,
 `sakana`, `longcat`, `opencode-go`, `opencode-zen`, `meta`, `xai`,
-`mistral`, `telecomjs`, `modelstudio-token-plan`, `google`, `antigravity`,
-`edenai`, `concentrate`, and `custom` (a user-defined OpenAI-compatible endpoint via
+`mistral`, `telecomjs`, `modelstudio-token-plan`, `google`,
+`edenai`, `concentrate`, `codewhale`, and `custom` (a user-defined OpenAI-compatible endpoint via
 `[providers.<name>]`).
 For the provider-by-provider registry, including wire protocol, auth variables,
 default base URLs, model IDs, and capability metadata, see
@@ -473,6 +492,36 @@ and uses `trinity-large-thinking` by default for Codewhale agent work.
 the direct Arcee provider uses the bare `trinity-large-thinking` ID. Direct
 Arcee large-model API calls are tracked as 256K-context BF16 serving; Thinking
 is reasoning-capable, while Preview is not marked as a thinking model.
+
+### OpenRouter vendor pinning
+
+OpenRouter serves each model through several upstream vendors, and Codewhale
+can pin requests to a vendor with `[providers.openrouter] vendor` (#6007):
+
+```toml
+provider = "openrouter"
+[providers.openrouter]
+model = "deepseek/deepseek-v4-pro"
+vendor = "deepinfra" # copy the vendor slug from the model's OpenRouter page
+```
+
+This sends `"provider": {"order": ["deepinfra"], "allow_fallbacks": false}`
+on OpenRouter requests. A base slug can match multiple endpoint variants;
+copy a full slug such as `deepinfra/turbo` to select one variant. An unavailable
+pin fails at OpenRouter. Codewhale's separate `fallback_providers` setting can
+still switch the whole route after a recoverable error.
+
+The pin applies across OpenRouter models, including auxiliary requests on that
+route. Set `vendor = ""` to clear it. Reload config or restart to apply edits;
+requests already in flight keep their captured route. Other providers do not
+inherit the pin. `/preview-request` shows the primary request's routing fields.
+
+Model strings still pass through verbatim: `:floor` sorts by price, `:nitro`
+sorts by throughput, and `@preset/my-team-preset` references an account preset.
+See OpenRouter's [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+and [presets](https://openrouter.ai/docs/guides/features/presets) documentation.
+Codewhale does not fetch per-vendor endpoint prices or availability; pinned
+usage reports a routing-dependent unknown cost instead of a catalog estimate.
 
 ### Custom OpenAI-Compatible Gateways
 
@@ -619,18 +668,27 @@ auto-select MiMo endpoints. Use
 `https://token-plan-cn.xiaomimimo.com/v1` for China-region accounts, or
 `https://token-plan-ams.xiaomimimo.com/v1` for Europe/Amsterdam accounts.
 
-### Auto Model Routing (`[auto.router]`)
+### Auto Model Routing (`[auto]`, `[auto.router]`)
 
-With `model = "auto"`, Codewhale routes each turn between a strong and a cheap
-model. The routing decision comes from a small classifier call, or from a local
-heuristic when no classifier route is available.
+With `model = "auto"`, each turn runs on your **declared default model** unless
+you have opted into something else. Auto never guesses a cheaper or stronger
+model from how a request is worded; the old keyword-and-length heuristic was
+removed (`auto_route_declared_fallback` in `crates/tui/src/model_routing.rs`).
+Two optional layers change that:
 
-**There is no default classifier.** With `[auto.router]` unset, Auto is local
-and free: it uses the heuristic and makes no classifier call, whatever keys you
-hold. Holding a DeepSeek key used to elect `deepseek-v4-flash` automatically;
-that was removed because it spent tokens on a route the user never chose and
-privileged one provider over the rest (`crates/tui/src/config.rs:2392-2402`).
-Electing a network classifier is now something you write down.
+- an `[auto.router]` classifier, which you write down, that picks a model per
+  turn; and
+- `[auto] cost_saving`, which prefers the active provider's fast sibling.
+
+With neither set, Auto is local and free: the turn uses the default model and
+no classifier call is made.
+
+**There is no default classifier.** With `[auto.router]` unset, no classifier
+call happens, whatever keys you hold. Holding a DeepSeek key used to elect
+`deepseek-v4-flash` automatically. That was removed because it spent tokens on
+a route the user never chose and privileged one provider over the rest
+(`AutoRouterConfig` in `crates/tui/src/config.rs`). Electing a network
+classifier is now something you write down.
 
 Point the classifier at any configured provider with `[auto.router]`:
 
@@ -639,13 +697,86 @@ Point the classifier at any configured provider with `[auto.router]`:
 provider = "zai"
 model = "glm-5-turbo"
 thinking = "off"        # optional; defaults to off
+timeout_secs = 4        # optional; default 4, 0 = default, capped at 300
 ```
 
-A classifier call happens only when `[auto.router]` is set *and* that provider
-has a key — `router_available = router_configured && has_api_key_for(...)`
-(`crates/tui/src/model_inventory.rs:206-218`). Either condition failing means
-the heuristic decides, not a failure. The turn's route receipt (`/status` →
-Auto) records which one it was.
+A classifier call happens only when `[auto.router]` names both `provider` and
+`model` *and* that provider has a key:
+`router_available = router_configured && has_api_key_for(...)` in
+`ModelInventory::from_config` (`crates/tui/src/model_inventory.rs`). If either
+condition fails, or the classifier call errors or times out, the local
+fallback decides: the default model, or the fast sibling under `cost_saving`.
+The turn's route receipt (`/status` → Auto) records which path was taken, and a
+router you configured that cannot run or fails (missing key, HTTP error,
+timeout, invalid answer) is shown as `Auto router: failing — …` rather than
+silently ignored.
+
+#### Set up model routing
+
+`/router` (also `/model router`) opens one Router setup view with these
+presets. Each writes only `[auto.router]`; none is ever chosen for you.
+
+| Preset | What it writes | Cost and privacy |
+| --- | --- | --- |
+| `/router jev` | Jev, TypeSafe's decision model, over OpenRouter (`typesafe/jev-1.13`) or TypeSafe direct, whichever key you have | About $0.00002 per turn ($0.042 per million input tokens, output free). Your latest request and up to six recent context lines go to OpenRouter → TypeSafe (or TypeSafe). |
+| `/router fast` | The active provider's runnable fast tier with thinking off | Your existing key; the classifier sees the same request text. |
+| `/router off` | Removes `[auto.router]` | No router call; Auto turns use the default model, or the fast tier while `[auto] cost_saving = true` (Off leaves that setting alone). |
+| `/router custom` | Nothing; prints the TOML to edit | — |
+
+Choosing Jev or Fast makes **one test call** with a fixed sample request and
+shows the tier it picked, the probabilities and confidence, the latency and the
+provider-reported cost. `Enter` (or `/router save <preset>`) then saves through
+the normal config writer; `Esc` discards it. TypeSafe paused new signups on
+2026-09-22, so OpenRouter is the default route for new users. A TypeSafe key is
+read from `TYPESAFE_API_KEY`, the `typesafe` secret-store entry, or
+`[providers.typesafe] api_key` / `api_key_env`.
+
+#### Decision routers (`kind = "decision"`)
+
+A decision router asks a non-generative decision model one typed question per
+turn — a Choice between the active provider's `fast` and `strong` tiers, plus a
+thinking level — and gets calibrated probabilities back. No prose is parsed.
+
+```toml
+[auto.router]
+kind = "decision"             # default "chat"
+provider = "openrouter"       # or "typesafe"
+model = "typesafe/jev-1.13"   # "~typesafe/jev-latest" also works; TypeSafe direct: "jev-latest"
+timeout_secs = 2
+min_confidence = 0.5          # default 0.5, clamped to 0..1
+```
+
+- The router is called only when the active provider has a runnable strong/fast
+  pair; otherwise there is no call and no spend.
+- An answer below `min_confidence` takes the local fallback. Under
+  `[auto] cost_saving`, a `strong` answer also needs a probability of at least
+  0.75, or the turn stays on the fast tier.
+- An unknown `kind`, or a decision `provider` other than `openrouter` /
+  `typesafe`, leaves the router unconfigured and shown as failing.
+- `thinking` is ignored for decision routers. OpenRouter spend is recorded like
+  any routed usage; TypeSafe-direct spend appears on the receipt only.
+
+Two `[auto]` keys shape routing (`AutoConfig` in `crates/tui/src/config.rs`):
+
+```toml
+[auto]
+cost_saving = false     # default false
+cross_provider = false  # default false
+```
+
+- **`cost_saving`** (default `false`). Without a classifier, Auto pins the
+  active provider's validated fast sibling instead of the default model. A
+  provider with no runnable fast sibling stays on the default. With a
+  classifier, the classifier is told to prefer the fast tier for routine or
+  ambiguous work and to pick the strong tier only for clearly agentic,
+  multi-step, architecture, security or debugging work. Cost-saving never
+  switches provider just to save money.
+- **`cross_provider`** (default `false`). Auto stays on the provider the session
+  is configured to use. The classifier is only shown that provider's models,
+  and the fallback never leaves it. Setting `cross_provider = true` lets the
+  classifier choose among every runnable provider. There is no interactive
+  toggle for `cross_provider`; it has to be set in config. A decision router
+  always chooses within the active provider.
 
 To bootstrap MCP and skills directories at their resolved paths, run `codewhale setup`.
 To only scaffold MCP, run `codewhale mcp init`.
@@ -746,8 +877,13 @@ byte ceilings (#5367) raise the model-visible floor after that routing
 and never lower it:
 
 - `read_result_max_bytes` — cap for a single `read` / `read_file`
-  result. Absent keeps the compile-time defaults (50KiB / 2000 lines
-  for `read`, 16KiB / 500 lines for `read_file`).
+  result. Absent keeps the compile-time defaults (100000 bytes for
+  `read`, which has no line cap; 16KiB / 500 lines for `read_file`).
+  For `read` this is the middle of a three-layer budget: the model's
+  own per-call `max_bytes` (hard maximum 500000) raises the budget for
+  one call, this setting raises the floor for the whole process, and
+  either way 2MiB is the absolute ceiling. Highest wins; neither layer
+  can lower a budget the other granted.
 - `tool_result_max_bytes` — cap for a generic tool result after
   spillover. Absent keeps the 12K-character compact floor (48K on
   windows ≥500K tokens). Hard cap is 2MiB.
@@ -791,27 +927,54 @@ Use the table for the provider you are actually on (`providers.openai`,
 `providers.deepseek`, `providers.moonshot`, …); `/status` names it for you. The
 value is a positive token count for the route's *total* window.
 
+When one gateway fronts models with heterogeneous windows, scope the override
+to an exact wire model id with `[providers.<name>.model_context_windows]`:
+
+```toml
+[providers.command_code]
+context_window = 204800
+
+[providers.command_code.model_context_windows]
+"MiniMaxAI/MiniMax-M2.5" = 204800
+"google/gemini-3.1-flash-lite" = 1000000
+```
+
+Keys are the exact wire model ids the route sends (dotted and `org/model`
+spellings both work as TOML keys when quoted); each value must be a positive
+token count. A matching entry beats the provider-level `context_window` for
+that model only — every other model on the provider still resolves against
+`context_window` and the rungs below. From the CLI:
+
+```bash
+codewhale config set 'providers.command_code.model_context_windows."MiniMaxAI/MiniMax-M2.5"' 204800
+codewhale config unset 'providers.command_code.model_context_windows."MiniMaxAI/MiniMax-M2.5"'
+```
+
 ### How the effective window is resolved
 
 First match wins, and the source label each surface prints is exactly this
 rung:
 
-1. `configured` — `[providers.<name>] context_window` in `config.toml`. A hard
-   override: nothing below it can raise or lower the result. Read-time aliases:
+1. `configured (per-model)` — a `[providers.<name>.model_context_windows]`
+   entry keyed by the route's exact wire model id. A hard override for that
+   model only; it never rewrites another model's window.
+2. `configured` — `[providers.<name>] context_window` in `config.toml`. A hard
+   override for every model on the provider: nothing below it can raise or
+   lower the result. Read-time aliases:
    `contextWindow`, `context_window_tokens`, `contextWindowTokens`,
    `context_length`, `contextLength`.
-2. `provider-reported` — route-scoped 1M metadata a provider actually reported
+3. `provider-reported` — route-scoped 1M metadata a provider actually reported
    for the Kimi Code `k3` route, when it was observed within the last 24 hours.
-3. `static Kimi Code safe floor` — 262,144 tokens for Kimi Code memberships,
+4. `static Kimi Code safe floor` — 262,144 tokens for Kimi Code memberships,
    because 1M access is plan-gated (Allegretto and above).
-4. `catalog` — the bundled route catalog (hand-curated offerings first, then
+5. `catalog` — the bundled route catalog (hand-curated offerings first, then
    the bundled Models.dev rows). For `openai-codex`, a fresh (under 24 hours)
    `$CODEX_HOME` model roster corrects this rung.
-5. `model-name hint` — an `_Nk` suffix parsed from the model name itself
+6. `model-name hint` — an `_Nk` suffix parsed from the model name itself
    (`qwen3-32b-256k` → 256,000), vendor-agnostic. A naming convention the
    serving engine may not honor is not a fact about the route, so this rung
    sits *below* the catalog: any catalog row for the same id beats it (#5441).
-6. `fallback` — the static per-provider capability table: 200,000 for
+7. `fallback` — the static per-provider capability table: 200,000 for
    Anthropic-wire routes, 128,000 for `openai-codex`, 8,192 for Ollama,
    otherwise Codewhale's static per-model metadata, and finally 128,000 when
    the model is unknown.
@@ -824,9 +987,10 @@ number — but they are guesses, not capabilities anyone checked. Every surface
 that renders one of these windows appends `(unverified)` to its source label
 (the status line, the context-pressure message, `/status`, `/config`, and the
 model picker chip), so a window you did not configure and no provider reported
-can never read as a verified limit (#5239, #5441). The `context_window`
-provider-table key above is the fix: a configured window is a hard override
-and renders as `configured` with no marker.
+can never read as a verified limit (#5239, #5441). The `context_window` and
+`model_context_windows` provider-table keys above are the fix: a configured
+window is a hard override and renders as `configured` (or
+`configured (per-model)`) with no marker.
 
 Output ceilings follow the same rule (#5440): an Anthropic-family model the
 catalog does not describe keeps the 64K Messages floor as its clamp, and the
@@ -835,12 +999,14 @@ pickers label those numbers `unverified` (or an "assumed floor") instead of
 `documented`. Clamping to a defensible floor is a product choice; presenting
 it as a documented fact is not.
 
-There is no environment variable for the context window, and no per-model
-override key. The per-provider `context_window` is the only user knob, which is
-also why it is the right one to set when a gateway or self-hosted runtime
-serves a window Codewhale's catalog does not model. Codewhale will not invent a
-window it cannot justify — it falls back to a conservative value, labels it
-`fallback`, and marks it `(unverified)` at every surface that shows it.
+There is no environment variable for the context window; the provider-table
+`context_window` and per-model `model_context_windows` keys are the user
+knobs. They are the right ones to set when a gateway or self-hosted runtime
+serves a window Codewhale's catalog does not model — per-model when only some
+of a provider's routes differ, provider-wide when they all do. Codewhale will
+not invent a window it cannot justify — it falls back to a conservative value,
+labels it `fallback`, and marks it `(unverified)` at every surface that shows
+it.
 
 ### Adjacent knobs
 
@@ -852,6 +1018,10 @@ window it cannot justify — it falls back to a conservative value, labels it
   absolute compaction point along with it.
 - `auto_compact` (settings.toml, on/off): turns automatic compaction off
   entirely; `/compact` and Ctrl+L stay available.
+- `[compaction] summary_instructions` and
+  `[compaction] retained_user_message_tokens` (config.toml): standing
+  summarizer instructions and the verbatim user-message retention budget. See
+  the `compaction.*` entry in the config-key reference below.
 - `CODEWHALE_MAX_OUTPUT_TOKENS` (environment variable; legacy alias
   `DEEPSEEK_MAX_OUTPUT_TOKENS`): overrides the requested output cap. Without an
   override, Codewhale starts at the safe `65536` request cap and intersects it
@@ -867,6 +1037,25 @@ window it cannot justify — it falls back to a conservative value, labels it
   default instead of activating a stale legacy setting. There is no
   `max_output_tokens` key in `config.toml`.
 
+Before compaction replaces conversation history, Codewhale durably saves the
+original messages to the session's `artifacts/context-transfer-<id>.json` and,
+when a model summary is produced, its handoff to the matching `.md` file.
+These use the existing session artifact store and persistence redaction.
+A failed write aborts compaction without replacing context. Pruning-only passes
+save the original messages without making an extra model call. Pressure metadata
+shows estimated input tokens and the configured trigger; it is an estimate, not
+an exact promise about a provider's remaining context.
+
+Compaction history is available through `codewhale metrics` (or `--json`) and
+`audit.log` in the Codewhale home. Completed passes record their trigger,
+summary/pruning path, message and estimated-token counts, effective threshold,
+and summarizer token usage. Automatic refusals are recorded once per turn with
+their reason. These are local diagnostics, not provider invoice totals; earlier
+artifacts are not retroactively counted. A text-mode `exec` that attempts
+compaction saves its owning session at turn completion so its recovery artifacts
+remain discoverable. A killed process may leave artifacts without that final
+session snapshot; the audit writer reports I/O failures instead of inventing data.
+
 See [Settings File](#settings-file-persistent-ui-preferences) for the
 compaction settings and [Token Quantities and
 Drivers](#token-quantities-and-drivers) for what each displayed token number
@@ -878,7 +1067,7 @@ You can define multiple profiles in the same file:
 
 ```toml
 api_key = "PERSONAL_KEY"
-default_text_model = "deepseek-v4-pro"
+default_text_model = "deepseek-flash"
 
 [profiles.work]
 api_key = "WORK_KEY"
@@ -955,7 +1144,7 @@ aliases. When both forms are set the `CODEWHALE_*` value wins; the
 `DEEPSEEK_*` form is kept for older shells:
 
 - `CODEWHALE_PROVIDER` (preferred) / `DEEPSEEK_PROVIDER` (legacy alias) —
-  `deepseek|deepseek-anthropic|nvidia-nim|openai|atlascloud|wanjie-ark|volcengine|openrouter|xiaomi-mimo|novita|fireworks|siliconflow|arcee|siliconflow-CN|moonshot|sglang|vllm|ollama|ollama-cloud|huggingface|together|qianfan|openai-codex|anthropic|openmodel|zai|stepfun|minimax|deepinfra|mistral`
+  `deepseek|deepseek-anthropic|nvidia-nim|openai|atlascloud|wanjie-ark|volcengine|openrouter|xiaomi-mimo|novita|fireworks|siliconflow|arcee|siliconflow-CN|moonshot|sglang|vllm|ollama|ollama-cloud|huggingface|modelscope|together|qianfan|openai-codex|anthropic|openmodel|zai|stepfun|minimax|deepinfra|mistral`
 - `CODEWHALE_MODEL` (preferred) / `DEEPSEEK_MODEL` (legacy alias) — default model for the active provider
 - `CODEWHALE_BASE_URL` (preferred) / `DEEPSEEK_BASE_URL` (legacy alias) — base URL for the active provider
 
@@ -1011,6 +1200,7 @@ Remaining variables:
 - `FIREWORKS_BASE_URL`
 - `FIREWORKS_MODEL`
 - `HUGGINGFACE_API_KEY` or `HF_TOKEN` (`HF_TOKEN` is a fallback alias accepted when provider is `huggingface`)
+- `MODELSCOPE_API_KEY`
 - `HUGGINGFACE_BASE_URL` or `HF_BASE_URL`
 - `HUGGINGFACE_MODEL` or `HF_MODEL`
 - `SILICONFLOW_API_KEY`
@@ -1073,7 +1263,9 @@ the `CODEWHALE_*` value wins.
 - `CODEWHALE_MEMORY` (`1|on|true|yes|y|enabled` turns user memory on)
 - `CODEWHALE_MEMORY_PATH`
 - `CODEWHALE_TELEMETRY` / `DEEPSEEK_TELEMETRY` (legacy alias) — anonymous usage
-  counting, on by default and disclosed on first interactive launch. Accepts `0|1|true|false|yes|no|on|off|enabled|
+  counting is on by default in the current 0.9.12 source, with a disclosure
+  naming Codewhale and PostHog and an easy durable opt-out. Prior explicit
+  declines remain off. Accepts `0|1|true|false|yes|no|on|off|enabled|
   disabled`. An explicit "off" is a **floor**: it beats `--telemetry true` and
   `telemetry = true` in config, and a value this list cannot read also resolves
   to off, because a typo in a kill switch must never resolve to "on". See
@@ -1574,6 +1766,8 @@ Common settings keys:
   validation. `/theme schema` prints the embedded JSON Schema and `/theme path`
   shows the exact directory. An overlay names one compiled `base` theme and
   changes only listed semantic colors; it cannot include or read another file.
+  Open `/theme` to browse valid overlays, preview them live, and keep the
+  active `custom:<name>` selector when the picker is opened without moving.
 - `auto_compact` (on/off, model-aware default on for known context windows
   unless explicitly configured)
 - `auto_compact_threshold_percent` (10-100, default `80`): pre-send
@@ -1625,9 +1819,10 @@ Common settings keys:
 - `show_thinking` (on/off)
 - `thinking_default_expanded` (on/off, default off): renders thinking blocks
   expanded initially when `show_thinking` is enabled. Space still toggles the
-  selected block, so setting this to `true` inverts the default without
-  removing per-block folding. This is useful in SSH/tmux environments where
-  the Space binding may be intercepted.
+  selected block, and it decides only the blocks you have not touched: a block
+  you expanded or collapsed yourself keeps that state if you change this
+  setting later. This is useful in SSH/tmux environments where the Space
+  binding may be intercepted.
 - `thinking_preview_lines` (integer, default `2`): how many body rows a
   **collapsed** completed thought still shows. `0` is header-only; `10` is
   the older dump. Live streaming preview is unchanged. Expand a block with
@@ -1706,7 +1901,7 @@ operations and four-state To-do list as plain text, running work first. It
 reads the same snapshots as the styled Work surface and owns no parallel
 progress state.
 
-Plan and Act are the everyday visible modes in the UI; Operate is an explicit
+Plan and Work are the everyday visible modes in the UI; Operate is an explicit
 preview entry while its Workflow control surface is still being built. Switch
 between them with `/mode`. For compatibility, older settings files with
 `default_mode = "normal"` still load as `agent`.
@@ -1767,51 +1962,48 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 
 ### Core keys (used by the TUI/engine)
 
-- `provider` (string, optional): `deepseek` (default), `deepseek-anthropic`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`, `ollama`, `ollama-cloud`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, `opencode-go`, `meta`, `mistral`, `telecomjs`, `xai`, `orcarouter`, `modelstudio-token-plan`, `google`, `antigravity`, `edenai`, or `custom`. Legacy `deepseek-cn` configs are still accepted as an alias for `deepseek`; DeepSeek uses the same official host [`https://api.deepseek.com`](https://api-docs.deepseek.com/) worldwide. `deepseek-anthropic` targets DeepSeek's Anthropic Messages-compatible endpoint at `https://api.deepseek.com/anthropic` using `DEEPSEEK_API_KEY`; `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `openai` targets a generic OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; `atlascloud` targets AtlasCloud's OpenAI-compatible endpoint at `https://api.atlascloud.ai/v1`; `wanjie-ark` targets Wanjie Ark's OpenAI-compatible endpoint at `https://maas-openapi.wanjiedata.com/api/v1`; `volcengine` targets Volcengine Ark's OpenAI-compatible coding endpoint at `https://ark.cn-beijing.volces.com/api/coding/v3`; `openrouter` targets `https://openrouter.ai/api/v1`; `xiaomi-mimo` targets Xiaomi MiMo's OpenAI-compatible endpoint, using `https://token-plan-sgp.xiaomimimo.com/v1` by default for Token Plan keys (`tp-...`) and `https://api.xiaomimimo.com/v1` for pay-as-you-go keys. For Token Plan accounts outside the Singapore default, set `base_url` explicitly or use `mode = "token-plan-cn"` for China and `mode = "token-plan-ams"` for Europe/Amsterdam; `novita` targets `https://api.novita.ai/openai/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `siliconflow` targets SiliconFlow, defaulting to `https://api.siliconflow.com/v1`; `arcee` targets Arcee AI's OpenAI-compatible endpoint at `https://api.arcee.ai/api/v1`; `siliconflow-CN` targets the SiliconFlow China regional endpoint through `[providers.siliconflow_cn]`; `moonshot` targets Moonshot/Kimi, defaulting to `https://api.moonshot.ai/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`; `ollama` targets Ollama's OpenAI-compatible endpoint, defaulting to `http://localhost:11434/v1`; `huggingface` targets Hugging Face Inference Providers at `https://router.huggingface.co/v1`; `together` targets Together AI at `https://api.together.xyz/v1`; `qianfan` targets Baidu Qianfan at `https://api.baiduqianfan.ai/v1`; `openai-codex` targets ChatGPT/Codex OAuth; `anthropic` targets Claude's native Messages API; `openmodel` targets OpenModel's Anthropic-compatible Messages API at `https://api.openmodel.ai`; `zai` targets Z.ai at `https://api.z.ai/api/coding/paas/v4`; `stepfun` targets StepFun at `https://api.stepfun.ai/v1`; `minimax` targets MiniMax at `https://api.minimax.io/v1`; `deepinfra` targets DeepInfra at `https://api.deepinfra.com/v1/openai`; `sakana` targets Sakana AI Fugu at `https://api.sakana.ai/v1`; `longcat` targets Meituan LongCat at `https://api.longcat.chat/openai/v1`; `opencode-go` targets the subscription-backed OpenCode Go Chat Completions route at `https://opencode.ai/zen/go/v1`; `meta` targets Meta Model API; `mistral` targets Mistral AI's OpenAI-compatible endpoint at `https://api.mistral.ai/v1`; `telecomjs` targets TelecomJS TokenHub at `https://aigw.telecomjs.com/v1`; and `xai` targets xAI's API-key or OAuth route.
+- `provider` (string, optional): `deepseek` (default), `deepseek-anthropic`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`, `ollama`, `ollama-cloud`, `huggingface`, `modelscope`, `together`, `qianfan`, `openai-codex`, `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, `opencode-go`, `meta`, `mistral`, `telecomjs`, `xai`, `orcarouter`, `modelstudio-token-plan`, `google`, `edenai`, or `custom`. Legacy `deepseek-cn` configs are still accepted as an alias for `deepseek`; DeepSeek uses the same official host [`https://api.deepseek.com`](https://api-docs.deepseek.com/) worldwide. `deepseek-anthropic` targets DeepSeek's Anthropic Messages-compatible endpoint at `https://api.deepseek.com/anthropic` using `DEEPSEEK_API_KEY`; `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `openai` targets a generic OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; `atlascloud` targets AtlasCloud's OpenAI-compatible endpoint at `https://api.atlascloud.ai/v1`; `wanjie-ark` targets Wanjie Ark's OpenAI-compatible endpoint at `https://maas-openapi.wanjiedata.com/api/v1`; `volcengine` targets Volcengine Ark's OpenAI-compatible coding endpoint at `https://ark.cn-beijing.volces.com/api/coding/v3`; `openrouter` targets `https://openrouter.ai/api/v1`; `xiaomi-mimo` targets Xiaomi MiMo's OpenAI-compatible endpoint, using `https://token-plan-sgp.xiaomimimo.com/v1` by default for Token Plan keys (`tp-...`) and `https://api.xiaomimimo.com/v1` for pay-as-you-go keys. For Token Plan accounts outside the Singapore default, set `base_url` explicitly or use `mode = "token-plan-cn"` for China and `mode = "token-plan-ams"` for Europe/Amsterdam; `novita` targets `https://api.novita.ai/openai/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `siliconflow` targets SiliconFlow, defaulting to `https://api.siliconflow.com/v1`; `arcee` targets Arcee AI's OpenAI-compatible endpoint at `https://api.arcee.ai/api/v1`; `siliconflow-CN` targets the SiliconFlow China regional endpoint through `[providers.siliconflow_cn]`; `moonshot` targets Moonshot/Kimi, defaulting to `https://api.moonshot.ai/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`; `ollama` targets Ollama's OpenAI-compatible endpoint, defaulting to `http://localhost:11434/v1`; `huggingface` targets Hugging Face Inference Providers at `https://router.huggingface.co/v1`; `modelscope` targets ModelScope's OpenAI-compatible inference API at `https://api-inference.modelscope.cn/v1`; `together` targets Together AI at `https://api.together.xyz/v1`; `qianfan` targets Baidu Qianfan at `https://api.baiduqianfan.ai/v1`; `openai-codex` targets ChatGPT/Codex OAuth; `anthropic` targets Claude's native Messages API; `openmodel` targets OpenModel's Anthropic-compatible Messages API at `https://api.openmodel.ai`; `zai` targets Z.ai at `https://api.z.ai/api/coding/paas/v4`; `stepfun` targets StepFun at `https://api.stepfun.ai/v1`; `minimax` targets MiniMax at `https://api.minimax.io/v1`; `deepinfra` targets DeepInfra at `https://api.deepinfra.com/v1/openai`; `sakana` targets Sakana AI Fugu at `https://api.sakana.ai/v1`; `longcat` targets Meituan LongCat at `https://api.longcat.chat/openai/v1`; `opencode-go` targets the subscription-backed OpenCode Go model-aware route (Chat Completions, Responses, or Messages according to the documented model) at `https://opencode.ai/zen/go/v1`; `meta` targets Meta Model API; `mistral` targets Mistral AI's OpenAI-compatible endpoint at `https://api.mistral.ai/v1`; `telecomjs` targets TelecomJS TokenHub at `https://aigw.telecomjs.com/v1`; and `xai` targets xAI's API-key or OAuth route.
 - `opencode-zen` (string provider value): selects the model-aware OpenCode Zen gateway through `[providers.opencode_zen]`. The default base URL is `https://opencode.ai/zen/v1`, the default model is `gpt-5.6`, and credentials come from `api_key`, `OPENCODE_ZEN_API_KEY`, or fallback `OPENCODE_API_KEY`—never ChatGPT/Codex OAuth. `OPENCODE_ZEN_BASE_URL` and `OPENCODE_ZEN_MODEL` are accepted. The selected model is resolved through the curated Zen catalog: GPT uses Responses, Claude/Qwen use Anthropic Messages, and the documented DeepSeek/MiniMax/GLM/Kimi/Grok/free rows use Chat Completions. Gemini and unknown models fail closed because Codewhale has no proven supported wire contract for them. See the exact current model groups in [`PROVIDERS.md`](PROVIDERS.md#opencode-zen-protocol-catalog).
 - `minimax-anthropic` (string provider value): selects MiniMax's Anthropic-compatible Messages route through `[providers.minimax_anthropic]`. The default Base URL is `https://api.minimax.io/anthropic`; set `https://api.minimaxi.com/anthropic` for China. Keep the `/anthropic` suffix because Codewhale appends `/v1/messages`. The route uses `MINIMAX_API_KEY` and defaults to `MiniMax-M3`; `MiniMax-M2.7` is also registered. Official M3 input modalities are text, image, and video, with adaptive or disabled thinking. M2.7 is text-only and always keeps thinking enabled.
 - `api_key` (string, required for hosted providers): must be non-empty for DeepSeek/hosted providers (or set the provider API key env var). Self-hosted SGLang, vLLM, and local `ollama` can omit it. `ollama-cloud` requires a key saved for that provider or supplied by `OLLAMA_CLOUD_API_KEY`, then `OLLAMA_API_KEY`.
 - `auth_mode` (string, optional provider-table key): selects a provider-specific authentication contract. Kimi Code membership uses `auth_mode = "api_key"` (or omit the field), a key created in the [Kimi Code console](https://www.kimi.com/code/console), `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"` for K3. Codewhale gives that route a safe 262,144-token baseline; set `context_window = 1048576` only when the Kimi Code plan includes 1M access (Allegretto and above). `k3[1m]` is a Claude Code-only convention, not an API model ID, and Codewhale rejects it instead of silently changing the wire model or assuming an entitlement. `model = "kimi-for-coding"` remains the valid K2.7 compatibility route available to all Kimi Code members. Legacy `auth_mode = "kimi_oauth"` fails closed with API-key guidance and never probes, reads, refreshes, or rewrites `kimi_cli`/`kimi_code_cli` credential files. First-class OAuth requires Codewhale's own vendor-registered client identity and remains tracked in #4417.
-- `base_url` (string, optional): defaults to `https://api.deepseek.com/beta` for DeepSeek's OpenAI-compatible Chat Completions API, including legacy `provider = "deepseek-cn"` configs. Other defaults are `https://api.deepseek.com/anthropic` for `deepseek-anthropic`, `https://integrate.api.nvidia.com/v1` for `nvidia-nim`, `https://api.openai.com/v1` for `openai`, `https://api.atlascloud.ai/v1` for `atlascloud`, `https://maas-openapi.wanjiedata.com/api/v1` for `wanjie-ark`, `https://ark.cn-beijing.volces.com/api/coding/v3` for `volcengine`, `https://openrouter.ai/api/v1` for `openrouter`, `https://token-plan-sgp.xiaomimimo.com/v1` for `xiaomi-mimo` when the API key starts with `tp-...` and `https://api.xiaomimimo.com/v1` otherwise, `https://api.novita.ai/openai/v1` for `novita`, `https://api.fireworks.ai/inference/v1` for `fireworks`, `https://api.siliconflow.com/v1` for `siliconflow`, `https://api.siliconflow.cn/v1` for `siliconflow-CN`, `https://api.arcee.ai/api/v1` for `arcee`, `https://api.moonshot.ai/v1` for `moonshot`, `https://api.minimax.io/v1` for `minimax`, `https://api.openmodel.ai` for `openmodel`, `https://api.z.ai/api/coding/paas/v4` for `zai`, `https://api.stepfun.ai/v1` for `stepfun`, `https://api.deepinfra.com/v1/openai` for `deepinfra`, `https://api.sakana.ai/v1` for `sakana`, `https://router.huggingface.co/v1` for `huggingface`, `https://api.together.xyz/v1` for `together`, `https://api.baiduqianfan.ai/v1` for `qianfan`, `https://chatgpt.com/backend-api` for `openai-codex`, `https://api.anthropic.com` for `anthropic`, `https://api.mistral.ai/v1` for `mistral`, `http://localhost:30000/v1` for `sglang`, `http://localhost:8000/v1` for `vllm`, `http://localhost:11434/v1` for `ollama`, and `https://ollama.com/v1` for `ollama-cloud`. Set `base_url = "https://token-plan-cn.xiaomimimo.com/v1"` for China-region Xiaomi MiMo Token Plan accounts or `base_url = "https://token-plan-ams.xiaomimimo.com/v1"` for Europe/Amsterdam accounts. Mistral-specific reasoning fields and polymorphic replay are enabled only on the documented first-party HTTPS `/v1` hosts; a custom Mistral base URL keeps generic Chat semantics. Set `https://api.deepseek.com` or `https://api.deepseek.com/v1` explicitly to opt out of DeepSeek beta features.
+- `base_url` (string, optional): defaults to `https://api.deepseek.com/beta` for DeepSeek's OpenAI-compatible Chat Completions API, including legacy `provider = "deepseek-cn"` configs. Other defaults are `https://api.deepseek.com/anthropic` for `deepseek-anthropic`, `https://integrate.api.nvidia.com/v1` for `nvidia-nim`, `https://api.openai.com/v1` for `openai`, `https://api.atlascloud.ai/v1` for `atlascloud`, `https://maas-openapi.wanjiedata.com/api/v1` for `wanjie-ark`, `https://ark.cn-beijing.volces.com/api/coding/v3` for `volcengine`, `https://openrouter.ai/api/v1` for `openrouter`, `https://token-plan-sgp.xiaomimimo.com/v1` for `xiaomi-mimo` when the API key starts with `tp-...` and `https://api.xiaomimimo.com/v1` otherwise, `https://api.novita.ai/openai/v1` for `novita`, `https://api.fireworks.ai/inference/v1` for `fireworks`, `https://api.siliconflow.com/v1` for `siliconflow`, `https://api.siliconflow.cn/v1` for `siliconflow-CN`, `https://api.arcee.ai/api/v1` for `arcee`, `https://api.moonshot.ai/v1` for `moonshot`, `https://api.minimax.io/v1` for `minimax`, `https://api.openmodel.ai` for `openmodel`, `https://api.z.ai/api/coding/paas/v4` for `zai`, `https://api.stepfun.ai/v1` for `stepfun`, `https://api.deepinfra.com/v1/openai` for `deepinfra`, `https://api.sakana.ai/v1` for `sakana`, `https://router.huggingface.co/v1` for `huggingface`, `https://api-inference.modelscope.cn/v1` for `modelscope`, `https://api.together.xyz/v1` for `together`, `https://api.baiduqianfan.ai/v1` for `qianfan`, `https://chatgpt.com/backend-api` for `openai-codex`, `https://api.anthropic.com` for `anthropic`, `https://api.mistral.ai/v1` for `mistral`, `http://localhost:30000/v1` for `sglang`, `http://localhost:8000/v1` for `vllm`, `http://localhost:11434/v1` for `ollama`, and `https://ollama.com/v1` for `ollama-cloud`. Set `base_url = "https://token-plan-cn.xiaomimimo.com/v1"` for China-region Xiaomi MiMo Token Plan accounts or `base_url = "https://token-plan-ams.xiaomimimo.com/v1"` for Europe/Amsterdam accounts. Mistral-specific reasoning fields and polymorphic replay are enabled only on the documented first-party HTTPS `/v1` hosts; a custom Mistral base URL keeps generic Chat semantics. Set `https://api.deepseek.com` or `https://api.deepseek.com/v1` explicitly to opt out of DeepSeek beta features.
 - `ollama-cloud` route: select `provider = "ollama-cloud"`, configure `[providers.ollama_cloud]` when overriding the default `https://ollama.com/v1` / `gpt-oss:120b` tuple, and save a key from [Ollama account settings](https://ollama.com/settings/keys) with `codewhale auth set --provider ollama-cloud`. Ambient precedence is `OLLAMA_CLOUD_API_KEY`, then `OLLAMA_API_KEY`; arbitrary Ollama model IDs pass through unchanged.
 - Legacy Ollama Cloud migration: a released `provider = "ollama"` config whose normalized `[providers.ollama].base_url` is exactly `https://ollama.com/v1` is upgraded to the `ollama-cloud` runtime identity in memory. Only that exact tuple may read its old `ollama` provider table and secret slot. The config and secrets are never rewritten, and neighboring paths, HTTP downgrades, lookalike hosts, or an explicit `ollama-cloud` selection never consume the fallback.
 - `telecomjs` base URL and catalog: `[providers.telecomjs]` defaults to `https://aigw.telecomjs.com/v1`; `TELECOMJS_BASE_URL` overrides it. With `TELECOMJS_API_KEY`, `/models` refreshes a key-scoped catalog without mixing rows into another provider.
 - `edenai` gateway: select `provider = "edenai"`; `[providers.edenai]` defaults to `https://api.edenai.run/v3` and `deepseek/deepseek-v4-pro`. `EDENAI_API_KEY`, `EDENAI_BASE_URL`, and `EDENAI_MODEL` are accepted. Use `EDENAI_BASE_URL = "https://api.eu.edenai.run/v3"` for Eden AI's documented EU endpoint; the default `deepseek/deepseek-v4-pro` is only listed on the global catalog, so pair the EU endpoint with an EU-listed model such as `qwen/deepseek-v4-pro` via `EDENAI_MODEL` or `model`. The provider refreshes Eden AI's `/models` catalog, but leaves model-specific reasoning controls untouched because the gateway spans multiple model families.
+- `codewhale` (Codewhale API): select `provider = "codewhale"`; `[providers.codewhale]` defaults to `https://api.codewhale.net/v1` and `deepseek/deepseek-v4-pro`. The credential is a Codewhale account API key (`cwc_key_…`) with the `models:infer` scope, read from `CODEWHALE_API_KEY` or the `codewhale` secret-store slot; `codewhale account api-keys create --name <name> --use` mints one and saves it locally. `CODEWHALE_API_BASE` overrides the origin and must be HTTPS except on loopback. The model catalog is the account's own authenticated `GET /v1/models`: ids are `provider/model` and each row states its wire (`chat-completions` → `/v1/chat/completions`, `anthropic-messages` → `/v1/messages`, `responses` → `/v1/responses`). Connect the underlying provider keys with `codewhale account keys set <provider>`.
 - `concentrate` gateway: select `provider = "concentrate"`; `[providers.concentrate]` defaults to `https://api.concentrate.ai/v1` and `deepseek-v4-pro` over the OpenAI Responses wire. `CONCENTRATE_API_KEY`, `CONCENTRATE_BASE_URL`, and `CONCENTRATE_MODEL` are accepted. Model ids pass through verbatim (`gpt-5.6-sol`, `openai/gpt-5.6-sol`, or `concentrate/auto` for the gateway router). BYOK only; see [PROVIDERS.md](PROVIDERS.md#concentrate-notes).
 - `mistral` model and reasoning contract: `[providers.mistral]` defaults to `mistral-code-latest`; `MISTRAL_MODEL` overrides it and the generic `CODEWHALE_MODEL` override wins when both are set. The current picker also lists `mistral-medium-latest`, `mistral-small-latest`, and `mistral-large-latest`. On exact first-party HTTPS `/v1` routes, Medium and Small accept only `reasoning_effort = "none" | "high"` and replay polymorphic thinking blocks. Deprecated native Magistral IDs may still be configured explicitly, remain always-reasoning, and never receive the adjustable effort field.
 - `context_window` (integer, optional provider-table key): override the total context window for the active `[providers.<name>]` route when an OpenAI-compatible gateway, hosted model alias, or self-hosted runtime has a different limit than Codewhale's static model table. For example, `[providers.openai] context_window = 1000000` lets an OpenAI-compatible DashScope/Qwen route budget against a 1M-token window instead of the conservative fallback. For Kimi Code K3, keep `model = "k3"` and set `[providers.moonshot] context_window = 1048576` only when the membership plan includes 1M access; otherwise omit it to retain the 262,144-token safe baseline. The value must be greater than 0 and affects prompt context notes, compaction thresholds, context-pressure checks, and request output caps. Full resolution order, and how to see which rung produced the current window: [Context length (context window)](#context-length-context-window).
 - `path_suffix` (string, optional provider-table key): override the chat-completions path for OpenAI-compatible gateways that do not serve `/v1/chat/completions`. For example, `[providers.openai] path_suffix = "/chat/completions"` sends chat requests to the unversioned base URL plus `/chat/completions`; `models` and `beta/*` requests keep their normal routing.
-- `reasoning_stream_style` (string, optional provider-table key): override how streaming reasoning is separated from answer text for the active provider route. Use `separate_field` for `reasoning_content` / `reasoning` deltas, `inline_tags` for gateways that stream `<think>...</think>` inside `delta.content`, or `none` to render incoming content exactly as answer text.
+- `reasoning_stream_style` (string, optional provider-table key): override how streaming reasoning is separated from answer text for the active provider route. Use `separate_field` for `reasoning_content` / `reasoning` deltas, `inline_tags` for gateways that stream `<think>...</think>` inside `delta.content`, or `none` to render incoming content exactly as answer text. When unset, every Chat Completions route uses `separate_field` (Mistral's first-party route uses its typed thinking blocks); set `none` only for a gateway that streams its answer inside `reasoning_content`.
 - `[providers.<name>.auth]` (table, optional): provider-scoped auth source metadata. `source = "command"` stores a command argv plus optional `timeout_ms`; `source = "secret"` stores a `secret_id`. This slice lets provider readiness, `/provider`, and doctor JSON report the auth source class without exposing command argv output or secret values; executing commands and resolving external secret material is handled by the follow-up resolver work.
 - `insecure_skip_tls_verify` (bool, optional provider-table key): legacy compatibility key, disabled by default. When true on the active provider table, provider clients reject the configuration instead of skipping TLS certificate verification. Use `SSL_CERT_FILE` for corporate or private CA bundles; `codewhale doctor` reports stale uses of this setting.
-- `default_text_model` (string, optional): defaults to `deepseek-v4-pro` for DeepSeek and `deepseek-anthropic`, `gpt-5.6` for OpenAI, `grok-4.6` for xAI, `deepseek-ai/deepseek-v4-pro` for NVIDIA NIM, `deepseek-ai/deepseek-v4-flash` for AtlasCloud, `deepseek-reasoner` for Wanjie Ark, `DeepSeek-V4-Pro` for Volcengine Ark, `deepseek/deepseek-v4-pro` for OpenRouter and Novita, `mimo-v2.5-pro` for Xiaomi MiMo, `accounts/fireworks/models/deepseek-v4-pro` for Fireworks, `deepseek-ai/DeepSeek-V4-Pro` for SiliconFlow and DeepInfra, `trinity-large-thinking` for Arcee AI, `kimi-k2.7-code` for Moonshot, `MiniMax-M3` for MiniMax, `GLM-5.3` for Z.ai, `step-3.7-flash` for StepFun, `ernie-4.0-turbo-8k` for Qianfan, `fugu` for Sakana AI, `deepseek-ai/DeepSeek-V4-Pro` for SGLang/vLLM, `deepseek-v4-flash` for local Ollama, and `gpt-oss:120b` for Ollama Cloud. Hugging Face and Together AI both default to `deepseek-ai/DeepSeek-V4-Pro`; `openai-codex` defaults to `gpt-5.6`; `anthropic` defaults to `claude-sonnet-4-6`; `openmodel` defaults to `deepseek-v4-flash`. Current public DeepSeek IDs are `deepseek-v4-pro` and `deepseek-v4-flash`, both with 1M context windows, 384K max output, and thinking mode enabled by default. DeepSeek's live pricing/model page now labels the Pro backend `DeepSeek-V4-Pro-0813`; the callable API ID remains `deepseek-v4-pro`, so Codewhale does not send the backend label or the Claude Code-specific `deepseek-v4-pro[1m]` selector. DeepSeek retires `deepseek-chat` and `deepseek-reasoner` on July 24, 2026; direct first-party routes migrate both to `deepseek-v4-flash`, with omitted reasoning settings preserving their former non-thinking (`off`) and thinking (`high`) intent. Explicit `reasoning_effort` wins, and provider-owned ids on Wanjie Ark, aggregators, self-hosted runtimes, and custom endpoints are not globally rewritten. SiliconFlow retains its own mapping: `deepseek-reasoner` and `deepseek-r1` select its Pro model while `deepseek-chat` and `deepseek-v3` select Flash. Provider-specific mappings translate `deepseek-v4-pro` / `deepseek-v4-flash` to each provider's model ID where supported. OpenRouter also recognizes recent large IDs such as `arcee-ai/trinity-large-thinking`, `minimax/minimax-m3`, `minimax/minimax-m2.7`, `xiaomi/mimo-v2.5-pro`, `qwen/qwen3.6-flash`, `qwen/qwen3.6-35b-a3b`, `qwen/qwen3.6-max-preview`, `qwen/qwen3.6-27b`, `qwen/qwen3.6-plus`, `qwen/qwen3.7-max`, `google/gemma-4-31b-it`, `moonshotai/kimi-k2.7-code`, `moonshotai/kimi-k2.6`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`, and `nvidia/nemotron-3-ultra-550b-a55b`; direct Arcee uses bare IDs such as `trinity-large-thinking` and `trinity-large-preview`; direct Moonshot recognizes `kimi-k3`, `kimi-k2.7-code`, and `kimi-k2.6`. The exact Kimi Code endpoint recognizes bare `k3` for K3 and `kimi-for-coding` for K2.7; those membership IDs are distinct from the direct Moonshot IDs and are never rewritten across routes. Direct MiniMax recognizes `MiniMax-M3` and the documented M2.x chat model IDs; direct Z.ai recognizes `GLM-5.3` (the default), `GLM-5.2`, `GLM-5.1`, and `GLM-5-Turbo`, and OpenRouter recognizes the matching `z-ai/glm-5.1`, `z-ai/glm-5.2`, `z-ai/glm-5.3`, and `z-ai/glm-5-turbo` IDs — `GLM-5.3` has been live on the Z.ai Coding Plan since 2026-08-13; it inherits its catalog metadata from `GLM-5.2` until Z.ai publishes distinct 5.3 numbers and carries no price, and an explicit `GLM-5.2` selection keeps its own id; direct Sakana recognizes `fugu` and `fugu-ultra-20260615`; direct Xiaomi MiMo recognizes chat IDs `mimo-v2.5-pro`, `mimo-v2.5-pro-ultraspeed`, and `mimo-v2.5`, while TTS IDs are selected through `codewhale speech` / `tts`. Generic `openai`, `atlascloud`, `wanjie-ark`, `xiaomi-mimo`, `arcee`, `moonshot`, `minimax`, `openmodel`, `zai`, `stepfun`, `qianfan`, `sakana`, local Ollama, and Ollama Cloud model IDs are passed through unchanged after known aliases are normalized. OpenRouter and SiliconFlow provider configs with a custom `base_url` also preserve explicit model values, which lets OpenAI-compatible gateways accept bare model IDs. Use `/models` or `codewhale models` to discover live IDs from your configured endpoint. `CODEWHALE_MODEL` overrides this for a single process; `DEEPSEEK_MODEL` is the legacy alias.
+- `default_text_model` (string, optional): defaults to `deepseek-flash` for DeepSeek and `deepseek-anthropic`, `gpt-5.6` for OpenAI, `grok-4.6` for xAI, `deepseek-ai/deepseek-v4-pro` for NVIDIA NIM, `deepseek-ai/deepseek-v4-flash` for AtlasCloud, `deepseek-reasoner` for Wanjie Ark, `DeepSeek-V4-Pro` for Volcengine Ark, `deepseek/deepseek-v4-pro` for OpenRouter and Novita, `mimo-v2.5-pro` for Xiaomi MiMo, `accounts/fireworks/models/deepseek-v4-pro` for Fireworks, `deepseek-ai/DeepSeek-V4-Pro` for SiliconFlow and DeepInfra, `trinity-large-thinking` for Arcee AI, `kimi-k2.7-code` for Moonshot, `MiniMax-M3` for MiniMax, `GLM-5.3` for Z.ai, `step-3.7-flash` for StepFun, `ernie-4.0-turbo-8k` for Qianfan, `fugu` for Sakana AI, `deepseek-ai/DeepSeek-V4-Pro` for SGLang/vLLM, `deepseek-v4-flash` for local Ollama, and `gpt-oss:120b` for Ollama Cloud. Hugging Face and Together AI both default to `deepseek-ai/DeepSeek-V4-Pro`; `openai-codex` defaults to `gpt-5.6`; `anthropic` defaults to `claude-sonnet-4-6`; `openmodel` defaults to `deepseek-v4-flash`. Current public DeepSeek IDs include `deepseek-v4-pro` and `deepseek-flash` (V4.1 Flash, shipped as the unversioned id), both with 1M context windows, 384K max output, and thinking mode enabled by default. DeepSeek's live pricing/model page now labels the Pro backend `DeepSeek-V4-Pro-0813`; the callable API ID remains `deepseek-v4-pro`, so Codewhale does not send the backend label or the Claude Code-specific `deepseek-v4-pro[1m]` selector. DeepSeek retires `deepseek-chat` and `deepseek-reasoner` on July 24, 2026; direct first-party routes migrate both to `deepseek-v4-flash`, with omitted reasoning settings preserving their former non-thinking (`off`) and thinking (`high`) intent. Explicit `reasoning_effort` wins, and provider-owned ids on Wanjie Ark, aggregators, self-hosted runtimes, and custom endpoints are not globally rewritten. SiliconFlow retains its own mapping: `deepseek-reasoner` and `deepseek-r1` select its Pro model while `deepseek-chat` and `deepseek-v3` select Flash. Provider-specific mappings translate `deepseek-v4-pro` / `deepseek-v4-flash` to each provider's model ID where supported. OpenRouter also recognizes recent large IDs such as `arcee-ai/trinity-large-thinking`, `minimax/minimax-m3`, `minimax/minimax-m2.7`, `xiaomi/mimo-v2.5-pro`, `qwen/qwen3.6-flash`, `qwen/qwen3.6-35b-a3b`, `qwen/qwen3.6-max-preview`, `qwen/qwen3.6-27b`, `qwen/qwen3.6-plus`, `qwen/qwen3.7-max`, `google/gemma-4-31b-it`, `moonshotai/kimi-k2.7-code`, `moonshotai/kimi-k2.6`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`, and `nvidia/nemotron-3-ultra-550b-a55b`; direct Arcee uses bare IDs such as `trinity-large-thinking` and `trinity-large-preview`; direct Moonshot recognizes `kimi-k3`, `kimi-k2.7-code`, and `kimi-k2.6`. The exact Kimi Code endpoint recognizes bare `k3` for K3 and `kimi-for-coding` for K2.7; those membership IDs are distinct from the direct Moonshot IDs and are never rewritten across routes. Direct MiniMax recognizes `MiniMax-M3` and the documented M2.x chat model IDs; direct Z.ai recognizes `GLM-5.3` (the default), `GLM-5.2`, `GLM-5.1`, and `GLM-5-Turbo`, and OpenRouter recognizes the matching `z-ai/glm-5.1`, `z-ai/glm-5.2`, `z-ai/glm-5.3`, and `z-ai/glm-5-turbo` IDs — `GLM-5.3` has been live on the Z.ai Coding Plan since 2026-08-13; it inherits its catalog metadata from `GLM-5.2` until Z.ai publishes distinct 5.3 numbers and carries no price, and an explicit `GLM-5.2` selection keeps its own id; direct Sakana recognizes `fugu` and `fugu-ultra-20260615`; direct Xiaomi MiMo recognizes chat IDs `mimo-v2.5-pro`, `mimo-v2.5-pro-ultraspeed`, and `mimo-v2.5`, while TTS IDs are selected through `codewhale speech` / `tts`. Generic `openai`, `atlascloud`, `wanjie-ark`, `xiaomi-mimo`, `arcee`, `moonshot`, `minimax`, `openmodel`, `zai`, `stepfun`, `qianfan`, `sakana`, local Ollama, and Ollama Cloud model IDs are passed through unchanged after known aliases are normalized. OpenRouter and SiliconFlow provider configs with a custom `base_url` also preserve explicit model values, which lets OpenAI-compatible gateways accept bare model IDs. Use `/models` or `codewhale models` to discover live IDs from your configured endpoint. `CODEWHALE_MODEL` overrides this for a single process; `DEEPSEEK_MODEL` is the legacy alias.
 - TelecomJS uses `deepseek-v4-pro` only as a conservative pre-refresh fallback. Once its key-scoped `/models` catalog is available, the picker uses those live rows; Codewhale omits unsupported reasoning request fields on this route.
-- `reasoning_effort` (string, optional): `off`, `low`, `medium`, `high`, `max`, `xhigh`, or `ultracode`; defaults to the configured UI tier. DeepSeek Platform receives top-level `thinking` / `reasoning_effort` fields. Ollama Cloud's OpenAI-compatible Chat Completions route preserves its documented `none` / `low` / `medium` / `high` / `max` ladder (`off` is sent as `none`; `xhigh` and `ultracode` normalize to `max`). Direct xAI `grok-4.6` on exact `https://api.x.ai/v1` receives top-level `reasoning_effort = "low" | "medium" | "high" | "xhigh"`; `off` normalizes to `high`, `max`/`ultracode` to `xhigh`, and `auto` leaves the field omitted so xAI's documented default `high` applies. A custom xAI-compatible `base_url` does not inherit that dialect. Direct Moonshot `kimi-k3` on exact `https://api.moonshot.ai/v1` is always-thinking and receives only top-level `reasoning_effort = "low" | "high" | "max"`; `off` normalizes to `low`, and `medium` to `high`. Kimi Code membership `k3` on exact `https://api.kimi.com/coding/v1` instead receives nested `thinking.effort`, and its `off` setting also normalizes to enabled `low`. Normal dispatched `auto` uses Codewhale's auto-reasoning selector and sends a concrete route-normalized tier; only an omitted reasoning setting leaves the provider default in control. Neighboring gateways and model/endpoint combinations retain the generic Moonshot contract. OpenAI Codex normalizes stale `off` to `low` and sends `max` / `ultracode` as Responses `xhigh`. Z.ai receives documented `thinking` controls and treats enabled thinking as the GLM coding high/max lane. NVIDIA NIM receives equivalent settings through `chat_template_kwargs`.
+- `reasoning_effort` (string, optional): `off`, `low`, `medium`, `high`, `max`, `xhigh`, or `ultracode`; defaults to the configured UI tier. DeepSeek Platform receives top-level `thinking` / `reasoning_effort` fields. Ollama Cloud's OpenAI-compatible Chat Completions route preserves its documented `none` / `low` / `medium` / `high` / `max` ladder (`off` is sent as `none`; `xhigh` and `ultracode` normalize to `max`). Direct xAI `grok-4.7` and `grok-4.6` on exact `https://api.x.ai/v1` receive top-level `reasoning_effort = "low" | "medium" | "high" | "xhigh"` (the ladder comes from the bundled catalog row; `grok-4.5` maps `xhigh` to `high`, and rows without a documented effort such as `grok-4.3` get no field); Grok reasoning cannot be disabled, so `off` normalizes to `high`, `max`/`ultracode` to `xhigh`, and `auto` leaves the field omitted so xAI's documented default `high` applies. A custom xAI-compatible `base_url` does not inherit that dialect. Direct Moonshot `kimi-k3` on exact `https://api.moonshot.ai/v1` is always-thinking and receives only top-level `reasoning_effort = "low" | "high" | "max"`; `off` normalizes to `low`, and `medium` to `high`. Kimi Code membership `k3` on exact `https://api.kimi.com/coding/v1` instead receives nested `thinking.effort`, and its `off` setting also normalizes to enabled `low`. Normal dispatched `auto` uses Codewhale's auto-reasoning selector and sends a concrete route-normalized tier; only an omitted reasoning setting leaves the provider default in control. Neighboring gateways and model/endpoint combinations retain the generic Moonshot contract. OpenAI Codex normalizes stale `off` to `low` and sends `max` / `ultracode` as Responses `xhigh`. Z.ai receives documented `thinking` controls and treats enabled thinking as the GLM coding high/max lane. NVIDIA NIM receives equivalent settings through `chat_template_kwargs`.
 - `verbosity` (string, optional): `normal` or `concise`. `normal` keeps the
   default conversational prompt. `concise` appends a prompt discipline block
   for direct, low-chatter output; CLI noninteractive commands (`exec` and
   `eval`) default to `concise` unless config/env/CLI overrides it.
   Override per process with `CODEWHALE_VERBOSITY` or the legacy
   `DEEPSEEK_VERBOSITY` alias.
-- `telemetry` (bool, optional): anonymous usage counting, **`true` by default**,
-  with a clear first-run disclosure. An explicit `false` here is the durable
-  *opt-out* — it deletes the random install id,
-  truncates every buffered event, and leaves a tombstone that every later run
-  re-asserts for as long as the key says `false`. It is also a floor: `--telemetry true` and
-  `CODEWHALE_TELEMETRY=1` both lose to it, and turning telemetry back on means
-  writing `true` here. Override per process with `CODEWHALE_TELEMETRY` (legacy
-  alias `DEEPSEEK_TELEMETRY`), where an explicit "off" is a hard floor that
-  beats both this key and `--telemetry true` — but is a *kill switch*, not an
-  opt-out: it stops the run and erases nothing, so a harness disabling
-  telemetry for one command never discards the machine owner's install id or
-  dry-run records. A repo-local `.codewhale/config.toml` cannot set it. The
-  resolved consent is visible with its source — `codewhale doctor` prints a
-  `telemetry=on (default)` row in the runtime-posture section, and
-  `codewhale config get telemetry` reports `on (default)`, `on (config)`, or
-  the environment's answer, so a machine that never opted in never reads
-  "unset" while its batches ship (#5441). Full
-  schema and red lines:
-  [`TELEMETRY.md`](TELEMETRY.md).
+- `telemetry` (bool, optional): anonymous usage counting, **`true` by default
+  in the current 0.9.12 source**. Notice version `5` names Codewhale and PostHog
+  and describes the opt-out policy; no acceptance is invented for a default
+  user. Existing explicit declines remain off. An explicit `false` here is the
+  durable *opt-out*: it deletes the random install id, truncates buffered and
+  dry-run events, and leaves a tombstone reasserted while the setting is false.
+  It is a floor: `--telemetry true` and `CODEWHALE_TELEMETRY=1` lose to it.
+  Use `/settings` or `codewhale config set telemetry true` to turn counting
+  back on explicitly for new sessions through the existing privacy transition. `CODEWHALE_TELEMETRY`
+  (legacy alias `DEEPSEEK_TELEMETRY`) and `--telemetry false` provide a run-scoped
+  kill switch that stops collection and delivery without erasing the owner's
+  state. A repo-local `.codewhale/config.toml` cannot set this preference.
+  `codewhale config telemetry` shows the disclosure; `codewhale config get
+  telemetry` reports preference and privacy status. Full schema and opt-out
+  behavior: [`TELEMETRY.md`](TELEMETRY.md).
 - `telemetry_endpoint` (string, optional): where batches are POSTed. Leaving it
   unset selects the shipped default,
   **`https://telemetry.codewhale.net/v1/telemetry`** — the first-party ingest
@@ -1845,6 +2037,17 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   ```toml
   [approval]
   default_selection = "allow_once"
+  ```
+- `[approval] timeout_seconds` (integer, optional): bound how long an
+  interactive approval card may wait. When the window elapses the card
+  resolves to **deny** — fail-closed, matching the external approval path —
+  and the transcript records that the bound denied the call, not the
+  operator. Omitted or `0` waits indefinitely, which stays the interactive
+  default; values above 24h clamp with a warning (#6101).
+
+  ```toml
+  [approval]
+  timeout_seconds = 300
   ```
 - `sandbox_mode` (string, optional): `read-only`, `workspace-write`, `danger-full-access`, `external-sandbox`.
   Platform support is not identical. macOS uses Seatbelt when its runtime
@@ -2047,9 +2250,18 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `managed_config_path` (string, optional): managed config file loaded after user/env config.
 - `requirements_path` (string, optional): requirements file used to enforce allowed approval/sandbox values.
 - `max_subagents` (int, optional): defaults to `64` and is clamped to `1..=128`.
-- `subagents.*` (optional compatibility table): per-Fleet-role model defaults
-  for `agent`. Explicit tool `model` values win, then role
-  overrides, then the parent runtime model. Supported convenience keys are
+- `subagents.*` (optional compatibility table): manual per-role model pins
+  for direct and Workflow `agent` starts. An explicit saved profile wins,
+  then a manual role pin, then a unique saved role pin. Conflicting tool
+  `model` or `model_strength` choices are refused before admission. Unpinned
+  roles allow task model/strength choices before inherited defaults.
+  `[subagents.roles.<role>] model = "provider/model"` folds into the existing override
+  map and wins over `[subagents.models]`, then the convenience keys. Structured
+  canonical role keys win over legacy aliases. Only this structured syntax
+  separates the explicit provider from the model suffix; unknown providers
+  fail before admission. Bare structured model ids inherit the active provider.
+  Legacy scalar/map values preserve namespaced provider-owned ids unchanged.
+  Supported convenience keys are
   `default_model`, `worker_model`, `scout_model`, `planner_model`,
   `reviewer_model`, `custom_model`, `max_concurrent`, `max_admitted`,
   `launch_concurrency`, `token_budget`, `api_timeout_secs`, and
@@ -2184,51 +2396,81 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   - The former seam-manager keys (`verbatim_window_turns`, `l1_threshold`,
     `l2_threshold`, `l3_threshold`, `seam_model`) are **ignored** — parsed
     for backward compatibility but read nowhere since 2026-07-23.
+- `compaction.*` (optional, config.toml): how a compaction pass behaves once
+  it fires. `auto_compact` / `auto_compact_threshold_percent` (settings.toml)
+  still decide *when* it fires. Both keys are absent by default, and absent
+  means the built-in behaviour, unchanged:
+  - `[compaction].summary_instructions` (string, default empty): standing
+    operator instructions appended to the summarizer prompt as a clearly
+    delimited "Additional instructions from the operator" section on **every**
+    pass, manual and automatic — the effort-free counterpart to a one-off
+    `/compact <focus>`, which still composes after this text. Useful for
+    "always list exact file paths and line numbers", "always restate open
+    decisions and their trade-offs", "always write a TL;DR first". Truncated
+    at 4 000 characters with a warning naming the key; whitespace-only reads
+    as unset. The summarizer still runs with no system prompt and no tools —
+    this suffix is the only operator-authored input it sees.
+  - `[compaction].retained_user_message_tokens` (int, default `20000`, clamped
+    to `2000`–`200000`; also accepted as `retained_user_message_max_tokens`):
+    token budget for the recent plain user messages kept **verbatim** in the
+    replacement history. Raising it keeps more of the user's own earlier
+    messages instead of only whatever the lossy summary captured; the
+    last-round survival contract still applies on top. The `/compact` receipt
+    names the effective budget and whether operator instructions were applied,
+    so you can tell the knob took effect.
 - `retry.*` (optional): retry/backoff settings for API requests:
   - `[retry].enabled` (bool, default `true`)
   - `[retry].max_retries` (int, default `3`)
   - `[retry].initial_delay` (float seconds, default `1.0`)
   - `[retry].max_delay` (float seconds, default `60.0`)
   - `[retry].exponential_base` (float, default `2.0`)
-- `[notifications].method` (string, optional): `auto`, `osc9`, `kitty`,
-  `ghostty`, `bel`, or `off`. Defaults to `auto`. The TUI fires this on completed (successful)
-  turns whose elapsed time meets `threshold_secs`; failed and cancelled
-  turns are silent. `auto` resolves to `osc9` for `iTerm.app`, `Ghostty`,
-  and `WezTerm` (detected via `$TERM_PROGRAM`). Unknown terminals fail closed
-  to `off`; Codewhale never invents an audible BEL fallback.
-- `[notifications].threshold_secs` (int, optional): defaults to `30`.
-  Only completed turns whose elapsed time meets or exceeds this fire a
-  notification.
-- `[notifications].include_summary` (bool, optional): defaults to
-  `false`. When `true`, the notification body includes the elapsed
-  duration and the turn's cost in the configured display currency.
-- `[notifications].completion_sound` (string, optional): `off`, `beep`,
-  `bell`, or `file`. Defaults to `off`. This opt-in sound follows the same
-  focus and quiet policy as desktop notifications. `file` plays the WAV path
-  from `[notifications].sound_file` on Windows.
-- `[notifications].sound_file` (path, optional): path to a custom WAV file
-  used when `completion_sound = "file"`.
-- `[notifications].quiet` (bool, optional): defaults to `false`. Quiet
-  mode — suppresses every desktop notification and sound (all categories,
-  all delivery methods) without changing `method`, `completion_sound`, or the
-  per-category switches.
-- `[notifications.events]` (table, optional): per-category
-  desktop-notification switches; every key defaults to `true`. Keys:
-  `turn-complete`, `subagent-terminal`, `approval-needed`,
-  `input-needed`, `elevation-needed`, `model-notify`. A disabled
-  category is suppressed on every delivery mechanism (OSC 9, Kitty,
-  Ghostty, BEL, macOS Notification Center).
-- `[notifications.event_sound]` (table, optional): opt-in, deterministic
-  per-event sound cues. Keys: `enabled` (bool, default `false`), `events`
-  (array of kebab-case event names, default `["turn-complete",
-  "approval-needed"]`), `min_interval_ms` (int, default `2000`), `quiet`
-  (bool, default `false`). See "Event sound cues" below.
+- `[notifications]`: notification delivery, attention, categories and audio share one
+  policy. `quiet = true`, `method = "off"`, `condition = "never"` and disabled
+  categories suppress both the banner and Codewhale's selected sound.
+- `notifications.method`: `auto` (default), `osc9`, `kitty`, `ghostty`, `bel`, `off`.
+- `notifications.condition`: `unfocused` (default), `always`, `never`. When absent,
+  the legacy `tui.notification_condition` remains the fallback. `always` also
+  bypasses the duration threshold; `unfocused` requires two seconds away.
+- `notifications.threshold_secs`: nonnegative integer, default `30`.
+- `notifications.include_summary`: boolean, default `false`.
+- `notifications.sound`: optional `off`, `whale`, `bell`, `beep`, `file`.
+  A selected value controls audio across enabled categories. Absent keeps legacy
+  `completion_sound` and `event_sound` choices; `off` overrides both.
+- `notifications.sound_file`: custom local WAV path for `sound = "file"` or legacy
+  `completion_sound = "file"`.
+- `notifications.subagent_completion`: `always`, `final-only` (default), `off`.
+- `notifications.quiet`: boolean, default `false`.
+- `notifications.events`: six boolean categories, all enabled by default; see below.
+- `notifications.completion_sound`: legacy completion cue, default `off`, with the
+  same values as `sound`. Used only when `sound` is absent.
+- `notifications.event_sound`: legacy `enabled` (default `false`), `events`
+  (default `["turn-complete", "approval-needed"]`), and `quiet` (default `false`).
+  `min_interval_ms` (default `2000`) applies to each category's audio in both modes.
 - `tui.alternate_screen` (string, optional, default `auto`): which screen an interactive session starts on. `auto` and `always` start on the TUI-owned alternate screen; `never` starts in inline mode — a ratatui viewport the full height of the terminal with no alternate screen, so the shell's scrollback survives the session and stays scrollable after exit. `/fullscreen` and `/inline` switch it in-process; a switch that the terminal refuses rolls back and says why. Inline mode paints the whole transcript inside its viewport — nothing is written into the host scrollback while the session runs.
-- `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies only transcript text, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right workbar and include visual wraps because the terminal, not the TUI, owns the selection.
-- `tui.terminal_probe_timeout_ms` (int, optional, default `500`): startup terminal-mode probe timeout in milliseconds. Values are clamped to `100..=5000`; timeout emits a warning and aborts startup instead of hanging indefinitely.
+- `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies the intersected cells, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane; the payload is Markdown source by default, see `tui.selection_copy_markdown` below. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right workbar and include visual wraps because the terminal, not the TUI, owns the selection.
+  On Linux, finishing a transcript or composer selection quietly copies text to
+  PRIMARY, leaving the regular clipboard unchanged. Middle-click inside the
+  composer pastes PRIMARY at the pointer without submitting it. This uses native
+  X11 or Wayland data control; compositors must support PRIMARY selection. Over
+  SSH without a forwarded graphical display, use your terminal's selection/paste
+  gestures or `--no-mouse-capture`. Explicit Copy still uses the regular clipboard.
+
+- `tui.selection_copy_markdown` (bool, optional, default `true`): copy TUI-owned
+  transcript selections (drag release, context-menu Copy, and `Cmd+C`/`Ctrl+C`
+  on an active selection) as Markdown source instead of rendered text. Every
+  intersected cell serializes through the same canonical projection `Ctrl-Y`
+  and `/copy` use — user and assistant cells keep their authored Markdown,
+  other cells keep their full transcript form — partial intersections round out
+  to whole cells, cells join with blank lines, and a toast names the copied
+  cell count. Set `false` to copy the rendered text as displayed. Composer
+  selections and the Linux PRIMARY auto-copy are unchanged; PRIMARY always
+  carries rendered text.
+
+- `tui.terminal_probe_timeout_ms` (int, optional): legacy setting, accepted for configuration compatibility but no longer used. Startup sets raw mode directly after checking terminal ownership; worker scheduling delays do not abort startup.
 - `tui.stream_chunk_timeout_secs` (int, optional, default `900`): per-SSE-chunk idle timeout for streamed model responses. Slow local or compatible servers can raise this with `/config stream_chunk_timeout_secs <seconds>`; `0` maps to the default and explicit values must be `1..=3600`. The legacy `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var is still honored when this key is omitted.
-- `tui.header_items` (array of strings, optional, default `[]`): opt-in header chips. Set `header_items = ["tokens"]` under `[tui]` to show the session input, cache-hit, and output token counts. Narrow terminals elide the optional chip; wide terminals show it alongside context utilization.
 - `tui.osc8_links` (bool, optional, default on for macOS/Linux, off for Windows): emit OSC 8 escape sequences around URLs in transcript output so supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty, WezTerm, Alacritty, recent gnome-terminal/konsole) can open them with the terminal's link gesture—usually Cmd-click on macOS and Ctrl-click on Linux/Windows. Terminals without OSC 8 support render the plain label and ignore the escape. The escapes are emitted out-of-band (not inside buffer cells), so column corruption is not a concern; set `false` only for terminals that misrender the OSC 8 terminator itself. Windows legacy consoles default off; opt in with `true`.
+- `tui.max_model_steps` (int, optional, default uncapped): optional model-step ceiling for one ordinary turn. Omission or `0` leaves model steps uncapped; explicit positive values are clamped to `1..=100000`. Headless `exec` and Fleet workers also have no implicit model-step ceiling; `exec --max-turns N` and positive worker budgets still apply. At ~80% of an explicit step budget the model gets one soft-landing notice; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` after one bounded final-report response when needed. Cumulative wall-clock and per-stream limits remain independent. Active interactive goal turns use `goal.max_steps` instead (default `1000`); see the Goal loop section below.
+- `tui.turn_wall_clock_secs` (int, optional, default `3600`): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Clamped to `30..=86400` (24 hours is the documented ceiling); `0` resolves to the default. When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
 - `transcript.prose_measure` (positive integer, optional, default absent = full width): wrap cap, in columns, for prose cells — user messages, assistant answers, and reasoning/thinking blocks — in the live transcript (#5436). Absent (or `0`) spends the full content width, consistent with tool/status cells and the #5322 wide-frame decision; the former 105-column prose rail is gone. Set a positive whole number (e.g. `prose_measure = 120` under `[transcript]`) to restore a bounded reading measure on ultrawide terminals. Narrow terminals always keep their content width — the cap clamps from above only. Tool, diff, and status cells never inherit this cap. Invalid values (negative or non-integer) are rejected at startup with a `transcript.prose_measure` config error. Resolved once per render pass, so the main transcript cache and the full-screen overlay always agree on the effective width.
 - `hooks` (optional): lifecycle hooks configuration (see `config.example.toml`).
 - `features.*` (optional): feature flag overrides (see below).
@@ -2305,6 +2547,13 @@ max_continuations = 100
 # for coordinator goals that should poll on a cadence instead of keeping one
 # provider turn open. Default: 0 (continue immediately).
 continuation_delay_seconds = 300
+
+# Per-turn step allowance while a goal is active (#5994). Goal turns get a
+# larger but still finite budget than an ordinary interactive turn.
+# Default: 1000 (0 or absent resolves to 1000, never unlimited). Range:
+# 1..=100,000. This bounds each provider turn, never the number of
+# continuation passes.
+max_steps = 1000
 ```
 
 The effective delay is capped at 86,400 seconds (24 hours); use an automation
@@ -2314,6 +2563,15 @@ When an explicit backstop fires, the goal pauses with a status message naming
 `[goal] max_continuations` and a warning is logged; resume the goal after
 inspecting progress, or raise/disable the backstop.
 
+`[goal] max_steps` governs one engine turn at a time: the ordinary interactive
+turn has no implicit model-step ceiling. Explicit per-invocation
+ceilings — `exec --max-turns N`, child-worker caps — always win over it. At
+about 80% of the selected budget the model is told to land; at exhaustion it
+gets one bounded final report and the turn classifies as budget-exhausted. An
+unfinished goal then pauses with the BudgetLimit reason instead of re-arming
+another goal turn — resume it explicitly after reviewing the report. Wall-clock
+and stream protections are separate and still apply.
+
 The delay starts only after a successful turn while an explicitly created goal
 is still active. `/goal pause`, `/goal done`, `/goal blocked`, `/goal clear`,
 Esc, or Ctrl+C cancels a pending continuation before another provider request
@@ -2321,92 +2579,145 @@ starts. Failed turns and policy/route failures never schedule another turn.
 Only the numeric cadence is stored in config; no prompt, credential, or secret
 is persisted for the loop.
 
+### Reasoning-only recovery (`[reasoning_only]`)
+
+When a reasoning model (thinking mode) finishes a response with only hidden
+reasoning and no answer text or tool call, the engine can automatically
+re-request the answer. Configure this behavior with the `[reasoning_only]`
+table:
+
+```toml
+[reasoning_only]
+# Maximum number of automatic re-requests. Default: 2.
+# Set to 0 to disable automatic recovery (fail immediately).
+max_reprompts = 10
+
+# Optional custom message sent to the model on each re-request.
+# When set, overrides the built-in default message.
+# When unset (or commented out), the engine uses:
+#   "So, what's up ? Keep running !"
+reprompt_message = "Allez, répond quelque chose !"
+```
+
+This only applies when the model returns a clean `stop` finish reason with
+only thinking content. An output-length stop (`length`/`max_tokens`) is never
+retried, and a persistently answerless model still fails honestly after the
+configured bound.
+
+To disable the reprompt message entirely (silent retry), set it to an empty
+string:
+
+```toml
+[reasoning_only]
+reprompt_message = ""
+```
+
 ### Notifications
 
-The TUI can emit a desktop notification (OSC 9 escape or plain BEL) when a turn **completes successfully** and took longer than a threshold, so you can tab away while a long task runs. Failed or cancelled turns are intentionally silent — the notification is a "your task is ready" cue, not a generic ping. Configuration lives under `[notifications]`:
+Notification controls are available in the existing `/config` settings view,
+from terminal commands, and through the CLI. All write the same `config.toml`
+keys. Terminal changes apply immediately; add `--save` to keep them. CLI writes
+apply when the next process loads its configuration.
+
+```sh
+codewhale config set notifications.sound whale
+codewhale config set notifications.events.approval-needed false
+codewhale config set notifications.quiet true
+codewhale config get notifications
+codewhale config unset notifications.quiet
+```
+
+```text
+/config notifications sound whale --save
+/config notifications condition unfocused --save
+/config notifications quiet true
+/config notifications status
+```
+
+Nested CLI edits preserve TOML types, unrelated keys and comments. Unset removes
+only the selected leaf. `notifications.sound legacy` in the TUI, or CLI unset of
+`notifications.sound`, restores previous sound choices. Invalid values are
+rejected before file or session changes. In an active TUI profile, saved edits
+update its notification table when it owns one; otherwise they update the
+inherited root table. The settings detail keeps saved and current values distinct.
 
 ```toml
 [notifications]
-method          = "auto"  # auto | osc9 | bel | off
-threshold_secs  = 30      # only notify when the turn took >= this many seconds
-include_summary = false   # include elapsed time + cost in the notification body
-completion_sound = "off"  # off | beep | bell | file; sound is opt-in
-sound_file = "E:\\google\\downloads\\notify.wav" # for completion_sound = "file"
-quiet = false             # true suppresses every desktop notification and sound
+method = "auto"        # auto | osc9 | kitty | ghostty | bel | off
+condition = "unfocused" # unfocused | always | never
+threshold_secs = 30
+include_summary = false
+sound = "whale"        # optional; sound is opt-in, not enabled by default
+quiet = false
 
-[notifications.events]    # per-category switches; all default to true
-turn-complete     = true  # an agent turn finished
-subagent-terminal = true  # a sub-agent reached a terminal status
-approval-needed   = true  # a tool call is blocked on your approval
-input-needed      = true  # the agent asked a question and is blocked
-elevation-needed  = true  # the sandbox denied a tool and needs a decision
-model-notify      = true  # the model called the `notify` tool
+[notifications.events]
+turn-complete = true
+subagent-terminal = true
+approval-needed = true
+input-needed = true
+elevation-needed = true
+model-notify = true
 ```
 
-`quiet = true` is the one-flag "stop interrupting me" switch: it silences
-every category on every delivery mechanism while leaving the rest of your
-notification configuration intact, so flipping it back restores your exact
-previous policy. `[notifications.events]` disables single categories the
-same way — a disabled category is suppressed at the emission path, so it
-cannot leak through one specific protocol. A suppressed notification also
-suppresses its paired `[notifications.event_sound]` cue (no orphaned bells
-for events you turned off). The turn-completion chime also respects `quiet`.
+`quiet = true` mutes every category without changing saved choices. `method =
+"off"` also stops both banner and selected audio. Disabling a category stops its
+sound. Attention and duration gates apply before any sink runs. Title animation
+completion is silent; only the authorized notification event can request audio.
+Successful turn completion is a notification category; failed/cancelled turns do
+not create a success notification.
 
-Method semantics:
+`auto` chooses a recognized terminal protocol or the existing macOS native
+fallback; unknown terminals remain unsupported and never invent a bell. `bel`
+is an audio-only transport: one selected cue is dispatched, without a second
+transport bell. With `sound = "off"`, that transport is silent. `osc9`, `kitty`
+and `ghostty` use their terminal notification protocols; tmux passthrough is
+preserved. Terminal/OS notification preferences still govern display, attribution
+and any sound the host itself adds.
 
-- `auto` (default) — picks a supported native or terminal banner transport. Unknown terminals fail closed to `off`; automatic banner selection never invents a BEL sound.
-- `osc9` — emit `\x1b]9;<msg>\x07`. Inside tmux the sequence is wrapped in DCS passthrough so it reaches the outer terminal.
-- `bel` — emit a single `\x07` byte. Use this on Windows only if you actively want the chime back.
-- `off` — disable banners. An explicitly selected completion sound remains an independent control.
+By default the terminal must stay unfocused for two seconds. `condition =
+"always"` allows foreground notifications and bypasses the duration threshold;
+`"never"` suppresses all delivery. The canonical condition takes precedence over
+legacy `[tui].notification_condition`.
 
-By default, delivery is background-only: Codewhale waits until the terminal
-has remained unfocused for two seconds. Set `notification_condition =
-"always"` under `[tui]` to allow configured notifications in the foreground,
-or `"never"` to suppress all operator notifications. macOS native banners are
-silent. `completion_sound` controls the turn-completion cue; the separate,
-opt-in `[notifications.event_sound]` table controls event BEL cues. Explicit
-`method = "bel"` is also audible and should be used only when that is wanted.
+The bundled `whale` is a 1.55-second original whale-inspired cue, with no
+third-party recording. It remains an opt-in candidate pending listening approval.
+WAV playback uses a background worker: macOS `/usr/bin/afplay`, Linux `aplay`
+from [ALSA utilities](https://github.com/alsa-project/alsa-utils), or Windows
+`PlaySoundW`. A missing player/file or unsupported platform has no fallback bell.
+Only one WAV plays at a time. A worker-start receipt is a dispatch attempt, not
+proof of audible playback or OS acceptance. The existing macOS `osascript`
+banner retains Script Editor attribution; this Core change does not provide a
+branded native Apps banner.
 
-Windows users who run inside a known OSC-9 terminal (e.g. WezTerm on Windows) keep getting OSC-9 notifications. Set `method = "off"` to disable threshold-based desktop notifications entirely.
+#### Previous sound settings
 
-`completion_sound = "file"` is for Windows users who want a per-application
-completion sound without changing the global Windows sound scheme. It plays the
-configured WAV `sound_file` asynchronously via the native Windows audio API.
-
-#### Event sound cues
-
-`[notifications.event_sound]` is an opt-in, deterministic policy that emits a
-terminal-bell-level cue when specific notification events fire (approval
-prompts, blocked-on-input, sub-agent completion, and so on). It is **off by
-default**; with `enabled = false` nothing is emitted, which is the
-platform-safe no-op fallback.
+When `notifications.sound` is absent, completion uses a non-off
+`completion_sound` selection, and other events use the existing event allow-list.
+These are compatibility inputs to the same audio decision, not separate playback
+paths. When the global sound is selected, it takes precedence over the previous
+completion/event choices. The default remains silent unless a legacy sound or
+explicit `bel` transport was already selected.
 
 ```toml
 [notifications.event_sound]
-enabled = false                              # default: off (opt-in)
-events = ["turn-complete", "approval-needed"] # default allow-list
-min_interval_ms = 2000                       # per-event rate limit
-quiet = false                                # true silences everything without editing the allow-list
+enabled = false
+events = ["turn-complete", "approval-needed"]
+min_interval_ms = 2000
+quiet = false
 ```
 
-The cue table is fixed — cues are functional BEL-based signals, not
-designed-for-pleasantness audio, and every cue is one or two `\x07` bytes
-(inert on terminals that ignore BEL, so this is a platform-safe no-op
-everywhere):
+Legacy event cues use one bell for completion, subagent completion, input and
+model notices; approval/elevation cues use two. The per-category repeat interval
+survives settings refreshes. Old unknown event names are ignored on load; new
+CLI/TUI edits require names from the six categories above.
 
-| Event | Cue |
-|---|---|
-| `turn-complete` | BEL (`\x07`) |
-| `subagent-terminal` | BEL (`\x07`) |
-| `approval-needed` | double BEL (`\x07\x07`) |
-| `input-needed` | BEL (`\x07`) |
-| `elevation-needed` | double BEL (`\x07\x07`) |
-| `model-notify` | BEL (`\x07`) |
-
-Decision order: disabled → quiet mode → event not in `events` → `turn-complete`
-deferred to the `completion_sound` channel when that is active (so the two
-never double-ding) → per-event rate limit (`min_interval_ms` since the last
-play of that event) → play. Unknown strings in `events` are ignored.
+Local approval/input/elevation prompts and error receipts remain available when
+external notifications are muted. Action prompts use the selected UI language
+and retire when that request settles. Repeated live notices keep their first
+expiry; a later routine update does not hide an unresolved warning at completion.
+Optional plugin suggestion toasts and contextual tips share one session guidance
+budget. `/config contextual_tips off` hides those toasts while preserving
+required notices and explicit plugin review requests.
 
 #### What a notification can contain
 
@@ -2448,6 +2759,38 @@ needs Codewhale to ship a real `.app` bundle. Tracked in
 iTerm2, WezTerm, Ghostty, and kitty are matched first and use their own
 notification protocols, and `method = "osc9"` / `"bel"` / `"off"` opt out
 of the `osascript` path explicitly.
+
+## Automations in the terminal
+
+Open `/automation`, then choose **New automation** (`n`) or **Edit automation**
+(`e`). The form edits the name, multiline prompt, schedule, model, workspace,
+and enabled status. `Tab` moves between fields; `Enter` inserts a newline in
+the prompt. Schedule presets include daily, weekly, hourly, once, and a custom
+RRULE. Time fields accept `HH:MM`; their arrow controls change the time by
+15 minutes. Weekly day buttons and model search support mouse and keyboard.
+
+The next-run preview uses the scheduler's local time zone, shown with its UTC
+offset. An enabled automation can run after **Save** (`Ctrl+S`); a paused one
+has no scheduled next run. **Cancel** (`Esc`) discards the draft. Editing keeps
+existing permission settings, custom schedules, and additional workspace
+entries unless the corresponding supported field is explicitly changed.
+
+Schedules are evaluated in the machine's local time zone against the wall
+clock. A wall time that does not exist on a spring-forward day is skipped and
+an ambiguous fall-back time fires once. Occurrences missed while Codewhale was
+closed, asleep, or still running the previous occurrence are coalesced: the
+next start runs one catch-up occurrence and then continues from the next
+future slot, never replaying every missed slot. An occurrence never starts
+while an earlier run of the same automation is still queued or running. Each
+run is recorded durably with its status, timing and error; a run that needs a
+tool approval has no operator to ask and fails once the approval wait expires.
+
+Choosing a concrete model pins both the model and its exact configured
+provider, including named custom routes. Later changes to the active provider
+do not move that automation's pin. The default-model choice and legacy
+definitions without a provider pin keep the runtime's existing default
+behavior. New automation records use schema v2 and tasks use v3 so older
+runtimes reject records whose provider pins they cannot preserve.
 
 ## Lifecycle Outbox (`[lifecycle_outbox]`)
 
@@ -2567,6 +2910,42 @@ tools loaded on every request, add them to `[tools].always_load`:
 always_load = ["Git", "notify"]
 ```
 
+### `request_user_input` limits
+
+`request_user_input` asks the user a short batch of multiple-choice questions.
+Both ceilings are configurable (#5949): raise `user_input_max_questions` when a
+research or planning workflow legitimately needs more clarifications, lower it
+when interactive triage should stay terse.
+
+```toml
+[tools]
+user_input_max_questions = 6   # default 6, clamped to 1..=10
+user_input_max_options = 4     # default 4, clamped to 2..=10
+```
+
+The effective values are applied in three places at once: the tool's JSON
+schema (`minItems` / `maxItems`), its model-visible description, and the
+payload validator. A rejected payload names the key to raise, so the model can
+either resize the batch or tell the user which setting to change.
+
+### User-input / approval wait timeout
+
+Questions from `request_user_input` and approval decisions wait a bounded
+time and then cancel with a timeout (#6003). The default is 300 seconds.
+Raise it when you step away or read carefully, or set `0` to wait forever
+(overnight automation, long human review). Headless `exec` runs have no
+responder, so `request_user_input` is withheld there by default:
+the model reports the tool absent and finishes instead of stalling.
+
+```toml
+[tools]
+user_input_timeout_seconds = 300   # default 300; 0 disables the timeout; clamped to 86400 (24h)
+```
+
+The one key governs both the interactive question wait and the Runtime
+approval-decision wait, and the wait is this table's only user-facing clock —
+wall-clock and stream protections elsewhere are unaffected.
+
 ## Feature Flags
 
 Feature flags live under the `[features]` table and are merged across profiles.
@@ -2609,6 +2988,35 @@ result visibly degrades through DuckDuckGo and then Bing; the structured search
 receipt records every hop. Missing configuration and network-policy denials
 fail closed without sending the query to another provider.
 
+**Provider-native search.** On routes whose provider offers its own web-search
+tool (OpenAI, xAI, Anthropic, DeepSeek, Kimi and others), that search can run
+ahead of the configured provider. It is a separate model call on the active
+route. `[search] native` decides the order:
+
+- unset (default): native search leads only when no search provider is
+  configured; a provider chosen in `[search] provider`,
+  `CODEWHALE_SEARCH_PROVIDER`, a Tavily key, or `/search` in-session wins;
+- `native = true`: native search leads even when a provider is pinned;
+- `native = false`: native search is never used.
+
+The native answer is returned whole; oversized tool output spills to a session
+artifact the model can page back.
+
+**Recency and locale.** `recency` and `locale` are forwarded where the
+backend's API takes them, and the search receipt reports each as honored or
+ignored:
+
+| Backend | Recency | Locale |
+| --- | --- | --- |
+| Firecrawl | `tbs=qdr:d/w/m/y` | `country` from the region (`de-DE` → `DE`); a bare language is ignored |
+| Tavily | `time_range` | not sent (Tavily takes country names) |
+| SearXNG | `time_range` | `language`, as given |
+| Serply | not sent (undocumented) | `hl` language, `gl` country |
+
+Recency is rounded up to the backend's nearest window (day, week, month,
+year), so `recency = 10` searches the last month. Other backends ignore both
+knobs and say so in the receipt.
+
 For a private/internal search service that serves DuckDuckGo-compatible HTML,
 keep `provider = "duckduckgo"` and set `base_url`; Codewhale appends the `q`
 query parameter to that endpoint and applies network policy to its host.
@@ -2622,6 +3030,32 @@ configured instance's JSON API. Set `provider = "searxng"` and
 `/search?q=...&format=json`. Codewhale does not use a public SearXNG instance
 by default because public instances often disable JSON output or rate-limit API
 traffic.
+
+Self-host it as a separate process (Docker is fine); Codewhale never bundles or
+manages the search engine itself:
+
+- Enable JSON on the instance (`settings.yml`, `search.formats` must include
+  `json`) and restart it. An HTML-only instance answers the API with HTTP 403;
+  Codewhale reports that as a JSON/API-access problem on the SearXNG hop rather
+  than silently returning no results.
+- Bind it to loopback, or to a host and port your network policy allows. The
+  instance keeps its own engine list, limiter, and limits.
+- Point Codewhale at it with `[search] provider = "searxng"` and `base_url`
+  (required; either the root URL or the `/search` endpoint). No instance ships
+  as a default, and none is discovered automatically.
+- `codewhale doctor --probe-search` sends a transport-only `HEAD` to that
+  origin — no `q=`, no credentials, no redirects, no audit receipt — so a green
+  probe proves reachability and network-policy admission, not that JSON is on.
+
+Confirm the JSON API itself before assuming a Codewhale bug:
+
+```sh
+curl -sS "$BASE/search?q=codewhale&format=json" | jq '.results[0] | {title,url,score}'
+```
+
+Codewhale ranks the returned rows by `score`, highest first, and applies
+`max_results` to that ranking; rows an instance reports without a usable score
+keep their original relative order.
 
 **Metaso** ([metaso.cn](https://metaso.cn)) requires a user-supplied key. Set
 `METASO_API_KEY` or `[search] api_key`; Codewhale does not ship a shared key.
@@ -2641,11 +3075,28 @@ rather than snippets. Set `[search] api_key` to your `ay_live_...` key, or the
 `SOFYA_API_KEY` env var. This is a search-tool backend only; it does not add a
 Sofya model provider.
 
+**Serply** ([serply.io](https://serply.io)) returns Google organic results with
+title, URL, and snippet. Set `[search] api_key` to your Serply key, or the
+`SERPLY_API_KEY` env var. This is a search-tool backend only; it does not add a
+Serply model provider.
+
+**Tavily** ([tavily.com](https://tavily.com)) is selected automatically when a
+Tavily key is present and no provider is pinned: `TAVILY_API_KEY` set, or
+`[search] api_key` / `CODEWHALE_SEARCH_API_KEY` in the `tvly-` family. Doctor
+reports that as `source: tavily key`. Autodetect is runtime-only — Codewhale
+never writes `[search] provider` for it, and `TAVILY_API_KEY` is never merged
+into `[search] api_key`. An explicit `[search] provider` or
+`CODEWHALE_SEARCH_PROVIDER` always wins, so `provider = "firecrawl"` keeps
+Firecrawl even with a Tavily key in the environment. Pinned `tavily` accepts
+any non-empty `[search] api_key` and is configured by that key or
+`TAVILY_API_KEY`; with both empty it fails closed.
+
 ```toml
 [search]
-provider = "firecrawl" # also duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya
+provider = "firecrawl" # also duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply
 # base_url = "https://search.example/" # optional with provider = "duckduckgo"; required with "searxng"
 # api_key = "YOUR_KEY" # optional for firecrawl; required by the other API providers
+# native = false # provider-native search: unset = only when no provider is configured
 ```
 
 ## Local Media Attachments
@@ -2802,3 +3253,65 @@ emits one compact `status` notice per turn so the user can see why their
 visible text shrank. Treat any change that re-enables text-based tool
 execution as a regression; the protocol-recovery tests in
 `crates/tui/tests/integration/protocol_recovery.rs` lock the contract.
+
+## Model-bound redaction (`[redaction] model_bound`)
+
+Codewhale masks credential-looking values in tool output **before it is sent
+to an upstream model** — the "model boundary". A file read by a tool can
+contain a configured API key, a bare provider token, or a credential-shaped
+opaque string, and the model must not see those bytes. This backstop is
+separate from the display/export scrubbers: it decides what the model itself
+can quote back, and it is deliberately conservative (`CredentialShaped`
+policy, see `crates/config/src/persistence.rs`), so ordinary code and config
+stay byte-exact while keys, JWTs, bearer tokens, PEM blocks, and long opaque
+runs are masked.
+
+Turning that masking **off** is a security decision, so it is not a plain
+boolean:
+
+```toml
+[redaction]
+model_bound = "disabled"   # "enabled" (default) | "disabled"
+```
+
+Setting `"disabled"` only records a *request*. It takes effect only when all
+of these are true:
+
+1. You restart the interactive TUI.
+2. The startup gate appears and you press `1`/`Y` on its first stage
+   ("confirm and disable"). This only advances to a second, final-confirmation
+   stage - the gate repeats the red warning and asks "are you really sure?".
+3. On that second stage you press `1`/`Y` again. The gate is rendered with the
+   same explicit-key discipline as workspace trust - `Enter` never confirms by
+   reflex, and `2`/`U` on the second stage steps back.
+4. Only that second confirmation persists a receipt to
+   `~/.codewhale/redaction-state.json` (next to `config.toml`) and rebuilds
+   the engine with masking off for the rest of this launch and future ones.
+
+The receipt is bound to the config it was made against and is valid only
+while that config still requests `"disabled"`. Setting `model_bound` back
+to `"enabled"` - or rewriting `config.toml` in any way after the
+confirmation - invalidates it, so requesting `"disabled"` again later
+asks for a fresh confirmation on the next launch. The receipt checks both the
+config contents and modification time; missing, unreadable, or malformed config
+and older receipts without this binding keep masking enabled. Legacy-home
+installs store the receipt beside their resolved config file.
+
+Until a confirmation exists, the effective mode is always `"enabled"`:
+
+- Choosing `2`/`U` ("keep masking on") leaves the config field untouched, so
+  the next launch asks again. Edit the field back to `"enabled"` to stop being
+  asked.
+- Non-interactive entry points (`codewhale exec`, hooks, automations, headless
+  agents) never confirm anything and never apply an unconfirmed request.
+- Routing/classification summaries and durable goal-state text keep their own
+  always-on redaction regardless of this switch; the opt-out exists so the
+  model can quote file bytes for exact edits, not to relax stored state.
+
+The config value itself is forgiving: `true`/`false`, `"on"`/`"off"`, and
+`"enabled"`/`"disabled"` (any casing) all parse, with `false`/`"off"` meaning
+`"disabled"`.
+
+A confirmed opt-out still sends your configured API keys to the provider you
+are already talking to. Only use it when the model must read and edit files
+that contain real credentials.

@@ -50,12 +50,12 @@ use anyhow::{Result, anyhow};
 use async_stream::try_stream;
 use futures_util::Stream;
 
-use crate::models::{
+use codewhale_models::{
     ContentBlock, MessageDelta, MessageRequest, MessageResponse, StreamEvent, Usage,
 };
 
 use super::{LlmClient, StreamEventBox};
-use crate::models::Role;
+use codewhale_models::Role;
 
 /// A pre-recorded "turn" the mock will replay on the next streaming call.
 ///
@@ -294,7 +294,7 @@ fn stream_from_canned(turn: CannedTurn) -> StreamEventBox {
 /// `MessageResponse` by concatenating text deltas. Used only as a fallback
 /// when callers `create_message` without a queued `MessageResponse`.
 fn synthesize_message_response(turn: CannedTurn, model: &str) -> MessageResponse {
-    use crate::models::Delta;
+    use codewhale_models::Delta;
 
     let mut text = String::new();
     let mut stop_reason: Option<String> = None;
@@ -336,7 +336,7 @@ fn synthesize_message_response(turn: CannedTurn, model: &str) -> MessageResponse
 pub mod canned {
     use serde_json::Value;
 
-    use crate::models::{
+    use codewhale_models::{
         ContentBlockStart, Delta, MessageDelta, MessageResponse, StreamEvent, Usage,
     };
 
@@ -477,7 +477,7 @@ mod tests {
 
     use super::*;
     use crate::llm_client::LlmClient;
-    use crate::models::{Delta, Message, MessageRequest, StreamEvent};
+    use codewhale_models::{Delta, Message, MessageRequest, StreamEvent};
 
     fn empty_request() -> MessageRequest {
         MessageRequest {
@@ -641,7 +641,7 @@ mod tests {
         while let Some(ev) = stream.next().await {
             match ev.unwrap() {
                 StreamEvent::ContentBlockStart { content_block, .. } => {
-                    use crate::models::ContentBlockStart;
+                    use codewhale_models::ContentBlockStart;
                     if let ContentBlockStart::ToolUse { name, .. } = content_block {
                         assert_eq!(name, "list_dir");
                         saw_tool_use = true;

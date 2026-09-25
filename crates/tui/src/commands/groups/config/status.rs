@@ -6,14 +6,56 @@ use std::path::Path;
 
 use super::CommandResult;
 use crate::compaction::estimate_input_tokens_conservative;
-use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::{App, AppModeUi};
-use crate::tui::approval::ApprovalMode;
 use crate::utils::{display_path, estimate_message_chars};
+use codewhale_execpolicy::ApprovalMode;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Show a compact runtime status report for the current TUI session.
 pub fn status(app: &mut App) -> CommandResult {
     CommandResult::message(format_status(app))
+}
+
+/// Models.dev live-layer freshness: source, row count, and age (#4187).
+fn catalog_summary() -> String {
+    use crate::models_dev_live::ModelsDevFreshness;
+    let st = crate::models_dev_live::status();
+    let now = codewhale_config::catalog::now_unix();
+    let mut out = match st.freshness {
+        ModelsDevFreshness::Bundled => "bundled".to_string(),
+        ModelsDevFreshness::Live => "models.dev live".to_string(),
+        ModelsDevFreshness::Stale => "models.dev stale".to_string(),
+        ModelsDevFreshness::Failed => "models.dev refresh failed".to_string(),
+    };
+    if st.offering_count > 0 {
+        let _ = write!(out, " · {} offerings", st.offering_count);
+    }
+    if let Some(fetched_at) = st.fetched_at {
+        let _ = write!(
+            out,
+            " · fetched {}",
+            codewhale_config::cloud_facts::provenance::age_label(fetched_at, now)
+        );
+    }
+    if let Some(err) = st.last_error.as_deref().filter(|e| !e.is_empty())
+        && st.freshness == ModelsDevFreshness::Failed
+    {
+        let _ = write!(out, " ({err})");
+    }
+    out
+}
+
+/// Cloud facts provenance: channel, version, key, age, origin — or why the
+/// bundled facts are in use. Off by default.
+fn cloud_facts_summary() -> String {
+    let status = codewhale_cloud_facts::status();
+    if status.state == codewhale_config::cloud_facts::CloudFactsState::Off {
+        // The adjacent catalog source already describes the available facts.
+        // Repeating "bundled" here also mislabels a live Models.dev catalog.
+        "off".to_string()
+    } else {
+        status.label(codewhale_config::catalog::now_unix())
+    }
 }
 
 /// Row label column, in columns. English's widest label is `Context window:`
@@ -73,6 +115,26 @@ fn format_status(app: &App) -> String {
             &[("{count}", &app.mcp_configured_count.to_string())],
         ),
     );
+    let config =
+        crate::config::Config::load(app.config_path.clone(), app.config_profile.as_deref()).ok();
+    if let Some(notice) = config
+        .as_ref()
+        .and_then(|config| session_model_drift_notice(app, config, locale))
+    {
+        let _ = writeln!(out, "  {notice}");
+    }
+    if let Some(drift) = config
+        .as_ref()
+        .and_then(|config| fleet_drift_summary(app, config, locale))
+    {
+        push_row(&mut out, locale, MessageId::StatusLabelFleet, &drift);
+    }
+    if let Some(notice) = crate::core::turn::snapshots_disabled_status(
+        &app.workspace,
+        app.current_session_id.as_deref(),
+    ) {
+        let _ = writeln!(out, "  {}", notice.localize(locale));
+    }
     let _ = writeln!(out);
 
     push_row(
@@ -89,11 +151,31 @@ fn format_status(app: &App) -> String {
             ],
         ),
     );
+    let mut source_summary =
+        context_window_source_label(context_window_source(app), locale).into_owned();
+    // The default bundled source needs no second catalog label. Keeping it
+    // compact preserves the 80-column budget as well as the report's row count.
+    if crate::models_dev_live::status().freshness
+        != crate::models_dev_live::ModelsDevFreshness::Bundled
+    {
+        let _ = write!(
+            source_summary,
+            " · {}: {}",
+            tr(locale, MessageId::StatusLabelCatalog),
+            catalog_summary()
+        );
+    }
+    let _ = write!(
+        source_summary,
+        " · {}: {}",
+        tr(locale, MessageId::StatusLabelCloudFacts),
+        cloud_facts_summary()
+    );
     push_row(
         &mut out,
         locale,
         MessageId::StatusLabelWindowSource,
-        context_window_source_label(context_window_source(app), locale).as_ref(),
+        &source_summary,
     );
     if let Some(key) = context_window_override_key(app, locale) {
         push_row(&mut out, locale, MessageId::StatusLabelWindowOverride, &key);
@@ -273,6 +355,80 @@ fn push_row(out: &mut String, locale: Locale, label: MessageId, value: &str) {
     let _ = writeln!(out, "  {label:<LABEL_WIDTH$} {value}");
 }
 
+/// Selected-Fleet pin drift: saved `(provider, model)` pairs that are no
+/// longer among the routes the Fleet picker can offer — the provider table
+/// was removed, or the model dropped out of the provider's roster. A pin may
+/// still serve upstream, so this reports and never rewrites. `None` when no
+/// Fleet is selected or nothing drifted.
+fn fleet_drift_summary(
+    app: &App,
+    config: &crate::config::Config,
+    locale: Locale,
+) -> Option<String> {
+    let selected = crate::fleet::store::selected_fleet(&app.workspace)?;
+    let (fleet, _scope) = crate::fleet::store::load_fleet_at(&selected.path).ok()?;
+    let active = config
+        .provider
+        .as_deref()
+        .and_then(crate::config::ApiProvider::parse)
+        .unwrap_or(crate::config::ApiProvider::Deepseek);
+    let health = crate::provider_readiness::ProviderReadinessSnapshot::default();
+    let routes =
+        crate::tui::views::fleet_setup::cross_provider_model_routes(config, active, &health);
+    let offered = |provider: &str, model: &str| {
+        routes
+            .iter()
+            .any(|(p, m, _)| p.eq_ignore_ascii_case(provider) && m.eq_ignore_ascii_case(model))
+    };
+    let mut drifted: Vec<String> = Vec::new();
+    if let Some(operator) = &fleet.operator
+        && !offered(&operator.provider, &operator.model)
+    {
+        drifted.push("operator".to_string());
+    }
+    for member in &fleet.members {
+        if let (Some(provider), Some(model)) = (&member.provider, &member.model)
+            && !offered(provider, model)
+        {
+            drifted.push(member.id.clone());
+        }
+    }
+    if drifted.is_empty() {
+        return None;
+    }
+    Some(localized(
+        locale,
+        MessageId::StatusFleetDrifted,
+        &[
+            ("{fleet}", &fleet.name),
+            ("{count}", &drifted.len().to_string()),
+            ("{ids}", &drifted.join(", ")),
+        ],
+    ))
+}
+
+/// The session's own pinned model, read-only (#6035): when the active route
+/// has a fresh live roster that no longer lists the pinned id, say so. The pin
+/// is never rewritten — the id may still answer, and a stale or missing
+/// roster proves nothing, so it stays silent then. `None` under Auto routing.
+fn session_model_drift_notice(
+    app: &App,
+    config: &crate::config::Config,
+    locale: Locale,
+) -> Option<String> {
+    if app.auto_model || app.model.trim().is_empty() {
+        return None;
+    }
+    let provider = app.provider_identity_for_persistence();
+    crate::provider_catalog_live::pin_missing_from_fresh_roster(config, provider, &app.model)
+        .filter(|missing| *missing)?;
+    Some(localized(
+        locale,
+        MessageId::StatusModelNotInRoster,
+        &[("{model}", &app.model), ("{provider}", provider)],
+    ))
+}
+
 fn safety_summary(app: &App) -> Cow<'static, str> {
     let policy = crate::core::authority::sandbox_policy_for_turn(
         app.mode,
@@ -375,8 +531,12 @@ fn context_window_source_label(
     tr(
         locale,
         match source {
-            crate::route_runtime::ContextWindowSource::Configured => {
+            crate::route_runtime::ContextWindowSource::Configured
+            | crate::route_runtime::ContextWindowSource::UserDeclared => {
                 MessageId::StatusContextSourceConfigured
+            }
+            crate::route_runtime::ContextWindowSource::ConfiguredModel => {
+                MessageId::StatusContextSourceConfiguredModel
             }
             crate::route_runtime::ContextWindowSource::ProviderReported => {
                 MessageId::StatusContextSourceProviderReported
@@ -400,7 +560,11 @@ fn context_window_source_label(
 /// The exact key that changes the window, or `None` when the user already set
 /// it and the row would be naming a key they have already used.
 fn context_window_override_key(app: &App, locale: Locale) -> Option<String> {
-    if app.active_context_window_source == crate::route_runtime::ContextWindowSource::Configured {
+    if matches!(
+        app.active_context_window_source,
+        crate::route_runtime::ContextWindowSource::Configured
+            | crate::route_runtime::ContextWindowSource::ConfiguredModel
+    ) {
         return None;
     }
     let table = app
@@ -449,16 +613,128 @@ fn localized(locale: Locale, id: MessageId, replacements: &[(&str, &str)]) -> St
 
 #[cfg(test)]
 mod tests {
-    use crate::models::Role;
+    use codewhale_models::Role;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
 
     use super::*;
     use crate::config::{ApiProvider, Config};
-    use crate::models::{ContentBlock, Message};
-    use crate::tui::app::{AppMode, TuiOptions};
+    use crate::tui::app::TuiOptions;
     use crate::tui::history::HistoryCell;
+    use codewhale_config::AppMode;
+    use codewhale_models::{ContentBlock, Message};
+
+    #[test]
+    fn status_keeps_current_session_snapshot_remedy_after_notice_delivery() {
+        let _env = crate::test_support::lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _user_home = crate::test_support::EnvVarGuard::set("HOME", root.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("large.txt"), vec![b'x'; 4096]).unwrap();
+        let mut app = create_test_app(workspace.clone());
+        app.current_session_id = Some("session-a".into());
+        assert!(
+            crate::core::turn::pre_turn_snapshot(&workspace, 1, 1024, None, Some("session-a"))
+                .is_none()
+        );
+        assert_eq!(
+            crate::core::turn::take_snapshots_disabled_notices(&workspace, Some("session-a")).len(),
+            1
+        );
+        for _ in 0..2 {
+            let report = status(&mut app).message.unwrap();
+            assert!(report.contains("Snapshots and /undo are off"), "{report}");
+            assert!(report.contains("snapshot-eligible content"), "{report}");
+            // Stated once, not doubled by a raw reason plus a template.
+            assert_eq!(
+                report
+                    .matches(crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY)
+                    .count(),
+                1,
+                "{report}"
+            );
+        }
+        app.current_session_id = Some("session-b".into());
+        assert!(
+            !status(&mut app)
+                .message
+                .unwrap()
+                .contains("Snapshots and /undo are off")
+        );
+        app.current_session_id = Some("session-a".into());
+        assert!(
+            crate::core::turn::pre_turn_snapshot(&workspace, 2, 0, None, Some("session-a"))
+                .is_some()
+        );
+        assert!(
+            !status(&mut app)
+                .message
+                .unwrap()
+                .contains("Snapshots and /undo are off")
+        );
+    }
+
+    #[test]
+    fn status_warns_when_the_session_pin_left_a_fresh_roster_and_keeps_it() {
+        // #6035: warning only. The pin is never rewritten, and a route with
+        // no fresh roster proves nothing, so it stays silent.
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = TempDir::new().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _user_home = crate::test_support::EnvVarGuard::set("HOME", root.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", root.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut app = create_test_app(workspace);
+        app.auto_model = false;
+        app.model = "deepseek-v4-flash".to_string();
+        let notice = "is not in deepseek's current model list";
+        assert!(
+            !status(&mut app).message.unwrap().contains(notice),
+            "no fresh roster, no claim"
+        );
+
+        let config = Config::load(app.config_path.clone(), app.config_profile.as_deref())
+            .unwrap_or_default();
+        let base_url = config.base_url_for_route_identity(ApiProvider::Deepseek, "deepseek");
+        let fingerprint = codewhale_config::catalog::base_url_fingerprint(&base_url);
+        let fetched_at = codewhale_config::catalog::now_unix();
+        crate::provider_catalog_live::record_success(
+            codewhale_config::catalog::ProviderCatalogDelta {
+                provider: "deepseek".to_string(),
+                base_url_fingerprint: fingerprint.clone(),
+                fetched_at,
+                offerings: vec![codewhale_config::catalog::CatalogOffering {
+                    provider: "deepseek".to_string(),
+                    wire_model_id: "deepseek-flash".to_string(),
+                    endpoint_key: "chat".to_string(),
+                    source: codewhale_config::catalog::CatalogSource::Live {
+                        base_url_fingerprint: fingerprint,
+                        fetched_at,
+                    },
+                    ..Default::default()
+                }],
+            },
+        );
+
+        let report = status(&mut app).message.unwrap();
+        assert!(report.contains(notice), "{report}");
+        assert!(report.contains("deepseek-v4-flash"), "{report}");
+        assert_eq!(app.model, "deepseek-v4-flash", "the pin is left unchanged");
+
+        app.model = "deepseek-flash".to_string();
+        assert!(!status(&mut app).message.unwrap().contains(notice));
+        app.model = "deepseek-v4-flash".to_string();
+        app.auto_model = true;
+        assert!(!status(&mut app).message.unwrap().contains(notice));
+        crate::provider_catalog_live::reset_cache_for_test();
+    }
 
     fn create_test_app(workspace: PathBuf) -> App {
         let options = TuiOptions {
@@ -481,7 +757,7 @@ mod tests {
         app.session.last_completion_tokens = Some(25);
         app.session.last_prompt_cache_hit_tokens = Some(70);
         app.session.last_prompt_cache_miss_tokens = Some(30);
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
@@ -532,6 +808,14 @@ mod tests {
         assert_eq!(
             rows, 18,
             "fresh session is 18 rows with Window override present, got {rows} rows:\n{msg}"
+        );
+        let source = msg
+            .lines()
+            .find(|line| line.contains("Window source:"))
+            .unwrap();
+        assert!(
+            source.chars().count() <= 80,
+            "fresh source provenance must not wrap: {source}"
         );
     }
 
@@ -726,7 +1010,7 @@ mod tests {
             assert!(agent.contains("sandbox workspace-write, network off"));
         }
 
-        app.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+        app.approval_mode = ApprovalMode::Bypass;
         let full_access = format_status(&app);
         assert!(full_access.contains("sandbox disabled, network unrestricted"));
 
@@ -804,7 +1088,7 @@ mod tests {
         let tmpdir = TempDir::new().expect("temp dir");
         let mut app = create_test_app(tmpdir.path().to_path_buf());
         let raw = "RAW_STATUS_PRESSURE\n".repeat(2_000);
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call-big".to_string(),

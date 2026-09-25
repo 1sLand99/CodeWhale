@@ -18,7 +18,7 @@
  * "Plan · Work · Operate", "Ask · Auto-Review · Full Access",
  * "TUI · exec · web · API", "Codewhale", "GitHub", "Issues",
  * `npm install -g codewhale`, `cargo test --locked`, `codewhale exec`,
- * package-manager proper nouns, mirror names, and `/codewhale-tui.webp`.
+ * package-manager proper nouns, mirror names, and captured media paths.
  */
 
 export interface ChromeDict {
@@ -31,21 +31,13 @@ export interface ChromeDict {
   navContribute: string;
 
   /**
-   * Bilingual secondary nav labels — the small companion label the
-   * newspaper masthead sets beside each primary link.
-   *
-   * The English edition uses the Han seal pair (文档 / 指引 / …) as an
-   * editorial device; every other locale supplies its OWN pairing (native
-   * primary, short English secondary). Never hardcode Han characters at a
-   * call site — a locale that wants no second label still needs a value
-   * here, because empty strings are rejected by dictionaries.test.ts.
+   * The primary strip: Product / Models / Plugins / Docs. The
+   * older six (Start, Install, FAQ, Community, Contribute) stay in the
+   * dictionary for the compact sheet's second group and the footer.
    */
-  navDocsSecondary: string;
-  navStartSecondary: string;
-  navInstallSecondary: string;
-  navFaqSecondary: string;
-  navCommunitySecondary: string;
-  navContributeSecondary: string;
+  navProduct: string;
+  navModels: string;
+  navPlugins: string;
 
   /**
    * Skip-to-content link rendered before the nav in app/[locale]/layout.tsx.
@@ -62,11 +54,11 @@ export interface ChromeDict {
   /** Mobile-menu and masthead call to action, e.g. "Install →". */
   installCta: string;
 
-  /** Header account links to the Codewhale app (app.codewhale.net). */
+  /**
+   * The header's one identity door to the Codewhale app (app.codewhale.net).
+   * Account creation is offered on the sign-in page, not beside it.
+   */
   authSignIn: string;
-  authRegister: string;
-  /** aria-label for the header account link group. */
-  authGroupAria: string;
 
   /** Wordmark seal glyph beside the masthead brand (components/seal.tsx). */
   wordmarkSeal: string;
@@ -81,11 +73,6 @@ export interface ChromeDict {
    * masthead date renders in English for every non-Chinese locale.
    */
   dateLocale: string;
-
-  /** aria-label on the star-count link, e.g. "GitHub stars". */
-  starsAria: string;
-  /** Star-badge label when the live count is unavailable. */
-  githubFallback: string;
 
   /** Live-ticker seal label (components/ticker.tsx). */
   tickerLiveLabel: string;
@@ -153,8 +140,6 @@ export interface ChromeDict {
   footerIssues: string;
   footerContribute: string;
   footerLicense: string;
-  /** Footer link to the pricing page, e.g. "Pricing". */
-  footerPricing: string;
   /** Footer link to the terms route, e.g. "Terms". */
   footerTerms: string;
   /** Footer link to the privacy route, e.g. "Privacy". */
@@ -185,109 +170,90 @@ export interface ChromeDict {
 export interface HomeDict {
   /**
    * `<title>` and meta description for the locale home route, consumed by
-   * `generateMetadata` in app/[locale]/layout.tsx. These were the last
-   * inline EN/ZH pair on the required slice; per-locale metadata is the
-   * whole point of routing a locale, so it lives in the dictionary.
+   * `generateMetadata` in app/[locale]/layout.tsx.
    */
   metaTitle: string;
   metaDescription: string;
 
-  /** Hero pill, e.g. "Open source · Any model · Runs in your terminal". */
-  kicker: string;
-  heroTitleA: string;
-  heroTitleB: string;
+  /** A complete headline that wraps naturally in each locale. */
+  heroTitle: string;
   /**
    * Hero lede. Carries a `{brand}` token so the brand can be typeset in its
    * own span wherever the sentence needs it — the page splits on the token
    * instead of concatenating fragments around it.
    */
   heroIntro: string;
-  install: string;
-  docs: string;
-  copy: string;
-  copied: string;
+  /** Primary action → /install, e.g. "Get Codewhale". */
+  getCodewhale: string;
+  /** Accessible name for the hero install command and its platform choice. */
+  heroInstallAria: string;
+  /** Secondary action → /product, e.g. "Explore the product". */
+  exploreProduct: string;
 
-  /** Eyebrow above the one-line install block, e.g. "one-line install". */
-  installEyebrow: string;
-  /** Install prerequisite line, e.g. "needs Node 18+ — no Rust toolchain". */
-  installRequirement: string;
-  /** Link to the other install methods, e.g. "other ways →". */
-  installOtherWays: string;
+  /** Screenshot caption, first item of the dot chain, e.g. "Terminal preview". */
+  shotPreview: string;
+  /** Screenshot caption, build item with a `{version}` token. */
+  shotBuild: string;
+  /** Screenshot alt text for the current media manifest capture. */
+  screenshotAlt: string;
 
   /** "Latest release {tag}" */
   latestRelease: string;
   releaseUnavailable: string;
-  /** "Current source" / "Source candidate" — prepended to `v{version}:`. */
+  /** "Source" / "Unreleased" — prepended to `v{version}`. */
   currentSource: string;
   sourceCandidate: string;
-  /** "{count} provider routes" */
+  /** "{count} providers" */
   providerRoutes: string;
-  /** "published release" / "source candidate" — the source-state label. */
+  /** "released" / "unreleased" — the machine-readable source-state label. */
   publishedRelease: string;
   figcaptionSourceCandidate: string;
 
-  /** Screenshot toolbar label, e.g. "Current session". */
-  shotSession: string;
-  /** Screenshot alt text for /codewhale-tui.webp. */
-  screenshotAlt: string;
-  /** Screenshot figcaption. */
-  figcaption: string;
+  /** The running head on the water beside the capture. */
+  chapterTerminal: string;
+  chapterTerminalTitle: string;
 
-  proofHeading: string;
-  proofBody: string;
+  /** What a person gains: heading, lede, and three [title, body] columns. */
+  gainHeading: string;
+  gainLede: string;
+  gain: [string, string][];
 
-  /** Section seal glyph for the "see how it decides" band. */
-  sealDecides: string;
-  decidesEyebrow: string;
-  decidesHeading: string;
-  decidesLede: string;
+  /** Models chapter. */
+  chapterModels: string;
+  modelsHeading: string;
+  modelsBody: string;
+  /** Three [route kind, description] rows. */
+  modelsFacts: [string, string][];
+  modelsLink: string;
 
-  /** Section seal glyph for the workflow band. */
-  sealWorkflow: string;
-  workflowHeading: string;
-  /** Four [title, description] steps. */
-  workflow: [string, string][];
-  receiptAria: string;
-  /**
-   * Right-hand column of the example receipt. The verbs (inspect / act /
-   * verify / report), `$ codewhale exec …`, and `cargo test --locked` stay
-   * code-owned literals in the JSX per docs/VOICE.md.
-   */
-  receiptInspect: string;
-  receiptAct: string;
-  receiptReport: string;
-
-  /** Section seal glyph for the getting-started band. */
-  sealStart: string;
   startHeading: string;
   startLede: string;
   startGuideLink: string;
   startVocabularyLink: string;
 
-  /** Section seal glyph for the boundaries band. */
-  sealBoundaries: string;
-  boundariesHeadingA: string;
-  boundariesHeadingB: string;
-  boundariesBody: string;
-  hostedGatewayLocal: string;
-  planActOperateDesc: string;
-  askAutoReviewDesc: string;
-  tuiExecWebDesc: string;
+  /**
+   * Availability chapter: four [surface, status, detail] rows stating what
+   * is released, what is a development build, and what is not available.
+   */
+  chapterAccount: string;
+  availabilityHeading: string;
+  availabilityLede: string;
+  availability: [string, string, string][];
+  availabilityNote: string;
+  accountLink: string;
 
-  /** Section seal glyph for the surfaces band. */
-  sealSurfaces: string;
   surfacesHeading: string;
   /** Five [name, description] surfaces. */
   surfaces: [string, string][];
   runtimeLink: string;
 
   installBandHeading: string;
+  copy: string;
+  copied: string;
   binaries: string;
   chinaMirrors: string;
   installGuideLink: string;
 
-  /** Section seal glyph for the community band. */
-  sealCommunity: string;
   communityHeading: string;
   communityBody: string;
   communityLinksAria: string;
@@ -399,10 +365,12 @@ export interface StatesDict {
   retry: string;
   reload: string;
   homeLink: string;
-  /** The 404 plate's primary action: the docs index, which the body names. */
+  /** Documentation recovery link on the 404 page. */
   docsIndexLink: string;
   notFoundTitle: string;
   notFoundBody: string;
+  notFoundHomeLink: string;
+  notFoundPosterAlt: string;
   /**
    * A data-bearing page whose source was not asked (build-time prerender)
    * or refused (rate limit, outage). Distinct from `empty`, which asserts
@@ -552,6 +520,38 @@ export interface ChangelogDict {
   releaseNotesLink: string;
   emptyTitle: string;
   emptyBody: string;
+}
+
+export interface LegalTermsDict {
+  metaTitle: string;
+  metaDescription: string;
+  kicker: string;
+  title: string;
+  /** "Effective and last updated {date}." — zh also says the English text binds. */
+  updated: string;
+  privacyLink: string;
+  homeLink: string;
+}
+
+export interface LegalPrivacyDict {
+  metaTitle: string;
+  metaDescription: string;
+  kicker: string;
+  title: string;
+  /** Same template as `LegalTermsDict.updated`. */
+  updated: string;
+  termsLink: string;
+  homeLink: string;
+}
+
+export interface DigestDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Heading shown with the empty state. */
+  emptyTitle: string;
+  emptyBody: string;
+  title: string;
+  lead: string;
 }
 
 /**
@@ -765,7 +765,71 @@ export interface DocsWebDict {
   authLead: string;
   localTitle: string;
   localLead: string;
+  /** Remote control of a running local session from the signed-in web app. */
+  remoteTitle: string;
+  remoteLead: string;
+  remoteBody: string;
   troubleshootingTitle: string;
   troubleshootingLead: string;
   sourceNote: string;
+}
+
+export interface DocsWorkDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Body-copy typography for this locale (CJK needs looser leading). */
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  checklistTitle: string;
+  /** Carries the {todoWrite}, {checklistAlias} and {todoAlias} code spans. */
+  checklistBody: string;
+  strategyTitle: string;
+  strategyLead: string;
+  continuityTitle: string;
+  continuityLead: string;
+  captureTitle: string;
+  captureLead: string;
+  /** Carries the four status prefixes as {pending}/{inProgress}/{completed}/{cancelled}. */
+  captureLegend: string;
+  modelFacingTitle: string;
+  modelFacingLead: string;
+  modelFacingBoundaries: string;
+  sourceNote: string;
+}
+
+/** Copy for `app/[locale]/computer-use/page.tsx` and the install page's Computer Use section. */
+export interface ComputerUseDict {
+  metaTitle: string;
+  metaDescription: string;
+  title: string;
+  lead: string;
+  publisher: string;
+  /** Primary button: the notarized disk image when the release carries one, else the archive. */
+  download: string;
+  /** Secondary link to the archive the in-app updater consumes. */
+  downloadZip: string;
+  requirements: string;
+  included: string;
+  pendingTitle: string;
+  pendingBody: string;
+  unavailableTitle: string;
+  unavailableBody: string;
+  releases: string;
+  receipt: string;
+  setup: string;
+  /** Four numbered setup steps, rendered in order. */
+  steps: { title: string; body: string }[];
+  controlsTitle: string;
+  controlsBody: string;
+  updateTitle: string;
+  updateBody: string;
+  help: string;
+  notes: string;
+  demo: string;
+  source: string;
+  platforms: string;
+  installTitle: string;
+  installLead: string;
+  installLink: string;
 }

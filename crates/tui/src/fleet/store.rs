@@ -28,6 +28,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::ApiProvider;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -132,7 +134,11 @@ pub struct FleetMember {
     /// to deserialize unchanged.
     #[serde(default, alias = "name", skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Role label; defaults to `id` when absent.
+    /// A role-less model choice, not an executable roster member. Omitted
+    /// in legacy files, whose role/id interpretation stays unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shortlist: bool,
+    /// Role label; defaults to `id` when absent on a non-shortlist member.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
     /// Exact model pin. Absent with `provider` absent = inherit the session
@@ -155,6 +161,54 @@ pub struct FleetMember {
     /// [`MemberCapability::VOCABULARY`] at parse.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+}
+
+impl FleetMember {
+    /// The role this member fills: `role`, or `id` when the document left
+    /// the role field off. A shortlisted model has no role.
+    #[must_use]
+    pub fn role_label(&self) -> &str {
+        if self.shortlist {
+            return "";
+        }
+        let role = self.role.trim();
+        if role.is_empty() {
+            self.id.trim()
+        } else {
+            role
+        }
+    }
+
+    /// A row that was a model pin promoted to a member: no role, and an id
+    /// that is just the model's slug. Such rows are not members.
+    #[must_use]
+    pub fn is_bare_model_pin(&self) -> bool {
+        !self.shortlist
+            && self.role.trim().is_empty()
+            && self
+                .model
+                .as_deref()
+                .is_some_and(|model| self.id.trim().starts_with(slugify(model).as_str()))
+    }
+}
+
+/// Provider kinds have documented aliases; named custom routes have exact
+/// keys. Treating every provider name as case-insensitive merges distinct
+/// endpoints before the configured route binder can resolve them.
+pub(crate) fn provider_ids_match(saved: &str, requested: &str) -> bool {
+    saved.trim() == requested.trim()
+        || ApiProvider::parse(saved)
+            .filter(|provider| *provider != ApiProvider::Custom)
+            .is_some_and(|provider| Some(provider) == ApiProvider::parse(requested))
+}
+
+/// The member pins exactly `provider`/`model`.
+pub(crate) fn member_pins(member: &FleetMember, provider: &str, model: &str) -> bool {
+    member
+        .provider
+        .as_deref()
+        .is_some_and(|p| provider_ids_match(p, provider))
+        && member.model.as_deref().is_some_and(|id| id == model)
 }
 
 /// The saved named Fleet document (compatibility `schema = "fleet"`, revision 2).
@@ -279,6 +333,38 @@ impl FleetFile {
                 }
                 _ => {}
             }
+            if member.shortlist
+                && (!member.role.trim().is_empty()
+                    || member
+                        .provider
+                        .as_deref()
+                        .is_none_or(|id| id.trim().is_empty())
+                    || member
+                        .model
+                        .as_deref()
+                        .is_none_or(|id| id.trim().is_empty()))
+            {
+                return Err(FleetStoreError::Invalid(format!(
+                    "shortlisted member `{}` must have no role and pin both provider and model",
+                    member.id,
+                )));
+            }
+            if member.shortlist
+                && (member
+                    .reasoning
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || member
+                        .instructions
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    || !member.requires.is_empty())
+            {
+                return Err(FleetStoreError::Invalid(format!(
+                    "shortlisted member `{}` cannot set role reasoning, instructions, or capability requirements",
+                    member.id,
+                )));
+            }
             for requirement in &member.requires {
                 if MemberCapability::parse(requirement).is_none() {
                     return Err(FleetStoreError::Invalid(format!(
@@ -302,8 +388,26 @@ impl FleetFile {
 
     /// Parse a v2 fleet document from TOML text.
     pub fn parse(text: &str) -> Result<Self, FleetStoreError> {
-        let fleet: Self = toml::from_str(text)
+        let mut fleet: Self = toml::from_str(text)
             .map_err(|e| FleetStoreError::Invalid(format!("invalid fleet TOML: {e}")))?;
+        // Compat (0.9.12): every model the user ever selected was enrolled
+        // as a role-less member with a slug id. Roles are the members; drop
+        // those rows on read so the roster reads as roles again. The next
+        // save writes the clean document.
+        fleet.members.retain(|member| !member.is_bare_model_pin());
+        // #6037: a member pinned to the fleet's own operator route resolves
+        // to that route either way; the pin only stops it following when the
+        // operator moves (a vendor retiring the id, an operator switching
+        // models). Read the redundant pin as the inheritance it always meant.
+        // Shortlist rows keep their pin — it is their entire content.
+        if let Some(operator) = &fleet.operator {
+            for member in &mut fleet.members {
+                if !member.shortlist && member_pins(member, &operator.provider, &operator.model) {
+                    member.provider = None;
+                    member.model = None;
+                }
+            }
+        }
         fleet.validate()?;
         Ok(fleet)
     }
@@ -315,13 +419,14 @@ impl FleetFile {
         slugify(&self.name)
     }
 
-    /// Look up a member by role id.
+    /// Look up an executable member by role id. Shortlisted model ids never
+    /// select a role, even when they happen to match one.
     #[must_use]
     pub fn member(&self, id: &str) -> Option<&FleetMember> {
         let id = id.trim();
         self.members
             .iter()
-            .find(|member| member.id.trim().eq_ignore_ascii_case(id))
+            .find(|member| !member.shortlist && member.id.trim().eq_ignore_ascii_case(id))
     }
 
     /// Whether the roster contains a scout member (the fast exploratory role).
@@ -375,6 +480,10 @@ pub struct SelectedFleet {
 }
 
 fn personal_fleets_dir() -> Result<PathBuf, FleetStoreError> {
+    #[cfg(test)]
+    if !crate::test_support::guarded_environment_provides_state_paths() {
+        return Ok(crate::test_support::unsealed_test_state_root().join(FLEET_DIR));
+    }
     codewhale_config::codewhale_home()
         .map(|home| home.join(FLEET_DIR))
         .map_err(|e| FleetStoreError::Io {
@@ -470,11 +579,50 @@ fn collect_entries(dir: &Path, scope: FleetScope, out: &mut Vec<FleetEntry>) {
     }
 }
 
+/// Every v2 Fleet file that answers to `name`, personal first.
+///
+/// Only files that declare `schema = "fleet"` count. The personal `fleets/`
+/// directory is shared with the workflow crate's legacy/exact files, and a
+/// file in another schema is a different Fleet form, not a v2 Fleet that
+/// failed to parse — the caller that owns that form reports on it.
+pub(crate) fn v2_fleet_candidates(name: &str, workspace: &Path) -> Vec<(FleetScope, PathBuf)> {
+    let file_name = format!("{}.toml", slugify(name.trim()));
+    let mut found = Vec::new();
+    let personal = personal_fleets_dir().ok().map(|dir| dir.join(&file_name));
+    let workspace = Some(workspace_fleets_dir(workspace).join(&file_name));
+    for (scope, path) in [
+        (FleetScope::Personal, personal),
+        (FleetScope::Workspace, workspace),
+    ] {
+        if let Some(path) = path
+            && path.is_file()
+            && declares_v2_schema(&path)
+        {
+            found.push((scope, path));
+        }
+    }
+    found
+}
+
+/// The `schema` a Fleet file declares, normalized to lowercase. `None` when
+/// the file cannot be read; `Some(None)` when it is readable but declares no
+/// schema (or is not valid TOML).
+pub(crate) fn read_declared_schema(path: &Path) -> Option<Option<String>> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|text| codewhale_workflow::fleet_exact::declared_schema_kind(&text))
+}
+
+/// Whether a file declares the v2 `schema = "fleet"`. Unreadable or
+/// malformed TOML is not a v2 declaration.
+pub(crate) fn declares_v2_schema(path: &Path) -> bool {
+    read_declared_schema(path).flatten().as_deref() == Some(FLEET_SCHEMA_KIND)
+}
+
 /// Load a v2 Fleet by name. Ambiguity between the two scopes is an error that
-/// names both origins — the caller (UI) resolves it by asking for a scope.
-/// (Kept for the qualified-name flow and the ambiguity tests; the list/detail
-/// UI resolves by scope via load_fleet_in_scope.)
-#[allow(dead_code)]
+/// names both origins — the caller resolves it by asking for a scope. A file
+/// under the same name in another schema (legacy/exact) is not a v2 hit.
+/// Used by `workflow(fleet:)` through `fleet::exact::load_fleet_document`.
 pub fn load_fleet(
     name: &str,
     workspace: &Path,
@@ -483,17 +631,7 @@ pub fn load_fleet(
     if name.is_empty() {
         return Err(FleetStoreError::NotFound("<empty name>".to_string()));
     }
-    let mut found: Vec<(FleetScope, PathBuf)> = Vec::new();
-    if let Ok(dir) = personal_fleets_dir() {
-        let path = dir.join(format!("{}.toml", slugify(name)));
-        if path.is_file() {
-            found.push((FleetScope::Personal, path));
-        }
-    }
-    let ws_path = workspace_fleets_dir(workspace).join(format!("{}.toml", slugify(name)));
-    if ws_path.is_file() {
-        found.push((FleetScope::Workspace, ws_path));
-    }
+    let mut found = v2_fleet_candidates(name, workspace);
     if found.len() > 1 {
         return Err(FleetStoreError::Ambiguous(
             name.to_string(),
@@ -549,7 +687,6 @@ pub fn load_fleet_in_scope(
 /// Load a v2 Fleet from a specific path (used by the editor on the currently
 /// open entry, so the saved scope is exact). API surface for the path-based
 /// editor flows; currently exercised by tests.
-#[allow(dead_code)]
 pub fn load_fleet_at(path: &Path) -> Result<(FleetFile, FleetScope), FleetStoreError> {
     let text = fs::read_to_string(path).map_err(|e| FleetStoreError::Io {
         path: path.display().to_string(),
@@ -858,6 +995,7 @@ pub fn migrate_legacy_roster(
         fleet.members.push(FleetMember {
             id: member.id.clone(),
             display_name: member.display_name.clone(),
+            shortlist: false,
             role: profile.role.name.clone(),
             model,
             provider,
@@ -904,31 +1042,104 @@ mod tests {
         })
     }
 
-    struct EnvGuard {
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialised by lock_test_env held by the caller.
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("CODEWHALE_HOME", v),
-                    None => std::env::remove_var("CODEWHALE_HOME"),
-                }
-            }
-        }
-    }
-
     /// Point CODEWHALE_HOME at a sealed temp dir. Caller must hold
     /// `lock_test_env`.
-    fn set_sealed_home() -> EnvGuard {
-        let prev = std::env::var_os("CODEWHALE_HOME");
-        // SAFETY: serialised by lock_test_env held by the caller.
-        unsafe {
-            std::env::set_var("CODEWHALE_HOME", sealed_home());
+    fn set_sealed_home() -> crate::test_support::EnvVarGuard {
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", sealed_home())
+    }
+
+    #[test]
+    fn declared_schema_separates_unreadable_from_undeclared() {
+        let dir = tempfile::tempdir().unwrap();
+        let v2 = dir.path().join("v2.toml");
+        std::fs::write(&v2, "name = \"a\"\nschema = \" Fleet \"\n").unwrap();
+        let legacy = dir.path().join("legacy.toml");
+        std::fs::write(&legacy, "name = \"b\"\n[roles]\nscout = \"scout\"\n").unwrap();
+        let malformed = dir.path().join("bad.toml");
+        std::fs::write(&malformed, "schema = [").unwrap();
+        let missing = dir.path().join("missing.toml");
+
+        assert!(
+            declares_v2_schema(&v2),
+            "case and whitespace are normalized"
+        );
+        assert_eq!(read_declared_schema(&legacy), Some(None));
+        assert_eq!(read_declared_schema(&malformed), Some(None));
+        assert_eq!(read_declared_schema(&missing), None);
+        assert!(!declares_v2_schema(&legacy));
+        assert!(!declares_v2_schema(&malformed));
+        assert!(!declares_v2_schema(&missing));
+    }
+
+    #[test]
+    fn unsealed_personal_routes_ignore_ambient_home() {
+        const PROBE: &str = "CODEWHALE_TEST_AMBIENT_FLEET_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            let workspace = tempfile::tempdir().unwrap();
+            for hold_env_lock in [false, true] {
+                let _lock = hold_env_lock.then(crate::test_support::lock_test_env);
+                let root = crate::test_support::unsealed_test_state_root();
+                assert_eq!(personal_fleets_dir().unwrap(), root.join(FLEET_DIR));
+                assert_eq!(
+                    crate::fleet::profile::personal_agent_profile_dir().unwrap(),
+                    root.join("agents")
+                );
+                assert!(resolve_selected_fleet(workspace.path()).unwrap().is_none());
+                assert!(list_fleets(workspace.path()).is_empty());
+                let roster = crate::fleet::identity::load_effective_roster(
+                    &Default::default(),
+                    workspace.path(),
+                    None,
+                );
+                assert!(roster.load_error().is_none());
+                assert!(roster.members().iter().all(|member| {
+                    member.origin == crate::fleet::roster::ProfileOrigin::BuiltIn
+                }));
+            }
+            return;
         }
-        EnvGuard { prev }
+
+        // A fresh process inherits populated operator state, without earning
+        // the explicit EnvVarGuard seal used by deliberate path fixtures.
+        let ambient = tempfile::tempdir().unwrap();
+        let state = ambient.path().join(".codewhale");
+        let fleets = state.join(FLEET_DIR);
+        std::fs::create_dir_all(&fleets).unwrap();
+        let fleet = sample_fleet();
+        let fleet_path = fleets.join(format!("{}.toml", fleet.file_slug()));
+        let contents = fleet.render_toml().unwrap();
+        std::fs::write(&fleet_path, &contents).unwrap();
+        std::fs::write(fleets.join(SELECTED_FILE), &fleet.name).unwrap();
+        for explicit_override in [false, true] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "fleet::store::tests::unsealed_personal_routes_ignore_ambient_home",
+                    "--test-threads=1",
+                ])
+                .env(PROBE, "1")
+                .env("HOME", ambient.path())
+                .env("USERPROFILE", ambient.path())
+                .env_remove("CODEWHALE_HOME")
+                .env_remove("CODEWHALE_CONFIG_PATH")
+                .env_remove("DEEPSEEK_CONFIG_PATH");
+            if explicit_override {
+                command.env("CODEWHALE_HOME", &state);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "ambient route probe failed (override={explicit_override})\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(std::fs::read_to_string(fleet_path).unwrap(), contents);
+        assert_eq!(
+            std::fs::read_to_string(fleets.join(SELECTED_FILE)).unwrap(),
+            fleet.name
+        );
     }
 
     fn sample_fleet() -> FleetFile {
@@ -942,6 +1153,7 @@ mod tests {
             .with_member(FleetMember {
                 id: "scout".to_string(),
                 display_name: Some("Flash Scout".to_string()),
+                shortlist: false,
                 role: "scout".to_string(),
                 provider: None,
                 model: None,
@@ -952,6 +1164,7 @@ mod tests {
             .with_member(FleetMember {
                 id: "builder".to_string(),
                 display_name: None,
+                shortlist: false,
                 role: "builder".to_string(),
                 provider: Some("deepseek".to_string()),
                 model: Some("deepseek-v4-pro".to_string()),
@@ -1045,6 +1258,66 @@ mod tests {
     }
 
     #[test]
+    fn member_pin_matching_the_operator_route_reads_as_inheritance() {
+        // #6037: a role member pinned to the fleet's own operator route
+        // resolves to that route either way — the pin only stops it
+        // following when the operator moves. Parse drops the redundant pin;
+        // a different-route pin and a shortlist row keep theirs.
+        let fleet = FleetFile::parse(
+            r#"schema = "fleet"
+schema_revision = 2
+name = "Inherit"
+
+[operator]
+provider = "openrouter"
+model = "z-ai/glm-5.3"
+
+[[members]]
+id = "planner"
+role = "planner"
+provider = "openrouter"
+model = "z-ai/glm-5.3"
+
+[[members]]
+id = "builder"
+role = "builder"
+provider = "openrouter"
+model = "z-ai/glm-5.3-pro"
+
+[[members]]
+id = "choice"
+shortlist = true
+provider = "openrouter"
+model = "z-ai/glm-5.3"
+"#,
+        )
+        .expect("parse");
+        let planner = fleet.member("planner").expect("planner member");
+        assert_eq!(planner.provider, None);
+        assert_eq!(planner.model, None);
+        let builder = fleet.member("builder").expect("builder member");
+        assert_eq!(builder.provider.as_deref(), Some("openrouter"));
+        assert_eq!(builder.model.as_deref(), Some("z-ai/glm-5.3-pro"));
+        let choice = fleet
+            .members
+            .iter()
+            .find(|member| member.shortlist)
+            .expect("shortlist row");
+        assert_eq!(choice.provider.as_deref(), Some("openrouter"));
+        assert_eq!(choice.model.as_deref(), Some("z-ai/glm-5.3"));
+        // The listing still attributes the inherited role to the route it runs.
+        let models = crate::fleet::members::models_of(&fleet);
+        assert_eq!(models[0].model, "z-ai/glm-5.3");
+        assert_eq!(models[0].roles, ["operator", "planner"]);
+        assert_eq!(models[1].roles, ["builder"]);
+        // The cleaned document round-trips: inherit stays inherit.
+        assert_eq!(
+            FleetFile::parse(&fleet.render_toml().expect("render")).expect("reparse"),
+            fleet
+        );
+    }
+
+    #[test]
     fn render_parse_round_trip_preserves_every_field() {
         let fleet = sample_fleet();
         let text = fleet.render_toml().expect("render");
@@ -1054,6 +1327,105 @@ mod tests {
         assert!(text.contains("schema_revision = 2"));
         assert!(text.contains("display_name = \"Flash Scout\""));
         assert!(text.contains("deepseek-v4-flash"));
+        assert!(
+            !text.contains("shortlist"),
+            "legacy members do not gain a marker"
+        );
+    }
+
+    #[test]
+    fn marked_shortlist_round_trips_without_becoming_a_role_or_legacy_bare_pin() {
+        let fleet = FleetFile::parse(
+            r#"schema = "fleet"
+schema_revision = 2
+name = "Shortlist"
+
+[[members]]
+id = "scout"
+shortlist = true
+provider = "fixture-provider"
+model = "scout"
+"#,
+        )
+        .expect("explicitly marked model survives legacy bare-pin migration");
+        assert_eq!(fleet.members.len(), 1);
+        let choice = &fleet.members[0];
+        assert!(choice.shortlist);
+        assert_eq!(choice.provider.as_deref(), Some("fixture-provider"));
+        assert_eq!(choice.model.as_deref(), Some("scout"));
+        assert!(choice.role_label().is_empty());
+        assert!(
+            !fleet.has_scout(),
+            "a model named scout cannot select the scout role"
+        );
+        assert!(fleet.member("scout").is_none());
+        let models = crate::fleet::members::models_of(&fleet);
+        assert_eq!(models.len(), 1);
+        assert!(models[0].roles.is_empty());
+        let text = fleet.render_toml().expect("serialize marker");
+        assert!(text.contains("shortlist = true"));
+        assert!(!text.contains("role ="));
+        assert_eq!(FleetFile::parse(&text).expect("reload marker"), fleet);
+    }
+
+    #[test]
+    fn shortlist_marker_rejects_roles_inheritance_and_incomplete_routes() {
+        for (role, provider, model) in [
+            ("scout", Some("deepseek"), Some("deepseek-v4-flash")),
+            ("", None, None),
+            ("", None, Some("deepseek-v4-flash")),
+            ("", Some("deepseek"), None),
+            ("", Some("  "), Some("deepseek-v4-flash")),
+            ("", Some("deepseek"), Some("  ")),
+        ] {
+            let member: FleetMember = serde_json::from_value(serde_json::json!({
+                "id": "choice", "shortlist": true, "role": role,
+                "provider": provider, "model": model,
+            }))
+            .expect("typed fixture");
+            let mut fleet = FleetFile::new("Malformed shortlist".into(), None).unwrap();
+            fleet.members.push(member);
+            assert!(
+                fleet.validate().is_err(),
+                "accepted invalid marker: {fleet:?}"
+            );
+            assert!(
+                fleet.render_toml().is_err(),
+                "render accepted invalid marker"
+            );
+            let text = toml::to_string(&fleet).expect("unchecked fixture serialization");
+            assert!(
+                FleetFile::parse(&text).is_err(),
+                "parse accepted invalid marker: {text}"
+            );
+        }
+
+        for metadata in [
+            serde_json::json!({"reasoning": "high"}),
+            serde_json::json!({"instructions": "Review the changes."}),
+            serde_json::json!({"requires": ["vision"]}),
+        ] {
+            let mut row = serde_json::json!({
+                "id": "choice", "shortlist": true,
+                "provider": "deepseek", "model": "deepseek-v4-flash",
+            });
+            row.as_object_mut()
+                .unwrap()
+                .extend(metadata.as_object().unwrap().clone());
+            let mut fleet = FleetFile::new("Malformed shortlist".into(), None).unwrap();
+            fleet.members.push(serde_json::from_value(row).unwrap());
+            let text = toml::to_string(&fleet).expect("unchecked metadata fixture");
+            for error in [
+                fleet.validate().unwrap_err(),
+                fleet.render_toml().unwrap_err(),
+                FleetFile::parse(&text).unwrap_err(),
+            ] {
+                assert!(
+                    error.to_string().contains("cannot set role reasoning"),
+                    "metadata was not rejected as role-only: {error}"
+                );
+            }
+        }
     }
 
     #[test]

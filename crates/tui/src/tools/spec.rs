@@ -18,6 +18,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use unicode_normalization::UnicodeNormalization;
 
+use codewhale_execpolicy::ApprovalMode;
+
 use crate::features::Features;
 use crate::lsp::LspManager;
 use crate::network_policy::NetworkPolicyDecider;
@@ -582,6 +584,8 @@ pub struct ToolContext {
 /// useful, without growing the top-level context by another field per feature.
 #[derive(Clone)]
 pub struct ToolExecutionState {
+    /// Effective session/ancestor tool ceiling, carried to MCP dispatch and runtime registration.
+    pub(crate) disallowed_tools: Vec<String>,
     /// Shared shell manager for background tasks and streaming IO.
     pub shell_manager: SharedShellManager,
     /// Per-session snapshots for files successfully observed by `read_file`.
@@ -593,18 +597,23 @@ pub struct ToolExecutionState {
     /// jobs can be attributed in UI surfaces.
     pub owner_agent_id: Option<String>,
     pub owner_agent_name: Option<String>,
+    /// Tool call and engine turn that created long-running work through this
+    /// context. Hosts use these stable identities to reconcile later updates
+    /// with the originating transcript position.
+    pub(crate) origin_tool_call_id: Option<String>,
+    pub(crate) origin_turn_id: Option<String>,
     /// Outer process authority cap installed by Fleet/headless dispatch.
     /// `None` for ordinary interactive/root sessions.
     pub(crate) tool_authority: Option<Arc<ToolAuthorityEnvelope>>,
     /// Whether to allow paths outside workspace
     pub trust_mode: bool,
     /// Current sandbox policy
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub sandbox_policy: SandboxPolicy,
     /// Path for notes file
     pub notes_path: PathBuf,
     /// MCP configuration path
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub mcp_config_path: PathBuf,
     /// Explicit skills directory used for model-visible skill discovery.
     pub skills_dir: Option<PathBuf>,
@@ -626,6 +635,13 @@ pub struct ToolExecutionState {
     /// Whether tools should auto-approve without safety checks (YOLO mode).
     /// When true, command safety analysis is skipped for shell execution.
     pub auto_approve: bool,
+    /// Effective approval posture for this execution context. A turn stamps the
+    /// posture it resolved here; a context built from the legacy bit alone
+    /// folds it with [`crate::core::authority::posture_from_auto_approve`].
+    /// Tools that create work of their own (a durable task) pin it, so the work
+    /// inherits the authority the caller was granted rather than re-deriving
+    /// one from a legacy bit.
+    pub approval_mode: ApprovalMode,
     /// Effective shell policy for this execution context.
     pub shell_policy: ShellPolicy,
     /// Effective feature flag set for the running session.
@@ -675,10 +691,11 @@ pub struct ToolExecutionState {
     /// result when this is present and the manager is enabled.
     pub lsp_manager: Option<Arc<LspManager>>,
 
-    /// Large-output router (#548). When `Some`, tool results that exceed the
-    /// configured token threshold are routed through a V4-Flash synthesis
-    /// sub-agent before being returned to the parent context. `None` disables
-    /// routing (e.g. in sub-agents and test contexts to avoid recursion).
+    /// Adaptive evidence router (#4619). Consulted only when
+    /// `CODEWHALE_ADAPTIVE_OUTPUT_ROUTING` opts the process in; under the
+    /// default classic lane this field is inert and bounding happens at the
+    /// engine/subagent completion boundary. `None` in sub-agents and test
+    /// contexts.
     pub large_output_router: Option<crate::tools::large_output_router::LargeOutputRouter>,
 
     /// Which search backend `web_search` should use. Default: Firecrawl. Set via
@@ -696,13 +713,6 @@ pub struct ToolExecutionState {
     pub(crate) provider_native_search: Option<crate::client::ProviderNativeSearchClient>,
     /// Exact active route capability facts. Unknown stays fail-closed.
     pub(crate) route_capabilities: codewhale_config::route::RouteCapabilities,
-
-    /// Per-session workshop variable store (#548). Holds the raw content of
-    /// the most recent large-tool routing event so the parent can call
-    /// `promote_to_context` later. `None` when the router is disabled.
-    pub workshop_vars: Option<
-        std::sync::Arc<tokio::sync::Mutex<crate::tools::large_output_router::WorkshopVariables>>,
-    >,
 }
 
 impl std::ops::Deref for ToolContext {
@@ -747,7 +757,6 @@ impl ToolContext {
     }
 
     /// Create a `ToolContext` with all settings specified.
-    #[allow(dead_code)]
     pub fn with_options(
         workspace: impl Into<PathBuf>,
         trust_mode: bool,
@@ -764,10 +773,13 @@ impl ToolContext {
         Self {
             workspace,
             execution: Box::new(ToolExecutionState {
+                disallowed_tools: Vec::new(),
                 shell_manager,
                 file_read_tracker: new_shared_file_read_tracker(),
                 owner_agent_id: None,
                 owner_agent_name: None,
+                origin_tool_call_id: None,
+                origin_turn_id: None,
                 tool_authority,
                 trust_mode,
                 sandbox_policy: SandboxPolicy::None,
@@ -780,6 +792,7 @@ impl ToolContext {
                 persist_services_enabled: false,
                 shell_network_denied_hint: None,
                 auto_approve: false,
+                approval_mode: ApprovalMode::Suggest,
                 shell_policy,
                 features: Features::with_defaults(),
                 state_namespace: "workspace".to_string(),
@@ -799,7 +812,6 @@ impl ToolContext {
                 search_base_url: None,
                 provider_native_search: None,
                 route_capabilities: codewhale_config::route::RouteCapabilities::default(),
-                workshop_vars: None,
             }),
         }
     }
@@ -814,6 +826,10 @@ impl ToolContext {
     ) -> Self {
         let mut context = Self::with_options(workspace, trust_mode, notes_path, mcp_config_path);
         context.auto_approve = auto_approve;
+        // The bit stands for a posture, so fold it here rather than leaving the
+        // two fields to disagree. A turn-level builder overwrites this with the
+        // session's resolved posture, which is the authority that counts.
+        context.approval_mode = crate::core::authority::posture_from_auto_approve(auto_approve);
         context
     }
 
@@ -842,6 +858,20 @@ impl ToolContext {
         let agent_name = agent_name.into();
         self.owner_agent_id = (!agent_id.trim().is_empty()).then_some(agent_id);
         self.owner_agent_name = (!agent_name.trim().is_empty()).then_some(agent_name);
+        self
+    }
+
+    /// Bind long-running work to the engine turn that created it.
+    #[must_use]
+    pub(crate) fn with_origin_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.origin_turn_id = Some(turn_id.into());
+        self
+    }
+
+    /// Bind long-running work to the tool call that created it.
+    #[must_use]
+    pub(crate) fn with_origin_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.origin_tool_call_id = Some(tool_call_id.into());
         self
     }
 
@@ -919,7 +949,6 @@ impl ToolContext {
 
     /// Attach an external sandbox backend for remote shell execution.
     #[must_use]
-    #[allow(dead_code)]
     pub fn with_sandbox_backend(mut self, backend: std::sync::Arc<dyn SandboxBackend>) -> Self {
         self.sandbox_backend = Some(backend);
         self
@@ -947,7 +976,7 @@ impl ToolContext {
     /// Attach an LSP manager so that edit tools can auto-inject diagnostics
     /// into their results after a successful file modification (#428).
     #[must_use]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_lsp_manager(mut self, manager: Arc<LspManager>) -> Self {
         self.lsp_manager = Some(manager);
         self
@@ -1028,7 +1057,9 @@ impl ToolContext {
     /// # Ok::<(), crate::tools::spec::ToolError>(())
     /// ```
     pub fn resolve_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
-        let candidate = if std::path::Path::new(raw).is_absolute() {
+        let candidate = if let Some(home_path) = resolve_home_path(raw)? {
+            home_path
+        } else if std::path::Path::new(raw).is_absolute() {
             PathBuf::from(raw)
         } else {
             self.workspace.join(raw)
@@ -1115,6 +1146,24 @@ impl ToolContext {
         self.resolve_nonexistent_path(candidate, &workspace_canonical)
     }
 
+    /// Resolve `raw` against the workspace and require an existing directory.
+    ///
+    /// Tools that scope execution to a subdirectory (Run `cwd`) resolve
+    /// through here so containment, existence, and the refusal wording have
+    /// one owner. A workspace escape keeps the typed `PathEscape`; a missing
+    /// or non-directory path names the fallback (drop the field to run in
+    /// the workspace root).
+    pub fn resolve_existing_dir(&self, raw: &str, field: &str) -> Result<PathBuf, ToolError> {
+        let resolved = self.resolve_path(raw)?;
+        if resolved.is_dir() {
+            Ok(resolved)
+        } else {
+            Err(ToolError::invalid_input(format!(
+                "{field} '{raw}' is not an existing directory inside the workspace; drop `{field}` to run in the workspace root"
+            )))
+        }
+    }
+
     /// Resolve a non-existent path by canonicalizing its deepest existing
     /// ancestor and validating the result is under the workspace or a
     /// trusted external path.
@@ -1188,7 +1237,7 @@ impl ToolContext {
     }
 
     /// Set the trust mode.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_trust_mode(mut self, trust: bool) -> Self {
         self.trust_mode = trust;
         self
@@ -1242,19 +1291,14 @@ impl ToolContext {
         self
     }
 
-    /// Attach the large-output router (#548). When set, tool results that
-    /// exceed the configured token threshold are synthesised by a V4-Flash
-    /// sub-agent before being returned to the parent context.
+    /// Attach the adaptive evidence router (#4619). Consulted only under the
+    /// `CODEWHALE_ADAPTIVE_OUTPUT_ROUTING` opt-in.
     #[must_use]
     pub fn with_large_output_router(
         mut self,
         router: crate::tools::large_output_router::LargeOutputRouter,
-        vars: std::sync::Arc<
-            tokio::sync::Mutex<crate::tools::large_output_router::WorkshopVariables>,
-        >,
     ) -> Self {
         self.large_output_router = Some(router);
-        self.workshop_vars = Some(vars);
         self
     }
 }
@@ -1332,11 +1376,75 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Resolve an exact `~` or `~/` path prefix to the current user's home directory.
+///
+/// Only exact `~` and `~/` (or `~\` on Windows) prefixes are resolved. Prefixes like
+/// `~otheruser`, shell variables (`$VAR`), command substitution, and globs are not
+/// expanded. Literal paths like `./~/file` stay literal.
+///
+/// Returns:
+/// - `Ok(Some(path))` if `raw` has an exact home prefix and home was determined.
+/// - `Ok(None)` if `raw` does not have an exact home prefix.
+/// - `Err(ToolError)` if `raw` has an exact home prefix but user home could not be determined.
+pub(crate) fn resolve_home_path(raw: &str) -> Result<Option<PathBuf>, ToolError> {
+    resolve_home_path_with(raw, crate::config::effective_home_dir)
+}
+
+pub(crate) fn resolve_home_path_with(
+    raw: &str,
+    home_lookup: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<PathBuf>, ToolError> {
+    let suffix = if raw == "~" {
+        ""
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        rest.trim_start_matches(|c| c == '/' || (cfg!(windows) && c == '\\'))
+    } else {
+        #[cfg(windows)]
+        if let Some(rest) = raw.strip_prefix(r"~\") {
+            rest.trim_start_matches(['/', '\\'])
+        } else {
+            return Ok(None);
+        }
+        #[cfg(not(windows))]
+        return Ok(None);
+    };
+
+    // A drive prefix is not a home-relative suffix. `PathBuf::join` would
+    // otherwise replace the home on Windows (for example `~/C:\file`).
+    #[cfg(windows)]
+    if Path::new(suffix)
+        .components()
+        .any(|part| matches!(part, std::path::Component::Prefix(_)))
+    {
+        return Err(ToolError::invalid_input(
+            "a home-relative path cannot contain a drive prefix",
+        ));
+    }
+    let home = home_lookup().ok_or_else(|| {
+        ToolError::execution_failed(format!(
+            "Failed to resolve path '{raw}': user home directory could not be determined"
+        ))
+    })?;
+
+    if suffix.is_empty() {
+        Ok(Some(home))
+    } else {
+        Ok(Some(home.join(suffix)))
+    }
+}
+
 /// The core trait that all tools must implement.
 #[async_trait]
 pub trait ToolSpec: Send + Sync {
     /// Returns the unique name of this tool (used in API calls).
     fn name(&self) -> &str;
+
+    /// Identifies the implementation in local registration diagnostics only.
+    /// Adapters should use their existing source identity, never credentials,
+    /// command arguments, descriptions, or other execution payloads.
+    fn registration_origin(&self) -> std::borrow::Cow<'_, str> {
+        std::any::type_name::<Self>().into()
+    }
 
     /// Returns a human-readable description of what this tool does.
     fn description(&self) -> &str;
@@ -1365,7 +1473,7 @@ pub trait ToolSpec: Send + Sync {
     }
 
     /// Returns whether this tool is sandboxable.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn is_sandboxable(&self) -> bool {
         self.capabilities().contains(&ToolCapability::Sandboxable)
     }

@@ -9,8 +9,8 @@ use std::fs;
 use std::io::Write;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
 use crate::tui::app::App;
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 

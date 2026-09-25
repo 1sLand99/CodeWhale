@@ -7,15 +7,15 @@
 //! tool-details pager (including #500 spillover folding), copy-cell actions, and
 //! footer detail labels live here too.
 
-use crate::localization::{MessageId, tr};
 use crate::snapshot::SnapshotRepo;
 use crate::tui::app::App;
 use crate::tui::footer_ui::one_line_summary;
-use crate::tui::history::{HistoryCell, ToolCell, ToolStatus, TranscriptRenderOptions};
+use crate::tui::history::{HistoryCell, ToolCell, ToolStatus};
 use crate::tui::pager::{PagerPage, PagerView};
 use crate::tui::ui_text::{
-    history_cell_to_clipboard_text, history_cell_to_text, line_to_plain, truncate_line_to_width,
+    history_cell_to_clipboard_text, history_cell_to_text, truncate_line_to_width,
 };
+use codewhale_localization::{MessageId, tr};
 
 fn selected_transcript_cell_index(app: &App) -> Option<usize> {
     app.viewport
@@ -505,40 +505,6 @@ pub(super) fn copy_focused_cell(app: &mut App) -> bool {
         return false;
     };
     copy_cell_to_clipboard(app, index)
-}
-
-/// Copy the focused cell with the transcript's role/metadata presentation.
-/// Unlike content copy, this retains the metadata prefixes used by the
-/// transcript surface and is useful for sharing a receipt or event record.
-pub(super) fn copy_focused_cell_metadata(app: &mut App) -> bool {
-    let Some(index) = detail_target_cell_index(app) else {
-        return false;
-    };
-    let Some(cell) = app.cell_at_virtual_index(index) else {
-        return false;
-    };
-    let width = app
-        .viewport
-        .last_transcript_area
-        .map(|area| area.width)
-        .unwrap_or(80);
-    let text = cell
-        .lines_with_copy_metadata(width, TranscriptRenderOptions::default())
-        .into_iter()
-        .map(|line| line_to_plain(&line.line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.trim().is_empty() {
-        app.status_message = Some("Message is empty".to_string());
-        return false;
-    }
-    if app.clipboard.write_text(&text).is_ok() {
-        app.status_message = Some("Message metadata copied".to_string());
-        true
-    } else {
-        app.status_message = Some("Copy failed".to_string());
-        false
-    }
 }
 
 pub(crate) fn copy_cell_to_clipboard(app: &mut App, cell_index: usize) -> bool {
@@ -1551,8 +1517,9 @@ fn command_looks_like_verifier(command: &str) -> bool {
 
 /// Section 7 — approvals / denials.
 ///
-/// The approval allow/deny sets are session-scoped (not per-turn), so the
-/// counts are labelled `(session)` to avoid implying turn precision.
+/// "Approve for session" grants last the conversation; a Deny lasts only
+/// the user turn it answered (cleared on `TurnStarted`), so each count names
+/// its own scope.
 fn turn_approvals_lines(app: &App) -> Vec<String> {
     let mut lines = Vec::new();
     let approved = app.approval_session_approved.len();
@@ -1561,7 +1528,7 @@ fn turn_approvals_lines(app: &App) -> Vec<String> {
         lines.push(format!("Approved (session): {approved}"));
     }
     if denied > 0 {
-        lines.push(format!("Denied (session): {denied}"));
+        lines.push(format!("Denied (this turn): {denied}"));
     }
     lines
 }
@@ -1618,6 +1585,7 @@ fn turn_route_lines(app: &App) -> Vec<String> {
         lines.push(format!("Auto pair: {pair}"));
         lines.push(format!("Auto scope: {}", receipt.scope.label()));
         lines.push(format!("Auto data: {}", receipt.data_path.label()));
+        lines.extend(auto_router_receipt_lines(receipt));
     }
 
     let session = &app.session;
@@ -1644,7 +1612,7 @@ fn turn_route_lines(app: &App) -> Vec<String> {
         crate::route_billing::UsageChip::PricedSubtotal { .. } => {
             lines.push(format!(
                 "Cost (session): {}",
-                crate::route_billing::format_usage_chip(&chip).unwrap_or_default()
+                crate::route_billing::format_usage_chip(&chip, app.ui_locale).unwrap_or_default()
             ));
         }
         crate::route_billing::UsageChip::Allowance { label, used_pct } => {
@@ -1656,8 +1624,10 @@ fn turn_route_lines(app: &App) -> Vec<String> {
         crate::route_billing::UsageChip::Local => {
             lines.push("Cost: local".to_string());
         }
-        crate::route_billing::UsageChip::Unknown => {
-            lines.push("Cost: unknown".to_string());
+        crate::route_billing::UsageChip::Unknown(_) => {
+            lines.push(
+                crate::route_billing::format_usage_chip(&chip, app.ui_locale).unwrap_or_default(),
+            );
         }
         crate::route_billing::UsageChip::Hidden => {}
     }
@@ -1672,6 +1642,55 @@ enum ResultDetail {
     Full,
     /// The exported handoff is intentionally a compact overview.
     Compact,
+}
+
+/// `/status` lines for the router behind an Auto receipt (#6525): the
+/// decision-model answer, its cost and latency, and a failing router.
+fn auto_router_receipt_lines(receipt: &crate::model_routing::AutoRouteReceipt) -> Vec<String> {
+    let percent = |bp: u16| format!("{}%", (u32::from(bp) + 50) / 100);
+    let mut lines = Vec::new();
+    if let Some(decision) = receipt.decision.as_ref() {
+        let cost = decision.provider_reported_cost_usd.as_deref().map_or_else(
+            || "cost not reported".to_string(),
+            |cost| format!("${cost} (provider-reported)"),
+        );
+        let model = decision
+            .response_model
+            .as_deref()
+            .map(|model| format!(" · {model}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "Auto router: decision model{model} · {} ms · {cost}",
+            decision.latency_ms
+        ));
+        let mut probabilities: Vec<(&String, &u16)> = decision.probabilities_bp.iter().collect();
+        probabilities.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let probabilities = probabilities
+            .into_iter()
+            .map(|(option, bp)| format!("{option} {}", percent(*bp)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let mut choice = format!(
+            "Auto choice: {} ({probabilities}) · confidence {} (min {})",
+            decision.choice,
+            percent(decision.confidence_bp),
+            percent(decision.min_confidence_bp)
+        );
+        if decision.cost_saving_kept_fast {
+            choice.push_str(" · cost-saving kept fast");
+        }
+        if let Some(thinking) = decision.thinking.as_deref() {
+            choice.push_str(&format!(" · thinking {thinking}"));
+        }
+        lines.push(choice);
+    }
+    if let Some(failure) = receipt.router_failure {
+        lines.push(format!(
+            "Auto router: failing — {} (used the local fallback)",
+            failure.label()
+        ));
+    }
+    lines
 }
 
 fn cleaned_turn_text(text: &str, detail: ResultDetail, max_width: usize) -> String {
@@ -1775,6 +1794,66 @@ mod tests {
     }
 
     #[test]
+    fn turn_route_lines_show_decision_evidence_and_a_failing_router() {
+        let mut app = test_app();
+        app.auto_model = true;
+        app.last_effective_provider = Some(crate::config::ApiProvider::Deepseek);
+        app.last_effective_model = Some("deepseek-v4-pro".to_string());
+        let decision = crate::model_routing::AutoRouteDecisionEvidence {
+            choice: "strong".to_string(),
+            probabilities_bp: [("fast".to_string(), 1800), ("strong".to_string(), 8200)]
+                .into_iter()
+                .collect(),
+            confidence_bp: 6400,
+            min_confidence_bp: 5000,
+            cost_saving_kept_fast: false,
+            thinking: Some("max".to_string()),
+            provider_reported_cost_usd: Some("0.000019992".to_string()),
+            latency_ms: 180,
+            response_model: Some("typesafe/jev-1.13-20260917".to_string()),
+        };
+        let receipt = crate::model_routing::AutoRouteReceipt {
+            tier: crate::model_routing::AutoRouteTier::Strong,
+            pair: crate::model_routing::AutoRoutePair {
+                strong: "deepseek-v4-pro".to_string(),
+                fast: Some("deepseek-v4-flash".to_string()),
+            },
+            scope: crate::model_routing::AutoRouteScope::ActiveProvider,
+            data_path: crate::model_routing::AutoRouteDataPath::Decision {
+                route: crate::client::system_one::DecisionRouterRoute::Openrouter,
+                model: "typesafe/jev-1.13".to_string(),
+            },
+            reason: crate::model_routing::AutoRouteReason::ClassifierRecommendation,
+            decision: Some(decision),
+            router_failure: None,
+        };
+        app.last_auto_route_receipt = Some(receipt.clone());
+        let joined = turn_route_lines(&app).join("\n");
+        assert!(joined.contains("-> OpenRouter / typesafe/jev-1.13 (decision model)"));
+        assert!(joined.contains(
+            "Auto router: decision model · typesafe/jev-1.13-20260917 · 180 ms · $0.000019992 (provider-reported)"
+        ));
+        assert!(joined.contains(
+            "Auto choice: strong (strong 82% · fast 18%) · confidence 64% (min 50%) · thinking max"
+        ));
+        assert!(!joined.contains("failing"));
+
+        app.last_auto_route_receipt = Some(crate::model_routing::AutoRouteReceipt {
+            reason: crate::model_routing::AutoRouteReason::ClassifierFallback(
+                crate::model_routing::AutoRouteHeuristicReason::DeclaredDefault,
+            ),
+            decision: None,
+            router_failure: Some(crate::model_routing::AutoRouterFailure::Http { status: 402 }),
+            ..receipt
+        });
+        let joined = turn_route_lines(&app).join("\n");
+        assert!(
+            joined.contains("Auto router: failing — HTTP 402 (used the local fallback)"),
+            "{joined}"
+        );
+    }
+
+    #[test]
     fn turn_route_lines_include_truthful_auto_receipt() {
         let mut app = test_app();
         app.auto_model = true;
@@ -1792,6 +1871,8 @@ mod tests {
                 model: "deepseek-v4-flash".to_string(),
             },
             reason: crate::model_routing::AutoRouteReason::ClassifierRecommendation,
+            decision: None,
+            router_failure: None,
         });
 
         let joined = turn_route_lines(&app).join("\n");
@@ -1967,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_pager_and_metadata_copy_use_the_same_cell_target() {
+    fn focused_pager_and_copy_use_the_same_cell_target() {
         let mut app = test_app();
         app.history = vec![HistoryCell::Assistant {
             content: "focused markdown **answer**".to_string(),
@@ -1987,10 +2068,10 @@ mod tests {
             Some(crate::tui::views::ModalKind::Pager)
         );
         app.view_stack.pop();
-        assert!(copy_focused_cell_metadata(&mut app));
+        assert!(copy_focused_cell(&mut app));
         assert_eq!(
             app.clipboard.last_written_text(),
-            Some("● focused markdown answer")
+            Some("focused markdown **answer**")
         );
     }
 

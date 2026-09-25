@@ -6,15 +6,15 @@
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::config::{ApiProvider, canonical_model_id_for_provider, provider_passes_model_through};
-use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "provider",
     aliases: &[],
-    usage: "/provider [setup [name]|templates|name [model]]",
+    usage: "/provider [setup [name]|name [model]]",
     description_id: MessageId::CmdProviderDescription,
 };
 
@@ -49,14 +49,6 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
     if name.eq_ignore_ascii_case("fallback") {
         return provider_fallback(app, model_arg);
     }
-    if name.eq_ignore_ascii_case("templates") || name.eq_ignore_ascii_case("template") {
-        if model_arg.is_some() {
-            return CommandResult::error(
-                "Usage: /provider templates — open beginner setup templates.".to_string(),
-            );
-        }
-        return CommandResult::action(AppAction::OpenProviderTemplateList);
-    }
     if name.eq_ignore_ascii_case("setup") {
         return match model_arg {
             None => CommandResult::action(AppAction::OpenProviderSetup { provider: None }),
@@ -65,6 +57,12 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
                 Err(message) => CommandResult::error(message),
             },
         };
+    }
+
+    if crate::config::is_legacy_antigravity_identity(name) {
+        return CommandResult::error(
+            codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE.to_string(),
+        );
     }
 
     let Some(target) = ApiProvider::parse(name) else {
@@ -116,30 +114,21 @@ pub fn provider(app: &mut App, args: Option<&str>) -> CommandResult {
 }
 
 pub(in crate::commands) fn provider_setup_action_for_name(raw: &str) -> Result<AppAction, String> {
+    if crate::config::is_legacy_antigravity_identity(raw) {
+        return Err(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE.to_string());
+    }
     if raw.eq_ignore_ascii_case("ds4") || raw.eq_ignore_ascii_case("dwarfstar") {
         return Ok(AppAction::OpenDs4Setup);
     }
-    if let Some(template) = codewhale_config::provider_setup_template(raw) {
-        match template.apply {
-            codewhale_config::ProviderSetupApply::FirstClass(kind) => {
-                return Ok(AppAction::OpenProviderSetup {
-                    provider: Some(ApiProvider::from_kind(kind)),
-                });
-            }
-            codewhale_config::ProviderSetupApply::Compatible
-            | codewhale_config::ProviderSetupApply::Unpublished => {
-                return Ok(AppAction::OpenTemplateSetup {
-                    template_id: template.id.to_string(),
-                });
-            }
-        }
-    }
+    // First-class aliases (zen, opencode-zen, …) resolve through the provider
+    // registry. There are no setup templates anymore: named custom hosts are
+    // configured with `/provider setup` and the blank custom form (#6289).
     match ApiProvider::parse(raw) {
         Some(provider) => Ok(AppAction::OpenProviderSetup {
             provider: Some(provider),
         }),
         None => Err(format!(
-            "Unknown provider '{raw}'. Expected: {}, or a template (agnes, sensenova, opencode-zen, opencode-go).",
+            "Unknown provider '{raw}'. Expected: {}.",
             ApiProvider::names_hint()
         )),
     }
@@ -250,7 +239,7 @@ mod tests {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app
     }
@@ -261,6 +250,25 @@ mod tests {
         let result = provider(&mut app, None);
         assert!(result.message.is_none());
         assert_eq!(result.action, Some(AppAction::OpenProviderPicker));
+    }
+
+    #[test]
+    fn retired_antigravity_selectors_return_the_tombstone_without_an_action() {
+        let _guard = lock_test_env();
+        for identity in ["antigravity", "agy", "AGY"] {
+            let mut app = create_test_app();
+            let result = provider(&mut app, Some(identity));
+            assert!(result.is_error, "{identity}");
+            assert_eq!(result.action, None, "{identity}");
+            let message = result.message.expect("tombstone message");
+            assert!(message.contains("non-runnable"), "{identity}: {message}");
+            assert!(message.contains("GEMINI_API_KEY"), "{identity}: {message}");
+            assert_eq!(app.api_provider, crate::config::ApiProvider::Deepseek);
+
+            let setup = provider_setup_action_for_name(identity)
+                .expect_err("setup must not open for the tombstone");
+            assert!(setup.contains("provider `google`"), "{identity}: {setup}");
+        }
     }
 
     #[test]
@@ -295,36 +303,28 @@ mod tests {
     }
 
     #[test]
-    fn setup_subcommand_opens_agnes_unpublished_template() {
+    fn setup_subcommand_rejects_retired_template_name() {
         let mut app = create_test_app();
         let result = provider(&mut app, Some("setup agnes"));
-        assert_eq!(
-            result.action,
-            Some(AppAction::OpenTemplateSetup {
-                template_id: "agnes".to_string(),
-            })
-        );
-        assert!(result.message.is_none());
+        assert!(result.action.is_none());
+        let msg = result.message.expect("expected error message");
+        assert!(msg.contains("Unknown provider 'agnes'"));
+        assert!(result.is_error);
     }
 
     #[test]
-    fn setup_subcommand_opens_first_class_zen_template() {
+    fn setup_subcommand_opens_first_class_zen_provider() {
         let mut app = create_test_app();
-        let result = provider(&mut app, Some("setup opencode-zen"));
-        assert_eq!(
-            result.action,
-            Some(AppAction::OpenProviderSetup {
-                provider: Some(ApiProvider::OpencodeZen),
-            })
-        );
-    }
-
-    #[test]
-    fn templates_subcommand_opens_template_list() {
-        let mut app = create_test_app();
-        let result = provider(&mut app, Some("templates"));
-        assert_eq!(result.action, Some(AppAction::OpenProviderTemplateList));
-        assert!(result.message.is_none());
+        for name in ["setup opencode-zen", "setup zen"] {
+            let result = provider(&mut app, Some(name));
+            assert_eq!(
+                result.action,
+                Some(AppAction::OpenProviderSetup {
+                    provider: Some(ApiProvider::OpencodeZen),
+                }),
+                "{name} must resolve through the provider registry"
+            );
+        }
     }
 
     #[test]
@@ -724,7 +724,7 @@ mod tests {
                             ),
                             crate::config::DEEPSEEK_ALIAS_REPLACEMENT
                         );
-                        app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
+                        app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::Max;
                         app.reasoning_effort_preference = None;
                         app.apply_provider_switch_reasoning_effort(
                             provider,
@@ -734,9 +734,9 @@ mod tests {
                         assert_eq!(
                             app.reasoning_effort,
                             if alias == "deepseek-chat" {
-                                crate::tui::app::ReasoningEffort::Off
+                                crate::reasoning_preference::ReasoningEffort::Off
                             } else {
-                                crate::tui::app::ReasoningEffort::High
+                                crate::reasoning_preference::ReasoningEffort::High
                             },
                             "{provider:?} {alias}"
                         );
@@ -777,7 +777,7 @@ mod tests {
             ),
             "deepseek-reasoner"
         );
-        app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
+        app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::Max;
         app.reasoning_effort_preference = None;
         app.apply_provider_switch_reasoning_effort(
             provider,
@@ -786,11 +786,11 @@ mod tests {
         );
         assert_eq!(
             app.reasoning_effort,
-            crate::tui::app::ReasoningEffort::Max,
+            crate::reasoning_preference::ReasoningEffort::Max,
             "custom endpoint owns alias semantics"
         );
 
-        app.reasoning_effort_preference = Some(crate::tui::app::ReasoningEffort::Max);
+        app.reasoning_effort_preference = Some(crate::reasoning_preference::ReasoningEffort::Max);
         app.apply_provider_switch_reasoning_effort(
             provider,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,
@@ -798,7 +798,7 @@ mod tests {
         );
         assert_eq!(
             app.reasoning_effort,
-            crate::tui::app::ReasoningEffort::Max,
+            crate::reasoning_preference::ReasoningEffort::Max,
             "explicit effort must beat compatibility inference"
         );
     }

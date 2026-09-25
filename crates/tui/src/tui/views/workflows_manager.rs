@@ -27,12 +27,12 @@ use ratatui::{
 };
 
 use super::{ActionHint, ModalKind, ModalView, ViewAction, render_modal_footer};
-use crate::palette;
 use crate::tools::workflow::{
     HostWorkflowChildRow, HostWorkflowRunDetail, host_cancel_workflow, host_workflow_run_details,
 };
 use crate::tui::app::App;
 use crate::tui::list_nav::wrap_index;
+use codewhale_palette as palette;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -472,6 +472,18 @@ impl ModalView for WorkflowsManagerView {
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         if self.detail_open {
             return ViewAction::None;
+        }
+        // The wheel moves this list, not the transcript behind it.
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.move_row(-1);
+                return ViewAction::None;
+            }
+            MouseEventKind::ScrollDown => {
+                self.move_row(1);
+                return ViewAction::None;
+            }
+            _ => {}
         }
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             let body = self.list_body.get();

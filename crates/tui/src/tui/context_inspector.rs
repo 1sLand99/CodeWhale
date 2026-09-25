@@ -18,17 +18,17 @@ use crate::compaction::{
     CompactionPath, estimate_input_tokens_for_pressure, inspect_compaction_keep,
     last_round_kept_count, last_round_start, pinned_anchors_text,
 };
-use crate::localization::{Locale, MessageId, tr};
-use crate::models::{SystemPrompt, Tool};
-use crate::palette;
 use crate::session_manager::SessionContextReference;
 use crate::tui::app::{App, ToolDetailRecord};
-use crate::tui::file_mention::ContextReferenceSource;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_underwater_surface,
 };
+use codewhale_core::ContextReferenceSource;
+use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::{SystemPrompt, Tool};
+use codewhale_palette as palette;
 
 /// Marker used by per-turn working-set metadata. Replicated here so the
 /// context inspector can distinguish stable prompt blocks from volatile
@@ -303,7 +303,7 @@ fn compaction_assistant_clause(kept: bool, locale: Locale) -> Cow<'static, str> 
     }
 }
 
-fn last_round_messages(messages: &[crate::models::Message]) -> &[crate::models::Message] {
+fn last_round_messages(messages: &[codewhale_models::Message]) -> &[codewhale_models::Message] {
     let start = last_round_start(messages).min(messages.len());
     &messages[start..]
 }
@@ -1001,7 +1001,7 @@ impl ModalView for ContextInspectorView {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::models::Role;
+    use codewhale_models::Role;
 
     #[test]
     fn short_tool_id_never_panics_on_multibyte() {
@@ -1015,16 +1015,14 @@ mod tests {
     }
 
     use crate::mcp::{McpDiscoveredItem, McpManagerSnapshot, McpServerSnapshot};
-    use crate::models::{ContentBlock, Message, Tool};
     use crate::session_manager::SessionContextReference;
     use crate::tui::app::TuiOptions;
-    use crate::tui::file_mention::{
-        ContextReference, ContextReferenceKind, ContextReferenceSource,
-    };
     use crate::tui::history::HistoryCell;
+    use codewhale_core::{ContextReference, ContextReferenceKind, ContextReferenceSource};
+    use codewhale_models::{ContentBlock, Message, Tool};
     use std::path::PathBuf;
 
-    use crate::localization::Locale;
+    use codewhale_localization::Locale;
 
     fn test_app() -> App {
         let mut app = App::new(
@@ -1084,8 +1082,8 @@ mod tests {
         let app = test_app();
         let text = build_context_inspector_text(&app, Locale::En);
         assert!(text.contains("Session Context"));
-        assert!(text.contains("No file, directory, or media references recorded yet."));
-        assert!(text.contains("No tool activity recorded yet."));
+        assert!(text.contains("No file, folder, or media references yet."));
+        assert!(text.contains("No tool activity yet."));
     }
 
     fn schema_tool(name: &str, property_count: usize) -> Tool {
@@ -1236,7 +1234,7 @@ mod tests {
     #[test]
     fn inspector_marks_high_context_pressure() {
         let mut app = test_app();
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "x".repeat(4_000_000),
@@ -1271,7 +1269,7 @@ mod tests {
     #[test]
     fn inspector_blocks_format_shows_stable_prefix_and_working_set() {
         let mut app = test_app();
-        use crate::models::SystemBlock;
+        use codewhale_models::SystemBlock;
         app.system_prompt = Some(SystemPrompt::Blocks(vec![
             SystemBlock {
                 block_type: "text".to_string(),
@@ -1312,7 +1310,7 @@ mod tests {
     #[test]
     fn inspector_blocks_without_working_set_shows_stable_only() {
         let mut app = test_app();
-        use crate::models::SystemBlock;
+        use codewhale_models::SystemBlock;
         app.system_prompt = Some(SystemPrompt::Blocks(vec![
             SystemBlock {
                 block_type: "text".to_string(),
@@ -1368,7 +1366,7 @@ mod tests {
 
     #[test]
     fn inspector_localizes_to_zh_hans() {
-        use crate::models::SystemBlock;
+        use codewhale_models::SystemBlock;
         let mut app = test_app();
         app.system_prompt = Some(SystemPrompt::Blocks(vec![
             SystemBlock {
@@ -1423,7 +1421,7 @@ mod tests {
     #[test]
     fn inspector_meter_matches_compaction_pressure_signal() {
         let mut app = test_app();
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "x".repeat(4_000),
@@ -1459,15 +1457,17 @@ mod tests {
                 last_round_assistant: true,
                 dropped_messages: 12,
                 anchors_chars: 0,
+                retained_user_message_tokens: 20_000,
+                operator_instructions_applied: false,
             },
             messages_before: 16,
             messages_after: 4,
         });
         let text = build_context_inspector_text(&app, Locale::En);
-        assert!(text.contains("compaction"), "{text}");
+        assert!(text.contains("making room"), "{text}");
         assert!(text.contains("16 → 4 messages"), "{text}");
         let view = ContextInspectorView::new(&app);
-        assert!(view.row_labels().iter().any(|label| label == "compaction"));
+        assert!(view.row_labels().iter().any(|label| label == "making room"));
         assert!(view.row_labels().iter().any(|label| label == "anchors"));
     }
 }

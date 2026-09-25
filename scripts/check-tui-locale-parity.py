@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LOCALES_DIR = ROOT / "crates" / "tui" / "locales"
+LOCALES_DIR = ROOT / "crates" / "localization" / "locales"
 REFERENCE = "en"
 
 # Packs that ship deliberately incomplete, with English fallback for the

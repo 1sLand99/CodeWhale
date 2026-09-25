@@ -4,17 +4,27 @@ use std::time::Instant;
 
 use super::CommandResult;
 use crate::client::{CacheWarmupKey, PromptInspection, inspect_prompt_for_request};
-use crate::localization::{Locale, MessageId, tr};
-use crate::models::MessageRequest;
 use crate::tui::app::{App, AppAction, TurnCacheRecord};
+use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::MessageRequest;
 
 /// Show per-turn DeepSeek prefix-cache telemetry for the last N turns (#263).
 ///
-/// `arg` is parsed as a count override (default 10, capped at the ring size).
+/// `arg` is a subcommand (`inspect [--verbose|--json]`, `stats`, `zones`,
+/// `warmup`) or a count override (default 10, capped at the ring size);
+/// anything else is a usage error.
 /// Renders a fixed-width table the user can paste into a bug report.
 pub fn cache(app: &mut App, arg: Option<&str>) -> CommandResult {
     let arg = arg.map(str::trim).filter(|s| !s.is_empty());
-    if let Some(flags) = arg.and_then(|a| a.strip_prefix("inspect")) {
+    let inspect_flags = arg.and_then(|a| {
+        if a == "inspect" {
+            Some("")
+        } else {
+            a.strip_prefix("inspect")
+                .filter(|rest| rest.starts_with(char::is_whitespace))
+        }
+    });
+    if let Some(flags) = inspect_flags {
         let flags = flags.trim();
         let verbose = flags.split_whitespace().any(|flag| flag == "--verbose");
         let json_mode = flags.split_whitespace().any(|flag| flag == "--json");
@@ -30,7 +40,17 @@ pub fn cache(app: &mut App, arg: Option<&str>) -> CommandResult {
         return CommandResult::message(format_cache_zones(app));
     }
 
-    let want = arg.and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+    let want = match arg {
+        None => 10,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                return CommandResult::error(format!(
+                    "Unknown /cache argument `{raw}`. Usage: /cache [count|inspect [--verbose|--json]|stats|zones|warmup]"
+                ));
+            }
+        },
+    };
     let cap = app.session.turn_cache_history.len();
     let count = want
         .min(cap)
@@ -60,7 +80,7 @@ fn format_cache_inspect(app: &mut App, verbose: bool, json_mode: bool) -> String
         .map(str::to_string);
     let request = MessageRequest {
         model: target.model.clone(),
-        messages: app.api_messages.clone(),
+        messages: app.api_messages.as_ref().clone(),
         max_tokens: 0,
         system: app.system_prompt.clone(),
         tools: app.session.last_tool_catalog.clone(),
@@ -448,11 +468,13 @@ fn format_cache_stats(app: &App) -> String {
 /// Render three-zone prefix contract status for `/cache zones` (#2264).
 ///
 /// Displays the PinnedPrefix fingerprint, AppendLog size, and TurnScratch
-/// state. The zones are type scaffolding only (Phase 1) — not yet
-/// enforcing the full contract at request time.
+/// state. PinnedPrefix is frozen and checked for drift each turn, and
+/// AppendLog is the backing store for the engine's session history
+/// (`core::session::Session::messages`). TurnScratch is still type
+/// scaffolding: nothing on the request path populates it.
 fn format_cache_zones(app: &App) -> String {
     let mut out = String::new();
-    out.push_str("Cache Zones (#2264 three-zone contract, Phase 1 foundation)\n");
+    out.push_str("Cache Zones (#2264 three-zone contract)\n");
 
     // ── PinnedPrefix ─────────────────────────────────────────────────
     out.push_str("\n── PinnedPrefix (system + tools, frozen baseline)\n");
@@ -485,7 +507,7 @@ fn format_cache_zones(app: &App) -> String {
 
     // ── AppendLog ────────────────────────────────────────────────────
     out.push_str("\n── AppendLog (conversation history, append-only)\n");
-    out.push_str("  Status:      Phase 1 scaffolding — not yet wired into engine\n");
+    out.push_str("  Status:      wired — backs the engine session history\n");
     let msg_count = app.api_messages.len();
     out.push_str(&format!("  Messages:    {msg_count}\n"));
     let history_count = app
@@ -497,7 +519,7 @@ fn format_cache_zones(app: &App) -> String {
 
     // ── TurnScratch ──────────────────────────────────────────────────
     out.push_str("\n── TurnScratch (per-turn ephemeral data)\n");
-    out.push_str("  Status:      Phase 1 scaffolding — not yet wired into engine\n");
+    out.push_str("  Status:      not wired — type scaffolding, unused by requests\n");
 
     // ── Zone contract summary ────────────────────────────────────────
     out.push_str("\n── Contract Status\n");
@@ -514,8 +536,8 @@ fn format_cache_zones(app: &App) -> String {
             "not frozen"
         }
     ));
-    out.push_str("  AppendLog:    Phase 1 foundation\n");
-    out.push_str("  TurnScratch:  Phase 1 foundation\n");
+    out.push_str("  AppendLog:    wired (session history)\n");
+    out.push_str("  TurnScratch:  not wired\n");
 
     out
 }
@@ -617,7 +639,8 @@ const TURN_CACHE_TABLE_WIDTH: usize = 106;
 fn turn_cost_cell(
     rec: &TurnCacheRecord,
     currency: crate::pricing::CostCurrency,
-    unpriced_notes: &mut std::collections::BTreeSet<&'static str>,
+    unpriced_reasons: &mut std::collections::BTreeSet<crate::pricing::UnpricedReason>,
+    unpriced_classes: &mut std::collections::BTreeSet<&'static str>,
 ) -> String {
     let Some(audit) = rec.cost_audit.as_ref() else {
         return "—".to_string();
@@ -628,10 +651,10 @@ fn turn_cost_cell(
         return crate::pricing::format_cost_amount_precise(estimate.amount(currency), currency);
     }
     if let Some(reason) = audit.unpriced_reason {
-        unpriced_notes.insert(reason.label());
+        unpriced_reasons.insert(reason);
     }
     for class in &audit.unpriced_classes {
-        unpriced_notes.insert(class.label());
+        unpriced_classes.insert(class.label());
     }
     "—".to_string()
 }
@@ -649,7 +672,9 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
     let currency = app.cost_display_currency(app.cost_currency);
     // Non-secret audit trail for turns whose spend is missing from the session
     // total, so a `—` in the cost column is always explainable.
-    let mut unpriced_notes: std::collections::BTreeSet<&'static str> =
+    let mut unpriced_reasons: std::collections::BTreeSet<crate::pricing::UnpricedReason> =
+        std::collections::BTreeSet::new();
+    let mut unpriced_classes: std::collections::BTreeSet<&'static str> =
         std::collections::BTreeSet::new();
     let mut header = tr(locale, MessageId::CmdCacheHeader)
         .replace("{count}", &rows.len().to_string())
@@ -672,7 +697,7 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
         let replay_cell = rec
             .reasoning_replay_tokens
             .map_or_else(|| "—".to_string(), |t| t.to_string());
-        let classes = crate::pricing::token_usage_for_pricing(&crate::models::Usage {
+        let classes = crate::pricing::token_usage_for_pricing(&codewhale_models::Usage {
             input_tokens: rec.input_tokens,
             output_tokens: rec.output_tokens,
             prompt_cache_hit_tokens: rec.cache_hit_tokens,
@@ -688,7 +713,7 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
             .map_or_else(|| "—".to_string(), |_| write.to_string());
         totals_write += classes.cache_write;
         totals_reasoning += u64::from(rec.reasoning_tokens.unwrap_or(0));
-        let cost_cell = turn_cost_cell(rec, currency, &mut unpriced_notes);
+        let cost_cell = turn_cost_cell(rec, currency, &mut unpriced_reasons, &mut unpriced_classes);
         let route_cell = format_turn_cache_route(rec);
         let age = humanize_age(now.saturating_duration_since(rec.recorded_at));
 
@@ -781,11 +806,16 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
             .replace("{avg}", &avg_ratio),
     );
     footer.push_str(&tr(locale, MessageId::CmdCacheFootnote));
-    if !unpriced_notes.is_empty() {
-        footer.push_str(&format!(
-            "cost — = no authoritative price for that turn; it is missing from the session estimate ({}).\n",
-            unpriced_notes.into_iter().collect::<Vec<_>>().join(", ")
-        ));
+    if !unpriced_reasons.is_empty() || !unpriced_classes.is_empty() {
+        // Reasons are localized prose; token-class labels are key names and
+        // stay raw, the same split `/cost` uses.
+        let notes = unpriced_reasons
+            .iter()
+            .map(|reason| tr(locale, reason.message_id()).into_owned())
+            .chain(unpriced_classes.iter().map(|class| (*class).to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        footer.push_str(&tr(locale, MessageId::CmdCacheUnpricedNote).replace("{notes}", &notes));
     }
     footer.push_str(&tr(locale, MessageId::CmdCacheAdvice));
 
@@ -849,5 +879,94 @@ mod route_tests {
         };
 
         assert_eq!(format_turn_cache_route(&record), "lm-studio/local-code-...");
+    }
+}
+
+#[cfg(test)]
+mod zones_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cache_zones_output_reports_real_wiring() {
+        let mut app = App::new(
+            crate::test_support::test_tui_options(PathBuf::from(".")),
+            &Config::default(),
+        );
+        app.api_messages = std::sync::Arc::new(Vec::new());
+        app.last_pinned_prefix_hash = None;
+        app.prefix_change_count = 0;
+
+        let expected = "\
+Cache Zones (#2264 three-zone contract)
+
+── PinnedPrefix (system + tools, frozen baseline)
+  Status:    unavailable (not yet frozen)
+  Run a turn first to freeze the baseline.
+
+── AppendLog (conversation history, append-only)
+  Status:      wired — backs the engine session history
+  Messages:    0
+  History msgs: 0
+
+── TurnScratch (per-turn ephemeral data)
+  Status:      not wired — type scaffolding, unused by requests
+
+── Contract Status
+  PinnedPrefix: not frozen
+  AppendLog:    wired (session history)
+  TurnScratch:  not wired
+";
+        assert_eq!(format_cache_zones(&app), expected);
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
+
+    fn app() -> App {
+        App::new(
+            crate::test_support::test_tui_options(PathBuf::from(".")),
+            &Config::default(),
+        )
+    }
+
+    #[test]
+    fn cache_rejects_unknown_word_args() {
+        let mut app = app();
+        for arg in ["stat", "inspector", "inspect--json"] {
+            let result = cache(&mut app, Some(arg));
+            assert!(result.is_error, "/cache {arg} must be a usage error");
+            let text = result.message.as_deref().unwrap_or_default();
+            assert!(
+                text.contains(arg) && text.contains("Usage: /cache"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_inspect_matches_whole_word_with_optional_flags() {
+        let mut app = app();
+        for arg in ["inspect", "inspect --json", "inspect  --verbose"] {
+            let result = cache(&mut app, Some(arg));
+            let text = result.message.as_deref().unwrap_or_default();
+            assert!(!result.is_error, "/cache {arg}: {text}");
+            assert!(
+                !text.contains("Unknown /cache argument"),
+                "/cache {arg}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_numeric_arg_still_selects_count() {
+        let mut app = app();
+        let result = cache(&mut app, Some("5"));
+        assert!(!result.is_error);
     }
 }

@@ -8,16 +8,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::deepseek_theme::active_theme;
-use crate::localization::Locale;
-use crate::models::{ContentBlock, Message};
-use crate::palette;
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::review::ReviewOutput;
 use crate::tui::app::TranscriptSpacing;
 use crate::tui::diff_render;
 use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::CopyLineSeparator;
+use codewhale_localization::Locale;
+use codewhale_models::{ContentBlock, Message};
+use codewhale_palette as palette;
 
 mod agent_activity;
 mod archived_context;
@@ -78,8 +77,6 @@ pub use tool_output::{
     OutputRow, summarize_mcp_output, summarize_tool_args, summarize_tool_output,
 };
 
-use std::process::Command;
-
 /// Render mode controlling whether tool/thinking cells render their compact
 /// "live" form (with caps and collapsed reasoning) or their full transcript
 /// form (uncapped, suitable for the pager / clipboard / message export).
@@ -97,6 +94,28 @@ pub enum RenderMode {
 pub(crate) enum ReasoningAction {
     Expand,
     Collapse,
+}
+
+/// A user's explicit decision about one thinking cell.
+///
+/// The absence of a `ThinkingFold` — `None` at a call site, no entry in
+/// `App::thinking_folds` — means the user has not touched that cell, so the
+/// display preferences (`verbose` or `thinking_default_expanded`) decide its
+/// default. An explicit intent is *absolute*: it says expanded or collapsed
+/// outright, never "the opposite of whatever the preference currently says".
+/// That is what lets a choice outlive a later preference change (#5847).
+///
+/// Known limitation: the intent is per session and per virtual cell index.
+/// It is not persisted across restarts, and destructive transcript edits drop
+/// it along with the other per-index state (`prune_transcript_index_state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingFold {
+    /// The user expanded this cell; show the whole body whatever the
+    /// preference says.
+    Expanded,
+    /// The user collapsed this cell; show the preview whatever the
+    /// preference says.
+    Collapsed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,8 +201,8 @@ pub enum SubAgentCell {
 impl SubAgentCell {
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
         match self {
-            SubAgentCell::Delegate(card) => card.render_lines(width, &crate::palette::UI_THEME),
-            SubAgentCell::Fanout(card) => card.render_lines(width, &crate::palette::UI_THEME),
+            SubAgentCell::Delegate(card) => card.render_lines(width, &codewhale_palette::UI_THEME),
+            SubAgentCell::Fanout(card) => card.render_lines(width, &codewhale_palette::UI_THEME),
         }
     }
 }
@@ -213,6 +232,20 @@ pub struct TranscriptRenderOptions {
     /// `[transcript] prose_measure` so the main cache and the full-screen
     /// overlay agree on the same effective width.
     pub(crate) prose_measure: Option<u16>,
+    /// This cell is a durable Work receipt that a later one has replaced.
+    ///
+    /// `todo_write` writes the whole list every time, so a long session grew a
+    /// stack of full checklist cards that could only be cleared by `/clear` or
+    /// `/new` — both of which also drop `api_messages` and the compaction
+    /// summary, so tidying the view cost the conversation (#5871). A
+    /// superseded snapshot collapses to its summary line in the live
+    /// transcript; the full card stays in the transcript overlay and in the
+    /// tool detail record, because the receipt that the tool ran is evidence.
+    pub(crate) superseded_work_receipt: bool,
+    /// This cell is the newest user turn in the transcript. Only it carries
+    /// the elevated-surface background; every older prompt renders on the
+    /// bare ground, so the eye lands on the turn in play.
+    pub(crate) newest_user_turn: bool,
     /// Extra raw reasoning body rows available to the newest transcript cell.
     /// The transcript cache derives this from genuinely unused viewport rows;
     /// non-layout-aware renderers and historical cells retain the compact
@@ -227,6 +260,8 @@ pub struct TranscriptRenderOptions {
 impl Default for TranscriptRenderOptions {
     fn default() -> Self {
         Self {
+            superseded_work_receipt: false,
+            newest_user_turn: false,
             locale: Locale::En,
             show_thinking: true,
             thinking_highlight: true,
@@ -357,7 +392,7 @@ impl HistoryCell {
     /// `transcript_lines`.
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
         match self {
-            HistoryCell::User { content } => render_user_message(content, width),
+            HistoryCell::User { content } => render_user_message(content, width, false),
             HistoryCell::Assistant { content, streaming } => render_message(
                 ASSISTANT_GLYPH,
                 assistant_label_style_for(*streaming, /*low_motion*/ false),
@@ -399,21 +434,22 @@ impl HistoryCell {
         width: u16,
         options: TranscriptRenderOptions,
     ) -> Vec<Line<'static>> {
-        self.lines_with_options_folded(width, options, false).0
+        self.lines_with_options_folded(width, options, None).0
     }
 
-    /// Render with an explicit per-cell fold override for thinking cells.
+    /// Render with the user's explicit per-cell fold intent for thinking
+    /// cells.
     ///
-    /// Space toggles the collapsed state *relative* to the expanded
-    /// baseline, which is on when either the session is verbose or the
-    /// thinking default is expanded:
-    /// - baseline off (default): thinking is collapsed; Space unfolds it
-    /// - baseline on: thinking is expanded; Space folds it
+    /// `None` means the user has not touched this cell, so the expanded
+    /// baseline decides: on when the session is verbose or the thinking
+    /// default is expanded, off otherwise. `Some(..)` is the user's own
+    /// decision and outranks the baseline in both directions, so changing a
+    /// preference later never rewrites what they already chose (#5847).
     pub fn lines_with_options_folded(
         &self,
         width: u16,
         options: TranscriptRenderOptions,
-        folded: bool,
+        fold: Option<ThinkingFold>,
     ) -> (Vec<Line<'static>>, Option<ReasoningAction>) {
         let mut reasoning_action = None;
         let mut lines = match self {
@@ -433,7 +469,11 @@ impl HistoryCell {
                 streaming,
                 duration_secs,
             } => {
-                let collapsed = folded ^ !(options.verbose || options.thinking_default_expanded);
+                let collapsed = match fold {
+                    Some(ThinkingFold::Expanded) => false,
+                    Some(ThinkingFold::Collapsed) => true,
+                    None => !(options.verbose || options.thinking_default_expanded),
+                };
                 let (lines, expandable) = thinking::render_thinking_with_preview_limit(
                     content,
                     width,
@@ -482,10 +522,26 @@ impl HistoryCell {
                 }
                 lines
             }
+            HistoryCell::Tool(cell) if options.superseded_work_receipt => {
+                // A durable Work receipt a later one replaced keeps its header
+                // — the progress reading — and drops the body (#5871). The full
+                // card stays in the transcript overlay and the detail record,
+                // so the evidence that the tool ran is not rewritten away.
+                let mut lines =
+                    cell.lines_with_motion_and_locale(width, options.low_motion, options.locale);
+                lines.truncate(1);
+                lines.push(details_affordance_line(
+                    &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details"),
+                    Style::default().fg(palette::TEXT_MUTED).italic(),
+                ));
+                lines
+            }
             HistoryCell::Tool(cell) => {
                 cell.lines_with_motion_and_locale(width, options.low_motion, options.locale)
             }
-            HistoryCell::User { content } => render_user_message(content, width),
+            HistoryCell::User { content } => {
+                render_user_message(content, width, options.newest_user_turn)
+            }
             HistoryCell::Assistant { content, streaming } => {
                 let mut lines: Vec<Line<'static>> = render_message_with_copy_metadata_for_palette(
                     ASSISTANT_GLYPH,
@@ -533,25 +589,26 @@ impl HistoryCell {
         width: u16,
         options: TranscriptRenderOptions,
     ) -> Vec<RenderedTranscriptLine> {
-        self.lines_with_copy_metadata_folded(width, options, false)
-            .0
+        self.lines_with_copy_metadata_folded(width, options, None).0
     }
 
     pub(crate) fn lines_with_copy_metadata_folded(
         &self,
         width: u16,
         options: TranscriptRenderOptions,
-        folded: bool,
+        fold: Option<ThinkingFold>,
     ) -> (Vec<RenderedTranscriptLine>, Option<ReasoningAction>) {
         if matches!(self, HistoryCell::Thinking { .. }) {
             let (lines, action) =
-                self.lines_with_options_folded(options.prose_width(width), options, folded);
+                self.lines_with_options_folded(options.prose_width(width), options, fold);
             return (hard_break_copy_lines(lines), action);
         }
         let lines = match self {
-            HistoryCell::User { content } => {
-                hard_break_copy_lines(render_user_message(content, options.prose_width(width)))
-            }
+            HistoryCell::User { content } => hard_break_copy_lines(render_user_message(
+                content,
+                options.prose_width(width),
+                options.newest_user_turn,
+            )),
             HistoryCell::Assistant { content, streaming } => {
                 let width = options.prose_width(width);
                 let mut rendered = render_message_with_copy_metadata_for_palette(
@@ -578,7 +635,7 @@ impl HistoryCell {
                 )
             }
             HistoryCell::Tool(_) => self
-                .lines_with_options_folded(width, options, folded)
+                .lines_with_options_folded(width, options, fold)
                 .0
                 .into_iter()
                 .map(|line| {
@@ -592,7 +649,7 @@ impl HistoryCell {
                 })
                 .collect(),
             HistoryCell::Thinking { .. } => unreachable!("reasoning handled above"),
-            _ => hard_break_copy_lines(self.lines_with_options_folded(width, options, folded).0),
+            _ => hard_break_copy_lines(self.lines_with_options_folded(width, options, fold).0),
         };
         (lines, None)
     }
@@ -659,6 +716,11 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
             content: display.to_string(),
         }];
     }
+    // Raw runtime handoffs have live tool/status receipts, not user cells.
+    // Keep their model-facing payload intact and filter only the display.
+    if crate::runtime_handoff::is_internal_runtime_handoff(msg) {
+        return Vec::new();
+    }
 
     let mut cells = Vec::new();
 
@@ -676,7 +738,7 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
                 }
                 // Check if this is an `<archived_context>` block.
                 if (msg.role == "assistant"
-                    || msg.role == crate::models::INTERRUPTED_ASSISTANT_ROLE)
+                    || msg.role == codewhale_models::INTERRUPTED_ASSISTANT_ROLE)
                     && let Some(archived) = parse_archived_context(text)
                 {
                     cells.push(archived);
@@ -1207,7 +1269,10 @@ impl ExploringCell {
             Cow::Borrowed("")
         } else if all_done {
             if status == ToolStatus::Success {
-                crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
+                codewhale_localization::tr(
+                    locale,
+                    codewhale_localization::MessageId::ToolReceiptDone,
+                )
             } else {
                 Cow::Borrowed(tool_status_label(status))
             }
@@ -2751,32 +2816,82 @@ fn render_card_detail_line_single(
     Line::from(spans)
 }
 
+// Tool-card ink. The transcript paints tool cards with the dark whale tokens
+// regardless of the selected theme, as every other cell in this file does by
+// reading the same `palette` constants directly.
+
 fn tool_title_style() -> Style {
-    active_theme().tool_title_style()
+    Style::default()
+        .fg(palette::TEXT_SOFT)
+        .add_modifier(Modifier::BOLD)
 }
 
+/// Right-side status text ("running", "done", "issue"). Reads as the glyph it
+/// sits beside, not as the rail.
 fn tool_status_style(
     status: ToolStatus,
     family: crate::tui::widgets::tool_card::ToolFamily,
 ) -> Style {
-    active_theme().tool_status_style(status, family)
+    Style::default().fg(tool_glyph_color(status, family))
 }
 
+/// Detail label style ("command:", "time:", step markers).
 fn tool_detail_label_style() -> Style {
-    active_theme().tool_label_style()
+    Style::default().fg(palette::TEXT_DIM)
 }
 
-/// Card border ink — OMP's border rule. See [`Theme::tool_rail_color`].
+/// Colour of a tool cell's **rail** — the card border.
+///
+/// This is OMP's `output-block.ts` rule verbatim: a block takes a state and
+/// its border colour follows it. In-flight takes the action accent, a settled
+/// success recedes into muted text so finished work stops competing for the
+/// eye, and only warning and failure keep a loud colour. `Hydrated` is a
+/// stalled "tool loaded — retry required", not live work, so it takes the hint
+/// colour instead of borrowing the running accent and reading as in-flight.
+///
+/// Deliberately *not* the same function as [`tool_glyph_color`]: the border
+/// reports lifecycle, the glyph reports identity. They agree wherever it
+/// matters — running, warning and failure are the same ink in both, so the two
+/// can never disagree about trouble.
 fn tool_rail_color(status: ToolStatus) -> Color {
-    active_theme().tool_rail_color(status)
+    match status {
+        ToolStatus::Running => palette::WHALE_ACTION,
+        ToolStatus::Success => palette::TEXT_MUTED,
+        ToolStatus::Hydrated => palette::TEXT_DIM,
+        ToolStatus::Warning => palette::WHALE_HUMAN,
+        ToolStatus::Failed => palette::WHALE_ERROR,
+    }
 }
 
-/// Status-glyph ink — the mockup's reading. See [`Theme::tool_glyph_color`].
+/// Colour of a tool cell's **status glyph** and the state word beside it.
+///
+/// Follows the accepted mockup (`tideline-mockups/tideline-01`) rather than
+/// the border rule: a finished verify row keeps its green `✓`, and a finished
+/// read or search keeps the family accent that identifies it — the blue
+/// magnifier in that mockup. A settled card therefore still says *what it was*
+/// even while its border has receded to muted.
+///
+/// Everything that needs attention reads identically to the rail.
 fn tool_glyph_color(
     status: ToolStatus,
     family: crate::tui::widgets::tool_card::ToolFamily,
 ) -> Color {
-    active_theme().tool_glyph_color(status, family)
+    use crate::tui::widgets::tool_card::ToolFamily;
+    match status {
+        ToolStatus::Running => palette::WHALE_ACTION,
+        // Verified work earns Working Green; every other family keeps the
+        // action accent it wore while running, which is what makes a
+        // completed `read` row still read as a read.
+        ToolStatus::Success => match family {
+            ToolFamily::Verify => palette::STATUS_SUCCESS,
+            _ => palette::WHALE_ACTION,
+        },
+        // A hydrated cell has not succeeded at anything yet, so it never
+        // borrows the verified or family accent.
+        ToolStatus::Hydrated => palette::TEXT_DIM,
+        ToolStatus::Warning => palette::WHALE_HUMAN,
+        ToolStatus::Failed => palette::WHALE_ERROR,
+    }
 }
 
 fn tool_status_label(status: ToolStatus) -> &'static str {
@@ -2807,26 +2922,29 @@ pub(crate) fn tool_receipt_label(
         ToolFamily::Read | ToolFamily::Find => {
             let lines = output.map(count_output_lines).unwrap_or(0);
             if lines == 0 {
-                crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
-            } else if lines == 1 {
-                crate::localization::tr(
+                codewhale_localization::tr(
                     locale,
-                    crate::localization::MessageId::ToolReceiptLinesSingular,
+                    codewhale_localization::MessageId::ToolReceiptDone,
+                )
+            } else if lines == 1 {
+                codewhale_localization::tr(
+                    locale,
+                    codewhale_localization::MessageId::ToolReceiptLinesSingular,
                 )
             } else {
                 Cow::Owned(
-                    crate::localization::tr(
+                    codewhale_localization::tr(
                         locale,
-                        crate::localization::MessageId::ToolReceiptLinesPlural,
+                        codewhale_localization::MessageId::ToolReceiptLinesPlural,
                     )
                     .replace("{count}", &lines.to_string()),
                 )
             }
         }
         ToolFamily::Run => {
-            crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
+            codewhale_localization::tr(locale, codewhale_localization::MessageId::ToolReceiptDone)
         }
-        _ => crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone),
+        _ => codewhale_localization::tr(locale, codewhale_localization::MessageId::ToolReceiptDone),
     }
 }
 
@@ -2838,54 +2956,45 @@ fn count_output_lines(output: &str) -> usize {
     }
 }
 
+/// Default value style for tool detail rows.
 fn tool_value_style() -> Style {
-    active_theme().tool_value_style()
+    Style::default().fg(palette::TEXT_MUTED)
 }
 
-/// Parse `path:line` patterns from `text` and open the file at the given line
-/// in the user's preferred editor (`$VISUAL` / `$EDITOR` / `vim`).
+/// Find the first `path:line` reference in a rendered cell.
 ///
-/// Scans lines of `text` for patterns like `src/main.rs:42`. Resolves the path
-/// relative to `workspace` (if not absolute) and opens the editor. Returns
-/// `true` if at least one file was opened successfully.
-pub fn try_open_file_at_line(text: &str, workspace: &Path) -> bool {
-    let editor = std::env::var("VISUAL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("EDITOR")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| "vim".to_string());
-
-    let mut any_opened = false;
+/// Pure: it resolves and stats candidate paths but never launches anything.
+/// Spawning the editor belongs to `external_editor`, which owns the terminal
+/// handoff — this used to build its own `Command` and `spawn()` it detached
+/// while the TUI still held raw mode, the alt screen and mouse capture, and it
+/// did that once per matching line, so one click could leave N editors fighting
+/// the TUI for the same tty (#6235).
+///
+/// Returns the first match rather than every match: a click is one request to
+/// open one file.
+pub(crate) fn first_file_line_reference(text: &str, workspace: &Path) -> Option<(PathBuf, u32)> {
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some((before, after)) = trimmed.rsplit_once(':')
-            && after.chars().all(|c| c.is_ascii_digit())
-        {
-            let line_num: u32 = after.parse().unwrap_or(1);
-            let path_str = before.trim();
-            if !path_str.is_empty() && looks_like_file_path(path_str) {
-                let abs_path = if Path::new(path_str).is_absolute() {
-                    PathBuf::from(path_str)
-                } else {
-                    workspace.join(path_str)
-                };
-                if abs_path.is_file()
-                    && Command::new(&editor)
-                        .arg(format!("+{line_num}"))
-                        .arg(&abs_path)
-                        .spawn()
-                        .is_ok()
-                {
-                    any_opened = true;
-                }
-            }
+        let Some((before, after)) = trimmed.rsplit_once(':') else {
+            continue;
+        };
+        if after.is_empty() || !after.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let path_str = before.trim();
+        if path_str.is_empty() || !looks_like_file_path(path_str) {
+            continue;
+        }
+        let abs_path = if Path::new(path_str).is_absolute() {
+            PathBuf::from(path_str)
+        } else {
+            workspace.join(path_str)
+        };
+        if abs_path.is_file() {
+            return Some((abs_path, after.parse().unwrap_or(1)));
         }
     }
-    any_opened
+    None
 }
 
 /// Heuristic check whether a string looks like a file path (contains a
@@ -3083,30 +3192,3 @@ pub(crate) fn apply_hot_tail_to_line(line: &mut Line<'static>, low_motion: bool)
 
 #[cfg(test)]
 mod tests;
-
-// ---------------------------------------------------------------------------
-// Tideline receipt stream (spec §5a "Receipt stream", §1 work screen): turn
-// rows, the pod-formation `├──/└──` tree, state-marked receipt rows with
-// timestamps and receipt counts, an indented conclusion block, and the
-// legend row that teaches the marks in place. Translation scaffolding in
-// the topbar mold: pure, deterministic, injected events — the transcript
-// click path (`work_surface` row rects) is reused at the landing slice;
-// not wired into `ui/frame.rs` (#5698 gate).
-
-pub use tideline_stream::{TidelineStream, render_tideline_stream};
-
-/// Full export alias for the Tideline components that compose the stream
-/// into their stages (work surface, settings preview).
-pub(crate) mod tideline_exports {
-    #![allow(unused_imports)] // consumed by the work-surface/settings test suites and landing slice
-
-    pub use super::tideline_stream::{
-        TidelineReceiptState, TidelineStream, TidelineStreamEvent, render_tideline_stream,
-        tideline_stream_hitboxes,
-    };
-}
-
-mod tideline_stream;
-
-#[cfg(test)]
-mod tideline_stream_tests;

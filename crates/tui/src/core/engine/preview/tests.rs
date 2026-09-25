@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::ops::TurnSpec;
 
 fn tool(name: &str, deferred: bool) -> Tool {
     Tool {
@@ -240,6 +241,9 @@ async fn terminal_undelivered_child_fails_closed_without_claiming_delivery() {
 fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
     let config = deepseek_config();
     let (mut engine, _handle, _tmp) = preview_engine(&config);
+    // Pressure advice is only surfaced when the user opts out of automatic
+    // maintenance. The route-budget assertion still applies in that mode.
+    engine.config.compaction.enabled = false;
     engine.api_provider = ApiProvider::Deepseek;
     let installed_limits = codewhale_config::route::RouteLimits {
         context_tokens: Some(4_096),
@@ -292,15 +296,12 @@ fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
         false,
         None,
     );
-    assert_eq!(
-        engine
-            .context_pressure_line("cross-route budget", &installed_context, None)
-            .as_deref(),
-        Some(
-            "Context pressure: critical — CRITICAL: stop expanding scope; run /compact immediately or finish the current task"
-        ),
-        "control fixture must be critical under the installed 4K limits"
-    );
+    let pressure = engine
+        .context_pressure_line("cross-route budget", &installed_context, None)
+        .unwrap();
+    assert!(pressure.contains("Context pressure: critical"));
+    assert!(pressure.contains("Estimated input:"));
+    assert!(pressure.contains("Making room automatically is off"));
     let message = engine.user_text_message_from_snapshot(
         "cross-route budget".to_string(),
         &prompt_context.model,
@@ -311,7 +312,7 @@ fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
         TurnMetadataSnapshot {
             prompt_context: &prompt_context,
             system_prompt: system_prompt.as_ref(),
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             working_set: &engine.session.working_set,
             policy_narrowing: None,
         },
@@ -579,7 +580,7 @@ async fn compaction_preview_uses_the_planned_routes_system_prompt() {
         .preview_runtime_transforms(&messages, Some(&planned_prompt), &compaction)
         .await;
     assert!(
-        planned_reasons.contains(&"auto-compaction would rewrite the conversation first"),
+        planned_reasons.contains(&"making room would summarize the conversation first"),
         "the planned route prompt crosses the compaction threshold: {planned_reasons:?}"
     );
 
@@ -587,7 +588,7 @@ async fn compaction_preview_uses_the_planned_routes_system_prompt() {
         .preview_runtime_transforms(&messages, Some(&installed_prompt), &compaction)
         .await;
     assert!(
-        !installed_reasons.contains(&"auto-compaction would rewrite the conversation first"),
+        !installed_reasons.contains(&"making room would summarize the conversation first"),
         "the installed route prompt is the below-threshold control: {installed_reasons:?}"
     );
 }
@@ -600,7 +601,7 @@ async fn planned_route_builds_subagent_catalog_without_installed_client() {
     engine.config.features.disable(Feature::Mcp);
     let _ = engine.config.features.enable(Feature::Subagents);
     engine.config.subagents_enabled = true;
-    engine.deepseek_client = None;
+    engine.codewhale_client = None;
     let planned = plan(&config, &identity, false, "planned child route").await;
     let route = planned.route.validate().expect("planned route validates");
     let planned_model = route.model.clone();
@@ -609,7 +610,7 @@ async fn planned_route_builds_subagent_catalog_without_installed_client() {
         false,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     let build = engine
         .build_turn_tool_registry_and_catalog(
@@ -669,7 +670,7 @@ async fn auto_route_without_a_prompt_omits_every_final_fact() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             provenance: UserInputProvenance::ExternalUser,
@@ -761,9 +762,9 @@ async fn plan_for(
         model,
         auto_model,
         if auto_model {
-            crate::tui::app::ReasoningEffort::Auto
+            crate::reasoning_preference::ReasoningEffort::Auto
         } else {
-            crate::tui::app::ReasoningEffort::High
+            crate::reasoning_preference::ReasoningEffort::High
         },
         prompt,
     )
@@ -779,7 +780,7 @@ async fn plan_with_reasoning(
     provider: ApiProvider,
     model: &str,
     auto_model: bool,
-    reasoning_effort: crate::tui::app::ReasoningEffort,
+    reasoning_effort: crate::reasoning_preference::ReasoningEffort,
     prompt: &str,
 ) -> crate::turn_route_plan::PlannedTurnRoute {
     crate::turn_route_plan::plan_turn_route(crate::turn_route_plan::TurnRoutePlanRequest {
@@ -791,7 +792,6 @@ async fn plan_with_reasoning(
         reasoning_effort,
         mode: AppMode::Agent,
         content: prompt,
-        display_text: prompt,
         auto_router_context: "",
         should_auto_resolve: auto_model,
         allow_auto_router_response_cache: false,
@@ -843,7 +843,7 @@ fn inputs(
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         provenance: UserInputProvenance::ExternalUser,
@@ -957,28 +957,31 @@ async fn assert_preview_matches_first_wire_body(
         .clone();
 
     let _ = engine
-        .handle_send_message(
-            prompt.to_string(),
-            AppMode::Agent,
-            production_route,
-            compaction,
+        .handle_send_message(TurnSpec {
+            content: prompt.to_string(),
+            mode: AppMode::Agent,
+            route: Box::new(production_route),
+            compaction: Box::new(compaction),
+            initial_routed_usage: Box::new(crate::cost_status::RuntimeUsageBatch::default()),
             goal_objective,
-            None,
+            goal_token_budget: None,
             goal_status,
             reasoning_effort,
             reasoning_effort_auto,
-            false,
-            false,
-            false,
-            false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled,
-            None,
-            Vec::new(),
-            None,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
             verbosity,
-            UserInputProvenance::ExternalUser,
-        )
+            provenance: UserInputProvenance::ExternalUser,
+            images: Vec::new(),
+            max_output_tokens: None,
+        })
         .await;
 
     let requests = server
@@ -1331,7 +1334,7 @@ struct MatrixRoute {
     provider_key: &'static str,
     base_url: &'static str,
     model: &'static str,
-    requested_reasoning: crate::tui::app::ReasoningEffort,
+    requested_reasoning: crate::reasoning_preference::ReasoningEffort,
     requested_reasoning_label: &'static str,
     /// Reasoning-control keys the manifest must report, in receipt order.
     expect_control_keys: &'static [&'static str],
@@ -1351,7 +1354,7 @@ fn glm_5_2_zai_coding() -> MatrixRoute {
         provider_key: "zai",
         base_url: crate::config::DEFAULT_ZAI_BASE_URL,
         model: crate::config::ZAI_GLM_5_2_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::High,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::High,
         requested_reasoning_label: "high",
         expect_control_keys: &["reasoning_effort", "thinking"],
         expect_wire_effort: Some("high"),
@@ -1368,7 +1371,7 @@ fn glm_5_turbo_zai() -> MatrixRoute {
         provider_key: "zai",
         base_url: crate::config::DEFAULT_ZAI_BASE_URL,
         model: crate::config::ZAI_GLM_5_TURBO_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::High,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::High,
         requested_reasoning_label: "high",
         // No invented granularity: the toggle ships, the tier does not.
         expect_control_keys: &["thinking"],
@@ -1387,7 +1390,7 @@ fn kimi_k3_moonshot_direct() -> MatrixRoute {
         base_url: crate::config::DEFAULT_MOONSHOT_BASE_URL,
         model: crate::config::MOONSHOT_KIMI_K3_MODEL,
         // The visible normalization: `off` is not a tier this route has.
-        requested_reasoning: crate::tui::app::ReasoningEffort::Off,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::Off,
         requested_reasoning_label: "off",
         expect_control_keys: &["reasoning_effort"],
         expect_wire_effort: Some("low"),
@@ -1404,7 +1407,7 @@ fn k3_kimi_code() -> MatrixRoute {
         provider_key: "moonshot",
         base_url: crate::config::DEFAULT_KIMI_CODE_BASE_URL,
         model: crate::config::KIMI_CODE_K3_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::Off,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::Off,
         requested_reasoning_label: "off",
         expect_control_keys: &["thinking"],
         expect_wire_effort: Some("low"),
@@ -1421,7 +1424,7 @@ fn minimax_m3() -> MatrixRoute {
         provider_key: "minimax",
         base_url: crate::config::DEFAULT_MINIMAX_BASE_URL,
         model: crate::config::DEFAULT_MINIMAX_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::High,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::High,
         requested_reasoning_label: "high",
         expect_control_keys: &["thinking", "reasoning_split"],
         expect_wire_effort: None,
@@ -1921,28 +1924,31 @@ async fn provider_reported_usage_is_unavailable_until_a_response_reports_it() {
     assert_eq!(engine.session.total_usage.output_tokens, 0);
 
     let _ = engine
-        .handle_send_message(
-            prompt.to_string(),
-            AppMode::Agent,
-            production_route,
-            compaction,
-            None,
-            None,
-            GoalStatus::Active,
+        .handle_send_message(TurnSpec {
+            content: prompt.to_string(),
+            mode: AppMode::Agent,
+            route: Box::new(production_route),
+            compaction: Box::new(compaction),
+            initial_routed_usage: Box::new(crate::cost_status::RuntimeUsageBatch::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: GoalStatus::Active,
             reasoning_effort,
             reasoning_effort_auto,
-            false,
-            false,
-            false,
-            false,
-            crate::tui::approval::ApprovalMode::Suggest,
-            false,
-            None,
-            Vec::new(),
-            None,
-            None,
-            UserInputProvenance::ExternalUser,
-        )
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            images: Vec::new(),
+            max_output_tokens: None,
+        })
         .await;
 
     // The completed turn's counts are exactly what `parse_usage` reads off
@@ -2157,7 +2163,7 @@ async fn preview_tool_snapshot_has_no_mcp_or_event_side_effects() {
         false,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     let build = engine
         .build_turn_tool_registry_and_catalog(
@@ -2171,7 +2177,7 @@ async fn preview_tool_snapshot_has_no_mcp_or_event_side_effects() {
                 model: engine.session.model.clone(),
                 capabilities: engine.active_route_capabilities,
                 limits: engine.active_route_limits,
-                client: engine.deepseek_client.clone(),
+                client: engine.codewhale_client.clone(),
                 api_config: Box::new(engine.api_config.clone()),
                 locale_tag: engine.config.locale_tag.clone(),
                 role_models: engine.subagent_role_models(),

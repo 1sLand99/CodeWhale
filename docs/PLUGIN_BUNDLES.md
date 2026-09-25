@@ -7,30 +7,53 @@ and Hooks through Codewhale's existing engines. Unsupported declarations stay
 inventoried instead of disabling a mixed bundle. Discovery alone never
 executes, enables, trusts, downloads, updates, or installs anything.
 
-This document owns the bundle format (both manifest encodings), discovery,
+This document owns the bundle formats, discovery,
 validation, and the trust/enable/runtime contract. [PLUGINS.md](PLUGINS.md)
 owns how bits get onto and off disk — the `/plugin install`, `update`,
-`uninstall`, and `suggest` on-ramp added in v0.9.4 (#5182). Claude Code
-plugin repositories are a different, unconverted format; that boundary is
+`uninstall`, and `suggest` on-ramp added in v0.9.4 (#5182). Compatible Claude Code bundles use the same native adapters; their supported subset is
 [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md).
+For a runnable native example and explicit OpenCode/DSH data conversion, see
+[Write your first plugin](PLUGIN_AUTHORING.md).
 
 ## Discovery and precedence
 
 Codewhale scans only its own roots, looking in each `<name>/` directory for a
 manifest named `plugin.json` (the native Agent Plugins v1.0.0 format, since
 v0.9.4), `kimi.plugin.json` (the compatible Kimi Skills/MCP subset, since
-v0.9.8), or `plugin.toml` (the legacy Codewhale format, still fully readable):
+v0.9.8), `plugin.toml` (the legacy Codewhale format, still fully readable), or
+`.claude-plugin/plugin.json` (the compatible Claude subset, since v0.9.13):
 
 - User: `~/.codewhale/plugins/<name>/`
 - Workspace: `<workspace>/.codewhale/plugins/<name>/`
 
 A bundle that publishes multiple formats is read through `plugin.json` first,
-then `kimi.plugin.json`, then the legacy `plugin.toml`.
-No built-in bundle ships as of v0.9.6. The internal precedence order is
+then `kimi.plugin.json`, then the legacy `plugin.toml`, then
+`.claude-plugin/plugin.json`.
+Computer Use ships as a built-in bundle; it still requires review and
+enablement before activation. The internal precedence order is
 built-in, user, then workspace; the first bundle with a given name wins. This
 prevents a repository from shadowing an explicitly installed user bundle.
 Symbolic-link roots, manifests, component paths, and nested component files
 fail closed.
+
+The embedded Computer Use files are materialized under
+`$CODEWHALE_HOME/builtin-plugins/snapshots/computer-use-<bundle-digest>/computer-use`.
+Each process captures only its own embedded digest's discovery root. Concurrent
+builds therefore keep separate, complete source trees; publishers never delete
+or replace an existing snapshot. Reuse checks every embedded byte, directory
+entry, file type, executable flag, and the stamp. A partial or altered snapshot
+is rejected without repair. Interrupted private staging directories are not
+discovered or reused.
+
+The existing path-bound plugin identity and trust rules apply: identical embedded
+bytes at the same home reuse the same identity; changed bytes require a fresh
+review and enablement. Moving from the older mutable
+`builtin-plugins/computer-use` layout also requires one fresh review. Legacy
+bundles and receipts remain intact for running older binaries; no trust is
+migrated. Diagnostics do not create a missing Codewhale home.
+The selected home may itself be a symlink: its resolved directory is pinned
+before creating any built-in paths. Links in the owned built-in cache paths
+still fail closed.
 
 New user and workspace bundles are always untrusted and disabled. Discovery is
 read-only and does not inspect any other application's extension or credential
@@ -43,7 +66,7 @@ trust; every bundle activates only through the content-hash and
 
 ## Manifest
 
-Both encodings parse into the same internal manifest, so validation, hashing,
+All supported encodings parse into the same internal manifest, so validation, hashing,
 review, and runtime behavior are identical downstream. On-disk auto-migration
 between them is deliberately not performed; `/plugin export <name>
 <target-dir>` publishes a loaded bundle as a spec-valid Agent Plugins v1.0.0
@@ -260,8 +283,9 @@ Then run `/plugin enable example` again. Trust and enablement are separate:
 bits themselves and always drop into this same review — see
 [PLUGINS.md](PLUGINS.md). `/plugin suggest` ranks installed bundles and
 any locally added marketplace catalogs; sending a matching task can toast the
-same next step without installing anything, and a live composer CTA plus an
-append-only `<recommended_plugins>` user block offer the same review path.)
+same next step without installing anything. Nothing is written into the
+model's request to advertise plugins; the full offering policy is in
+[PLUGINS.md](PLUGINS.md#how-codewhale-offers-plugins).)
 
 Trust, enable, disable, revoke, and reload rebuild the current workspace's
 Skills, MCP, Commands, Agent profiles, and Hooks immediately. Each persisted
@@ -362,9 +386,16 @@ one reviewed source, and `/plugin suggest` ranks only what is already
 installed), no ambient compatibility discovery, no automatic trust, no
 plugin-contributed MCP OAuth, no LSP adapter, native extension runtime, or MCP
 subscription adapter, no
-migration of another application's bundle, and no on-disk auto-migration of a
-legacy `plugin.toml` to `plugin.json`. These remain later work rather than
-implied capabilities.
+foreign executable plugin runtime import, and no on-disk auto-migration of a
+legacy `plugin.toml` to `plugin.json`. The explicit offline
+[OpenCode/DSH converter](PLUGIN_AUTHORING.md#convert-an-existing-plugin) supports
+selected portable Skills, static Streamable HTTP MCP declarations, and
+explicitly packaged Node `.mjs`, `.js`, or `.cjs` MCP servers selected with `--stdio-root`.
+Local source and dependencies are copied for the same native installation,
+capability review, hash-bound trust and enable flow; conversion executes no
+code or package manager. It does not migrate arbitrary bundles or reproduce
+another client's runtime or policy.
+The other capabilities above remain later work rather than implied support.
 
 ## Marketplace catalogs (#5311)
 

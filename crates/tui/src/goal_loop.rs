@@ -12,13 +12,16 @@
 //!
 //! Scope: **decision logic + types**. The engine (`core/engine.rs`) reads the
 //! `SharedGoalState` snapshot after each turn and calls `decide_continuation`
-//! to decide whether to re-dispatch. For operate-mode goals the only terminal
-//! stops are a verified completion, a blocked report, or the continuation
-//! backstop (`[goal] max_continuations`); token/time accounting stays visible
-//! as telemetry but does not gate continuation — the run is unbounded like
-//! grokbuild (`DEFAULT_AGENT_BUDGET` as call cap) and kimicode swarm
-//! (`turnBudget` per-task, resumable after budget-reached). Log when the
-//! backstop fires.
+//! to decide whether to re-dispatch. For operate-mode goals the terminal stops
+//! are a verified completion, a blocked report, the stall pause that fires
+//! when a critical verifier reports the same gap set
+//! [`MAX_REPEATED_GAP_PASSES`] times running (enforced in
+//! `GoalState::record_not_achieved`), and the opt-in continuation backstop
+//! (`[goal] max_continuations`); token/time accounting stays visible as
+//! telemetry but does not gate continuation — spend is bounded by stalling,
+//! not by a pass count, like grokbuild (`DEFAULT_AGENT_BUDGET` as call cap)
+//! and kimicode swarm (`turnBudget` per-task, resumable after
+//! budget-reached). Log when the backstop fires.
 
 use std::time::Duration;
 
@@ -28,6 +31,34 @@ use std::time::Duration;
 /// user control ends the run. Operators who want a circuit breaker can opt in
 /// with `[goal] max_continuations`; `0` keeps the default unlimited behavior.
 pub const DEFAULT_MAX_GOAL_CONTINUATIONS: u32 = 0;
+
+/// Default per-engine-turn step allowance while a goal is active (#5994).
+/// Deliberate maintainer policy, not a measured number: five times the
+/// ordinary interactive allowance (200), so intentional goal work has room
+/// while every provider turn stays finite. The count of continuation passes
+/// remains governed separately (`[goal] max_continuations`).
+pub const DEFAULT_GOAL_MAX_STEPS: u32 = 1_000;
+
+/// How many consecutive critical `not_achieved` reviews naming the *same*
+/// normalized gap set a goal may accumulate before it pauses itself with
+/// `GoalPauseReason::NoProgress`.
+///
+/// This is the bound the continuation prompt promises the model, and it is the
+/// only default stop on a goal run: `DEFAULT_MAX_GOAL_CONTINUATIONS` is `0`, so
+/// without it the loop runs until the model volunteers a terminal status.
+/// Enforcement lives in `GoalState::record_not_achieved`, and it reuses the
+/// existing pause authority rather than adding a second one — both continuation
+/// dispatchers already refuse to re-dispatch a non-active goal, and
+/// `RuntimeThreadManager` already mirrors a non-limit pause into the durable
+/// `ThreadGoalStatus::Paused`, so the stop survives a restart and needs an
+/// explicit resume.
+///
+/// The counter is `1` on the first report of a gap set, so `3` means the
+/// verifier named identical remaining work three times running: two whole
+/// continuation passes that moved nothing the verifier can see. Two is too
+/// eager — one pass legitimately fails to land a fix and retries — and anything
+/// larger just buys more identical passes.
+pub const MAX_REPEATED_GAP_PASSES: u32 = 3;
 
 /// Upper bound for one between-turn quiet period. A day is long enough for
 /// coordinator cadences while preventing an accidental giant integer from
@@ -43,7 +74,7 @@ pub enum GoalRunStatus {
     /// verifier confirmed — see `GoalGate`).
     Completed,
     /// The model reported it is blocked and needs the user.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     Blocked,
 }
 
@@ -53,11 +84,14 @@ pub enum StopReason {
     /// Objective achieved.
     Completed,
     /// Model reported blocked.
-    #[allow(dead_code)]
     Blocked,
     /// Continuation circuit-breaker tripped (too many continuations without a
     /// terminal signal).
     ContinuationLimit,
+    /// The goal's token budget was reached while `[goal] enforce_token_budget`
+    /// opted the budget into a hard stop (#6013). Default-off: without the
+    /// opt-in the budget stays advisory telemetry and never produces this.
+    BudgetLimit,
 }
 
 /// Accumulated, durable progress for a goal run. Mirrors the fields wired by
@@ -77,6 +111,11 @@ pub struct GoalProgress {
 pub struct GoalBudget {
     pub token_budget: Option<u64>,
     pub time_budget_seconds: Option<u64>,
+    /// Whether `token_budget` stops the run when reached (#6013). `false`
+    /// keeps the default advisory behavior: crossing the budget logs and
+    /// continues. There is no time-budget enforcement because goals carry no
+    /// `time_budget` field — only `token_budget` can gate.
+    pub enforce_token_budget: bool,
     /// Safety backstop on automatic continuation passes (#5052). `0` disables
     /// the backstop: only terminal status stops the run.
     pub max_continuations: u32,
@@ -85,28 +124,37 @@ pub struct GoalBudget {
 impl GoalBudget {
     /// No token or time cap. Terminal status, user control, and the default
     /// continuation backstop still stop the run.
-    #[allow(dead_code)]
     pub const fn unbounded() -> Self {
         Self {
             token_budget: None,
             time_budget_seconds: None,
+            enforce_token_budget: false,
             max_continuations: DEFAULT_MAX_GOAL_CONTINUATIONS,
         }
     }
 
     /// A token budget for telemetry/UI. It never pauses an unbounded goal.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub const fn with_token_budget(token_budget: u64) -> Self {
         Self {
             token_budget: Some(token_budget),
             time_budget_seconds: None,
+            enforce_token_budget: false,
             max_continuations: DEFAULT_MAX_GOAL_CONTINUATIONS,
         }
     }
 
+    /// Opt the token budget into a hard stop (`[goal] enforce_token_budget`).
+    /// With no `token_budget` set this is a no-op by construction — there is
+    /// no ceiling to reach.
+    #[must_use]
+    pub const fn with_enforced_token_budget(mut self, enforce: bool) -> Self {
+        self.enforce_token_budget = enforce;
+        self
+    }
+
     /// Override the continuation backstop (`0` = unlimited until terminal
     /// status).
-    #[allow(dead_code)]
     #[must_use]
     pub const fn with_max_continuations(mut self, max_continuations: u32) -> Self {
         self.max_continuations = max_continuations;
@@ -145,14 +193,21 @@ pub fn decide_continuation(
         GoalRunStatus::Active => {}
     }
 
-    // 2. Token/time budgets are advisory only (unbounded). They are
-    //    visible in the Goal chip + /cost but never pause the loop — like
-    //    grokbuild's agent-call budget and kimicode swarm's per-task
-    //    turnBudget with resume. Log if we are over budget, then continue.
+    // 2. Token budget: advisory telemetry by default, or a hard stop when
+    //    `[goal] enforce_token_budget` opts in (#6013). Time stays advisory —
+    //    goals carry no time budget to enforce against.
     if budget
         .token_budget
         .is_some_and(|limit| progress.tokens_used >= limit)
     {
+        if budget.enforce_token_budget {
+            tracing::info!(
+                tokens_used = progress.tokens_used,
+                token_budget = ?budget.token_budget,
+                "goal token budget reached; stopping ([goal] enforce_token_budget)"
+            );
+            return ContinuationDecision::Stop(StopReason::BudgetLimit);
+        }
         tracing::debug!(
             tokens_used = progress.tokens_used,
             token_budget = ?budget.token_budget,
@@ -249,7 +304,7 @@ pub const fn token_budget_exhausted(_progress: GoalProgress, _budget: GoalBudget
 /// Whether a stop reason represents success (Completed) vs. an early/forced exit.
 /// Useful for the UI/status projection (#2666 token/time visibility).
 #[must_use]
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub fn is_success(reason: StopReason) -> bool {
     matches!(reason, StopReason::Completed)
 }
@@ -290,6 +345,7 @@ mod tests {
         let budget = GoalBudget {
             token_budget: Some(1000),
             time_budget_seconds: Some(600),
+            enforce_token_budget: false,
             max_continuations: DEFAULT_MAX_GOAL_CONTINUATIONS,
         };
         assert_eq!(
@@ -386,6 +442,48 @@ mod tests {
     }
 
     #[test]
+    fn enforced_token_budget_stops_the_run() {
+        let progress = GoalProgress {
+            tokens_used: 1000,
+            continuations: 1,
+            ..GoalProgress::default()
+        };
+        let budget = GoalBudget::with_token_budget(1000).with_enforced_token_budget(true);
+        assert_eq!(
+            decide_continuation(GoalRunStatus::Active, progress, budget),
+            ContinuationDecision::Stop(StopReason::BudgetLimit),
+            "enforce_token_budget makes an exhausted token budget terminal"
+        );
+        assert!(!is_success(StopReason::BudgetLimit));
+    }
+
+    #[test]
+    fn enforce_flag_without_a_token_budget_cannot_stop() {
+        // A goal created without `token_budget` has no ceiling to reach — the
+        // flag must not invent one.
+        let progress = GoalProgress {
+            tokens_used: u64::MAX / 2,
+            continuations: 1,
+            ..GoalProgress::default()
+        };
+        let budget = GoalBudget::unbounded().with_enforced_token_budget(true);
+        assert_eq!(
+            decide_continuation(GoalRunStatus::Active, progress, budget),
+            ContinuationDecision::Continue
+        );
+    }
+
+    #[test]
+    fn enforced_budget_still_yields_to_a_terminal_status() {
+        let budget = GoalBudget::with_token_budget(1000).with_enforced_token_budget(true);
+        assert_eq!(
+            decide_continuation(GoalRunStatus::Completed, GoalProgress::default(), budget),
+            ContinuationDecision::Stop(StopReason::Completed),
+            "a clean completion outranks the budget gate"
+        );
+    }
+
+    #[test]
     fn token_budget_is_advisory_not_terminal() {
         let progress = GoalProgress {
             tokens_used: 1000,
@@ -410,6 +508,7 @@ mod tests {
         let budget = GoalBudget {
             token_budget: None,
             time_budget_seconds: Some(600),
+            enforce_token_budget: false,
             max_continuations: DEFAULT_MAX_GOAL_CONTINUATIONS,
         };
         assert_eq!(
@@ -426,6 +525,7 @@ mod tests {
         let budget = GoalBudget {
             token_budget: Some(1_000_000),
             time_budget_seconds: Some(86_400),
+            enforce_token_budget: false,
             max_continuations: DEFAULT_MAX_GOAL_CONTINUATIONS,
         };
         assert_eq!(

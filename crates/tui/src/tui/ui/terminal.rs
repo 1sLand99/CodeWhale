@@ -8,29 +8,29 @@ use super::*;
 
 pub(crate) fn next_terminal_event(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
     timeout: Duration,
-) -> io::Result<Option<Event>> {
+) -> io::Result<Option<ObservedTerminalEvent>> {
     if let Some(event) = pending.pop_front() {
         return Ok(Some(event));
     }
     let event = input.recv_timeout(timeout)?;
-    if let Some(event) = event.as_ref() {
-        observe_terminal_attention(event);
+    if let Some(observed) = event.as_ref() {
+        observe_terminal_attention(&observed.event);
     }
     Ok(event)
 }
 
 pub(crate) fn try_next_terminal_event(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
-) -> io::Result<Option<Event>> {
+    pending: &mut VecDeque<ObservedTerminalEvent>,
+) -> io::Result<Option<ObservedTerminalEvent>> {
     if let Some(event) = pending.pop_front() {
         return Ok(Some(event));
     }
     let event = input.try_recv()?;
-    if let Some(event) = event.as_ref() {
-        observe_terminal_attention(event);
+    if let Some(observed) = event.as_ref() {
+        observe_terminal_attention(&observed.event);
     }
     Ok(event)
 }
@@ -43,7 +43,7 @@ pub(crate) fn try_next_terminal_event(
 /// the normal event loop can process it.
 pub(crate) fn prepare_terminal_input_handoff(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
 ) -> io::Result<bool> {
     let mut drained = VecDeque::new();
     while let Some(event) = input.try_recv()? {
@@ -52,7 +52,7 @@ pub(crate) fn prepare_terminal_input_handoff(
     let interrupted = pending
         .iter()
         .chain(drained.iter())
-        .any(terminal_event_interrupts_child_handoff);
+        .any(|observed| terminal_event_interrupts_child_handoff(&observed.event));
     if interrupted {
         pending.extend(drained);
         return Ok(false);
@@ -76,14 +76,14 @@ fn terminal_event_interrupts_child_handoff(event: &Event) -> bool {
 
 pub(crate) fn collect_pending_terminal_events(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
 ) -> io::Result<()> {
-    while let Some(event) = input.try_recv()? {
+    while let Some(observed) = input.try_recv()? {
         // Focus is notification authority, not merely a render event. Apply
         // it at pump receipt so a queued FocusGained cannot sit behind an
         // engine TurnComplete and produce a false background notification.
-        observe_terminal_attention(&event);
-        pending.push_back(event);
+        observe_terminal_attention(&observed.event);
+        pending.push_back(observed);
     }
     Ok(())
 }
@@ -91,7 +91,10 @@ pub(crate) fn collect_pending_terminal_events(
 fn observe_terminal_attention(event: &Event) {
     match event {
         Event::FocusGained => crate::tui::notifications::set_terminal_focused(true),
-        Event::FocusLost => crate::tui::notifications::set_terminal_focused(false),
+        Event::FocusLost => {
+            crate::tui::notifications::set_terminal_focused(false);
+            crate::tui::hover_layer::clear_pointer();
+        }
         _ => {}
     }
 }
@@ -152,41 +155,6 @@ pub(crate) fn validate_foreground_process_group(
          Run `fg` to foreground the job or launch `codew` in a new terminal. \
          For automated prompts use `codewhale exec \"…\"` instead."
     ))
-}
-
-/// One side of the raw-mode probe abandonment handshake between the startup
-/// probe timeout and the blocking `enable_raw_mode` task finishing late.
-///
-/// Each side publishes its own flag (`publish`), then checks whether the
-/// other side's flag (`check`) is already up; a `true` return means this
-/// side must disable raw mode again. `SeqCst` ordering guarantees that when
-/// both sides run, at least one observes the other's flag, so a raw-mode
-/// enable landing after the probe timeout is always undone. Both sides
-/// observing each other is fine — a duplicate `disable_raw_mode` is a no-op.
-pub(crate) fn raw_mode_probe_handshake(publish: &AtomicBool, check: &AtomicBool) -> bool {
-    publish.store(true, Ordering::SeqCst);
-    check.load(Ordering::SeqCst)
-}
-
-pub(crate) fn terminal_probe_timeout(config: &Config) -> Duration {
-    let timeout_ms = config
-        .tui
-        .as_ref()
-        .and_then(|tui| tui.terminal_probe_timeout_ms)
-        .unwrap_or(DEFAULT_TERMINAL_PROBE_TIMEOUT_MS)
-        .clamp(100, 5_000);
-    Duration::from_millis(timeout_ms)
-}
-
-pub(crate) fn subagent_terminal_verb(status: &SubAgentStatus) -> &'static str {
-    match status {
-        SubAgentStatus::Completed => "completed",
-        SubAgentStatus::Interrupted(_) => "interrupted",
-        SubAgentStatus::Failed(_) => "failed",
-        SubAgentStatus::Cancelled => "cancelled",
-        SubAgentStatus::BudgetExhausted => "exhausted its budget",
-        SubAgentStatus::Running => "finished",
-    }
 }
 
 pub(crate) fn subagent_terminal_projection_from_mailbox(
@@ -254,6 +222,9 @@ pub(crate) fn enter_alt_screen<W: Write>(writer: &mut W) -> io::Result<()> {
 
 /// Leave the alternate screen; the counterpart of [`enter_alt_screen`].
 pub(crate) fn leave_alt_screen<W: Write>(writer: &mut W) -> io::Result<()> {
+    if crate::tui::mark::kitty_graphics_supported() {
+        crate::tui::pet_watch::clear_images(writer)?;
+    }
     execute!(writer, LeaveAlternateScreen)?;
     set_live_alt_screen(false);
     Ok(())
@@ -372,9 +343,6 @@ pub(crate) fn switch_screen_mode(
 
     // Either way the screen changed underneath the app: repaint.
     app.needs_redraw = true;
-    // A rebuilt terminal drops sixel pixels with the old screen; forget the
-    // live image so the reconciler re-emits it onto the new one.
-    app.launch.sixel_emitted = None;
     if outcome.is_ok() {
         app.screen_mode = target;
         // Mouse capture is a per-screen answer (inline leaves selection to
@@ -651,6 +619,9 @@ pub(crate) fn disable_alternate_scroll_mode<W: Write>(writer: &mut W) {
 /// raw mode + kitty keyboard flags cleared, which is what causes the
 /// `^[[>5u` shell pollution reported in #1583.
 pub fn emergency_restore_terminal() {
+    if crate::tui::mark::kitty_graphics_supported() {
+        let _ = crate::tui::pet_watch::clear_images(&mut std::io::stdout());
+    }
     let mut stdout = std::io::stdout();
     crate::tui::cursor_accent::restore_cursor_accent();
     pop_keyboard_enhancement_flags(&mut stdout);
@@ -701,6 +672,11 @@ pub(crate) fn enable_windows_ime_console_mode() {
 /// flag at startup or in `resume_terminal`, add it here too — `FocusGained`
 /// recovery calls this and will silently fall behind otherwise.
 ///
+/// There are three callers, and they must stay in step: `resume_terminal`
+/// (after a child hands the terminal back, and after a job-control suspend),
+/// and the `FocusGained` recovery path. A mode enabled in only one of them is a
+/// mode that leaks into the shell on the other two paths (#6169).
+///
 /// Excluded by design: raw mode and the alternate screen — those persist
 /// across focus events and are only re-established by `resume_terminal`
 /// after a suspension, which always runs a separate path.
@@ -749,6 +725,40 @@ pub(crate) fn disable_bracketed_paste_mode<W: Write>(writer: &mut W) {
 
 pub(crate) fn terminal_event_needs_viewport_recapture(evt: &Event) -> bool {
     matches!(evt, Event::FocusGained)
+}
+
+/// Next frame-emission gate from one terminal event (#6311).
+///
+/// GTK3 pauses the frame clock on full occlusion while VTE keeps queuing
+/// damage, so every frame emitted while covered becomes flicker backlog on
+/// return. Focus loss therefore defers draws (state keeps ingesting;
+/// `needs_redraw` stays set); focus gain re-arms with the existing
+/// full-repaint recovery. Any key/mouse/paste input also re-arms: input
+/// focus means a visible window, and it unsticks a lost `FocusGained`.
+pub(crate) fn next_unfocused(unfocused: bool, evt: &Event) -> bool {
+    match evt {
+        Event::FocusLost => true,
+        Event::FocusGained | Event::Key(_) | Event::Mouse(_) | Event::Paste(_) => false,
+        _ => unfocused,
+    }
+}
+
+/// Whether focus loss may defer frame emission at all (#6311).
+///
+/// Only GTK/VTE terminals (MATE, GNOME Terminal, Tilix, Terminator, ...)
+/// queue damage while occluded and replay it on return; they all export
+/// `VTE_VERSION`. Everywhere else an unfocused window is usually still
+/// visible (side-by-side macOS/Windows windows, split panes), so freezing
+/// frames on `FocusLost` made streaming output look stuck until the user
+/// clicked, scrolled or typed back into the terminal.
+///
+/// `VTE_VERSION` only proves VTE is the *immediate* terminal when no
+/// multiplexer sits in between: tmux started from GNOME Terminal inherits it,
+/// yet tmux reports `FocusLost` for a still-visible split pane. Inside tmux
+/// (`TMUX` set) frames keep flowing.
+pub(crate) fn focus_loss_defers_frames(vte_version: Option<&str>, tmux: Option<&str>) -> bool {
+    let inside_tmux = tmux.is_some_and(|v| !v.trim().is_empty());
+    !inside_tmux && vte_version.is_some_and(|v| !v.trim().is_empty())
 }
 
 pub(crate) fn terminal_pause_has_live_owner(app: &App) -> bool {
@@ -1009,8 +1019,8 @@ mod screen_mode_tests {
         // independent of where the cursor happened to be.
         let backend = crate::tui::color_compat::ColorCompatBackend::new(
             io::stdout(),
-            crate::palette::ColorDepth::TrueColor,
-            crate::palette::PaletteMode::Dark,
+            codewhale_palette::ColorDepth::TrueColor,
+            codewhale_palette::PaletteMode::Dark,
         );
         let mut backend = backend;
         backend.set_terminal_size(Size::new(80, 24));

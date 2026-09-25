@@ -36,10 +36,11 @@ impl ToolSpec for LoadSkillTool {
     }
 
     fn description(&self) -> &'static str {
-        "Load a skill (SKILL.md body + companion file list) into the next turn's context. \
-         Use name=\"list\" to discover the complete enabled catalogue, then load an exact \
-         skill when the user names it or the task clearly matches its description. Faster \
-         than File action=\"read\" plus File action=\"list\"."
+        "Load a named skill's SKILL.md body and companion file list into this turn. Use when \
+         the user names a skill, or when an entry in the system prompt's `## Skills` index \
+         matches the task -- load it before starting the work, not after. Pass query=\"...\" to \
+         search names and descriptions, or name=\"list\" for the whole catalogue. Resolves \
+         global and plugin skills that `read` cannot reach."
     }
 
     fn input_schema(&self) -> Value {
@@ -49,6 +50,10 @@ impl ToolSpec for LoadSkillTool {
                 "name": {
                     "type": "string",
                     "description": "Skill id to load. Omit or pass \"list\" to see all available skills."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search term matched against skill names and descriptions. Use when the index was truncated or no name is known."
                 }
             },
             "additionalProperties": false
@@ -100,12 +105,37 @@ impl ToolSpec for LoadSkillTool {
         .into_enabled();
 
         // Listing mode: empty name, "*", or "list" returns the full registry (#4651).
-        if name.is_empty() || name == "*" || name == "list" {
-            let skills = registry.list();
+        // A `query` filters that listing over the same routing metadata the
+        // ambient index carries, so a truncated index does not force the model
+        // to pull every skill to find one.
+        let query = input
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if !query.is_empty() || name.is_empty() || name == "*" || name == "list" {
+            let all = registry.list();
+            let skills: Vec<&_> = all
+                .iter()
+                .filter(|skill| {
+                    query.is_empty()
+                        || skill.name.to_lowercase().contains(&query)
+                        || skill.description.to_lowercase().contains(&query)
+                })
+                .collect();
             if skills.is_empty() {
-                return Ok(ToolResult::success("No skills installed."));
+                return Ok(ToolResult::success(if query.is_empty() {
+                    "No skills installed.".to_string()
+                } else {
+                    format!("No skill matches {query:?}. Pass name=\"list\" for the catalogue.")
+                }));
             }
-            let mut listing = format!("Available skills ({}):\n", skills.len());
+            let mut listing = if query.is_empty() {
+                format!("Available skills ({}):\n", skills.len())
+            } else {
+                format!("Skills matching {:?} ({}):\n", query, skills.len())
+            };
             for skill in skills {
                 if skill.description.trim().is_empty() {
                     listing.push_str(&format!("  - {}\n", skill.name));
@@ -271,7 +301,7 @@ fn format_skill_body(skill: &Skill) -> String {
     if !companions.is_empty() {
         out.push_str("\n## Companion files\n\n");
         out.push_str(
-            "Sibling files in the skill directory. Open one with File action=\"read\" when the task requires it; a skill stored outside the workspace has to be read through Bash instead.\n\n",
+            "Sibling files in the skill directory. Open one with `read` (path=...) when the task requires it; a skill stored outside the workspace has to be read through `bash` instead.\n\n",
         );
         for path in &companions {
             out.push_str(&format!("- `{}`\n", path.display()));
@@ -543,6 +573,13 @@ mod tests {
         let body = format_skill_body(skill);
         assert!(body.contains("## Companion files"));
         assert!(body.contains("helper.sh"));
+        // Companion guidance names the model-visible tools only.
+        assert!(body.contains("`read` (path=...)"), "{body}");
+        assert!(body.contains("`bash`"), "{body}");
+        assert!(
+            !body.contains("File action=") && !body.contains("through Bash"),
+            "{body}"
+        );
     }
 
     #[test]

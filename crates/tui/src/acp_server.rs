@@ -2,7 +2,15 @@
 //!
 //! This starts from the ACP baseline: initialize, new session, prompt, and
 //! cancel. It keeps stdout protocol-clean for editor clients and routes
-//! prompts through the same configured DeepSeek client as one-shot CLI mode.
+//! prompts through the same configured provider route as one-shot CLI mode.
+//!
+//! `session/new` and `session/load` expose mode/model configuration. Standard
+//! setters change only the addressed in-memory session between turns. Plan
+//! uses the shared read-only tool authority and sandbox; changing mode is an
+//! explicit prompt-prefix invalidation for the next turn. In-flight turns
+//! keep their frozen prefix and return the existing busy error for setters.
+//! Configuration is connection-local, not a new durable preference store;
+//! legacy unscoped `selectModel` changes defaults for future sessions.
 //!
 //! `session/prompt` streams the provider response: each text delta is emitted
 //! as a `session/update` agent_message_chunk as it arrives, instead of buffering
@@ -35,7 +43,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio_util::sync::CancellationToken;
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 use crate::config::{ApiProvider, Config};
 use crate::core::engine::turn_loop::run_tool_call_before_hooks;
 use crate::core::engine::{
@@ -43,13 +51,15 @@ use crate::core::engine::{
     exec_shell_ask_rule_decision_for_policy, file_tool_ask_rule_decision_for_policy,
 };
 use crate::llm_client::{LlmClient, StreamEventBox};
-use crate::models::Role;
-use crate::models::{
-    ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
-};
 use crate::tools::spec::{ApprovalRequirement, PreparedToolCall, RichToolResult, ToolError};
 use crate::tools::{ToolContext, ToolRegistry, ToolRegistryBuilder};
 use crate::worker_profile::ShellPolicy;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::Role;
+use codewhale_models::{
+    ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
+};
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 
@@ -146,6 +156,8 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                         session_id,
                         messages,
                         cwd,
+                        config,
+                        model,
                     } = prepared;
                     let response_id_policy = server.response_id_policy;
                     let Some(tool_registry) = server.session_tool_registry(&session_id) else {
@@ -168,8 +180,8 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                     // stdout.
                     let outcome = run_agentic_prompt_turn(
                         AcpTurnContext {
-                            config: &server.config,
-                            model: &server.model,
+                            config: &config,
+                            model: &model,
                             session_id: &session_id,
                             tool_registry: &tool_registry,
                             response_id_policy,
@@ -188,11 +200,15 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                             // `FnMut` closure makes.
                             let server = &server;
                             let cwd = &cwd;
+                            let config = &config;
+                            let model = &model;
                             let tool_registry = &tool_registry;
                             let frozen_system_prompt = Arc::clone(&frozen_system_prompt);
                             async move {
                                 server
                                     .open_prompt_stream(
+                                        config,
+                                        model,
                                         &msgs,
                                         cwd,
                                         tool_registry,
@@ -678,7 +694,7 @@ fn prepare_acp_tool_admission(
     }
     let mut permission_reason =
         (prepared.approval != ApprovalRequirement::Auto).then(|| prepared.description.clone());
-    let approval_mode = crate::tui::approval::ApprovalMode::Suggest;
+    let approval_mode = acp_approval_mode(config);
     let workspace = registry.context().workspace.as_path();
 
     let typed_rule = exec_shell_ask_rule_decision_for_policy(
@@ -748,6 +764,17 @@ fn prepare_acp_tool_admission(
     let admission = permission_reason
         .map(AcpToolAdmission::RequestPermission)
         .unwrap_or(AcpToolAdmission::Auto);
+    // #6337: Bypass pre-approves prompts so an unattended `--yolo` session
+    // executes instead of stalling on permission requests no client answers.
+    // Hard blocks above (safety floor, repo law, reviewer consult) return
+    // early and are never downgraded.
+    let admission = if approval_mode == ApprovalMode::Bypass
+        && matches!(admission, AcpToolAdmission::RequestPermission(_))
+    {
+        AcpToolAdmission::Auto
+    } else {
+        admission
+    };
     Ok((prepared, admission))
 }
 
@@ -773,7 +800,7 @@ async fn prepare_acp_tool_with_hooks(
         &call.name,
         &call.id,
         &call.input,
-        crate::tui::app::AppMode::Agent,
+        acp_mode(config),
         registry.context().workspace.as_path(),
         model,
     )
@@ -1253,6 +1280,11 @@ fn tool_result_message_with_blocks(
 /// LLM <-> tool round-trips as the model requests (bounded by
 /// [`MAX_ACP_TOOL_ROUNDS`]).
 ///
+/// Recorded interim exception to the one-turn-loop rule (#6088, named in
+/// `crates/core/tests/single_turn_loop.rs`): ACP IDE sessions do not run on
+/// the full thread/turn runtime yet. #5835 converges them onto
+/// `Engine::run_turn` and deletes this loop along with the exception.
+///
 /// `open_stream` opens a fresh provider stream for the given message
 /// history; production callers wire it to [`AcpServer::open_prompt_stream`],
 /// while tests supply canned per-round streams so the loop can be exercised
@@ -1286,14 +1318,64 @@ where
         ..
     } = context;
     let mut has_tool_receipts = false;
+    // #6310: the engine turn loop's empty-stop budget, shared so both loops
+    // recover the same way. It is turn-scoped, like the engine's.
+    let mut empty_stop_retries: u32 = 0;
+    let mut empty_stop_nudge = false;
     for _round in 0..MAX_ACP_TOOL_ROUNDS {
-        let stream = open_stream(messages.clone())
-            .await
-            .map_err(|error| AgenticPromptError::new(error, &messages, has_tool_receipts))?;
-        let (outcome, tool_calls) =
-            drive_prompt_stream(stream, session_id, response_id_policy, reader, writer)
+        let (outcome, tool_calls) = loop {
+            let mut outbound = messages.clone();
+            // Request-scoped: the nudge rides this one request and is never
+            // committed to the session history.
+            let nudge = context.config.reasoning_only_reprompt_message();
+            if std::mem::take(&mut empty_stop_nudge) && !nudge.trim().is_empty() {
+                outbound.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: nudge.to_string(),
+                        cache_control: None,
+                    }],
+                });
+            }
+            let stream = open_stream(outbound)
                 .await
                 .map_err(|error| AgenticPromptError::new(error, &messages, has_tool_receipts))?;
+            let (outcome, tool_calls) =
+                drive_prompt_stream(stream, session_id, response_id_policy, reader, writer)
+                    .await
+                    .map_err(|error| {
+                        AgenticPromptError::new(error, &messages, has_tool_receipts)
+                    })?;
+            let answerless = matches!(&outcome, PromptOutcome::Completed(text) if text.trim().is_empty())
+                && tool_calls.is_empty();
+            if !answerless {
+                break (outcome, tool_calls);
+            }
+            // Nothing was streamed to the client for this response, so a
+            // retry is invisible to it until the budget is spent.
+            match crate::core::engine::turn_loop::plan_empty_stop_retry(empty_stop_retries) {
+                Some(retry) => {
+                    empty_stop_retries += 1;
+                    empty_stop_nudge = matches!(
+                        retry,
+                        crate::core::engine::turn_loop::EmptyStopRetry::Nudged
+                    );
+                    crate::logging::warn(format!(
+                        "ACP: model returned no answer or tool call (attempt {empty_stop_retries}/{}); re-requesting",
+                        crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES
+                    ));
+                }
+                None => {
+                    return Err(AgenticPromptError::new(
+                        anyhow!(
+                            "Model returned no answer or tool call (after {empty_stop_retries} retries)."
+                        ),
+                        &messages,
+                        has_tool_receipts,
+                    ));
+                }
+            }
+        };
 
         let text = match outcome {
             PromptOutcome::Cancelled => return Ok((PromptOutcome::Cancelled, messages)),
@@ -1382,6 +1464,8 @@ struct AcpServer {
 struct AcpSession {
     cwd: PathBuf,
     messages: Vec<Message>,
+    config: Config,
+    model: String,
     /// Built once per session over the session `cwd`, then reused for every
     /// prompt turn: `to_api_tools()` memoises the serialised catalog, and
     /// `file_read_tracker` / the shell manager need to persist across turns.
@@ -1395,6 +1479,8 @@ struct PreparedPrompt {
     session_id: String,
     messages: Vec<Message>,
     cwd: PathBuf,
+    config: Config,
+    model: String,
 }
 
 enum AcpDispatch {
@@ -1443,9 +1529,27 @@ impl AcpServer {
                 )))
             }
             "session/new" => Ok(AcpDispatch::Response(self.new_session(params)?)),
+            "session/list" => Ok(AcpDispatch::Response(self.list_sessions(params)?)),
+            "session/load" => Ok(AcpDispatch::Response(self.load_session(params)?)),
             "session/listProviders" => Ok(AcpDispatch::Response(self.list_providers())),
             "session/currentModel" => Ok(AcpDispatch::Response(self.current_model())),
             "session/selectModel" => Ok(AcpDispatch::Response(self.select_model(params)?)),
+            "session/set_config_option" => {
+                Ok(AcpDispatch::Response(self.set_session_config(params)?))
+            }
+            "session/set_mode" | "session/set_model" => {
+                let (config_id, field) = if method == "session/set_mode" {
+                    ("mode", "modeId")
+                } else {
+                    ("model", "modelId")
+                };
+                self.set_session_config(json!({
+                    "sessionId": params.get("sessionId"),
+                    "configId": config_id,
+                    "value": params.get(field),
+                }))?;
+                Ok(AcpDispatch::Response(json!({})))
+            }
             // A cancel that arrives with no prompt in flight is an idempotent
             // no-op (the in-flight case is handled by the prompt driver).
             "session/cancel" => Ok(AcpDispatch::Response(json!(null))),
@@ -1460,7 +1564,12 @@ impl AcpServer {
             .and_then(Value::as_str)
             .map(PathBuf::from)
             .unwrap_or_else(|| self.default_cwd.clone());
-        let session_id = format!("codewhale-{}", uuid::Uuid::new_v4());
+        // A bare uuid, the same shape `create_saved_session` produces and the
+        // same shape `session/list` advertises. The old `codewhale-` prefix put
+        // this id in a namespace no other method understood, so a client that
+        // replayed it into `session/load` — the normal thing to do — got
+        // `-32602` for an id we had just handed it (#6174).
+        let session_id = uuid::Uuid::new_v4().to_string();
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
             &cwd,
@@ -1483,10 +1592,267 @@ impl AcpServer {
             AcpSession {
                 cwd,
                 messages: Vec::new(),
+                config: self.config.clone(),
+                model: self.model.clone(),
                 tool_registry,
             },
         );
-        Ok(json!({ "sessionId": session_id }))
+        Ok(self.session_configuration(&session_id))
+    }
+
+    /// Durable Codewhale sessions an ACP client can resume (#5864).
+    ///
+    /// ACP sessions are in-memory and capped; Codewhale's own sessions are the
+    /// durable record, and an IDE that offers "resume" means those. A store
+    /// that cannot be read is an empty list, not a failed request: enumeration
+    /// is discovery, and a client asking what exists should not be broken by a
+    /// missing sessions directory.
+    fn list_sessions(&self, params: Value) -> std::result::Result<Value, AcpError> {
+        let cwd = match params.get("cwd") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(path)) if std::path::Path::new(path).is_absolute() => {
+                Some(PathBuf::from(path))
+            }
+            Some(_) => {
+                return Err(AcpError::invalid_params(
+                    "session/list cwd must be an absolute path",
+                ));
+            }
+        };
+        let sessions = Self::session_manager()
+            .and_then(|manager| manager.list_sessions().ok())
+            .unwrap_or_default();
+        let sessions: Vec<Value> = sessions
+            .into_iter()
+            .filter(|meta| {
+                cwd.as_ref().is_none_or(|cwd| {
+                    crate::session_manager::paths_equivalent(&meta.workspace, cwd)
+                })
+            })
+            .map(|meta| {
+                json!({
+                    "sessionId": meta.id,
+                    "title": meta.title,
+                    "cwd": meta.workspace.to_string_lossy(),
+                    "createdAt": meta.created_at.to_rfc3339(),
+                    "updatedAt": meta.updated_at.to_rfc3339(),
+                    "messageCount": meta.message_count,
+                })
+            })
+            .collect();
+        Ok(json!({ "sessions": sessions }))
+    }
+
+    /// Rehydrate a durable Codewhale session as this connection's ACP session.
+    ///
+    /// The loaded session keeps its own id so a client can list, load, and
+    /// prompt against one identity. Its `cwd` comes from the saved workspace,
+    /// not the server default, because the tool registry is built over it.
+    fn load_session(&mut self, params: Value) -> std::result::Result<Value, AcpError> {
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AcpError::invalid_params("session/load requires sessionId"))?
+            .to_string();
+        // Sessions this connection already holds resolve from memory. `session/new`
+        // sessions live only here — nothing on the ACP path writes them to the
+        // durable store — so consulting the store first would fail every id we
+        // minted ourselves. This also makes reloading an already-loaded durable
+        // session cheap and free of store side effects.
+        if self.sessions.contains_key(&session_id) {
+            return Ok(self.session_configuration(&session_id));
+        }
+        let manager = Self::session_manager()
+            .ok_or_else(|| AcpError::internal("no Codewhale session store is available"))?;
+        let saved = manager
+            .resume_session_by_prefix(&session_id)
+            .map_err(|error| {
+                AcpError::invalid_params(format!("could not load session {session_id}: {error}"))
+            })?
+            .session;
+
+        let cwd = saved.metadata.workspace.clone();
+        let tool_registry = Arc::new(build_acp_tool_registry(
+            &self.config,
+            &cwd,
+            self.client_supports_terminal,
+        ));
+        let resolved_id = saved.metadata.id.clone();
+        // A short prefix can resolve to an id this connection already
+        // tracks: the in-memory fast path above checked the prefix, not the
+        // resolved id. Pushing again would duplicate the id in
+        // `insertion_order` while `sessions.insert` merely overwrites, and a
+        // later capacity eviction would then pop the stale front copy and
+        // remove a live, recently reloaded session (#6245).
+        if self.sessions.contains_key(&resolved_id) {
+            return Ok(self.session_configuration(&resolved_id));
+        }
+        if self.sessions.len() >= MAX_ACP_SESSIONS
+            && let Some(oldest) = self.insertion_order.pop_front()
+        {
+            self.sessions.remove(&oldest);
+        }
+        self.insertion_order.push_back(resolved_id.clone());
+        self.sessions.insert(
+            resolved_id.clone(),
+            AcpSession {
+                cwd,
+                messages: saved.messages,
+                config: self.config.clone(),
+                model: self.model.clone(),
+                tool_registry,
+            },
+        );
+        Ok(self.session_configuration(&resolved_id))
+    }
+
+    fn session_models(session: &AcpSession) -> Vec<String> {
+        let provider = session.config.api_provider();
+        let mut models =
+            crate::provider_lake::models_for_provider(&session.config, provider, provider);
+        if !models.contains(&session.model) {
+            models.push(session.model.clone());
+        }
+        models
+    }
+
+    fn session_configuration(&self, session_id: &str) -> Value {
+        use codewhale_localization::{MessageId, resolve_locale, tr};
+        let settings = crate::settings::Settings::load().unwrap_or_default();
+        let locale = resolve_locale(&settings.locale);
+        let session = &self.sessions[session_id];
+        let models = Self::session_models(session);
+        let mut modes = vec![
+            json!({"id": "plan", "name": tr(locale, MessageId::AppModePlan), "description": tr(locale, MessageId::AppModePlanHint)}),
+        ];
+        // #6310: the permission posture is server-owned (a client can never
+        // relax it), but it must be discoverable. Work under Full Access must
+        // not claim that edits ask for approval, and the posture is surfaced
+        // below as a read-only select that names how Full Access is enabled.
+        let posture = acp_approval_mode(&session.config);
+        let agent_hint = if posture == ApprovalMode::Bypass {
+            tr(locale, MessageId::HomeYoloModeTip)
+        } else {
+            tr(locale, MessageId::AppModeAgentHint)
+        };
+        if acp_mode(&self.config) != AppMode::Plan {
+            modes.insert(0, json!({"id": "agent", "name": tr(locale, MessageId::AppModeAgent), "description": agent_hint}));
+        }
+        let current_mode = if acp_mode(&session.config) == AppMode::Plan {
+            "plan"
+        } else {
+            "agent"
+        };
+        let (posture_value, posture_name, posture_description) = match posture {
+            ApprovalMode::Bypass => (
+                "full-access",
+                MessageId::ConfigChoiceFullAccess,
+                MessageId::PermissionsPostureBypass,
+            ),
+            ApprovalMode::Auto => (
+                "auto-review",
+                MessageId::ConfigChoiceAutoReview,
+                MessageId::PermissionsPostureAuto,
+            ),
+            ApprovalMode::Never => (
+                "never",
+                MessageId::ConfigChoiceNever,
+                MessageId::PermissionsPostureNever,
+            ),
+            ApprovalMode::Suggest => (
+                "ask",
+                MessageId::ConfigChoiceAsk,
+                MessageId::PermissionsPostureAsk,
+            ),
+        };
+        json!({
+            "sessionId": session_id,
+            "modes": {"currentModeId": current_mode, "availableModes": modes},
+            "models": {
+                "currentModelId": session.model,
+                "availableModels": models.iter().map(|model| json!({"modelId": model, "name": model})).collect::<Vec<_>>()
+            },
+            "configOptions": [
+                {"id": "mode", "name": tr(locale, MessageId::SettingSubjectMode), "category": "mode", "type": "select", "currentValue": current_mode,
+                 "options": modes.iter().map(|mode| json!({"value": mode["id"], "name": mode["name"], "description": mode["description"]})).collect::<Vec<_>>()},
+                {"id": "model", "name": tr(locale, MessageId::SettingSubjectModel), "category": "model", "type": "select", "currentValue": session.model,
+                 "options": models.iter().map(|model| json!({"value": model, "name": model})).collect::<Vec<_>>()},
+                // Exactly one option: the posture the server was started
+                // with. Offering a looser value here would let a client relax
+                // the operator's floor.
+                {"id": "permission", "name": tr(locale, MessageId::SettingSubjectPermissions), "category": "_permission", "type": "select", "currentValue": posture_value,
+                 "options": [{"value": posture_value, "name": tr(locale, posture_name), "description": tr(locale, posture_description)}],
+                 "_meta": {"codewhale": {
+                     "readOnly": true,
+                     "fullAccess": posture == ApprovalMode::Bypass,
+                     "enableFullAccess": ACP_FULL_ACCESS_HINT,
+                 }}}
+            ]
+        })
+    }
+
+    fn set_session_config(&mut self, params: Value) -> std::result::Result<Value, AcpError> {
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AcpError::invalid_params("sessionId is required"))?;
+        let config_id = params
+            .get("configId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AcpError::invalid_params("configId is required"))?;
+        let value = params
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AcpError::invalid_params("value must be an offered string option"))?;
+        if !self.sessions.contains_key(session_id) {
+            return Err(AcpError::invalid_params("unknown sessionId"));
+        }
+        let state = self.session_configuration(session_id);
+        let offered = state["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| {
+                option["id"] == config_id
+                    && option["options"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|choice| choice["value"] == value)
+            });
+        if !offered {
+            return Err(AcpError::invalid_params(
+                "unknown configuration option or value",
+            ));
+        }
+        let session = self.sessions.get_mut(session_id).unwrap();
+        match config_id {
+            "model" => session.model = value.to_string(),
+            "mode" => {
+                session.config.sandbox_mode = if value == "plan" {
+                    Some("read-only".to_string())
+                } else {
+                    self.config.sandbox_mode.clone()
+                };
+                // Rebuild at this explicit between-turn authority boundary.
+                // Both the next prompt prefix and tools reflect the new mode;
+                // an in-flight turn keeps its frozen prefix and rejects setters.
+                session.tool_registry = Arc::new(build_acp_tool_registry(
+                    &session.config,
+                    &session.cwd,
+                    self.client_supports_terminal,
+                ));
+            }
+            // The only offered permission value is the current posture.
+            "permission" => {}
+            _ => unreachable!("validated offered option"),
+        }
+        Ok(json!({"configOptions": self.session_configuration(session_id)["configOptions"]}))
+    }
+
+    fn session_manager() -> Option<crate::session_manager::SessionManager> {
+        let dir = crate::session_manager::default_sessions_dir().ok()?;
+        crate::session_manager::SessionManager::new(dir).ok()
     }
 
     fn session_tool_registry(&self, session_id: &str) -> Option<Arc<ToolRegistry>> {
@@ -1589,7 +1955,7 @@ impl AcpServer {
             .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| AcpError::invalid_params("prompt must include text content"))?;
 
-        let (messages, cwd) = {
+        let (messages, cwd, config, model) = {
             let session = self
                 .sessions
                 .get_mut(&session_id)
@@ -1601,13 +1967,20 @@ impl AcpServer {
                     cache_control: None,
                 }],
             });
-            (session.messages.clone(), session.cwd.clone())
+            (
+                session.messages.clone(),
+                session.cwd.clone(),
+                session.config.clone(),
+                session.model.clone(),
+            )
         };
 
         Ok(PreparedPrompt {
             session_id,
             messages,
             cwd,
+            config,
+            model,
         })
     }
 
@@ -1645,6 +2018,8 @@ impl AcpServer {
     /// consumption, so it is dropped here.
     async fn open_prompt_stream(
         &self,
+        config: &Config,
+        selected_model: &str,
         messages: &[Message],
         cwd: &PathBuf,
         tool_registry: &ToolRegistry,
@@ -1665,10 +2040,9 @@ impl AcpServer {
                 }
             })
             .unwrap_or("");
-        let route =
-            crate::resolve_cli_auto_route(&self.config, &self.model, last_user_text).await?;
-        let execution_config = crate::config_for_cli_route(&self.config, &route);
-        let client = DeepSeekClient::new(&execution_config)?;
+        let route = crate::resolve_cli_auto_route(config, selected_model, last_user_text).await?;
+        let execution_config = crate::config_for_cli_route(config, &route);
+        let client = CodewhaleClient::new(&execution_config)?;
         let model = route.model;
         let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
         let reasoning_effort = route
@@ -1676,7 +2050,7 @@ impl AcpServer {
             .and_then(|effort| {
                 effort.api_value_for_route(
                     execution_config.api_provider(),
-                    &execution_config.deepseek_base_url(),
+                    &execution_config.active_route_base_url(),
                     &model,
                 )
             })
@@ -1780,7 +2154,7 @@ fn build_acp_system_prompt(
     route_limits: Option<codewhale_config::route::RouteLimits>,
 ) -> SystemPrompt {
     let settings = crate::settings::Settings::load().unwrap_or_default();
-    let locale_tag = crate::localization::resolve_locale(&settings.locale)
+    let locale_tag = codewhale_localization::resolve_locale(&settings.locale)
         .tag()
         .to_string();
     let instructions = config
@@ -1815,17 +2189,47 @@ fn build_acp_system_prompt(
             verbosity: config.verbosity.as_deref(),
             skills_scan_codewhale_only: config.skills_config().scan_codewhale_only(),
             plugin_registry: None,
-            mode: crate::tui::app::AppMode::Agent,
+            recovery_hint: None,
+            mode: acp_mode(config),
         },
         crate::prompts::PromptHost::Headless,
     )
+}
+
+/// How an operator starts an ACP server in Full Access. The posture is chosen
+/// when the server is launched, never by a client request (#6310).
+const ACP_FULL_ACCESS_HINT: &str = "Start the server with `codewhale --approval-policy full-access serve --acp`, or set approval_policy = \"full-access\" in config.toml. Full Access also turns off Codewhale's own sandbox unless sandbox_mode tightens it; Plan stays read-only.";
+
+fn acp_mode(config: &Config) -> AppMode {
+    if config.sandbox_mode.as_deref() == Some("read-only") {
+        AppMode::Plan
+    } else {
+        AppMode::Agent
+    }
+}
+
+/// Approval posture for ACP turns, derived from server config instead of
+/// hardcoded: `--yolo` resolves to Bypass so an unattended headless session
+/// actually executes tools (#6337); otherwise the configured approval policy,
+/// else the Suggest default. Plan mode still pins read-only downstream
+/// regardless of posture.
+fn acp_approval_mode(config: &Config) -> ApprovalMode {
+    if config.yolo.unwrap_or(false) {
+        ApprovalMode::Bypass
+    } else {
+        config
+            .approval_policy
+            .as_deref()
+            .and_then(ApprovalMode::from_config_value)
+            .unwrap_or_default()
+    }
 }
 
 /// Build the tool registry for one ACP session, rooted at the session's
 /// `cwd`. Reuses the shared registry builders used by headless `exec` and the
 /// MCP adapter — no ACP-specific tool implementations.
 ///
-/// `Bash` is registered only when all three independent gates allow it: the
+/// Outside Plan mode, `Bash` is registered only when all three gates allow it: the
 /// client declares `clientCapabilities.terminal`, headless shell access is
 /// explicitly enabled in config, and the stable shell feature is enabled.
 /// Omitting any gate fails closed. The context also inherits the current
@@ -1845,7 +2249,9 @@ fn build_acp_tool_registry(
         !kind.is_empty() && !kind.eq_ignore_ascii_case("none")
     });
     let sandbox_backend = match crate::sandbox::backend::create_backend(config) {
-        Ok(backend) => backend.map(std::sync::Arc::from),
+        Ok(backend) => backend
+            .filter(|backend| backend.kind() != crate::sandbox::backend::SandboxKind::Unsupported)
+            .map(std::sync::Arc::from),
         Err(error) => {
             tracing::warn!("Failed to create ACP sandbox backend: {error}");
             None
@@ -1855,7 +2261,8 @@ fn build_acp_tool_registry(
     // it cannot be constructed, omit Bash instead of silently running the
     // command on the local host.
     let sandbox_backend_ready = !external_sandbox_requested || sandbox_backend.is_some();
-    let allow_shell = client_supports_terminal
+    let allow_shell = acp_mode(config) != AppMode::Plan
+        && client_supports_terminal
         && config.allow_shell()
         && features.enabled(crate::features::Feature::ShellTool)
         && sandbox_backend_ready;
@@ -1865,8 +2272,8 @@ fn build_acp_tool_registry(
         ShellPolicy::None
     };
     let sandbox_policy = crate::core::authority::sandbox_policy_for_turn(
-        crate::tui::app::AppMode::Agent,
-        crate::tui::approval::ApprovalMode::Suggest,
+        acp_mode(config),
+        acp_approval_mode(config),
         config.sandbox_mode.as_deref(),
         workspace,
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
@@ -1874,6 +2281,21 @@ fn build_acp_tool_registry(
     let mut context = ToolContext::new(workspace)
         .with_shell_policy(shell_policy)
         .with_elevated_sandbox_policy(sandbox_policy);
+    if acp_mode(config) == AppMode::Plan {
+        // Use the shared headless authority cap for file/Git dispatch too:
+        // an OS shell sandbox alone cannot prevent in-process tool writes.
+        context.tool_authority = Some(Arc::new(crate::tools::spec::ToolAuthorityEnvelope {
+            schema_version: 1,
+            owner: "acp-plan".to_string(),
+            authority: crate::tools::spec::ToolMutationAuthority::ReadOnly,
+            network_access: Some(false),
+            shell: crate::tools::spec::ToolShellAuthority::None,
+            verification: crate::tools::spec::ToolVerificationAuthority::None,
+            writable_roots: Vec::new(),
+            writable_files: Vec::new(),
+            coordination_contracts: Vec::new(),
+        }));
+    }
     match context.shell_manager.lock() {
         Ok(mut manager) => manager.set_prefer_bwrap(config.prefer_bwrap.unwrap_or(false)),
         Err(poisoned) => poisoned
@@ -2100,6 +2522,15 @@ impl AcpError {
         }
     }
 
+    /// JSON-RPC internal error: the request was well-formed and the agent
+    /// could not serve it.
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: -32603,
+            message: message.into(),
+        }
+    }
+
     fn method_not_found(method: &str) -> Self {
         Self {
             code: -32601,
@@ -2114,7 +2545,7 @@ fn initialize_result(client_protocol_version: Option<u64>, config: &Config) -> V
             .map(|version| version.min(ACP_PROTOCOL_VERSION))
             .unwrap_or(ACP_PROTOCOL_VERSION),
         "agentCapabilities": {
-            "loadSession": false,
+            "loadSession": true,
             "modelSelection": true,
             "promptCapabilities": {
                 "image": false,
@@ -2125,7 +2556,17 @@ fn initialize_result(client_protocol_version: Option<u64>, config: &Config) -> V
                 "http": false,
                 "sse": false
             },
-            "sessionCapabilities": {}
+            // ACP `SessionCapabilities` fields are objects, never booleans:
+            // `{}` means "supported", absent/null means "not supported"
+            // (#5969 — a boolean here made JetBrains' strictly-typed client
+            // fail the handshake and kill the agent). `session/load` support
+            // is advertised by the top-level `loadSession` above; it is not a
+            // field of `sessionCapabilities`. We only claim `list` because
+            // `session/list` is the only one of the optional session methods
+            // this server dispatches.
+            "sessionCapabilities": {
+                "list": {}
+            }
         },
         "agentInfo": {
             "name": "codewhale",
@@ -2330,13 +2771,515 @@ mod tests {
         assert_eq!(content[1]["content"]["data"], "QUJD");
     }
 
+    /// #5864: `serve --acp` implemented `initialize` and `session/new` and
+    /// nothing else, so ACP clients that offer session history could not
+    /// enumerate or resume anything. ACP sessions are in-memory and capped;
+    /// the durable Codewhale sessions are what "resume" means.
+    #[tokio::test]
+    async fn session_list_and_load_reach_the_durable_codewhale_sessions() {
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "what did we decide?".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &workspace,
+            42,
+            None,
+        );
+        let saved_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("save fixture session");
+
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            workspace.clone(),
+        );
+
+        let listed = server.list_sessions(json!({})).expect("session/list");
+        let ids: Vec<&str> = listed["sessions"]
+            .as_array()
+            .expect("sessions array")
+            .iter()
+            .filter_map(|entry| entry["sessionId"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&saved_id.as_str()),
+            "session/list must enumerate durable sessions: {ids:?}"
+        );
+
+        let other_workspace = home.path().join("other-workspace");
+        std::fs::create_dir_all(&other_workspace).unwrap();
+        let other = crate::session_manager::create_saved_session(
+            &saved.messages,
+            "deepseek-v4-flash",
+            &other_workspace,
+            0,
+            None,
+        );
+        manager.save_session(&other).unwrap();
+        for filter in [workspace.clone(), workspace.join(".")] {
+            let AcpDispatch::Response(filtered) = server
+                .handle_request("session/list", json!({"cwd": filter}))
+                .await
+                .expect("filtered session/list")
+            else {
+                panic!("session/list returned shutdown");
+            };
+            let entries = filtered["sessions"].as_array().unwrap();
+            assert_eq!(
+                entries.len(),
+                1,
+                "workspace filter must not include another directory"
+            );
+            assert_eq!(entries[0]["sessionId"], saved_id);
+        }
+        let AcpDispatch::Response(all) = server
+            .handle_request("session/list", json!({}))
+            .await
+            .unwrap()
+        else {
+            panic!("session/list returned shutdown");
+        };
+        assert_eq!(all["sessions"].as_array().unwrap().len(), 2);
+        let AcpDispatch::Response(empty) = server
+            .handle_request(
+                "session/list",
+                json!({"cwd": home.path().join("missing-workspace")}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("session/list returned shutdown");
+        };
+        assert!(empty["sessions"].as_array().unwrap().is_empty());
+        for invalid in [json!("relative"), json!(""), json!(42)] {
+            let error = server
+                .handle_request("session/list", json!({"cwd": invalid}))
+                .await
+                .err()
+                .expect("invalid cwd must be rejected");
+            assert_eq!(error.code, -32602);
+        }
+
+        let loaded = server
+            .load_session(json!({ "sessionId": saved_id }))
+            .expect("session/load");
+        assert_eq!(loaded["sessionId"], saved_id);
+        assert!(
+            loaded["configOptions"]
+                .as_array()
+                .is_some_and(|options| options.len() == 3)
+        );
+        let session = server
+            .sessions
+            .get(&saved_id)
+            .expect("loaded session is addressable by its own id");
+        assert_eq!(session.cwd, workspace, "cwd comes from the saved workspace");
+        assert_eq!(
+            session.messages.len(),
+            1,
+            "the conversation is rehydrated, not started empty"
+        );
+
+        // A session that does not exist is a client error, not a panic.
+        let missing = server.load_session(json!({ "sessionId": "codewhale-nope" }));
+        assert_eq!(missing.expect_err("unknown session").code, -32602);
+        let no_id = server.load_session(json!({}));
+        assert_eq!(no_id.expect_err("missing sessionId").code, -32602);
+    }
+
+    /// #6245: reloading a tracked session by a short prefix must not push a
+    /// duplicate `insertion_order` entry. The duplicate made the deque
+    /// disagree with `sessions`, so a later capacity eviction popped the
+    /// stale front copy of a just-reloaded session and removed a live
+    /// conversation.
+    #[tokio::test]
+    async fn loading_a_tracked_session_by_prefix_does_not_duplicate_ordering() {
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "reload me by prefix".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &workspace,
+            42,
+            None,
+        );
+        let saved_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("save fixture session");
+
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            workspace.clone(),
+        );
+
+        // Load by the full id first: the session becomes tracked exactly once.
+        let loaded = server
+            .load_session(json!({ "sessionId": saved_id }))
+            .expect("load by full id");
+        assert_eq!(loaded["sessionId"], saved_id);
+
+        // A prefix resolving to the same tracked id must be idempotent, not
+        // a second insertion.
+        let prefix: String = saved_id.chars().take(8).collect();
+        let reloaded = server
+            .load_session(json!({ "sessionId": prefix }))
+            .expect("load by prefix");
+        assert_eq!(reloaded["sessionId"], saved_id);
+
+        assert_eq!(server.sessions.len(), 1);
+        assert_eq!(
+            server.insertion_order.len(),
+            server.sessions.len(),
+            "a prefix reload of a tracked session must not duplicate the ordering entry"
+        );
+        assert_eq!(
+            server
+                .insertion_order
+                .iter()
+                .filter(|id| *id == &saved_id)
+                .count(),
+            1,
+            "the ordering deque holds the tracked id exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_session_configuration_is_offered_and_scoped_to_one_session() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let first = server.new_session(json!({})).unwrap();
+        let second = server.new_session(json!({})).unwrap();
+        let first_id = first["sessionId"].as_str().unwrap();
+        let second_id = second["sessionId"].as_str().unwrap();
+        assert_eq!(first["modes"]["currentModeId"], "agent");
+        assert_eq!(first["models"]["currentModelId"], "deepseek-v4-flash");
+        let alternative = first["models"]["availableModels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|row| {
+                row["modelId"]
+                    .as_str()
+                    .filter(|model| *model != "deepseek-v4-flash")
+            })
+            .expect("shared active-provider catalog offers another model");
+
+        server
+            .handle_request(
+                "session/set_model",
+                json!({"sessionId": first_id, "modelId": alternative}),
+            )
+            .await
+            .unwrap();
+        let AcpDispatch::Response(configured) = server
+            .handle_request(
+                "session/set_config_option",
+                json!({"sessionId": first_id, "configId": "mode", "value": "plan"}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("configuration response")
+        };
+        assert_eq!(configured["configOptions"].as_array().unwrap().len(), 3);
+        assert_eq!(configured["configOptions"][2]["currentValue"], "ask");
+        assert_eq!(configured["configOptions"][0]["currentValue"], "plan");
+        assert_eq!(configured["configOptions"][1]["currentValue"], alternative);
+        assert_eq!(
+            server.session_configuration(second_id),
+            second,
+            "another session is unchanged"
+        );
+        let prepared = server
+            .begin_prompt(
+                json!({"sessionId": first_id, "prompt": [{"type": "text", "text": "review this"}]}),
+            )
+            .unwrap();
+        assert_eq!(
+            prepared.model, alternative,
+            "provider request receives the session model"
+        );
+        assert_eq!(acp_mode(&prepared.config), AppMode::Plan);
+        server
+            .handle_request(
+                "session/set_mode",
+                json!({"sessionId": first_id, "modeId": "agent"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            server.sessions[first_id].messages.len(),
+            1,
+            "configuration retains history"
+        );
+        assert_eq!(
+            server.sessions[first_id].config.sandbox_mode,
+            server.config.sandbox_mode
+        );
+        assert_eq!(
+            server.model, "deepseek-v4-flash",
+            "session setters do not alter defaults"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_configuration_enforces_shared_read_only_tools() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = Config {
+            allow_shell: Some(true),
+            sandbox_mode: Some("danger-full-access".into()),
+            ..Config::default()
+        };
+        let mut server =
+            AcpServer::new(config, "deepseek-v4-flash".into(), workspace.path().into());
+        server.client_supports_terminal = true;
+        let new = server.new_session(json!({})).unwrap();
+        let id = new["sessionId"].as_str().unwrap();
+        server
+            .set_session_config(json!({"sessionId": id, "configId": "mode", "value": "plan"}))
+            .unwrap();
+        let registry = server.session_tool_registry(id).unwrap();
+        assert!(
+            registry.get("Bash").is_none(),
+            "Plan does not offer shell execution"
+        );
+        let target = workspace.path().join("must-not-exist.txt");
+        assert!(
+            registry.get("write").is_some(),
+            "exercise the real shared file writer"
+        );
+        let outcome = registry
+            .execute_full(
+                "write",
+                json!({"path": target, "content": "unauthorized write"}),
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(ToolError::PermissionDenied { .. })),
+            "the shared authority must reject mutation: {outcome:?}"
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn full_access_posture_is_discoverable_but_never_client_selectable() {
+        // #6310: the mode list alone gave an ACP client no way to see or
+        // learn about Full Access, and Work claimed edits ask for approval
+        // even under `--yolo`.
+        let workspace = tempfile::tempdir().unwrap();
+        let mut ask = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let state = ask.new_session(json!({})).unwrap();
+        let id = state["sessionId"].as_str().unwrap().to_string();
+        let permission = &state["configOptions"][2];
+        assert_eq!(permission["id"], "permission");
+        assert_eq!(permission["currentValue"], "ask");
+        assert_eq!(permission["options"].as_array().unwrap().len(), 1);
+        assert_eq!(permission["_meta"]["codewhale"]["fullAccess"], false);
+        assert!(
+            permission["_meta"]["codewhale"]["enableFullAccess"]
+                .as_str()
+                .unwrap()
+                .contains("--approval-policy full-access"),
+            "the posture names how Full Access is enabled"
+        );
+        for value in ["full-access", "bypass"] {
+            let error = ask
+                .set_session_config(
+                    json!({"sessionId": id, "configId": "permission", "value": value}),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, -32602, "a client cannot select {value}");
+        }
+        assert_eq!(
+            acp_approval_mode(&ask.sessions[&id].config),
+            ApprovalMode::Suggest
+        );
+        // Re-selecting the offered (current) value is a harmless no-op.
+        ask.set_session_config(json!({"sessionId": id, "configId": "permission", "value": "ask"}))
+            .unwrap();
+
+        // The hint's own spelling must actually reach Full Access.
+        let mut yolo = AcpServer::new(
+            Config {
+                approval_policy: Some("full-access".into()),
+                ..Config::default()
+            },
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let state = yolo.new_session(json!({})).unwrap();
+        let permission = &state["configOptions"][2];
+        assert_eq!(permission["currentValue"], "full-access");
+        assert_eq!(permission["_meta"]["codewhale"]["fullAccess"], true);
+        let agent_hint = state["modes"]["availableModes"][0]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(
+            state["modes"]["availableModes"][0]["description"],
+            ask.session_configuration(&id)["modes"]["availableModes"][0]["description"],
+            "Work under Full Access must not reuse the ask-for-approval hint: {agent_hint}"
+        );
+    }
+
+    #[test]
+    fn acp_approval_mode_derives_from_server_config() {
+        // #6337: `--yolo --danger-full-access` must not silently run as Ask.
+        let yolo = Config {
+            yolo: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(acp_approval_mode(&yolo), ApprovalMode::Bypass);
+        let policy = Config {
+            approval_policy: Some("never".into()),
+            ..Config::default()
+        };
+        assert_eq!(acp_approval_mode(&policy), ApprovalMode::Never);
+        assert_eq!(acp_approval_mode(&Config::default()), ApprovalMode::Suggest);
+    }
+
+    #[test]
+    fn yolo_admission_auto_executes_write_without_permission_round_trip() {
+        // #6337: an unattended `--yolo` session must execute tools instead of
+        // stalling on permission requests no headless client answers.
+        let (dir, registry) = workspace_registry();
+        let config = Config {
+            yolo: Some(true),
+            ..Config::default()
+        };
+        let call = pending_call(
+            "File",
+            json!({"action": "write", "path": "yolo.txt", "content": "yolo"}),
+        );
+        let (_, admission) = prepare_acp_tool_admission(&config, &registry, &call).unwrap();
+        assert_eq!(admission, AcpToolAdmission::Auto);
+        assert_eq!(registry.context().workspace, dir.path());
+    }
+
+    #[test]
+    fn default_admission_still_requests_permission_for_write() {
+        // Pins the Ask default the yolo test above contrasts with: without
+        // `--yolo`, a write surfaces a permission request to the client.
+        let (_dir, registry) = workspace_registry();
+        let call = pending_call(
+            "File",
+            json!({"action": "write", "path": "ask.txt", "content": "ask"}),
+        );
+        let (_, admission) =
+            prepare_acp_tool_admission(&Config::default(), &registry, &call).unwrap();
+        assert!(matches!(admission, AcpToolAdmission::RequestPermission(_)));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_stays_read_only_under_yolo() {
+        // The posture derivation must never loosen the Plan guardrail.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            yolo: Some(true),
+            sandbox_mode: Some("read-only".into()),
+            ..Config::default()
+        };
+        let registry = build_acp_tool_registry(&config, dir.path(), false);
+        let target = dir.path().join("must-not-exist.txt");
+        let outcome = registry
+            .execute_full("write", json!({"path": target, "content": "x"}))
+            .await;
+        assert!(
+            matches!(outcome, Err(ToolError::PermissionDenied { .. })),
+            "Plan stays read-only under yolo: {outcome:?}"
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn session_configuration_cannot_relax_a_configured_floor_or_invent_values() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = Config {
+            sandbox_mode: Some("read-only".into()),
+            ..Config::default()
+        };
+        let mut server =
+            AcpServer::new(config, "deepseek-v4-flash".into(), workspace.path().into());
+        let before = server.new_session(json!({})).unwrap();
+        let id = before["sessionId"].as_str().unwrap();
+        assert_eq!(before["modes"]["currentModeId"], "plan");
+        for params in [
+            json!({"sessionId": id, "configId": "mode", "value": "agent"}),
+            json!({"sessionId": id, "configId": "model", "value": "unknown-model"}),
+            json!({"sessionId": id, "configId": "permission", "value": "bypass"}),
+            json!({"sessionId": id, "configId": "mode", "value": true}),
+            json!({"sessionId": "missing", "configId": "mode", "value": "plan"}),
+            json!({"configId": "mode", "value": "plan"}),
+        ] {
+            assert_eq!(server.set_session_config(params).unwrap_err().code, -32602);
+            assert_eq!(server.session_configuration(id), before);
+        }
+    }
+
     #[test]
     fn initialize_advertises_baseline_acp_agent() {
         let result = initialize_result(Some(1), &Config::default());
 
         assert_eq!(result["protocolVersion"], 1);
         assert_eq!(result["agentInfo"]["name"], "codewhale");
-        assert_eq!(result["agentCapabilities"]["loadSession"], false);
+        // #5864: enumerating and resuming durable Codewhale sessions is now
+        // served, so the capability says so rather than declining it.
+        // #5969: this test used to assert `list == true` and `load == true`,
+        // certifying the wire format that broke every strictly-typed client.
+        // `loadSession` is the top-level boolean that advertises
+        // `session/load`; inside `sessionCapabilities` every field is a
+        // capability *object*, and `load` is not a field at all. Comparing the
+        // whole object pins both halves: a boolean `list` or a resurrected
+        // `load` key fails here.
+        assert_eq!(result["agentCapabilities"]["loadSession"], true);
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"],
+            json!({"list": {}})
+        );
+        assert!(
+            result["agentCapabilities"]["sessionCapabilities"]["list"].is_object(),
+            "sessionCapabilities.list must be a SessionListCapabilities object, got {}",
+            result["agentCapabilities"]["sessionCapabilities"]["list"]
+        );
         assert_eq!(
             result["agentCapabilities"]["promptCapabilities"]["embeddedContext"],
             true
@@ -2547,6 +3490,60 @@ mod tests {
         let session_id = result["sessionId"].as_str().expect("session id");
         let session = server.sessions.get(session_id).expect("session exists");
         assert!(session.messages.is_empty());
+    }
+
+    /// #6174: an ACP client has no id for a session it just created other than
+    /// the one `session/new` returned, so that id must be loadable. It used to
+    /// come back `codewhale-<uuid>` — a namespace `session/load` did not
+    /// understand and the durable store never held — and replaying it, which is
+    /// the normal client behaviour, failed with `-32602`.
+    #[test]
+    fn session_new_returns_an_id_that_session_load_resolves() {
+        let mut server = AcpServer::new(
+            Config::default(),
+            "test-model".to_string(),
+            PathBuf::from("/tmp"),
+        );
+        let created = server
+            .new_session(json!({ "cwd": "/tmp" }))
+            .expect("new session");
+        let session_id = created["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        // The id is in the one namespace every method understands: the bare
+        // uuid shape `session/list` advertises for durable sessions.
+        assert!(
+            !session_id.starts_with("codewhale-"),
+            "session/new must not mint a prefixed id, got {session_id}"
+        );
+        uuid::Uuid::parse_str(&session_id)
+            .unwrap_or_else(|e| panic!("session/new must mint a bare uuid, got {session_id}: {e}"));
+
+        // Replaying that exact id resolves, and resolves to the same session.
+        let loaded = server
+            .load_session(json!({ "sessionId": session_id }))
+            .expect("session/load must resolve an id session/new returned");
+        assert_eq!(loaded["sessionId"].as_str(), Some(session_id.as_str()));
+    }
+
+    /// The memory hit must not paper over a genuinely unknown id: that still
+    /// has to reach the durable store and fail there.
+    #[test]
+    fn session_load_still_rejects_an_id_no_one_minted() {
+        let mut server = AcpServer::new(
+            Config::default(),
+            "test-model".to_string(),
+            PathBuf::from("/tmp"),
+        );
+        let unknown = uuid::Uuid::new_v4().to_string();
+        assert!(
+            server
+                .load_session(json!({ "sessionId": unknown }))
+                .is_err(),
+            "an id from no namespace must not resolve"
+        );
     }
 
     #[test]
@@ -3239,7 +4236,7 @@ mod tests {
         );
         let text = crate::prompts::system_prompt_flat_text(&prompt);
 
-        assert!(text.contains(crate::prompts::text::HEADLESS_BASE_PROMPT.trim()));
+        assert!(text.contains(crate::prompts::text::BASE_PROMPT.trim()));
         assert!(text.contains("acp-project-marker"));
         assert!(text.contains("acp-config-marker"));
         assert!(!text.contains("You are a coding assistant inside an ACP-compatible editor."));
@@ -4008,6 +5005,97 @@ mod tests {
             panic!("expected tool_result for b.txt");
         };
         assert!(b_content.contains("contents-of-b"));
+    }
+
+    fn empty_stop_stream() -> StreamEventBox {
+        ready_stream(vec![StreamEvent::MessageStop])
+    }
+
+    async fn run_empty_stop_acp_turn(
+        streams: Vec<StreamEventBox>,
+    ) -> (
+        std::result::Result<(PromptOutcome, Vec<Message>), AgenticPromptError>,
+        Vec<Vec<Message>>,
+    ) {
+        let (_dir, registry) = workspace_registry();
+        let scripted = ScriptedStreams::new(streams);
+        let requests = RefCell::new(Vec::new());
+        let mut reader = lines_from("");
+        let mut out = Vec::new();
+        let result = run_agentic_prompt_turn(
+            AcpTurnContext {
+                config: &Config::default(),
+                model: "test-model",
+                session_id: "sess_1",
+                tool_registry: &registry,
+                response_id_policy: JsonRpcResponseIdPolicy::Preserve,
+            },
+            vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Answer me".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            &mut reader,
+            &mut out,
+            |msgs| {
+                requests.borrow_mut().push(msgs);
+                scripted.next()
+            },
+        )
+        .await;
+        (result, requests.into_inner())
+    }
+
+    /// #6310 through the ACP prompt loop: one answerless clean stop is
+    /// retried with the identical request and the turn completes.
+    #[tokio::test]
+    async fn agentic_turn_retries_an_empty_clean_stop_then_completes() {
+        let (result, requests) = run_empty_stop_acp_turn(vec![
+            empty_stop_stream(),
+            ready_stream(vec![text_delta("recovered"), StreamEvent::MessageStop]),
+        ])
+        .await;
+        let (outcome, messages) = result.expect("turn completes after one retry");
+        assert_eq!(outcome, PromptOutcome::Completed("recovered".to_string()));
+        assert_eq!(requests.len(), 2, "exactly one retry");
+        assert_eq!(requests[0], requests[1], "exact-prefix retry");
+        // user -> assistant(text); the empty response left nothing behind.
+        assert_eq!(messages.len(), 2);
+    }
+
+    /// #6310 through the ACP prompt loop: an answerless clean stop on every
+    /// attempt fails visibly after the shared budget; the second retry is
+    /// nudged and the nudge never joins the committed history.
+    #[tokio::test]
+    async fn agentic_turn_fails_visibly_when_every_stop_is_empty() {
+        let (result, requests) = run_empty_stop_acp_turn(vec![
+            empty_stop_stream(),
+            empty_stop_stream(),
+            empty_stop_stream(),
+        ])
+        .await;
+        let Err(error) = result else {
+            panic!("an always-empty model must fail the turn");
+        };
+        assert!(
+            error.to_string().contains("no answer or tool call")
+                && error.to_string().contains("after 2 retries"),
+            "{error}"
+        );
+        assert!(error.partial_messages.is_none());
+        assert_eq!(
+            requests.len(),
+            1 + crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES as usize
+        );
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[2].len(), requests[0].len() + 1, "nudged retry");
+        let nudge = crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE;
+        assert!(matches!(
+            requests[2].last().map(|m| &m.content[0]),
+            Some(ContentBlock::Text { text, .. }) if text == nudge
+        ));
     }
 
     #[tokio::test]

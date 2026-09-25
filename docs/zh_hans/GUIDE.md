@@ -36,21 +36,19 @@ Codewhale 是一个终端编码智能体（agent）。你从某个工作区运�
 
 ## 2. 首次启动
 
-用适合你机器的路径安装 Codewhale。发布安装器在 `codewhale` 和 `codew` 两个命令名下提供同一运行时；每条受支持的安装路径都提供 `codewhale` 调度器，`codewhale-tui` 运行时已内置。
+在 macOS 或 Linux 上首次安装时，使用官方 GitHub Release。安装器会校验发布资源，
+并在 `codewhale` 和 `codew` 两个命令名下提供同一运行时：
 
 ```bash
-# npm
-npm install -g codewhale
-
-# Cargo
-cargo install codewhale-cli --locked
-# Cargo 安装后可选的短命令名：
-ln -s "$(command -v codewhale)" "$(dirname "$(command -v codewhale)")/codew"
-
-# Homebrew
-brew tap Hmbown/deepseek-tui
-brew install codewhale
+curl -fsSL https://codewhale.net/install.sh | sh
 ```
+
+Windows 用户请选择 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest)
+中的对应安装器或压缩包。已有的直接安装先运行 `codewhale update --check`，再运行
+`codewhale update`。npm 和 Cargo 是次要打包方式；没有兼容预编译资源的平台仍可使用
+受支持的 Cargo 源码构建路径。目录已占用、包管理器安装及 PATH 配置请参阅
+[安装与迁移指南](INSTALL.md)。Android/Termux 使用专用的
+[预览压缩包或源码构建路径](INSTALL.md#android--termux-arm64)。
 
 当你想要隔离的运行时，也可以用 Docker：
 
@@ -64,11 +62,14 @@ docker run --rm -it \
   ghcr.io/hmbown/codewhale:latest
 ```
 
-从你希望它工作的仓库或目录启动 Codewhale：
+把安装目录加入 PATH 后，从你希望它工作的仓库或目录启动 Codewhale：
 
 ```bash
 codewhale
 ```
+
+使用 GitHub 安装器的默认目录时，在把该目录加入 PATH 之前，可以通过
+`"$HOME/.local/bin/codewhale"` 启动。
 
 首次启动时，Codewhale 只询问本次安装仍然需要的决定：无法推断语言时询问语言，未配置可用路由时询问提供商，文件夹需要决定时询问工作区信任。提供商步骤包含明确的离线路由。就绪界面随后打开真正的编辑器，保留命令行中提供的任务，或为当前文件夹建议第一个任务。
 
@@ -168,13 +169,18 @@ JSON 把凭据的 `source`（来源）与字面的 `availability`（可用性）
 - 工作栏（Work bar）：转录区上方的一条（或可选的侧栏），承载活动目标、待办列表和子智能体。行会保持整个会话——已完成的工作显示为"已完成"而不是消失——点击某一行（或对它按 `Enter`）会打开它的详情。
 - 状态与底部区域：实时活动、排队的后续动作和简短命令提示。
 
-底部状态行可配置。运行 `/statusline` 选择哪些底部的片区可见，或在 `config.toml` 里设置 `[tui].status_items` 同时控制选择和顺序。
-当前支持的键包括 `mode`、`model`、`cost`、`balance`（仅 DeepSeek / DeepSeekCN）、`status`、`agents`、`reasoning_replay`、`prefix_stability`、`cache`、`context_percent`、`git_branch`、`last_tool_elapsed`（保留）、`rate_limit`（保留）、`tokens` 和 `session_metrics`。
-省略 `status_items` 以保持内置默认顺序；把它设为 `[]` 以隐藏可配置的片区。
+底部区域可配置。运行 `/statusline` 选择哪些内容可见，或在 `config.toml` 里设置 `[tui].status_items`。每个键只对应屏幕上的一样东西：`mode` 是姿态栏的 plan/act/operate 片区，而 `model`、`context_percent`、`cost`、`balance`（仅限预付费提供商：DeepSeek、DeepSeekCN、OpenRouter、SiliconFlow）、`cache`、`tokens` 、`ttft`、`output_rate`、`workspace` 和 `git_branch` 是它下方指标行的片区。
+省略 `status_items` 以保持内置默认；把它设为 `[]` 只保留帮助提示。
 
-`session_metrics`（默认开启）在阶段行上绘制会话指标条带：
-`4 turns · 108 steps │ LLM 11m46s · Tool call 1m52s │ TTFT avg 1.5s · 120 tok/s │ Cache hit 99% │ Input 9.3M`
-Turns 是用户回合；steps 是模型调用加工具调用；`LLM` 是模型调用墙钟时间的总和，`Tool call` 是工具墙钟时间的总和；`TTFT avg` 是到首个流式 token 的平均时间；`tok/s` 是提供商报告的输出 token 除以流式秒数；`Cache hit` 和 `Input` 是提供商报告的 token 类别。提供商或运行时证据尚未到达的单元格会被省略而不是估算，在窄行上，指标条会丢弃价值最低的组（先是 steps 和工具时间，然后是延迟、turns、LLM 时间），而不是截断某个数字。`/status` 打印未裁剪的完整行。
+`workspace` 和 `git_branch` 默认关闭。工作区片区显示文件夹名称；链接工作树会包含父目录以区分同名文件夹。分支片区显示当前分支或游离 HEAD 的短 SHA，并用 `(wt)` 标记链接工作树。名称过长时，保留末尾并限制为 24 个显示列。Git 信息沿用每 15 秒的后台刷新机制，也可按需刷新；无法取得 Git 信息时省略分支片区。这些信息对应当前会话的工作区，完整路径仍可在 `/status` 查看。
+
+`context_percent` 默认开启，并在任何占用率下都显示 `ctx NN%`——0.9.12 在 50% 以下保持沉默，使会话的大部分时间都没有上下文信号。该读数从 80% 起仍使用警示配色。
+
+`status`、`agents`、`reasoning_replay`、`prefix_stability`、`last_tool_elapsed` 和 `rate_limit` 这些键在 0.9.13 中已退役：它们不驱动任何东西。旧的配置文件仍可加载——已退役的键会被忽略并在日志中给出警告。
+
+`status_items` 负责组合这两行；另有两个尺寸预设决定每行绘制多少。`[tui].posture_bar` 和 `[tui].metrics_line` 各接受 `full`、`compact` 或 `hidden`。姿态栏默认使用 `full` 以保留操作提示；指标行默认使用 `compact`，减少常驻遥测信息，也可以在运行时用 `/config posture_bar compact` 设置。TOML 中的值必须使用小写；`/config` 命令不区分大小写。`compact` 是该行走完最初几级舍弃阶梯后的样子：姿态栏保留权限与模式片区——以及属于建议而非装饰的容量警示——并舍弃时钟、计数和提示；指标行保留路由、上下文读数、成本和余额，并在空间足够时保留已选的 TTFT 和输出速率，舍弃次要计数与帮助提示。`hidden` 把该行交还给转录区。狭小的 tmux 面板可以隐藏两行而不动 `/statusline` 的组合。
+
+`session_metrics`（默认开启）在指标行上显示 `ttft 1.5s`（到首个流式 token 的平均时间）和 `120 平均 tok/s`（本次会话中提供商报告的输出 token 总数，除以同一批调用的实测请求总秒数）。速率包含连接建立、首 token 等待以及响应过程中的停顿，不包含工具执行和调用之间的空闲时间；它衡量请求的实际吞吐量，而非模型解码速度。流式和非流式调用使用相同规则；没有独立请求计时的回执，其 token 和时间都不计入。新请求进行时保留上次实测平均值。两项读数与 `/status` 共用累加器，缺少证据时省略而不估算。在窄行上，这一对会先于成本和上下文读数被舍弃。
 
 转录区（对话记录）就是审计轨迹。当 Codewhale 读文件、跑命令或改代码时，动作会出现在那里。如果某条命令失败，把可见的失败输出作为你下一条指令的一部分，而不是从头再来。
 
@@ -215,7 +221,7 @@ Plan 模式是在陌生仓库里开始的最安全位置。它用于检查和决
 
 Act 模式是大多数贡献工作的默认模式。它允许 Codewhale 读文件、跑检查、编辑文件，同时把有风险的动作留在审批门禁之后。
 
-Operate 保持直接的工具面及其审批、沙箱、shell、ask 规则和仓库保护。它的区别在于编排重点：Codewhale 优先把独立、并行、后台或长时间运行的工作交给 fleet worker，而小型或紧密耦合的工作可以留在父进程中。
+Operate 保持直接的工具面及其审批、沙箱、shell、ask 规则和仓库保护。小型或紧密耦合的工作直接处理。多步骤委派使用简洁的 Workflow 计划，明确依赖关系、工作范围，并在步骤间传递完成证据。Fleet 配置和管理的就是这些子智能体及其角色。一个范围明确、可独立完成的任务可以直接交给子智能体；后续工作通过 `followup` 继续使用同一个子智能体。
 
 对于你信任的工作区，如果你确实希望动作不经审批提示就继续，可以用 `Shift+Tab` 选择 Full Access 权限姿态。不要在你不信任的仓库里使用 Full Access。
 
@@ -454,6 +460,8 @@ Codewhale 会保存会话。用 README 和模式指南里讲到的会话选择�
 
 要从网页应用继续当前正在运行的会话，输入 `/rc` 或用 `codewhale rc` 启动。在系统浏览器里批准一次性代码。租赁期生效期间，浏览器拥有新的提示和审批，终端是可读的安全面。连接后，横幅和一条转录备注会显示实时会话链接（`https://app.codewhale.net/session?run=…`）；`/rc open` 在浏览器里打开它，`/rc link` 打印它。`/rc status` 显示归属，`/rc stop` 把它交回终端，interrupt 仍然可用。断开的连接会保持本地输入锁定，直到最后一个网页租赁过期，这样两个控制器永远不会竞争。从一个终端登记的每个文件夹共享同一个稳定的设备 id，因此网页应用每台机器列出一台电脑，而不是每个会话一台。
 
+> 注（2026-09-14）：根据 2026-09-14 的产品客户端决定，app.codewhale.net 的托管网页应用将分阶段下线；原生 GPUI 桌面应用（私有 codehwhale-gpui 仓库，阶段规划见 docs/TRANSITION.md）是承接界面。网页应用存续期间 `/rc` 继续可用。
+
 ### 模型糊涂了，我该怎么办？
 
 停下来，重新陈述目标、约束和当前证据。如果转录很长，用 `/compact`，或带简短交接开一个新会话。如果是运维问题，运行 `codewhale doctor` 并检查报告的配置与提供商状态。
@@ -471,3 +479,5 @@ Codewhale 会保存会话。用 README 和模式指南里讲到的会话选择�
 读与你正在改动的东西相关的重点参考。对大多数用户，接下来的页面是安装、配置、提供商、模式、快捷键、工具和子智能体。
 
 下一步：[INSTALL.md](INSTALL.md)、[CONFIGURATION.md](CONFIGURATION.md)、[PROVIDERS.md](PROVIDERS.md)、[MODES.md](MODES.md) 和 [TOOL_SURFACE.md](../TOOL_SURFACE.md)。
+
+`/statusline` 可分别切换首 token 等待时间（`ttft`）和平均输出速率（`output_rate`）。Space 预览，Enter 保存，Esc 撤销。旧的 `session_metrics` 配置仍会启用两项读数。

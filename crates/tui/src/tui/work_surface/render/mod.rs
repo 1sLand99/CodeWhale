@@ -23,10 +23,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::MessageId;
-use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::app::{App, SidebarHoverRow, SidebarHoverSection};
 use crate::tui::ui_text::truncate_line_to_width;
+use codewhale_localization::MessageId;
+use codewhale_palette::{ChromeInk, chrome_style};
 
 use super::model::{
     DockTabHitbox, DockTabTarget, RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone,
@@ -107,8 +107,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .then(|| top_todo_progress(app, &rows))
         .flatten();
     // Pin goal title, then progress receipt, above the scrollable rows.
-    // At the minimum two-row surface keep one usable content row + divider.
-    let goal_height = u16::from(goal_title.is_some() && body_area.height >= 1);
+    // A compact strip keeps its last usable row for content, ahead of headers.
+    let goal_height = u16::from(goal_title.is_some() && body_area.height >= 2);
     let fold_progress = progress_shares_goal_row(body_area.width, goal_height > 0);
     let progress_height = u16::from(
         todo_progress.is_some()
@@ -128,7 +128,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         body_height
     };
-    let inset = u16::from(body_area.width >= 60);
+    let inset = u16::from(body_area.width >= 16);
     let rail_width = u16::from(overflow);
     let content_area = Rect {
         x: body_area.x.saturating_add(inset),
@@ -150,7 +150,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     app.work_surface.scroll_offset = app.work_surface.scroll_offset.min(max_offset);
 
     Block::default()
-        .style(Style::default().bg(app.ui_theme.surface_bg))
+        .style(Style::default().bg(app.ui_theme.panel_bg))
         .render(area, frame.buffer_mut());
     render_dock_tabs(frame, area, app);
     register_dock_targets(app);
@@ -166,7 +166,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let goal_text = truncate_line_to_width(&goal_text, full_width.saturating_sub(reserved));
         let mut spans = vec![Span::styled(
             goal_text.clone(),
-            goal_style.bg(app.ui_theme.surface_bg),
+            goal_style.bg(app.ui_theme.panel_bg),
         )];
         if let Some(receipt) = receipt {
             let gap = full_width
@@ -176,7 +176,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 format!("{}{receipt}", " ".repeat(gap)),
                 Style::default()
                     .fg(app.ui_theme.text_muted)
-                    .bg(app.ui_theme.surface_bg),
+                    .bg(app.ui_theme.panel_bg),
             ));
         }
         Paragraph::new(Line::from(spans)).render(
@@ -198,7 +198,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             progress,
             Style::default()
                 .fg(app.ui_theme.text_muted)
-                .bg(app.ui_theme.surface_bg),
+                .bg(app.ui_theme.panel_bg),
         )))
         .render(
             Rect {
@@ -326,7 +326,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                     queued.to_string(),
                     Style::default()
                         .fg(app.ui_theme.accent_action)
-                        .bg(normal.bg.unwrap_or(app.ui_theme.surface_bg)),
+                        .bg(normal.bg.unwrap_or(app.ui_theme.panel_bg)),
                 ));
             }
             lines.push(Line::from(spans));
@@ -402,7 +402,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             ),
             Style::default()
                 .fg(app.ui_theme.text_muted)
-                .bg(app.ui_theme.surface_bg),
+                .bg(app.ui_theme.panel_bg),
         )));
     }
 
@@ -426,7 +426,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             format!("{}{text}", " ".repeat(pad)),
             Style::default()
                 .fg(app.ui_theme.text_muted)
-                .bg(app.ui_theme.surface_bg),
+                .bg(app.ui_theme.panel_bg),
         )));
     }
 
@@ -562,7 +562,7 @@ fn render_divider(frame: &mut Frame, area: Rect, placement: WorkSurfacePlacement
                 frame.buffer_mut()[(x, y)]
                     .set_symbol(if active { "━" } else { "─" })
                     .set_fg(color)
-                    .set_bg(app.ui_theme.surface_bg);
+                    .set_bg(app.ui_theme.panel_bg);
             }
         }
         WorkSurfacePlacement::Bottom => {
@@ -571,7 +571,7 @@ fn render_divider(frame: &mut Frame, area: Rect, placement: WorkSurfacePlacement
                 frame.buffer_mut()[(x, y)]
                     .set_symbol(if active { "━" } else { "─" })
                     .set_fg(color)
-                    .set_bg(app.ui_theme.surface_bg);
+                    .set_bg(app.ui_theme.panel_bg);
             }
         }
         WorkSurfacePlacement::Left | WorkSurfacePlacement::Right => {
@@ -584,16 +584,16 @@ fn render_divider(frame: &mut Frame, area: Rect, placement: WorkSurfacePlacement
                 frame.buffer_mut()[(x, y)]
                     .set_symbol(if active { "┃" } else { "│" })
                     .set_fg(color)
-                    .set_bg(app.ui_theme.surface_bg);
+                    .set_bg(app.ui_theme.panel_bg);
             }
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct DockTab {
     target: DockTabTarget,
-    label: &'static str,
+    label: std::borrow::Cow<'static, str>,
     count: usize,
 }
 
@@ -607,22 +607,46 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         if useful || panel == app.work_surface.panel {
             entries.push(DockTab {
                 target: DockTabTarget::Panel(panel),
-                label: panel.title(),
+                label: match panel {
+                    RailPanel::Tasks => "Tasks",
+                    RailPanel::Agents => "Fleet",
+                    RailPanel::Background => "Jobs",
+                    RailPanel::Files => "Files",
+                    RailPanel::Notepad => "Notes",
+                    RailPanel::Context => "Context",
+                    RailPanel::Git => "Git",
+                    RailPanel::Price => "Cost",
+                }
+                .into(),
                 count: count.unwrap_or(0),
             });
         }
     }
 
-    let close = if crate::tui::color_compat::ascii_safe_enabled() {
+    let close_mark = if crate::tui::color_compat::ascii_safe_enabled() {
         "x"
     } else {
         "×"
     };
+    // #6502: name Esc beside the close control only while Esc really closes
+    // the dock — the dock owns keyboard focus and has something to close
+    // (`input::handle_key`). Otherwise Esc belongs to the composer and stops
+    // the running turn, which the posture bar already says with the turn
+    // status; a bare `×` here keeps the two from reading as one shortcut.
+    let esc_closes = app.work_surface.focused
+        && !super::interaction::opened_detail_on_screen(app)
+        && (app.work_surface.explicit_view || !visible_rows_for_panel(app).is_empty());
+    let close = if esc_closes && area.width >= 60 {
+        format!(" Esc {close_mark} ")
+    } else {
+        format!(" {close_mark} ")
+    };
+    let close_width = close.width().min(width);
     let mut show_counts = true;
     let fits = |tabs: &[DockTab], counts: bool| {
         tabs.iter()
             .map(|tab| {
-                UnicodeWidthStr::width(tab.label)
+                UnicodeWidthStr::width(tab.label.as_ref())
                     + if counts && tab.count > 0 {
                         1 + tab.count.to_string().len()
                     } else {
@@ -632,7 +656,7 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
             })
             .sum::<usize>()
             .saturating_add(tabs.len().saturating_sub(1).saturating_mul(2))
-            .saturating_add(1)
+            .saturating_add(close_width + 2)
             <= width
     };
     if !fits(&entries, true) {
@@ -649,7 +673,9 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let tab_y = if app.work_surface.effective_placement == WorkSurfacePlacement::Bottom {
-        area.y.saturating_add(1)
+        area.y
+            .saturating_add(1)
+            .min(area.bottom().saturating_sub(1))
     } else {
         area.y
     };
@@ -660,9 +686,9 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         height: 1,
     };
     let close_area = Rect {
-        x: tab_area.right().saturating_sub(1),
+        x: tab_area.right().saturating_sub(close_width as u16),
         y: tab_y,
-        width: 1,
+        width: close_width as u16,
         height: 1,
     };
     app.work_surface.dock_tabs.clear();
@@ -680,7 +706,7 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
                 .dock_tabs
                 .last()
                 .map(|hitbox| hitbox.area.right().saturating_sub(tab_area.x) + 2)
-                .unwrap_or(0),
+                .unwrap_or(1),
         );
         if x.saturating_add(tab_width) > close_area.x {
             break;
@@ -695,10 +721,15 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         let pressed = app.work_surface.pressed_tab == Some(tab.target);
         let hovered = app.work_surface.hovered_tab == Some(tab.target);
         let style = if active || pressed {
-            chrome_style(&app.ui_theme, ChromeInk::MetadataValue)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            Style::default()
+                .fg(app.ui_theme.text_body)
+                .bg(app.ui_theme.selection_bg)
+                .add_modifier(Modifier::BOLD)
         } else if hovered {
-            chrome_style(&app.ui_theme, ChromeInk::MetadataValue).add_modifier(Modifier::UNDERLINED)
+            Style::default()
+                .fg(app.ui_theme.text_body)
+                .bg(app.ui_theme.elevated_bg)
+                .add_modifier(Modifier::UNDERLINED)
         } else {
             chrome_style(&app.ui_theme, ChromeInk::Metadata)
         };
@@ -710,9 +741,11 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         });
     }
     let close_style = if app.work_surface.hovered_tab == Some(DockTabTarget::Close) {
-        chrome_style(&app.ui_theme, ChromeInk::Attention)
+        chrome_style(&app.ui_theme, ChromeInk::Info)
+            .bg(app.ui_theme.elevated_bg)
+            .add_modifier(Modifier::UNDERLINED)
     } else {
-        chrome_style(&app.ui_theme, ChromeInk::Metadata)
+        chrome_style(&app.ui_theme, ChromeInk::MetadataHint)
     };
     Paragraph::new(Line::from(Span::styled(close, close_style)))
         .render(close_area, frame.buffer_mut());
@@ -820,6 +853,6 @@ fn render_scrollbar(
             } else {
                 app.ui_theme.border
             })
-            .set_bg(app.ui_theme.surface_bg);
+            .set_bg(app.ui_theme.panel_bg);
     }
 }

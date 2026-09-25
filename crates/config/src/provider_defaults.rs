@@ -5,7 +5,9 @@
 //! are unchanged. Re-exported `pub(crate)` at the crate root so existing
 //! `crate::DEFAULT_*` references keep resolving.
 
-pub(crate) const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-v4-pro";
+// V4.1 Flash remains the selected default. The September 11 vendor reversal
+// keeps V4 Pro available with unchanged billing; explicit Pro selections stay Pro.
+pub(crate) const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
 pub(crate) const DEFAULT_DEEPSEEK_ANTHROPIC_MODEL: &str = DEFAULT_DEEPSEEK_MODEL;
 pub(crate) const DEFAULT_NVIDIA_NIM_MODEL: &str = "deepseek-ai/deepseek-v4-pro";
 pub(crate) const DEFAULT_NVIDIA_NIM_FLASH_MODEL: &str = "deepseek-ai/deepseek-v4-flash";
@@ -111,6 +113,8 @@ pub(crate) const DEFAULT_ARCEE_BASE_URL: &str = "https://api.arcee.ai/api/v1";
 pub(crate) const DEFAULT_HUGGINGFACE_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub(crate) const DEFAULT_HUGGINGFACE_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub(crate) const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://router.huggingface.co/v1";
+pub(crate) const DEFAULT_MODELSCOPE_MODEL: &str = "Qwen/Qwen3.5-397B-A17B";
+pub(crate) const DEFAULT_MODELSCOPE_BASE_URL: &str = "https://api-inference.modelscope.cn/v1";
 pub(crate) const DEFAULT_TOGETHER_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub(crate) const DEFAULT_TOGETHER_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub(crate) const DEFAULT_TOGETHER_BASE_URL: &str = "https://api.together.xyz/v1";
@@ -164,9 +168,8 @@ pub(crate) const DEFAULT_SAKANA_BASE_URL: &str = "https://api.sakana.ai/v1";
 // Meituan LongCat defaults
 pub(crate) const DEFAULT_LONGCAT_MODEL: &str = "LongCat-2.0";
 pub(crate) const DEFAULT_LONGCAT_BASE_URL: &str = "https://api.longcat.chat/openai/v1";
-// OpenCode Go Chat Completions defaults. The Go catalog also contains models
-// served only through Anthropic Messages; those are deliberately not listed by
-// this provider until Codewhale can route wire formats per model.
+// OpenCode Go keeps its Chat default and resolves other model protocols from
+// the shared opencode_go roster.
 pub(crate) const DEFAULT_OPENCODE_GO_MODEL: &str = "deepseek-v4-pro";
 pub(crate) const DEFAULT_OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 pub(crate) const OPENCODE_GO_GROK_4_5_MODEL: &str = "grok-4.5";
@@ -199,6 +202,10 @@ pub(crate) const DEFAULT_TELECOMJS_BASE_URL: &str = "https://aigw.telecomjs.com/
 // Eden AI (OpenAI-compatible AI gateway) defaults
 pub(crate) const DEFAULT_EDENAI_MODEL: &str = "deepseek/deepseek-v4-pro";
 pub(crate) const DEFAULT_EDENAI_BASE_URL: &str = "https://api.edenai.run/v3";
+// ZenMux (OpenAI-compatible AI gateway) defaults. Default model verified
+// present in the live keyless catalog at https://zenmux.ai/api/v1/models.
+pub(crate) const DEFAULT_ZENMUX_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+pub(crate) const DEFAULT_ZENMUX_BASE_URL: &str = "https://zenmux.ai/api/v1";
 // Concentrate (OpenAI Responses-compatible AI gateway) defaults. Contract:
 // https://concentrate.ai/docs/api-reference/introduction — base URL, bearer
 // Universal API key, `POST /v1/responses`, unauthenticated `GET /v1/models`.
@@ -206,6 +213,14 @@ pub(crate) const DEFAULT_EDENAI_BASE_URL: &str = "https://api.edenai.run/v3";
 // `provider/model` pins a provider and `concentrate/auto` is the gateway router.
 pub(crate) const DEFAULT_CONCENTRATE_MODEL: &str = "deepseek-v4-pro";
 pub(crate) const DEFAULT_CONCENTRATE_BASE_URL: &str = "https://api.concentrate.ai/v1";
+pub(crate) const DEFAULT_CSDN_MODEL: &str = "glm_for_coding";
+pub(crate) const DEFAULT_CSDN_BASE_URL: &str = "https://ai.csdn.net/api/model/v1";
+// Codewhale API (account-backed model access) defaults. The account control
+// plane serves an OpenAI-shaped `GET /v1/models` whose rows carry the wire
+// protocol per model, so this route is model-aware and its catalog is the
+// account's own connected providers. The default is a bootstrap hint only.
+pub(crate) const DEFAULT_CODEWHALE_MODEL: &str = "deepseek/deepseek-v4-pro";
+pub(crate) const DEFAULT_CODEWHALE_BASE_URL: &str = "https://api.codewhale.net/v1";
 // Alibaba Cloud Model Studio (DashScope) defaults
 // Token Plan (Personal / Team): shared endpoint, OpenAI + Anthropic dialects
 pub(crate) const DEFAULT_MODELSTUDIO_TOKEN_PLAN_MODEL: &str = "qwen3.8-max";
@@ -225,8 +240,10 @@ pub const DEFAULT_GOOGLE_BASE_URL: &str =
 /// Default Gemini model for the Google provider (preview flagship, 2026-08).
 pub const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.1-pro-preview";
 
-/// Antigravity cloud-code internal endpoint (credential plane only; the
-/// wire protocol is not implemented and sends fail closed).
-pub const DEFAULT_ANTIGRAVITY_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
-/// Placeholder model id; never sent — the route fails closed before transport.
-pub const DEFAULT_ANTIGRAVITY_MODEL: &str = "gemini-3-pro-preview";
+/// Non-network endpoint for the legacy Antigravity configuration tombstone.
+///
+/// `.invalid` is reserved and cannot resolve. Existing configuration remains
+/// readable solely so Codewhale can guide the user to clear it safely.
+pub const DEFAULT_ANTIGRAVITY_BASE_URL: &str = "https://legacy-antigravity.invalid";
+/// Non-runnable model marker for the legacy Antigravity tombstone.
+pub const DEFAULT_ANTIGRAVITY_MODEL: &str = "legacy-antigravity-disabled";

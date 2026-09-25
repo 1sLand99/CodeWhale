@@ -16,10 +16,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette;
 use crate::tui::hover_hit::{
     HoverHit, HoverTargetKind, copy_affordance, hit_test, link_hover_style,
 };
+use codewhale_palette as palette;
 
 /// Pointer position from the last mouse move (column, row).
 static POINTER: Mutex<Option<(u16, u16)>> = Mutex::new(None);
@@ -71,8 +71,10 @@ pub fn set_pointer(column: u16, row: u16) {
     }
 }
 
-/// Clear the process-wide pointer between tests.
-#[cfg(test)]
+/// Forget the pointer. Called on terminal `FocusLost`: terminals stop
+/// reporting motion once the window is inactive, so the last position would
+/// otherwise keep a hover glow painted until the mouse moves again (#6503).
+/// Tests also use it to reset the process-wide pointer.
 pub fn clear_pointer() {
     if let Ok(mut guard) = POINTER.lock() {
         *guard = None;

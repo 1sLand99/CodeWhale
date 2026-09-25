@@ -13,16 +13,17 @@ use serde_json::{Value, json};
 use crate::config::ApiProvider;
 use crate::llm_client::StreamEventBox;
 use crate::logging;
-use crate::models::{
+use crate::tools::schema_sanitize;
+use codewhale_models::{
     ContentBlock, ContentBlockStart, Delta, MessageDelta, MessageRequest, MessageResponse,
     OpaqueReasoningState, StreamEvent, Tool, Usage,
 };
-use crate::tools::schema_sanitize;
 
 use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
+use super::wire::{extract_sse_data_value, next_sse_line};
 use super::{
-    DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text, from_api_tool_name,
+    CodewhaleClient, ERROR_BODY_MAX_BYTES, bounded_error_text, from_api_tool_name,
     system_to_instructions, to_api_tool_name,
 };
 
@@ -115,15 +116,16 @@ pub(super) fn build_responses_body_for_provider(
         }
     }
 
-    // Reasoning configuration. The Codex Responses backend accepts
-    // low/medium/high/xhigh, so provider-aware callers normalize inherited
-    // DeepSeek-only values before request construction: "off" becomes
-    // "low", and CodeWhale's "auto" falls back to "medium". DeepSeek's
-    // Responses API documents `reasoning.effort: "none"` to disable
-    // thinking, so its branch sends "none" for the off tier instead of
-    // collapsing it into low (see `responses_reasoning_effort`).
+    // Preserve the selected Codex tier through the final wire boundary. The
+    // roster owns each model's available levels; this pure builder must not
+    // collapse newer tiers to an older model's xhigh ceiling. Other Responses
+    // providers retain their own compatibility vocabulary.
     if let Some(raw) = request.reasoning_effort.as_deref()
-        && let Some(effort) = responses_reasoning_effort(raw, is_deepseek)
+        && let Some(effort) = if provider == ApiProvider::OpenaiCodex {
+            codex_responses_reasoning_effort(raw)
+        } else {
+            responses_reasoning_effort(raw, is_deepseek)
+        }
     {
         body["reasoning"] = if is_deepseek || is_concentrate {
             json!({ "effort": effort })
@@ -144,7 +146,7 @@ pub(super) fn build_responses_body_for_provider(
     body
 }
 
-impl DeepSeekClient {
+impl CodewhaleClient {
     /// Handle a streaming Responses API request for the OpenAI Codex provider.
     pub(super) async fn handle_responses_stream(
         &self,
@@ -221,6 +223,8 @@ impl DeepSeekClient {
         }
 
         let stream_idle_timeout = self.stream_idle_timeout;
+        let first_byte = super::stream_entry::first_byte_timeout(stream_idle_timeout);
+        let provider_label = self.api_provider.display_name();
         let byte_stream = response.bytes_stream();
 
         let stream = async_stream::stream! {
@@ -265,7 +269,12 @@ impl DeepSeekClient {
 
             while !done {
                 if !ended {
-                    match tokio::time::timeout(stream_idle_timeout, byte_stream.next()).await {
+                    let wait = super::stream_entry::next_chunk_timeout(
+                        stream_idle_timeout,
+                        first_byte,
+                        bytes_received,
+                    );
+                    match tokio::time::timeout(wait, byte_stream.next()).await {
                         Ok(Some(Ok(chunk))) => {
                             bytes_received += chunk.len();
                             last_chunk_at = std::time::Instant::now();
@@ -277,11 +286,12 @@ impl DeepSeekClient {
                         }
                         Ok(None) => ended = true,
                         Err(_) => {
-                            yield Err(anyhow::anyhow!(super::stream_entry::idle_timeout_message(
-                                stream_idle_timeout,
+                            yield Err(anyhow::anyhow!(super::stream_entry::body_timeout_message(
+                                wait,
                                 bytes_received,
                                 stream_start.elapsed(),
                                 last_chunk_at.elapsed(),
+                                provider_label,
                             )));
                             return;
                         }
@@ -290,7 +300,7 @@ impl DeepSeekClient {
 
                 // Process complete SSE lines, and the unterminated tail at stream end.
                 loop {
-                    let line = match super::next_sse_line(&mut buffer, ended) {
+                    let line = match next_sse_line(&mut buffer, ended) {
                         Ok(Some(line)) => line,
                         Ok(None) => break,
                         Err(err) => {
@@ -299,11 +309,16 @@ impl DeepSeekClient {
                         }
                     };
 
-                    if line.is_empty() || line.starts_with(':') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if line.starts_with(':') {
+                        // SSE comment keep-alive: the provider is alive (#6184).
+                        yield Ok(StreamEvent::Ping);
                         continue;
                     }
 
-                    if let Some(data) = super::extract_sse_data_value(&line) {
+                    if let Some(data) = extract_sse_data_value(&line) {
                         if data == "[DONE]" {
                             done = true;
                             break;
@@ -774,7 +789,7 @@ pub(super) fn convert_messages_to_responses_input(
                             let text = if placement == RolePlacement::InterruptedAssistant {
                                 format!(
                                     "{}{}",
-                                    crate::models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
+                                    codewhale_models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
                                     text
                                 )
                             } else {
@@ -915,6 +930,12 @@ fn tool_to_responses_function(tool: &Tool) -> Value {
 }
 
 fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
+    crate::reasoning_preference::ReasoningEffort::parse_strict(raw)
+        .unwrap_or(crate::reasoning_preference::ReasoningEffort::Medium)
+        .api_value_for_provider(ApiProvider::OpenaiCodex)
+}
+
+fn compatible_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "off" | "disabled" | "none" | "false" => Some("low"),
         "minimal" => Some("low"),
@@ -935,7 +956,7 @@ fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
 /// table's default tier rather than writing nothing.
 pub(super) fn responses_reasoning_effort(raw: &str, is_deepseek: bool) -> Option<&'static str> {
     if !is_deepseek {
-        return codex_responses_reasoning_effort(raw);
+        return compatible_responses_reasoning_effort(raw);
     }
     Some(super::deepseek_effort::deepseek_effort_tier_or_default(raw).responses_effort())
 }

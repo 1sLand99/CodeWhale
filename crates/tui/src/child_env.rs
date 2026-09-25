@@ -200,6 +200,16 @@ fn is_allowed_parent_env_key(key: &OsStr) -> bool {
     matches!(
         normalized.as_str(),
         "PATH"
+            // Desktop connection metadata. Computer-use tools must reach
+            // the existing X11/Wayland and accessibility bus sessions. Keep
+            // this list exact; never inherit arbitrary XDG/DBUS namespaces
+            // or read the Xauthority credential file into the environment.
+            | "DISPLAY"
+            | "WAYLAND_DISPLAY"
+            | "XDG_RUNTIME_DIR"
+            | "XDG_SESSION_TYPE"
+            | "DBUS_SESSION_BUS_ADDRESS"
+            | "XAUTHORITY"
             | "HOME"
             | "USER"
             | "USERNAME"
@@ -432,6 +442,7 @@ fn windows_registry_env_vars() -> Vec<(OsString, OsString)> {
 fn append_windows_registry_env_key(env: &mut Vec<(OsString, OsString)>, root: HKEY, subkey: &str) {
     let mut key = HKEY::default();
     let subkey_wide = windows_wide_null(OsStr::new(subkey));
+    // SAFETY: `subkey_wide` is NUL-terminated and live; `key` is live.
     let open =
         unsafe { RegOpenKeyExW(root, PCWSTR(subkey_wide.as_ptr()), None, KEY_READ, &mut key) };
     if open != ERROR_SUCCESS {
@@ -452,6 +463,7 @@ fn append_windows_registry_env_key(env: &mut Vec<(OsString, OsString)>, root: HK
         }
     }
 
+    // SAFETY: `key` was opened above and is not used after.
     let _ = unsafe { RegCloseKey(key) };
 }
 
@@ -471,6 +483,7 @@ fn read_windows_registry_env_value(key: HKEY, index: u32) -> RegistryEnvValue {
         let mut name_len = name.len() as u32;
         let mut data_len = data.len() as u32;
         let mut value_type = 0u32;
+        // SAFETY: buffers are live with matching lengths passed.
         let status = unsafe {
             RegEnumValueW(
                 key,
@@ -535,12 +548,14 @@ fn registry_utf16_value_from_bytes(data: &[u8]) -> OsString {
 #[cfg(windows)]
 fn expand_windows_env_string(value: &OsStr) -> Option<OsString> {
     let src = windows_wide_null(value);
+    // SAFETY: `src` is NUL-terminated and live.
     let required_len = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), None) };
     if required_len == 0 {
         return None;
     }
 
     let mut expanded = vec![0u16; required_len as usize];
+    // SAFETY: `src` is NUL-terminated; `expanded` has the queried length.
     let written = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut expanded)) };
     if written == 0 || written > required_len {
         return None;
@@ -988,6 +1003,38 @@ mod tests {
         assert!(explicit.iter().any(|(key, value)| {
             normalize_key(key) == "HTTP_PROXY" && value == "http://proxy.invalid"
         }));
+    }
+
+    #[test]
+    fn reviewed_plugin_mcp_env_keeps_desktop_routing_without_secret_namespaces() {
+        let desktop = [
+            ("DISPLAY", ":1"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("XAUTHORITY", "/run/user/1000/.Xauthority"),
+        ];
+        let unexpected = [
+            ("OPENAI_API_KEY", "provider-fixture"),
+            ("XDG_PRIVATE_TOKEN", "xdg-fixture"),
+            ("DBUS_PRIVATE_TOKEN", "dbus-fixture"),
+            ("CODEWHALE_CU_APP_BUNDLE", "/stale/helper.app"),
+        ];
+        let child = sanitized_plugin_mcp_env_from(
+            desktop.into_iter().chain(unexpected),
+            std::iter::empty::<(&str, &str)>(),
+        );
+        for (key, value) in desktop {
+            assert!(
+                child
+                    .iter()
+                    .any(|(found, content)| found == key && content == value)
+            );
+        }
+        for (key, _) in unexpected {
+            assert!(child.iter().all(|(found, _)| found != key));
+        }
     }
 
     #[test]

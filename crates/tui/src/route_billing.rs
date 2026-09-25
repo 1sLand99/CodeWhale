@@ -13,7 +13,8 @@
 //! - unknown stays unknown — never `$0.00` and never an estimate-as-spend.
 
 use crate::config::{ApiProvider, Config, ProviderConfig};
-use crate::pricing::{CostCurrency, format_cost_amount};
+use crate::pricing::{CostCurrency, UnpricedReason, format_cost_amount};
+use codewhale_localization::{Locale, MessageId, tr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BillingPresentation {
@@ -39,6 +40,7 @@ pub enum UsageChip {
     PricedSubtotal {
         amount: String,
         legacy: bool,
+        reasons: Vec<UnpricedReason>,
     },
     /// Subscription / OAuth allowance. `used_pct` is only set when the
     /// provider supplied a real percentage.
@@ -47,7 +49,7 @@ pub enum UsageChip {
         used_pct: Option<f32>,
     },
     Local,
-    Unknown,
+    Unknown(Vec<UnpricedReason>),
     /// Metered route with pricing, but nothing spent yet — omit the chip
     /// rather than rendering `$0.00` / `<$0.0001`.
     Hidden,
@@ -141,6 +143,9 @@ fn static_subscription_label(label: &str) -> Option<&'static str> {
         "Grok OAuth quota" => "Grok OAuth quota",
         "Claude OAuth quota" => "Claude OAuth quota",
         "StepFun Step Plan quota" => "StepFun Step Plan quota",
+        "Alibaba Token Plan" => "Alibaba Token Plan",
+        "Alibaba Coding Plan" => "Alibaba Coding Plan",
+        "Volcengine Coding Plan" => "Volcengine Coding Plan",
         _ => return None,
     })
 }
@@ -255,6 +260,11 @@ pub fn capture_product(config: &Config, provider: ApiProvider) -> RouteProduct {
                 CredentialProduct::Unprovable => RouteProduct::Unproven,
             }
         }
+        ApiProvider::Csdn => match csdn_credential_product(provider_config) {
+            CredentialProduct::Plan => RouteProduct::Subscription("CSDN Coding Plan quota"),
+            CredentialProduct::PayAsYouGo => RouteProduct::Metered,
+            CredentialProduct::Unprovable => RouteProduct::Unproven,
+        },
         ApiProvider::XiaomiMimo => {
             if xiaomi_is_explicit_pay_as_you_go(provider_config) {
                 RouteProduct::Metered
@@ -264,7 +274,7 @@ pub fn capture_product(config: &Config, provider: ApiProvider) -> RouteProduct {
         }
         ApiProvider::Xai => {
             if provider_config.is_some_and(uses_xai_oauth)
-                && crate::xai_oauth::credentials_valid(config)
+                && crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Xai, config)
             {
                 RouteProduct::Subscription("Grok OAuth quota")
             } else {
@@ -343,20 +353,10 @@ fn classify(
     base_url: &str,
     product: RouteProduct,
 ) -> BillingPresentation {
-    if matches!(
-        provider,
-        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm
-    ) {
-        return BillingPresentation::Local;
-    }
-    if provider == ApiProvider::OpenaiCodex {
-        return BillingPresentation::Subscription("Codex OAuth quota");
-    }
-    if provider == ApiProvider::OpencodeGo {
-        return BillingPresentation::Subscription("OpenCode Go quota");
-    }
-
     match provider {
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => BillingPresentation::Local,
+        ApiProvider::OpenaiCodex => BillingPresentation::Subscription("Codex OAuth quota"),
+        ApiProvider::OpencodeGo => BillingPresentation::Subscription("OpenCode Go quota"),
         // StepFun already reduces an endpoint to a non-secret billing surface
         // and fails closed on anything it does not recognize.
         ApiProvider::Stepfun => stepfun_billing_for_endpoint(Some(base_url)),
@@ -369,7 +369,7 @@ fn classify(
         ApiProvider::Zai if is_zai_coding_plan_endpoint(base_url) => {
             BillingPresentation::Subscription("Z.ai Coding Plan quota")
         }
-        ApiProvider::Zai => BillingPresentation::Metered,
+        ApiProvider::Zai => endpoint_shaped_payg_billing(provider, base_url),
         ApiProvider::XiaomiMimo => product_billing(product),
 
         // Moonshot's direct platform is pay-as-you-go metered. Only the exact
@@ -410,6 +410,20 @@ fn classify(
             BillingPresentation::Unknown
         }
         ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => product_billing(product),
+        // CSDN 星图 sells the Coding Plan (`glm_for_coding`) and metered
+        // marketplace models over the same endpoint; the URL proves only that
+        // the route is first-party, so the captured product decides. Anything
+        // off the supported direct endpoint is Unknown no matter what was
+        // captured.
+        ApiProvider::Csdn
+            if !codewhale_config::provider::is_exact_csdn_platform_route(
+                codewhale_config::ProviderKind::Csdn,
+                base_url,
+            ) =>
+        {
+            BillingPresentation::Unknown
+        }
+        ApiProvider::Csdn => product_billing(product),
         ApiProvider::Xai | ApiProvider::Anthropic => product_billing(product),
         // A named custom route is billed from the identity and endpoint it
         // dispatched on. Without an identity there is no vendor to name, and
@@ -421,13 +435,54 @@ fn classify(
             BillingPresentation::Unknown
         }
         ApiProvider::Custom => product_billing(product),
-        // Everything else is an endpoint-shaped, pay-as-you-go provider — but
+        // These providers are endpoint-shaped — but
         // only on an endpoint we actually recognize. A first-party or
         // aggregator provider pointed at an unrecognized host is not evidence
         // that the host sells that provider's price list, so it must not fall
         // through to metered per-token dollars on the strength of a provider
         // name (#4318).
-        _ => endpoint_shaped_payg_billing(provider, base_url),
+        // Keep this match exhaustive: onboarding a provider requires an
+        // explicit billing decision and the default-route audit below.
+        ApiProvider::Deepseek
+        | ApiProvider::DeepseekCN
+        | ApiProvider::DeepseekAnthropic
+        | ApiProvider::NvidiaNim
+        | ApiProvider::Openai
+        | ApiProvider::Atlascloud
+        | ApiProvider::WanjieArk
+        | ApiProvider::Volcengine
+        | ApiProvider::Openrouter
+        | ApiProvider::Orcarouter
+        | ApiProvider::Novita
+        | ApiProvider::Fireworks
+        | ApiProvider::Siliconflow
+        | ApiProvider::SiliconflowCn
+        | ApiProvider::Arcee
+        | ApiProvider::OllamaCloud
+        | ApiProvider::Huggingface
+        | ApiProvider::Modelscope
+        | ApiProvider::Together
+        | ApiProvider::Qianfan
+        | ApiProvider::Openmodel
+        | ApiProvider::Deepinfra
+        | ApiProvider::Sakana
+        | ApiProvider::LongCat
+        | ApiProvider::OpencodeZen
+        | ApiProvider::Meta
+        | ApiProvider::Mistral
+        | ApiProvider::Google
+        | ApiProvider::Antigravity
+        | ApiProvider::Telecomjs
+        | ApiProvider::Edenai
+        | ApiProvider::Zenmux
+        | ApiProvider::Concentrate
+        | ApiProvider::Codewhale
+        | ApiProvider::ModelstudioTokenPlan
+        | ApiProvider::ModelstudioTokenPlanAnthropic
+        | ApiProvider::ModelstudioCodingPlan
+        | ApiProvider::ModelstudioCodingPlanAnthropic => {
+            endpoint_shaped_payg_billing(provider, base_url)
+        }
     }
 }
 
@@ -440,7 +495,14 @@ fn endpoint_shaped_payg_billing(provider: ApiProvider, base_url: &str) -> Billin
     match crate::pricing::endpoint_metering_for_billing_surface(surface) {
         EndpointMetering::Money => BillingPresentation::Metered,
         EndpointMetering::LocalNoBill => BillingPresentation::Local,
-        EndpointMetering::ExactSubscription => BillingPresentation::Subscription("provider plan"),
+        EndpointMetering::ExactSubscription => BillingPresentation::Subscription(match surface {
+            Some(crate::pricing::MODELSTUDIO_TOKEN_PLAN_BILLING_SURFACE) => "Alibaba Token Plan",
+            Some(crate::pricing::MODELSTUDIO_CODING_PLAN_BILLING_SURFACE) => "Alibaba Coding Plan",
+            Some(crate::pricing::VOLCENGINE_CODING_PLAN_BILLING_SURFACE) => {
+                "Volcengine Coding Plan"
+            }
+            _ => "provider plan",
+        }),
         EndpointMetering::Unknown => BillingPresentation::Unknown,
     }
 }
@@ -490,6 +552,7 @@ pub fn billing_surface_for_dispatch(
                     ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => {
                         crate::pricing::MINIMAX_TOKEN_PLAN_BILLING_SURFACE
                     }
+                    ApiProvider::Csdn => crate::pricing::CSDN_CODING_PLAN_BILLING_SURFACE,
                     ApiProvider::OpenaiCodex
                     | ApiProvider::OpencodeGo
                     | ApiProvider::Anthropic
@@ -505,6 +568,9 @@ pub fn billing_surface_for_dispatch(
                 ) =>
             {
                 return Some(crate::pricing::MINIMAX_PAYG_BILLING_SURFACE);
+            }
+            BillingPresentation::Metered if provider == ApiProvider::Csdn => {
+                return Some(crate::pricing::CSDN_PAYG_BILLING_SURFACE);
             }
             BillingPresentation::Local => return Some(crate::pricing::LOCAL_BILLING_SURFACE),
             BillingPresentation::Unknown | BillingPresentation::Metered => {}
@@ -721,6 +787,7 @@ pub struct ChildRouteClaim<'a> {
 /// Requires both a metered billing presentation and an authoritative priced
 /// basis for the model. OAuth/token-plan routes always return false even when
 /// the same model id is priced on a public API route.
+#[cfg(test)]
 #[must_use]
 pub fn has_priced_metered_basis(
     billing: BillingPresentation,
@@ -754,14 +821,38 @@ pub fn usage_chip(
 ) -> UsageChip {
     match billing {
         BillingPresentation::Local => UsageChip::Local,
-        BillingPresentation::Unknown => UsageChip::Unknown,
+        BillingPresentation::Unknown => {
+            UsageChip::Unknown(vec![UnpricedReason::UnknownBillingBasis])
+        }
         BillingPresentation::Subscription(label) => UsageChip::Allowance {
             label,
             used_pct: used_pct.filter(|pct| pct.is_finite() && *pct >= 0.0),
         },
         BillingPresentation::Metered => {
-            if !has_priced_metered_basis(billing, provider, model) {
-                UsageChip::Unknown
+            let surface = (provider == ApiProvider::Stepfun)
+                .then_some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE);
+            let audit = if surface.is_some() {
+                crate::pricing::audit_turn_cost_for_route_at(
+                    provider,
+                    model,
+                    surface,
+                    &codewhale_models::Usage::default(),
+                    chrono::Utc::now(),
+                )
+            } else {
+                crate::pricing::audit_turn_cost_for_provider_at(
+                    provider,
+                    model,
+                    &codewhale_models::Usage::default(),
+                    chrono::Utc::now(),
+                )
+            };
+            if !audit.is_priced_in(currency) {
+                UsageChip::Unknown(vec![
+                    audit
+                        .unpriced_reason
+                        .unwrap_or(UnpricedReason::UnsupportedCurrency),
+                ])
             } else if displayed_cost.is_finite() && displayed_cost > 0.0 {
                 UsageChip::Money(format_cost_amount(displayed_cost, currency))
             } else {
@@ -774,22 +865,54 @@ pub fn usage_chip(
 /// Compact footer/header chip text. `None` means omit the chip.
 #[must_use]
 #[allow(dead_code)] // shared chip formatter for footer/sidebar siblings (TUI-DOG-010)
-pub fn format_usage_chip(chip: &UsageChip) -> Option<String> {
+pub fn format_usage_chip(chip: &UsageChip, locale: Locale) -> Option<String> {
     match chip {
         UsageChip::Money(amount) => Some(amount.clone()),
-        UsageChip::PricedSubtotal { amount, legacy } => Some(if *legacy {
-            format!("saved subtotal {amount} + unknown")
-        } else {
-            format!("subtotal {amount} + unknown")
-        }),
+        UsageChip::PricedSubtotal {
+            amount,
+            legacy,
+            reasons,
+        } => Some(
+            tr(
+                locale,
+                if *legacy {
+                    MessageId::CostChipSavedSubtotal
+                } else {
+                    MessageId::CostChipSubtotal
+                },
+            )
+            .replace("{amount}", amount)
+            .replace("{reasons}", &format_unpriced_reasons(reasons, locale)),
+        ),
         UsageChip::Allowance { label, used_pct } => Some(match used_pct {
-            Some(pct) => format!("usage: {label} · {pct:.0}%"),
-            None => format!("usage: {label}"),
+            Some(pct) => tr(locale, MessageId::CostChipAllowancePercent)
+                .replace("{plan}", label)
+                .replace("{percent}", &format!("{pct:.0}")),
+            None => tr(locale, MessageId::CostChipAllowance).replace("{plan}", label),
         }),
-        UsageChip::Local => Some("cost: local".to_string()),
-        UsageChip::Unknown => Some("cost: unknown".to_string()),
+        UsageChip::Local => Some(tr(locale, MessageId::CostChipLocal).into_owned()),
+        UsageChip::Unknown(reasons) => Some(
+            tr(locale, MessageId::CostChipUnknown)
+                .replace("{reasons}", &format_unpriced_reasons(reasons, locale)),
+        ),
         UsageChip::Hidden => None,
     }
+}
+
+/// The same saved receipt explains missing coverage in every cost surface.
+#[must_use]
+pub fn format_unpriced_reasons(reasons: &[UnpricedReason], locale: Locale) -> String {
+    if reasons.is_empty() {
+        return tr(locale, UnpricedReason::UnrecordedCoverage.message_id()).into_owned();
+    }
+    let mut descriptions = Vec::new();
+    for reason in reasons {
+        let text = tr(locale, reason.message_id());
+        if !descriptions.contains(&text) {
+            descriptions.push(text);
+        }
+    }
+    descriptions.join(", ")
 }
 
 fn custom_billing_unknown(config: &ProviderConfig) -> bool {
@@ -826,7 +949,7 @@ fn auth_mode(config: &ProviderConfig) -> Option<String> {
 }
 
 fn uses_xai_oauth(config: &ProviderConfig) -> bool {
-    auth_mode(config).is_some_and(|mode| crate::xai_oauth::auth_mode_uses_xai_oauth(&mode))
+    auth_mode(config).is_some_and(|mode| crate::oauth::auth_mode_uses_xai_oauth(&mode))
 }
 
 fn uses_anthropic_oauth(config: &ProviderConfig) -> bool {
@@ -895,6 +1018,42 @@ fn minimax_credential_product(
         Some(true) => CredentialProduct::Plan,
         Some(false) => CredentialProduct::PayAsYouGo,
         None => CredentialProduct::Unprovable,
+    }
+}
+
+/// CSDN 星图 sells the Coding Plan and metered marketplace models over the
+/// same `ai.csdn.net/api/model/v1` endpoint and `CSDN_API_KEY` slot, so the
+/// product comes from an explicit saved pay mode or the routed model:
+/// `glm_for_coding` is the Coding Plan's dedicated model id — the route the
+/// plan sells — while every other model on the platform endpoint is ordinary
+/// metered marketplace access. An explicit operator-set mode wins over the
+/// model in both directions; an unrecognized mode is not a product claim.
+fn csdn_credential_product(provider_config: Option<&ProviderConfig>) -> CredentialProduct {
+    if let Some(mode) = provider_config
+        .and_then(|config| config.mode.as_deref())
+        .filter(|mode| !mode.trim().is_empty())
+        .map(normalized)
+    {
+        return match mode.as_str() {
+            "coding_plan" | "codingplan" | "plan" | "subscription" | "subscription_plan" => {
+                CredentialProduct::Plan
+            }
+            "pay_as_you_go" | "payg" | "paygo" | "pay_as_go" | "metered" | "standard" | "api"
+            | "api_key" | "default" => CredentialProduct::PayAsYouGo,
+            _ => CredentialProduct::Unprovable,
+        };
+    }
+    // No table at all still resolves to the plan model: `glm_for_coding` is
+    // the shipped default for the `csdn` route.
+    let model = provider_config
+        .and_then(|entry| entry.model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(crate::config::DEFAULT_CSDN_MODEL);
+    if model.eq_ignore_ascii_case(crate::config::DEFAULT_CSDN_MODEL) {
+        CredentialProduct::Plan
+    } else {
+        CredentialProduct::PayAsYouGo
     }
 }
 
@@ -1004,8 +1163,8 @@ fn xiaomi_is_explicit_pay_as_you_go(config: Option<&ProviderConfig>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Usage;
     use crate::pricing::CostCurrency;
+    use codewhale_models::Usage;
 
     fn config_with(provider: ApiProvider, provider_config: ProviderConfig) -> Config {
         let mut config = Config::default();
@@ -1061,22 +1220,26 @@ mod tests {
         );
         assert!(!matches!(chip, UsageChip::Money(_)));
         assert_eq!(
-            format_usage_chip(&chip).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("usage: Kimi Code quota")
         );
         // The label names the membership product, never the credential import
         // mechanism, and never a dollar figure.
         assert!(
-            !format_usage_chip(&chip)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains("OAuth")
         );
         assert!(
-            !format_usage_chip(&chip)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains("imported token")
         );
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -1212,7 +1375,11 @@ mod tests {
                 None,
             );
             assert!(!matches!(chip, UsageChip::Money(_)));
-            assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+            assert!(
+                !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                    .unwrap_or_default()
+                    .contains('$')
+            );
         }
     }
 
@@ -1237,7 +1404,11 @@ mod tests {
             None,
         );
         assert!(matches!(chip, UsageChip::Money(_)));
-        assert!(format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -1273,7 +1444,11 @@ mod tests {
                 used_pct: None,
             }
         );
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -1423,10 +1598,14 @@ mod tests {
             None,
         );
         assert_eq!(
-            format_usage_chip(&chip).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("usage: Codex OAuth quota")
         );
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -1476,7 +1655,11 @@ mod tests {
             CostCurrency::Usd,
             None,
         );
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
         assert_eq!(
             for_child_route(
                 ApiProvider::Deepseek,
@@ -1521,7 +1704,11 @@ mod tests {
             CostCurrency::Usd,
             None,
         );
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -1556,7 +1743,10 @@ mod tests {
             CostCurrency::Usd,
             None,
         );
-        assert_eq!(format_usage_chip(&payg_chip).as_deref(), Some("$0.42"));
+        assert_eq!(
+            format_usage_chip(&payg_chip, codewhale_localization::Locale::En).as_deref(),
+            Some("$0.42")
+        );
 
         let plan_config = config_with(
             ApiProvider::Stepfun,
@@ -1579,7 +1769,7 @@ mod tests {
             None,
         );
         assert!(
-            !format_usage_chip(&plan_chip)
+            !format_usage_chip(&plan_chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1625,7 +1815,7 @@ mod tests {
     fn child_route_billing_fails_closed_for_every_ambiguous_provider() {
         use crate::pricing::UnpricedReason;
 
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
             ..Default::default()
@@ -1751,7 +1941,7 @@ mod tests {
             Some(37.0),
         );
         assert_eq!(
-            format_usage_chip(&chip).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("usage: Grok OAuth quota · 37%")
         );
     }
@@ -1772,7 +1962,10 @@ mod tests {
             CostCurrency::Usd,
             None,
         );
-        assert_eq!(format_usage_chip(&spent).as_deref(), Some("$0.42"));
+        assert_eq!(
+            format_usage_chip(&spent, codewhale_localization::Locale::En).as_deref(),
+            Some("$0.42")
+        );
 
         let zero = usage_chip(
             billing,
@@ -1783,8 +1976,12 @@ mod tests {
             None,
         );
         assert_eq!(zero, UsageChip::Hidden);
-        assert!(format_usage_chip(&zero).is_none());
-        assert!(!format_usage_chip(&zero).unwrap_or_default().contains('$'));
+        assert!(format_usage_chip(&zero, codewhale_localization::Locale::En).is_none());
+        assert!(
+            !format_usage_chip(&zero, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -1801,8 +1998,15 @@ mod tests {
             CostCurrency::Usd,
             None,
         );
-        assert_eq!(format_usage_chip(&chip).as_deref(), Some("cost: local"));
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert_eq!(
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
+            Some("cost: local")
+        );
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -1851,9 +2055,16 @@ mod tests {
             CostCurrency::Usd,
             None,
         );
-        assert_eq!(chip, UsageChip::Unknown);
-        assert_eq!(format_usage_chip(&chip).as_deref(), Some("cost: unknown"));
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert_eq!(chip, UsageChip::Unknown(vec![UnpricedReason::NoPricingRow]));
+        assert_eq!(
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
+            Some("cost: unknown (rate unavailable)")
+        );
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
 
         let unknown_billing = usage_chip(
             BillingPresentation::Unknown,
@@ -1863,9 +2074,12 @@ mod tests {
             CostCurrency::Usd,
             None,
         );
-        assert_eq!(unknown_billing, UsageChip::Unknown);
+        assert_eq!(
+            unknown_billing,
+            UsageChip::Unknown(vec![UnpricedReason::UnknownBillingBasis])
+        );
         assert!(
-            !format_usage_chip(&unknown_billing)
+            !format_usage_chip(&unknown_billing, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1891,8 +2105,8 @@ mod tests {
         .expect("secure owned credential directory");
         let scope = format!(
             "{}::{}",
-            crate::xai_oauth::XAI_OIDC_ISSUER,
-            crate::xai_oauth::GROK_OIDC_CLIENT_ID
+            crate::oauth::XAI_OIDC_ISSUER,
+            crate::oauth::GROK_OIDC_CLIENT_ID
         );
         std::fs::write(
             &owned_path,
@@ -2213,7 +2427,11 @@ mod tests {
             None,
         );
         assert!(matches!(chip, UsageChip::Money(_)));
-        assert!(format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -2245,7 +2463,11 @@ mod tests {
             None,
         );
         assert!(!matches!(chip, UsageChip::Money(_)));
-        assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+        assert!(
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                .unwrap_or_default()
+                .contains('$')
+        );
     }
 
     #[test]
@@ -2399,8 +2621,15 @@ mod tests {
                 CostCurrency::Usd,
                 None,
             );
-            assert_eq!(chip, UsageChip::Unknown);
-            assert!(!format_usage_chip(&chip).unwrap_or_default().contains('$'));
+            assert_eq!(
+                chip,
+                UsageChip::Unknown(vec![UnpricedReason::UnknownBillingBasis])
+            );
+            assert!(
+                !format_usage_chip(&chip, codewhale_localization::Locale::En)
+                    .unwrap_or_default()
+                    .contains('$')
+            );
         }
     }
 
@@ -2780,5 +3009,189 @@ mod tests {
             BillingPresentation::Subscription("Kimi Code quota")
         );
         assert!(!billing.shows_money());
+    }
+
+    /// Every provider env contract that can move a default route's endpoint.
+    /// The audit below pins shipped defaults, so these must not leak in.
+    const BASE_URL_ENV_VARS: &[&str] = &[
+        "CODEWHALE_BASE_URL",
+        "DEEPSEEK_BASE_URL",
+        "NIM_BASE_URL",
+        "NVIDIA_BASE_URL",
+        "NVIDIA_NIM_BASE_URL",
+        "OPENAI_BASE_URL",
+        "ATLASCLOUD_BASE_URL",
+        "OPENROUTER_BASE_URL",
+        "ORCAROUTER_BASE_URL",
+        "MIMO_BASE_URL",
+        "XIAOMI_MIMO_BASE_URL",
+        "WANJIE_ARK_BASE_URL",
+        "WANJIE_BASE_URL",
+        "WANJIE_MAAS_BASE_URL",
+        "VOLCENGINE_BASE_URL",
+        "VOLCENGINE_ARK_BASE_URL",
+        "ARK_BASE_URL",
+        "NOVITA_BASE_URL",
+        "FIREWORKS_BASE_URL",
+        "SILICONFLOW_BASE_URL",
+        "ARCEE_BASE_URL",
+        "MOONSHOT_BASE_URL",
+        "KIMI_BASE_URL",
+        "SGLANG_BASE_URL",
+        "VLLM_BASE_URL",
+        "OLLAMA_BASE_URL",
+        "OLLAMA_CLOUD_BASE_URL",
+        "HF_BASE_URL",
+        "HUGGINGFACE_BASE_URL",
+        "META_MODEL_API_BASE_URL",
+        "MODEL_API_BASE_URL",
+        "MISTRAL_BASE_URL",
+        "XAI_BASE_URL",
+        "GEMINI_BASE_URL",
+        "GOOGLE_BASE_URL",
+        "TELECOMJS_BASE_URL",
+        "EDENAI_BASE_URL",
+        "CONCENTRATE_BASE_URL",
+        "MODELSTUDIO_TOKEN_PLAN_BASE_URL",
+        "MODELSTUDIO_CODING_PLAN_BASE_URL",
+        "OPENCODE_GO_BASE_URL",
+        "OPENCODE_ZEN_BASE_URL",
+    ];
+
+    /// The shipped default-route billing decision for every runnable provider.
+    /// Onboarding or re-defaulting a provider must update this table and the
+    /// audit artifact (`docs/PROVIDERS.md` billing column) deliberately.
+    const DEFAULT_ROUTE_BILLING_AUDIT: &[(ApiProvider, BillingPresentation)] = &[
+        (ApiProvider::Deepseek, BillingPresentation::Metered),
+        (ApiProvider::DeepseekAnthropic, BillingPresentation::Metered),
+        (ApiProvider::NvidiaNim, BillingPresentation::Metered),
+        (ApiProvider::Openai, BillingPresentation::Metered),
+        (ApiProvider::Atlascloud, BillingPresentation::Metered),
+        (ApiProvider::WanjieArk, BillingPresentation::Metered),
+        (
+            ApiProvider::Volcengine,
+            BillingPresentation::Subscription("Volcengine Coding Plan"),
+        ),
+        (ApiProvider::Openrouter, BillingPresentation::Metered),
+        (ApiProvider::Orcarouter, BillingPresentation::Metered),
+        (
+            ApiProvider::XiaomiMimo,
+            BillingPresentation::Subscription("MiMo token plan"),
+        ),
+        (ApiProvider::Novita, BillingPresentation::Metered),
+        (ApiProvider::Fireworks, BillingPresentation::Metered),
+        (ApiProvider::Siliconflow, BillingPresentation::Metered),
+        (ApiProvider::Arcee, BillingPresentation::Metered),
+        (ApiProvider::SiliconflowCn, BillingPresentation::Metered),
+        (ApiProvider::Moonshot, BillingPresentation::Metered),
+        (ApiProvider::Sglang, BillingPresentation::Local),
+        (ApiProvider::Vllm, BillingPresentation::Local),
+        (ApiProvider::Ollama, BillingPresentation::Local),
+        (ApiProvider::OllamaCloud, BillingPresentation::Unknown),
+        (ApiProvider::Huggingface, BillingPresentation::Metered),
+        (ApiProvider::Modelscope, BillingPresentation::Metered),
+        (ApiProvider::Together, BillingPresentation::Metered),
+        (ApiProvider::Qianfan, BillingPresentation::Metered),
+        (
+            ApiProvider::OpenaiCodex,
+            BillingPresentation::Subscription("Codex OAuth quota"),
+        ),
+        (ApiProvider::Anthropic, BillingPresentation::Metered),
+        (ApiProvider::Openmodel, BillingPresentation::Metered),
+        (
+            ApiProvider::Zai,
+            BillingPresentation::Subscription("Z.ai Coding Plan quota"),
+        ),
+        (ApiProvider::Stepfun, BillingPresentation::Metered),
+        (ApiProvider::Minimax, BillingPresentation::Unknown),
+        (ApiProvider::MinimaxAnthropic, BillingPresentation::Unknown),
+        (ApiProvider::Deepinfra, BillingPresentation::Metered),
+        (ApiProvider::Sakana, BillingPresentation::Metered),
+        (ApiProvider::LongCat, BillingPresentation::Metered),
+        (
+            ApiProvider::OpencodeGo,
+            BillingPresentation::Subscription("OpenCode Go quota"),
+        ),
+        (ApiProvider::OpencodeZen, BillingPresentation::Metered),
+        (ApiProvider::Meta, BillingPresentation::Metered),
+        (ApiProvider::Xai, BillingPresentation::Metered),
+        (ApiProvider::Mistral, BillingPresentation::Metered),
+        (ApiProvider::Telecomjs, BillingPresentation::Metered),
+        (
+            ApiProvider::ModelstudioTokenPlan,
+            BillingPresentation::Subscription("Alibaba Token Plan"),
+        ),
+        (
+            ApiProvider::ModelstudioTokenPlanAnthropic,
+            BillingPresentation::Subscription("Alibaba Token Plan"),
+        ),
+        (
+            ApiProvider::ModelstudioCodingPlan,
+            BillingPresentation::Subscription("Alibaba Coding Plan"),
+        ),
+        (
+            ApiProvider::ModelstudioCodingPlanAnthropic,
+            BillingPresentation::Subscription("Alibaba Coding Plan"),
+        ),
+        // Retired identity: never selectable or runnable. Its classification
+        // is pinned only so the endpoint-shaped arm stays exhaustive.
+        (ApiProvider::Antigravity, BillingPresentation::Metered),
+        (ApiProvider::Google, BillingPresentation::Metered),
+        (ApiProvider::Edenai, BillingPresentation::Metered),
+        (ApiProvider::Zenmux, BillingPresentation::Metered),
+        (
+            ApiProvider::Csdn,
+            BillingPresentation::Subscription("CSDN Coding Plan quota"),
+        ),
+        (ApiProvider::Concentrate, BillingPresentation::Metered),
+        (ApiProvider::Codewhale, BillingPresentation::Metered),
+        (ApiProvider::Custom, BillingPresentation::Unknown),
+    ];
+
+    /// Default-route billing is a deliberate, audited decision for every
+    /// provider `ApiProvider::all()` exposes — 51 rows covering the primary
+    /// route and every dialect/plan-variant alternate identity.
+    #[test]
+    fn default_route_billing_audit_covers_every_provider() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env: Vec<_> = BASE_URL_ENV_VARS
+            .iter()
+            .copied()
+            .map(crate::test_support::EnvVarGuard::remove)
+            .collect();
+        // Credential shape also steers MiniMax's default product; the audit
+        // pins the no-credential answer.
+        let _minimax = crate::test_support::EnvVarGuard::remove("MINIMAX_API_KEY");
+
+        let audited: Vec<_> = DEFAULT_ROUTE_BILLING_AUDIT
+            .iter()
+            .map(|(provider, _)| provider)
+            .collect();
+        for (index, provider) in audited.iter().enumerate() {
+            assert!(
+                !audited[..index].contains(provider),
+                "duplicate audit row for {provider:?}"
+            );
+        }
+        for provider in ApiProvider::all() {
+            assert!(
+                audited.contains(&provider),
+                "{provider:?} is missing from DEFAULT_ROUTE_BILLING_AUDIT"
+            );
+        }
+        assert_eq!(
+            DEFAULT_ROUTE_BILLING_AUDIT.len(),
+            52,
+            "the audit covers every provider identity, primary and alternate"
+        );
+
+        let config = Config::default();
+        for (provider, expected) in DEFAULT_ROUTE_BILLING_AUDIT {
+            let actual = for_route(&config, *provider);
+            assert_eq!(
+                &actual, expected,
+                "{provider:?} default route billing changed; update the audit deliberately"
+            );
+        }
     }
 }

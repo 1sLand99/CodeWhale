@@ -254,7 +254,7 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
                 | AgentCurrentActivityStatus::Waiting
         )
     {
-        let mut current = vec![activity_status_label(activity.status).to_string()];
+        let mut current = vec![activity_status_label(activity.status, app.ui_locale).into_owned()];
         if let Some(tool) = activity
             .current_tool
             .as_deref()
@@ -429,8 +429,17 @@ fn safe_parent_from_meta(app: &App, meta: Option<&AgentProgressMeta>) -> String 
     }
 }
 
-fn activity_status_label(status: AgentCurrentActivityStatus) -> &'static str {
-    match status {
+fn activity_status_label(
+    status: AgentCurrentActivityStatus,
+    locale: codewhale_localization::Locale,
+) -> std::borrow::Cow<'static, str> {
+    if status == AgentCurrentActivityStatus::Parked {
+        return codewhale_localization::tr(
+            locale,
+            codewhale_localization::MessageId::AgentStatusParked,
+        );
+    }
+    std::borrow::Cow::Borrowed(match status {
         AgentCurrentActivityStatus::Queued => "queued",
         AgentCurrentActivityStatus::Starting => "starting",
         AgentCurrentActivityStatus::Running => "running",
@@ -441,13 +450,21 @@ fn activity_status_label(status: AgentCurrentActivityStatus) -> &'static str {
         AgentCurrentActivityStatus::Failed => "failed",
         AgentCurrentActivityStatus::Canceled => "canceled",
         AgentCurrentActivityStatus::Interrupted => "interrupted",
-    }
+        AgentCurrentActivityStatus::Parked => unreachable!("handled above"),
+    })
 }
 
 fn pending_question<'a>(
     agent: Option<&'a SubAgentResult>,
     meta: Option<&'a AgentProgressMeta>,
 ) -> Option<&'a str> {
+    // A parked child carries a `needs_input` note that is phrased as a
+    // question but asks the *operator* nothing — it is the resume recipe.
+    // Reporting it as a pending question is the #5906 complaint verbatim, so
+    // this surface reports the parked state and its recovery instead.
+    if agent.is_some_and(crate::tui::subagent_routing::subagent_is_parked) {
+        return None;
+    }
     agent
         .and_then(|agent| agent.needs_input.as_ref())
         .map(|needs_input| needs_input.question.as_str())
@@ -552,6 +569,7 @@ mod tests {
 
     fn agent(agent_id: &str, status: SubAgentStatus) -> SubAgentResult {
         SubAgentResult {
+            usage: None,
             name: agent_id.to_string(),
             agent_id: agent_id.to_string(),
             context_mode: "isolated".to_string(),
@@ -722,6 +740,7 @@ mod tests {
             provider_id: "deepseek".to_string(),
             model_id: "deepseek-v4-pro".to_string(),
             route_source: "roster".to_string(),
+            fallback_note: None,
             requested_reasoning: "inherit".to_string(),
             effective_reasoning: Some("high".to_string()),
             runtime_version: "test".to_string(),
@@ -954,5 +973,90 @@ mod tests {
                     if id == agent_id
             ));
         }
+    }
+    // === #5906: a parked husk is not a pending question ==================
+
+    /// The runtime hands a parked child a `needs_input` note that reads like a
+    /// question, so Agent Details used to print `Pending question: Resume this
+    /// parked child with ...` — a question no operator ever asked and none can
+    /// answer. Build one exactly as the runtime does and assert the view names
+    /// the state and both ways out instead.
+    fn parked_child(agent_id: &str) -> SubAgentResult {
+        let mut child = agent(
+            agent_id,
+            SubAgentStatus::Interrupted(
+                "Parent turn ended before this turn-owned child settled.".to_string(),
+            ),
+        );
+        child.worker_status = Some(AgentWorkerStatus::WaitingForUser);
+        child.needs_input = Some(SubAgentNeedsInput {
+            question: format!(
+                "Resume this parked child with agent(action=\"start\", resume_from=\"{agent_id}\")."
+            ),
+        });
+        child.checkpoint = Some(crate::tools::subagent::SubAgentCheckpoint {
+            checkpoint_id: format!("{agent_id}:step:2"),
+            agent_id: agent_id.to_string(),
+            continuation_handle: format!("agent:{agent_id}:checkpoint"),
+            reason: "Parent turn ended before this turn-owned child settled.".to_string(),
+            continuable: true,
+            steps_taken: 2,
+            message_count: 4,
+            created_at_ms: 1_000,
+            messages: Vec::new(),
+            omitted_messages: 0,
+            parked_at_turn_end: true,
+        });
+        child
+    }
+
+    #[test]
+    fn parked_details_name_the_state_and_the_recovery_not_a_pending_question() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        let agent_id = "agent_parked_details";
+        app.subagent_cache.push(parked_child(agent_id));
+        crate::tui::subagent_routing::reconcile_subagent_activity_state(&mut app);
+
+        let body = project_agent_details(&app, agent_id)
+            .expect("projection")
+            .body;
+
+        assert!(body.contains("State: parked"), "{body}");
+        assert!(
+            !body.contains("waiting for input") && !body.contains("State: waiting"),
+            "a parked husk must not wear the answerable label: {body}"
+        );
+        assert!(
+            !body.contains("Pending question"),
+            "nothing asked the operator anything: {body}"
+        );
+        // The recovery is quoted with the verbs the runtime actually exposes.
+        assert!(body.contains("resume_from"), "{body}");
+        assert!(body.contains("cancel"), "{body}");
+    }
+
+    #[test]
+    fn a_child_that_really_asked_still_reports_waiting_for_input() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        let agent_id = "agent_really_asked";
+        let mut child = agent(agent_id, SubAgentStatus::Running);
+        child.worker_status = Some(AgentWorkerStatus::WaitingForUser);
+        child.needs_input = Some(SubAgentNeedsInput {
+            question: "Which path should I use?".to_string(),
+        });
+        app.subagent_cache.push(child);
+        crate::tui::subagent_routing::reconcile_subagent_activity_state(&mut app);
+
+        let body = project_agent_details(&app, agent_id)
+            .expect("projection")
+            .body;
+        assert!(body.contains("State: waiting"), "{body}");
+        assert!(
+            body.contains("Pending question: Which path should I use?"),
+            "{body}"
+        );
+        assert!(!body.contains("parked"), "{body}");
     }
 }

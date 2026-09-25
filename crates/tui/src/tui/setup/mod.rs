@@ -20,8 +20,6 @@ use ratatui::{
 };
 
 use crate::config::{Config, has_api_key};
-use crate::localization::{Locale, MessageId, tr};
-use crate::palette;
 use crate::prompts::{
     BASE_PROMPT_OVERRIDE_OPT_IN_ENV, CONSTITUTION_OVERRIDE_FILE, base_prompt_override_opt_in,
 };
@@ -31,6 +29,8 @@ use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_panel_scroll_rail, render_underwater_surface,
 };
+use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 use codewhale_config::{
     AutonomyPreference, ConstitutionAuthoring, ConstitutionChoice, ConstitutionSource,
@@ -272,11 +272,11 @@ impl Default for SetupRuntimeFacts {
             sandbox_mode_value: "default".to_string(),
             network: "not configured".to_string(),
             network_default_value: "prompt".to_string(),
-            runtime_result: "runtime posture not loaded".to_string(),
+            runtime_result: "permissions not loaded".to_string(),
             operate_runtime_ready: false,
-            operate_runtime_result: "worker runtime not loaded".to_string(),
+            operate_runtime_result: "agent runtime not loaded".to_string(),
             fleet_roster_ready: false,
-            fleet_roster_result: "Fleet roster not loaded".to_string(),
+            fleet_roster_result: "Fleet not loaded".to_string(),
             operate_concurrency_result: "concurrency not loaded".to_string(),
             operate_result: "operate readiness not loaded".to_string(),
             hotbar_bindings_result: "Hotbar config not loaded".to_string(),
@@ -360,7 +360,7 @@ impl SetupRuntimeFacts {
             )
         } else if let Some(url) = crate::config::credential_help_for_provider_route(
             app.api_provider,
-            &config.deepseek_base_url(),
+            &config.active_route_base_url(),
         )
         .credential_url
         {
@@ -374,7 +374,7 @@ impl SetupRuntimeFacts {
                 readiness.label(),
                 crate::config::credential_help_for_provider_route(
                     app.api_provider,
-                    &config.deepseek_base_url(),
+                    &config.active_route_base_url(),
                 )
                 .guidance
             )
@@ -394,7 +394,7 @@ impl SetupRuntimeFacts {
         );
         let shell = if app.allow_shell { "enabled" } else { "hidden" }.to_string();
         let trust = if app.trust_mode {
-            "trusted workspace / writes allowed by posture"
+            "trusted workspace / writes allowed by permissions"
         } else {
             "workspace trust not elevated"
         }
@@ -3329,9 +3329,12 @@ impl ModalView for SetupWizardView {
         let scroll = self.body_scroll.min(max_scroll);
         let content_area =
             render_panel_scroll_rail(content_area, buf, visual_rows, scroll, visible_rows, true);
+        // Explicit base ink: same black-on-black hazard as the pager body;
+        // value spans below carry no fg of their own.
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0))
+            .style(Style::default().fg(palette::TEXT_PRIMARY))
             .render(content_area, buf);
     }
 
@@ -4233,15 +4236,11 @@ fn project_runtime_override_warning(workspace: &Path, locale: Locale) -> Option<
     // workspace falls back to the user's baseline. Say so here rather than
     // only in a log line the TUI never shows.
     if let Some((path, reason)) = outcome.invalid() {
-        let path = path.display();
-        return Some(match locale {
-            Locale::ZhHans => format!(
-                "无法解析项目配置 {path}（{reason}）。此工作区的项目级运行姿态限制未生效，将回退到用户默认值。",
-            ),
-            _ => format!(
-                "Project config {path} could not be parsed ({reason}). Its runtime posture restrictions are NOT in effect; this workspace falls back to your user defaults.",
-            ),
-        });
+        return Some(
+            tr(locale, MessageId::SetupProjectPermissionsInvalid)
+                .replace("{path}", &path.display().to_string())
+                .replace("{reason}", reason),
+        );
     }
     let project = outcome.into_config()?;
     let mut fields = Vec::new();
@@ -4254,16 +4253,10 @@ fn project_runtime_override_warning(workspace: &Path, locale: Locale) -> Option<
     if fields.is_empty() {
         return None;
     }
-    Some(match locale {
-        Locale::ZhHans => format!(
-            "此工作区的项目配置包含 {}。预设会保存用户默认值；项目配置仍可在此工作区收紧运行姿态。",
-            fields.join(", ")
-        ),
-        _ => format!(
-            "Project config contains {}. Presets save user defaults; project config can still tighten runtime posture in this workspace.",
-            fields.join(", ")
-        ),
-    })
+    Some(
+        tr(locale, MessageId::SetupProjectPermissionsOverride)
+            .replace("{fields}", &fields.join(", ")),
+    )
 }
 
 fn setup_report_result(state: &SetupState, facts: &SetupRuntimeFacts) -> String {
@@ -5493,6 +5486,65 @@ mod progressive_tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn wizard_body_cells_carry_explicit_ink_on_the_dark_surface() {
+        // The setup surface paints WHALE_BG while the blurb span carries no
+        // fg of its own, so without the base paragraph style it inherits the
+        // terminal default: black-on-black on light-profile terminals. Every
+        // blurb cell must pin to the body ink; the explicitly styled title
+        // must patch over the base unchanged.
+        let view = SetupWizardView::new_with_facts(SetupState::default(), Locale::En, facts(false));
+        let blurb_head: String = tr(Locale::En, MessageId::OnboardProviderBlurb)
+            .chars()
+            .take(16)
+            .collect();
+        let title_head: String = tr(Locale::En, MessageId::OnboardProviderTitle)
+            .chars()
+            .take(16)
+            .collect();
+        assert!(
+            !blurb_head.is_empty() && !title_head.is_empty(),
+            "test needs non-empty title and blurb heads to locate rows"
+        );
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buffer = Buffer::empty(area);
+        ModalView::render(&view, area, &mut buffer);
+        let mut blurb_hit = false;
+        let mut title_hit = false;
+        let mut checked = 0;
+        for y in 0..area.height {
+            let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            let expected = if row.contains(blurb_head.as_str()) {
+                blurb_hit = true;
+                Some(palette::TEXT_PRIMARY)
+            } else if row.contains(title_head.as_str()) {
+                title_hit = true;
+                Some(palette::WHALE_ACTION)
+            } else {
+                None
+            };
+            let Some(fg) = expected else {
+                continue;
+            };
+            for x in 0..area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol().trim().is_empty() {
+                    continue;
+                }
+                assert_eq!(
+                    cell.style().fg,
+                    Some(fg),
+                    "setup body cell ({x}, {y}) must carry explicit ink"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            blurb_hit && title_hit && checked > 0,
+            "expected title and blurb rows in the rendered wizard"
+        );
     }
 
     #[test]

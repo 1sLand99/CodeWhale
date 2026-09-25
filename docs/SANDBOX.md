@@ -147,6 +147,8 @@ sandbox_api_key = "YOUR_API_KEY"
 ```
 
 `sandbox_backend = "none"` (or omitting the key) keeps local execution.
+Unsupported backend settings refuse shell execution; they never silently select
+local execution. Choose a supported backend or explicitly select `none`.
 
 ## Policies and fallbacks
 

@@ -2,7 +2,7 @@
 //!
 //! Each turn the engine takes a `pre-turn:<seq>` snapshot of the user's
 //! workspace into a side git repo at
-//! `~/.deepseek/snapshots/<project_hash>/<worktree_hash>/.git`, then a
+//! `<snapshot state dir>/<project_hash>/<worktree_hash>/.git`, then a
 //! matching `post-turn:<seq>` snapshot when the turn finishes. Users
 //! can roll back via `/restore N` (slash command) or, when the model
 //! recognises an "undo my last edit" intent, the `revert_turn` tool.
@@ -53,6 +53,8 @@ pub use prune::{DEFAULT_MAX_AGE, prune_older_than};
 pub const DEFAULT_MAX_SNAPSHOTS: usize = 50;
 #[allow(unused_imports)]
 pub use repo::{
-    DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT, Snapshot, SnapshotId, SnapshotRepo,
-    estimate_workspace_size_bounded,
+    DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT, GATE_TOO_LARGE_MARKER, GATE_TOO_MANY_ENTRIES_MARKER,
+    GATE_UNSAFE_LOCATION_MARKER, PathRestoreAction, PathRestoreOutcome, SIZE_WALK_MAX_ENTRIES,
+    Snapshot, SnapshotId, SnapshotRepo, WorkspaceGate, estimate_workspace_size_bounded,
+    workspace_relative_path,
 };

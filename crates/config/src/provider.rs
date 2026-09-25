@@ -8,15 +8,17 @@
 use super::{
     DEFAULT_ANTIGRAVITY_BASE_URL, DEFAULT_ANTIGRAVITY_MODEL, DEFAULT_ARCEE_BASE_URL,
     DEFAULT_ARCEE_MODEL, DEFAULT_ATLASCLOUD_BASE_URL, DEFAULT_ATLASCLOUD_MODEL,
-    DEFAULT_CONCENTRATE_BASE_URL, DEFAULT_CONCENTRATE_MODEL, DEFAULT_DEEPINFRA_BASE_URL,
-    DEFAULT_DEEPINFRA_MODEL, DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL, DEFAULT_DEEPSEEK_ANTHROPIC_MODEL,
-    DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL, DEFAULT_EDENAI_BASE_URL,
-    DEFAULT_EDENAI_MODEL, DEFAULT_FIREWORKS_BASE_URL, DEFAULT_FIREWORKS_MODEL,
-    DEFAULT_GOOGLE_BASE_URL, DEFAULT_GOOGLE_MODEL, DEFAULT_HUGGINGFACE_BASE_URL,
-    DEFAULT_HUGGINGFACE_MODEL, DEFAULT_LONGCAT_BASE_URL, DEFAULT_LONGCAT_MODEL,
-    DEFAULT_META_BASE_URL, DEFAULT_META_MODEL, DEFAULT_MINIMAX_ANTHROPIC_BASE_URL,
-    DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_MODEL, DEFAULT_MISTRAL_BASE_URL,
-    DEFAULT_MISTRAL_MODEL, DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL,
+    DEFAULT_CODEWHALE_BASE_URL, DEFAULT_CODEWHALE_MODEL, DEFAULT_CONCENTRATE_BASE_URL,
+    DEFAULT_CONCENTRATE_MODEL, DEFAULT_CSDN_BASE_URL, DEFAULT_CSDN_MODEL,
+    DEFAULT_DEEPINFRA_BASE_URL, DEFAULT_DEEPINFRA_MODEL, DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL,
+    DEFAULT_DEEPSEEK_ANTHROPIC_MODEL, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_EDENAI_BASE_URL, DEFAULT_EDENAI_MODEL, DEFAULT_FIREWORKS_BASE_URL,
+    DEFAULT_FIREWORKS_MODEL, DEFAULT_GOOGLE_BASE_URL, DEFAULT_GOOGLE_MODEL,
+    DEFAULT_HUGGINGFACE_BASE_URL, DEFAULT_HUGGINGFACE_MODEL, DEFAULT_LONGCAT_BASE_URL,
+    DEFAULT_LONGCAT_MODEL, DEFAULT_META_BASE_URL, DEFAULT_META_MODEL,
+    DEFAULT_MINIMAX_ANTHROPIC_BASE_URL, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_MODEL,
+    DEFAULT_MISTRAL_BASE_URL, DEFAULT_MISTRAL_MODEL, DEFAULT_MODELSCOPE_BASE_URL,
+    DEFAULT_MODELSCOPE_MODEL, DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL,
     DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MODELSTUDIO_TOKEN_PLAN_MODEL,
     DEFAULT_MOONSHOT_BASE_URL, DEFAULT_MOONSHOT_MODEL, DEFAULT_NOVITA_BASE_URL,
     DEFAULT_NOVITA_MODEL, DEFAULT_NVIDIA_NIM_BASE_URL, DEFAULT_NVIDIA_NIM_MODEL,
@@ -34,8 +36,9 @@ use super::{
     DEFAULT_VOLCENGINE_BASE_URL, DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL,
     DEFAULT_WANJIE_ARK_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL,
     DEFAULT_XIAOMI_MIMO_BASE_URL, DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL,
-    DEFAULT_ZAI_MODEL, MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL,
-    MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL, ProviderKind,
+    DEFAULT_ZAI_MODEL, DEFAULT_ZENMUX_BASE_URL, DEFAULT_ZENMUX_MODEL,
+    MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL, MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL,
+    ProviderKind,
 };
 
 /// Wire protocol spoken by a provider.
@@ -144,6 +147,47 @@ pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str = "https://www.kimi.com/co
 
 /// Ollama's account page for creating API keys used by the hosted API.
 pub const OLLAMA_CLOUD_API_KEY_URL: &str = "https://ollama.com/settings/keys";
+
+/// Codewhale account page for minting a `cwc_key_…` API key.
+///
+/// The Codewhale API route needs a key carrying the `models:infer` scope; the
+/// same page is both the credential console and the scope documentation.
+pub const CODEWHALE_API_KEY_URL: &str = "https://app.codewhale.net/settings?section=api";
+
+/// Environment variable that overrides the Codewhale API base URL.
+///
+/// Mirrors `CODEWHALE_CLOUD_API_BASE` for the account control plane: HTTPS is
+/// required except for loopback HTTP, so a test harness can point the route at
+/// a local stub without ever enabling cleartext to a remote host.
+pub const CODEWHALE_API_BASE_ENV: &str = "CODEWHALE_API_BASE";
+
+/// Resolve the Codewhale API base URL from the environment.
+///
+/// Returns `None` when the variable is unset, empty, or names an origin this
+/// route refuses to send a `cwc_key_…` bearer to. A bearer token has no replay
+/// protection, so cleartext is allowed only on loopback — the same rule the
+/// account control plane applies to `CODEWHALE_CLOUD_API_BASE`.
+#[must_use]
+pub fn codewhale_api_base_from_env() -> Option<String> {
+    let raw = std::env::var(CODEWHALE_API_BASE_ENV).ok()?;
+    codewhale_api_base(&raw)
+}
+
+/// Validate one candidate Codewhale API base URL. See [`codewhale_api_base_from_env`].
+#[must_use]
+pub fn codewhale_api_base(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (scheme, host, has_credentials) = crate::device_code::url_scheme_and_host(trimmed).ok()?;
+    if has_credentials {
+        return None;
+    }
+    let allowed =
+        scheme == "https" || (scheme == "http" && crate::device_code::is_loopback_host(&host));
+    allowed.then(|| trimmed.to_string())
+}
 
 /// Ollama Cloud's exact OpenAI-compatible API base URL.
 pub const OLLAMA_CLOUD_BASE_URL: &str = DEFAULT_OLLAMA_CLOUD_BASE_URL;
@@ -329,6 +373,12 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             docs_url: Some("https://huggingface.co/docs/hub/en/security-tokens"),
             guidance: "Create a scoped Hugging Face access token.",
         },
+        ProviderKind::Modelscope => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some("https://modelscope.cn/my/settings/token"),
+            docs_url: None,
+            guidance: "Create an SDK token in ModelScope account settings.",
+        },
         ProviderKind::Together => CredentialHelp {
             acquisition: ApiKey,
             credential_url: Some("https://api.together.ai/settings/api-keys"),
@@ -439,6 +489,24 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             docs_url: Some("https://www.edenai.co/docs"),
             guidance: "Create an Eden AI API key from the Eden AI dashboard, then select models by their provider/model namespaced id.",
         },
+        ProviderKind::Zenmux => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some("https://zenmux.ai/platform/pay-as-you-go"),
+            docs_url: Some("https://zenmux.ai/docs/"),
+            guidance: "Create a ZenMux API key from the Pay As You Go management page, then select models by their provider/model namespaced id. The catalog at https://zenmux.ai/api/v1/models is keyless-readable.",
+        },
+        ProviderKind::Csdn => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some("https://ai.csdn.net/workbench/api-key"),
+            docs_url: Some("https://ai.csdn.net/coding-plan"),
+            guidance: "Create an API key in the CSDN console — choose the Coding Plan key type so glm_for_coding calls bill against plan quota; a general key bills metered.",
+        },
+        ProviderKind::Codewhale => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some(CODEWHALE_API_KEY_URL),
+            docs_url: Some("https://app.codewhale.net/settings?section=api"),
+            guidance: "Create an API key with the models:infer scope at https://app.codewhale.net/settings?section=api",
+        },
         ProviderKind::Concentrate => CredentialHelp {
             acquisition: ApiKey,
             credential_url: Some("https://concentrate.ai/"),
@@ -455,10 +523,10 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             guidance: "Sign in to Alibaba Cloud Model Studio (Bailian console), create or copy an API key, and select the plan endpoint matching your subscription (Token Plan or Coding Plan).",
         },
         ProviderKind::Antigravity => CredentialHelp {
-            acquisition: OAuth,
+            acquisition: Configuration,
             credential_url: None,
-            docs_url: Some("https://antigravity.google/docs/cli/reference"),
-            guidance: "Sign in with the official agy CLI (1.1.13). Codewhale can read that login's token read-only from the exact pinned state.vscdb after `codewhale auth external-consent`; it never writes or refreshes it. An ANTIGRAVITY_API_KEY or AGY_ADC_AUTH in the process wins over the file.",
+            docs_url: None,
+            guidance: "Legacy configuration only; this route is disabled. Run `codewhale auth clear --provider antigravity` to clear only Codewhale-owned legacy state, then use provider `google` with `GEMINI_API_KEY` for Gemini.",
         },
         ProviderKind::Google => CredentialHelp {
             acquisition: ApiKey,
@@ -556,13 +624,20 @@ pub fn is_exact_xai_platform_route(kind: ProviderKind, base_url: &str) -> bool {
 /// Completions endpoints.
 ///
 /// Z.ai-only request fields must not leak to compatible gateways merely
-/// because they expose the same model id. Both the Coding Plan and general
-/// platform endpoints are first-party; neighboring paths remain distinct.
+/// because they expose the same model id. Both api.z.ai products (Coding
+/// Plan and general platform) and BigModel's general platform endpoint are
+/// first-party: `open.bigmodel.cn/api/paas/v4` is the same open platform
+/// whose docs prescribe the same `thinking` / `reasoning_effort` dialect
+/// (including the forced-thinking GLM-5.3 family), and the bundled catalog
+/// already lists it as the Z.ai catalog API. Neighboring paths — including
+/// BigModel's `/preview` — remain distinct, mirroring the web-search and
+/// official-endpoint families.
 #[must_use]
 pub fn is_exact_zai_chat_route(kind: ProviderKind, base_url: &str) -> bool {
     kind == ProviderKind::Zai
         && (is_exact_https_route(base_url, "api.z.ai", "api/coding/paas/v4")
-            || is_exact_https_route(base_url, "api.z.ai", "api/paas/v4"))
+            || is_exact_https_route(base_url, "api.z.ai", "api/paas/v4")
+            || is_exact_https_route(base_url, "open.bigmodel.cn", "api/paas/v4"))
 }
 
 /// Whether a configured route is one of MiniMax's exact first-party OpenAI
@@ -588,6 +663,18 @@ pub fn is_exact_minimax_anthropic_route(kind: ProviderKind, base_url: &str) -> b
     kind == ProviderKind::MinimaxAnthropic
         && (is_exact_https_route(base_url, "api.minimax.io", "anthropic")
             || is_exact_https_route(base_url, "api.minimaxi.com", "anthropic"))
+}
+
+/// Whether a configured route is exactly CSDN 星图's official OpenAI-compatible
+/// platform endpoint.
+///
+/// Coding Plan keys and general marketplace keys share this one endpoint, so
+/// the URL proves neither product — only that the route is first-party.
+/// Neighboring paths, HTTP downgrades, and lookalike hosts must not inherit
+/// CSDN billing or wire semantics.
+#[must_use]
+pub fn is_exact_csdn_platform_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Csdn && is_exact_https_route(base_url, "ai.csdn.net", "api/model/v1")
 }
 
 /// Return credential help for one concrete provider route.
@@ -629,6 +716,7 @@ macro_rules! provider {
         [$($env_var:literal),* $(,)?],
         $config_key:literal,
         aliases: [$($alias:literal),* $(,)?]
+        $(, wire_policy: $wire_policy:expr)?
     ) => {
         /// Zero-sized metadata entry for this built-in provider.
         pub struct $struct_name;
@@ -665,6 +753,10 @@ macro_rules! provider {
             fn aliases(&self) -> &'static [&'static str] {
                 &[$($alias),*]
             }
+
+            $(fn wire_policy(&self) -> WirePolicy {
+                $wire_policy
+            })?
         }
     };
 }
@@ -1009,6 +1101,17 @@ provider!(
     aliases: ["hugging-face", "hugging_face", "hf"]
 );
 provider!(
+    Modelscope,
+    Modelscope,
+    "modelscope",
+    "ModelScope",
+    DEFAULT_MODELSCOPE_BASE_URL,
+    DEFAULT_MODELSCOPE_MODEL,
+    ["MODELSCOPE_API_KEY"],
+    "modelscope",
+    aliases: ["model-scope", "model_scope", "modelscope-cn", "modelscope_cn"]
+);
+provider!(
     Together,
     Together,
     "together",
@@ -1050,10 +1153,10 @@ provider!(
     Antigravity,
     Antigravity,
     "antigravity",
-    "Google Antigravity",
+    "Antigravity (legacy, disabled)",
     DEFAULT_ANTIGRAVITY_BASE_URL,
     DEFAULT_ANTIGRAVITY_MODEL,
-    ["ANTIGRAVITY_API_KEY"],
+    [],
     "antigravity",
     aliases: ["agy"]
 );
@@ -1321,7 +1424,8 @@ provider!(
     DEFAULT_OPENCODE_GO_MODEL,
     ["OPENCODE_GO_API_KEY"],
     "opencode_go",
-    aliases: ["opencode_go", "opencodego"]
+    aliases: ["opencode_go", "opencodego"],
+    wire_policy: WirePolicy::ModelAware
 );
 
 /// OpenCode Zen gateway with a model-scoped wire protocol.
@@ -1358,6 +1462,60 @@ impl Provider for OpencodeZen {
 
     fn aliases(&self) -> &'static [&'static str] {
         &["opencode_zen", "opencodezen", "zen", "opencode"]
+    }
+
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::ModelAware
+    }
+}
+
+/// Codewhale API — account-backed model access with a model-scoped wire.
+///
+/// One base URL and one `cwc_key_…` account API key with the `models:infer`
+/// scope. The account's authenticated `GET {base}/models` is the catalog
+/// authority: each row is `provider/model` and carries the protocol
+/// (`chat-completions` → `{base}/chat/completions`, `anthropic-messages` →
+/// `{base}/messages`, `responses` → `{base}/responses`). Every protocol
+/// authenticates with `Authorization: Bearer`; the Anthropic passthrough
+/// deliberately does not take `x-api-key`.
+pub struct Codewhale;
+
+impl Provider for Codewhale {
+    fn id(&self) -> &'static str {
+        "codewhale"
+    }
+
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Codewhale
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Codewhale"
+    }
+
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_CODEWHALE_BASE_URL
+    }
+
+    fn default_model(&self) -> &'static str {
+        DEFAULT_CODEWHALE_MODEL
+    }
+
+    fn env_vars(&self) -> &'static [&'static str] {
+        &["CODEWHALE_API_KEY"]
+    }
+
+    fn provider_config_key(&self) -> &'static str {
+        "codewhale"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &[
+            "codewhale-api",
+            "codewhale_api",
+            "cw-api",
+            "codewhale-cloud",
+        ]
     }
 
     fn wire_policy(&self) -> WirePolicy {
@@ -1417,6 +1575,34 @@ provider!(
     ["EDENAI_API_KEY"],
     "edenai",
     aliases: ["eden-ai", "eden_ai"]
+);
+provider!(
+    Zenmux,
+    Zenmux,
+    "zenmux",
+    "ZenMux",
+    DEFAULT_ZENMUX_BASE_URL,
+    DEFAULT_ZENMUX_MODEL,
+    ["ZENMUX_API_KEY"],
+    "zenmux",
+    aliases: ["zen-mux", "zen_mux"]
+);
+provider!(
+    Csdn,
+    Csdn,
+    "csdn",
+    "CSDN",
+    DEFAULT_CSDN_BASE_URL,
+    DEFAULT_CSDN_MODEL,
+    ["CSDN_API_KEY"],
+    "csdn",
+    aliases: [
+        "csdn-ai",
+        "csdn_ai",
+        "csdn-coding-plan",
+        "csdn_coding_plan",
+        "starmap"
+    ]
 );
 
 /// Concentrate — OpenAI Responses-compatible AI gateway (aggregator).
@@ -1741,6 +1927,7 @@ static VLLM: Vllm = Vllm;
 static OLLAMA: Ollama = Ollama;
 static OLLAMA_CLOUD: OllamaCloud = OllamaCloud;
 static HUGGINGFACE: Huggingface = Huggingface;
+static MODELSCOPE: Modelscope = Modelscope;
 static TOGETHER: Together = Together;
 static QIANFAN: Qianfan = Qianfan;
 static OPENAI_CODEX: OpenaiCodex = OpenaiCodex;
@@ -1761,7 +1948,10 @@ static MISTRAL: Mistral = Mistral;
 static ANTIGRAVITY: Antigravity = Antigravity;
 static TELECOMJS: Telecomjs = Telecomjs;
 static EDENAI: Edenai = Edenai;
+static ZENMUX: Zenmux = Zenmux;
+static CSDN: Csdn = Csdn;
 static CONCENTRATE: Concentrate = Concentrate;
+static CODEWHALE: Codewhale = Codewhale;
 static MODELSTUDIO_TOKEN_PLAN: ModelstudioTokenPlan = ModelstudioTokenPlan;
 static MODELSTUDIO_TOKEN_PLAN_ANTHROPIC: ModelstudioTokenPlanAnthropic =
     ModelstudioTokenPlanAnthropic;
@@ -1770,7 +1960,7 @@ static MODELSTUDIO_CODING_PLAN_ANTHROPIC: ModelstudioCodingPlanAnthropic =
     ModelstudioCodingPlanAnthropic;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 48] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 52] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -1792,6 +1982,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 48] = [
     &OLLAMA,
     &OLLAMA_CLOUD,
     &HUGGINGFACE,
+    &MODELSCOPE,
     &TOGETHER,
     &QIANFAN,
     &OPENAI_CODEX,
@@ -1811,7 +2002,10 @@ static PROVIDER_REGISTRY: [&dyn Provider; 48] = [
     &MISTRAL,
     &TELECOMJS,
     &EDENAI,
+    &ZENMUX,
+    &CSDN,
     &CONCENTRATE,
+    &CODEWHALE,
     &MODELSTUDIO_TOKEN_PLAN,
     &MODELSTUDIO_TOKEN_PLAN_ANTHROPIC,
     &MODELSTUDIO_CODING_PLAN,
@@ -1821,11 +2015,11 @@ static PROVIDER_REGISTRY: [&dyn Provider; 48] = [
     &CUSTOM,
 ];
 
-/// Return all built-in provider metadata entries in `ProviderKind::ALL` order.
+/// Return all built-in and legacy provider metadata entries.
 ///
-/// This insertion order is the stable order used for internal parsing and
-/// default selection. It is intentionally NOT the order user-facing UI should
-/// render; for browsing/picker surfaces use [`providers_sorted_for_display`].
+/// The full registry retains legacy entries needed to read old configuration.
+/// It is intentionally NOT a user-facing provider list; for browsing/picker
+/// surfaces use [`providers_sorted_for_display`].
 #[must_use]
 pub fn all_providers() -> &'static [&'static dyn Provider] {
     &PROVIDER_REGISTRY
@@ -1839,16 +2033,22 @@ pub fn all_providers() -> &'static [&'static dyn Provider] {
 /// happens to sit first in [`ProviderKind::ALL`] (historically DeepSeek). The
 /// ordering policy intentionally differs from internal parsing/default order:
 ///
-/// - [`all_providers`] / [`ProviderKind::ALL`] — stable order for internal
-///   matching, parsing, and default selection. Do not reorder.
+/// - [`all_providers`] — full compatibility registry for internal identity
+///   matching, including legacy entries.
+/// - [`ProviderKind::ALL`] — stable selectable catalog order. Do not reorder.
 /// - [`providers_sorted_for_display`] — neutral alphabetical order for UI
-///   browsing. DeepSeek stays present and searchable but is not hard-coded
-///   first; a caller may still highlight/pin the active provider separately.
+///   browsing, with legacy tombstones omitted. DeepSeek stays present and
+///   searchable but is not hard-coded first; a caller may still highlight/pin
+///   the active provider separately.
 ///
 /// Returns an owned `Vec` because the sorted order is computed, not static.
 #[must_use]
 pub fn providers_sorted_for_display() -> Vec<&'static dyn Provider> {
-    let mut providers = all_providers().to_vec();
+    let mut providers: Vec<_> = all_providers()
+        .iter()
+        .copied()
+        .filter(|provider| provider.kind() != ProviderKind::Antigravity)
+        .collect();
     providers.sort_by(|a, b| {
         a.display_name()
             .to_ascii_lowercase()
@@ -2091,6 +2291,11 @@ mod tests {
             "https://api.z.ai/api/coding/paas/v4",
             "https://api.z.ai/api/paas/v4/",
             "HTTPS://API.Z.AI/api/paas/v4",
+            // BigModel's general platform endpoint is the same first-party
+            // open platform; authority case stays insignificant.
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4/",
+            "HTTPS://OPEN.BIGMODEL.CN/api/paas/v4",
         ] {
             assert!(is_exact_zai_chat_route(ProviderKind::Zai, route), "{route}");
         }
@@ -2102,6 +2307,13 @@ mod tests {
             "https://api.z.ai/api/paas/v4#fragment",
             "https://api.z.ai/api/paas/v4//",
             "https://api.z.ai/api/paas/v4/chat/completions",
+            // BigModel neighbors: the undocumented coding path and the
+            // preview product stay fail-closed, like the official-endpoint
+            // and web-search families.
+            "https://open.bigmodel.cn/api/paas/v4/preview",
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "http://open.bigmodel.cn/api/paas/v4",
+            "https://open.bigmodel.cn/API/paas/v4",
             "https://gateway.example/v1",
         ] {
             assert!(
@@ -2112,6 +2324,10 @@ mod tests {
         assert!(!is_exact_zai_chat_route(
             ProviderKind::Openai,
             DEFAULT_ZAI_BASE_URL
+        ));
+        assert!(!is_exact_zai_chat_route(
+            ProviderKind::Openai,
+            "https://open.bigmodel.cn/api/paas/v4"
         ));
     }
 
@@ -2220,6 +2436,26 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_registry_entry_is_a_non_runnable_legacy_tombstone() {
+        let legacy = provider_for_kind(ProviderKind::Antigravity);
+        assert_eq!(legacy.id(), "antigravity");
+        assert!(legacy.env_vars().is_empty());
+        assert!(legacy.default_base_url().ends_with(".invalid"));
+        assert_eq!(legacy.default_model(), "legacy-antigravity-disabled");
+
+        let help = legacy.credential_help();
+        assert_eq!(help.acquisition, CredentialAcquisition::Configuration);
+        assert_eq!(help.credential_url, None);
+        assert_eq!(help.docs_url, None);
+        assert!(
+            help.guidance
+                .contains("codewhale auth clear --provider antigravity")
+        );
+        assert!(help.guidance.contains("provider `google`"));
+        assert!(help.guidance.contains("GEMINI_API_KEY"));
+    }
+
+    #[test]
     fn live_verified_console_replacements_do_not_regress_to_404_links() {
         let openmodel = provider_for_kind(ProviderKind::Openmodel).credential_help();
         assert_eq!(
@@ -2280,7 +2516,7 @@ mod tests {
     #[test]
     fn display_order_differs_from_internal_all_order() {
         // The whole point of the helper is that UI ordering is NOT the
-        // internal ProviderKind::ALL / all_providers() insertion order.
+        // internal compatibility-registry insertion order.
         let display_ids: Vec<&str> = providers_sorted_for_display()
             .iter()
             .map(|p| p.id())
@@ -2294,12 +2530,25 @@ mod tests {
 
     #[test]
     fn display_order_is_complete_and_unique() {
-        // No provider is dropped or duplicated by the sort.
+        // Every selectable provider is retained exactly once; legacy
+        // configuration tombstones stay in the internal registry only.
         let display = providers_sorted_for_display();
         assert_eq!(
             display.len(),
-            all_providers().len(),
-            "display order must include every built-in provider"
+            all_providers().len() - 1,
+            "display order must include every selectable built-in provider"
+        );
+        assert!(
+            all_providers()
+                .iter()
+                .any(|provider| provider.kind() == ProviderKind::Antigravity),
+            "legacy config identity must remain in the internal registry"
+        );
+        assert!(
+            display
+                .iter()
+                .all(|provider| provider.kind() != ProviderKind::Antigravity),
+            "legacy Antigravity tombstone must not appear in provider pickers"
         );
         let mut ids: Vec<&str> = display.iter().map(|p| p.id()).collect();
         ids.sort_unstable();

@@ -22,7 +22,7 @@
 //! - Code rounds and sub-LLM calls travel over a single stdin/stdout
 //!   pipe to a long-lived Python subprocess. No HTTP sidecar.
 
-use crate::models::Usage;
+use codewhale_models::Usage;
 
 pub mod bridge;
 pub mod prompt;
@@ -92,7 +92,7 @@ mod tests {
             prompt_cache_miss_tokens: Some(20),
             reasoning_tokens: Some(4),
             reasoning_replay_tokens: Some(3),
-            server_tool_use: Some(crate::models::ServerToolUsage {
+            server_tool_use: Some(codewhale_models::ServerToolUsage {
                 code_execution_requests: Some(2),
                 tool_search_requests: Some(1),
             }),
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(total.reasoning_replay_tokens, Some(3));
         assert_eq!(
             total.server_tool_use,
-            Some(crate::models::ServerToolUsage {
+            Some(codewhale_models::ServerToolUsage {
                 code_execution_requests: Some(2),
                 tool_search_requests: Some(1),
             })

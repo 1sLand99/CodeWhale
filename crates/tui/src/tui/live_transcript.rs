@@ -32,7 +32,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Widget, Wrap},
 };
 
-use crate::palette;
 use crate::tui::app::App;
 use crate::tui::backtrack::Direction;
 use crate::tui::history::{HistoryCell, TranscriptRenderOptions};
@@ -40,6 +39,7 @@ use crate::tui::transcript_cache::{CachedTranscriptLine, CellId, TranscriptCache
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
 };
+use codewhale_palette as palette;
 
 /// Render mode for the overlay. `Tail` is the original sticky-tail
 /// behaviour (#94). `BacktrackPreview` (#133) highlights the Nth-from-tail
@@ -314,9 +314,16 @@ impl LiveTranscriptOverlay {
 
         let mut cache = self.cache.borrow_mut();
         for (cell_idx, snap) in self.snapshots.iter().enumerate() {
-            let rendered: Vec<CachedTranscriptLine> = match cache.get(snap.id, width, snap.revision)
-            {
-                Some(cached) => cached.to_vec(),
+            // Borrow the cached slice and clone each line (and its links)
+            // exactly once into the flattened output.
+            let split = |cached: &[CachedTranscriptLine]| -> (Vec<Line<'static>>, Vec<_>) {
+                cached
+                    .iter()
+                    .map(|rendered| (rendered.line.clone(), rendered.links.clone()))
+                    .unzip()
+            };
+            let (lines, mut line_links) = match cache.get(snap.id, width, snap.revision) {
+                Some(cached) => split(cached),
                 None => {
                     let rendered = snap
                         .cell
@@ -327,22 +334,15 @@ impl LiveTranscriptOverlay {
                             links: rendered.links,
                         })
                         .collect::<Vec<_>>();
-                    cache.insert(snap.id, width, snap.revision, rendered.clone());
-                    rendered
+                    let split_lines = split(&rendered);
+                    cache.insert(snap.id, width, snap.revision, rendered);
+                    split_lines
                 }
             };
-            let mut lines = rendered
-                .iter()
-                .map(|rendered| rendered.line.clone())
-                .collect::<Vec<_>>();
-            let mut line_links = rendered
-                .into_iter()
-                .map(|rendered| rendered.links)
-                .collect::<Vec<_>>();
 
             if Some(cell_idx) == highlighted_cell_idx {
                 let start = out.len();
-                lines = decorate_highlight(lines);
+                let lines = decorate_highlight(lines);
                 if let Some(first_links) = line_links.first_mut() {
                     *first_links = first_links.iter().map(|link| link.shifted(2)).collect();
                 }

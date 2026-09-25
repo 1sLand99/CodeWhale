@@ -14,11 +14,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Padding, Paragraph, Widget},
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::commands;
-use crate::localization::{Locale, MessageId, tr};
-use crate::palette;
 use crate::skills;
 use crate::tools::spec::ApprovalRequirement;
 use crate::tools::spec::ToolCapability;
@@ -28,6 +25,8 @@ use crate::tui::views::{
     ActionHint, CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
 };
+use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PaletteSection {
@@ -102,6 +101,9 @@ pub fn build_entries_with_plugins(
     commands::user_registry::with_registry_for_workspace(Some(workspace), |user_registry| {
         let all_user_commands = user_registry.iter().collect::<Vec<_>>();
         for command in commands::command_infos() {
+            if command.is_unlisted() {
+                continue;
+            }
             if commands::discovery::user_command_shadows_builtin_canonical(
                 command,
                 &all_user_commands,
@@ -190,7 +192,7 @@ pub fn build_entries_with_plugins(
         .with_shell_tools()
         .with_web_tools()
         .with_git_tools()
-        .with_user_input_tool()
+        .with_user_input_tool(crate::tools::user_input::UserInputLimits::default())
         .with_patch_tools()
         .with_note_tool()
         .with_diagnostics_tool()
@@ -723,10 +725,16 @@ impl CommandPaletteView {
             let entry = &self.entries[*idx];
             (section_rank(entry.section), *score, &entry.label)
         });
+        // Follow the highlighted entry across the refilter instead of leaving a
+        // raw index pointing into a freshly re-sorted list. Every keystroke
+        // refilters, so a clamp alone silently slides the highlight onto an
+        // unrelated row — and Enter runs whatever it landed on. `filtered` holds
+        // indices into the stable `entries`, so the entry is its own identity.
+        let keep = self.filtered.get(self.selected).copied();
         self.filtered = filtered.into_iter().map(|(idx, _)| idx).collect();
-        if self.selected >= self.filtered.len() {
-            self.selected = 0;
-        }
+        self.selected = keep
+            .and_then(|entry| self.filtered.iter().position(|idx| *idx == entry))
+            .unwrap_or(0);
         self.hovered.set(None);
     }
 
@@ -827,14 +835,6 @@ impl ModalView for CommandPaletteView {
                 ViewAction::None
             }
             KeyCode::Down => {
-                self.move_selection(1);
-                ViewAction::None
-            }
-            KeyCode::Char('k') if self.query.is_empty() => {
-                self.move_selection(-1);
-                ViewAction::None
-            }
-            KeyCode::Char('j') if self.query.is_empty() => {
                 self.move_selection(1);
                 ViewAction::None
             }
@@ -996,20 +996,19 @@ impl ModalView for CommandPaletteView {
                 };
 
                 let pointer = crate::tui::glyphs::selection_marker(is_selected);
-                let mut line = format!("{pointer} {:<label_width$}", entry.label);
-                let desc_capacity = popup_width as usize - (label_width + 4);
-                let desc = if entry.description.width() > desc_capacity {
-                    let mut shortened = String::new();
-                    for ch in entry.description.chars() {
-                        if shortened.width() >= desc_capacity.saturating_sub(3) {
-                            break;
-                        }
-                        shortened.push(ch);
-                    }
-                    format!("{shortened}...")
-                } else {
-                    entry.description.clone()
-                };
+                // `{:<width$}` pads but never truncates, so a long label — every
+                // `mcp:server:tool` row — ran past the column and pushed the
+                // description off the card entirely. Truncate first, then pad, so
+                // the description column stays on one axis.
+                let label = crate::tui::ui_text::truncate_line_to_width(&entry.label, label_width);
+                let mut line = format!("{pointer} {label:<label_width$}");
+                // The rows are drawn into `content`, which is the popup less its
+                // borders and padding — measuring against `popup_width` overstated
+                // the room by four columns.
+                let content_width = (popup_width as usize).saturating_sub(4);
+                let desc_capacity = content_width.saturating_sub(label_width + 4);
+                let desc =
+                    crate::tui::ui_text::truncate_line_to_width(&entry.description, desc_capacity);
                 line.push_str("  ");
                 line.push_str(&desc);
                 entry_line_indices.push((lines.len(), absolute));
@@ -1037,6 +1036,49 @@ mod tests {
     use super::*;
     use std::path::Path;
     use tempfile::TempDir;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn refilter_keeps_the_highlight_on_the_entry_the_user_was_looking_at() {
+        // Every keystroke refilters and re-sorts. The index used to be clamped
+        // but never re-anchored, so refining a query could slide the highlight
+        // onto an unrelated row — and Enter runs whatever is highlighted.
+        let entries = vec![
+            palette_entry(PaletteSection::Tool, "tool:one", "alpha", "one"),
+            palette_entry(PaletteSection::Tool, "tool:two", "shared", "two"),
+            palette_entry(PaletteSection::Tool, "tool:three", "shared", "three"),
+        ];
+        let mut view = CommandPaletteView::new(entries);
+
+        view.query = "tool".to_string();
+        view.refilter();
+        view.selected = view
+            .filtered
+            .iter()
+            .position(|idx| view.entries[*idx].label == "tool:three")
+            .expect("tool:three is listed");
+
+        // Narrowing to a query `tool:three` still matches. It moves to a lower
+        // index in the shorter list, which is exactly the case a clamp gets
+        // wrong: the old code reset to 0 and highlighted `tool:two`.
+        view.query = "shared".to_string();
+        view.refilter();
+        assert_eq!(
+            view.selected_entry().map(|entry| entry.label.as_str()),
+            Some("tool:three"),
+            "the highlight jumped to another row: {:?}",
+            view.selected_entry().map(|entry| entry.label.clone())
+        );
+
+        // When the highlighted entry filters out entirely, fall back to the top
+        // rather than to a stale index.
+        view.query = "alpha".to_string();
+        view.refilter();
+        assert_eq!(
+            view.selected_entry().map(|entry| entry.label.as_str()),
+            Some("tool:one")
+        );
+    }
 
     #[test]
     fn visible_window_keeps_selection_in_view_and_fits() {
@@ -1112,6 +1154,66 @@ mod tests {
             },
             show_on_empty_query: true,
         }
+    }
+
+    fn assert_palette_search_owns_text(query: &str) {
+        let entries = ["json", "key", "队列é"]
+            .map(|text| palette_entry(PaletteSection::Command, text, "", text))
+            .to_vec();
+        let mut stack = crate::tui::views::ViewStack::new();
+        stack.push(CommandPaletteView::new(entries));
+        for ch in query.chars() {
+            assert!(
+                stack
+                    .handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                    .is_empty()
+            );
+            assert_eq!(stack.top_kind(), Some(ModalKind::CommandPalette));
+        }
+        let mut modal = stack.pop().unwrap();
+        let view = modal
+            .as_any_mut()
+            .downcast_mut::<CommandPaletteView>()
+            .unwrap();
+        assert_eq!(view.query, query);
+        assert_eq!(view.filtered.len(), 1);
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert!(matches!(
+                view.handle_key(KeyEvent::new(code, KeyModifiers::NONE)),
+                ViewAction::None
+            ));
+            assert_eq!(view.query, query);
+        }
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::InsertText { text }
+            }) if text == query
+        ));
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ViewAction::Close
+        ));
+    }
+
+    #[test]
+    fn palette_search_owns_initial_j() {
+        assert_palette_search_owns_text("json");
+    }
+
+    #[test]
+    fn palette_search_owns_initial_k() {
+        assert_palette_search_owns_text("key");
+    }
+
+    #[test]
+    fn palette_search_owns_unicode() {
+        assert_palette_search_owns_text("队列é");
     }
 
     #[test]
@@ -1737,13 +1839,19 @@ mod tests {
             .iter()
             .filter(|command| user_registry.get(command.name).is_some())
             .count();
+        // Unlisted commands run when typed but are never advertised — see
+        // `commands::traits::UNLISTED_COMMANDS`.
+        let unlisted = commands::command_infos()
+            .iter()
+            .filter(|command| command.is_unlisted() && user_registry.get(command.name).is_none())
+            .count();
         assert_eq!(
             command_entries.len(),
-            commands::command_infos().len() - shadowed_builtins + visible_user_commands
+            commands::command_infos().len() - shadowed_builtins - unlisted + visible_user_commands
         );
 
         for command in commands::command_infos() {
-            if user_registry.get(command.name).is_some() {
+            if user_registry.get(command.name).is_some() || command.is_unlisted() {
                 continue;
             }
             let label = format!("/{}", command.name);
@@ -1889,7 +1997,7 @@ mod tests {
         let user_registry = commands::user_registry::registry_for_workspace(Some(tmp.path()));
 
         for command in commands::command_infos() {
-            if user_registry.get(command.name).is_some() {
+            if user_registry.get(command.name).is_some() || command.is_unlisted() {
                 continue;
             }
             let label = format!("/{}", command.name);
@@ -2181,7 +2289,7 @@ mod tests {
         view.render(area, &mut hovered_buf);
         assert_eq!(
             hovered_buf[(rect.x, rect.y)].bg,
-            crate::palette::SURFACE_ELEVATED,
+            codewhale_palette::SURFACE_ELEVATED,
             "hovered palette entry must show the shared hover band"
         );
     }

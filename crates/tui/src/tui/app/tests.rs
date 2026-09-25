@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::{ApiProvider, Config, ProviderConfig, ProvidersConfig};
-use crate::models::Usage;
 use crate::settings::Settings;
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use crate::tools::plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
@@ -8,6 +7,7 @@ use crate::tools::todo::TodoStatus;
 use crate::tui::clipboard::{ClipboardHandler, PastedImage};
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
 use crate::tui::motion::MotionMode;
+use codewhale_models::Usage;
 
 fn test_options(yolo: bool) -> TuiOptions {
     TuiOptions {
@@ -20,6 +20,60 @@ fn test_options(yolo: bool) -> TuiOptions {
         yolo,
         ..crate::test_support::test_tui_options(PathBuf::from("."))
     }
+}
+
+#[test]
+fn missing_api_stamps_never_drop_messages_or_shift_preserved_times() {
+    let mut app = App::new(test_options(false), &Config::default());
+    let message = |text: &str| Message {
+        role: codewhale_models::Role::User,
+        content: vec![codewhale_models::ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    };
+    let first = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    let third = first + chrono::Duration::minutes(2);
+    // Reproduce partial legacy/test state without going through restoration,
+    // which already fills missing stamps. Reading it must preserve both rows.
+    app.api_messages = std::sync::Arc::new(vec![message("first"), message("unstamped")]);
+    app.api_message_stamps = vec![first];
+    let observed = app.api_messages_stamped().collect::<Vec<_>>();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].1, first);
+    assert_eq!(observed[1].0, &message("unstamped"));
+
+    app.push_api_message_stamped(message("third"), third);
+    assert_eq!(app.api_message_stamps.len(), 3);
+    assert_eq!(app.api_message_stamps[0], first);
+    assert_eq!(app.api_message_stamps[2], third);
+    app.pop_api_message();
+    assert_eq!(app.api_messages.len(), 2);
+    assert_eq!(app.api_message_stamps.len(), 2);
+    app.truncate_api_messages(1);
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.api_message_stamps, vec![first]);
+}
+
+#[test]
+fn set_api_messages_installs_the_shared_snapshot_without_copying() {
+    let mut app = App::new(test_options(false), &Config::default());
+    let snapshot = Arc::new(vec![Message {
+        role: codewhale_models::Role::User,
+        content: vec![codewhale_models::ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    }]);
+    app.set_api_messages(Arc::clone(&snapshot));
+    assert!(Arc::ptr_eq(&app.api_messages, &snapshot));
+    // Mutating the mirror detaches; the engine snapshot is untouched.
+    app.push_api_message(Message {
+        role: codewhale_models::Role::Assistant,
+        content: vec![],
+    });
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(app.api_messages.len(), 2);
 }
 
 #[test]
@@ -311,7 +365,7 @@ fn test_trust_mode_follows_yolo_on_startup() {
 }
 
 #[test]
-fn reasoning_effort_display_label_uses_codex_xhigh() {
+fn reasoning_effort_display_label_keeps_codex_top_tiers_distinct() {
     assert_eq!(
         ReasoningEffort::Off.display_label_for_provider(ApiProvider::OpenaiCodex),
         "low"
@@ -320,9 +374,19 @@ fn reasoning_effort_display_label_uses_codex_xhigh() {
         ReasoningEffort::Medium.display_label_for_provider(ApiProvider::OpenaiCodex),
         "medium"
     );
+    // The roster publishes xhigh, max and ultra as separate rungs, so the
+    // label must not collapse them onto the old ceiling.
+    assert_eq!(
+        ReasoningEffort::XHigh.display_label_for_provider(ApiProvider::OpenaiCodex),
+        "xhigh"
+    );
     assert_eq!(
         ReasoningEffort::Max.display_label_for_provider(ApiProvider::OpenaiCodex),
-        "xhigh"
+        "max"
+    );
+    assert_eq!(
+        ReasoningEffort::Ultra.display_label_for_provider(ApiProvider::OpenaiCodex),
+        "ultra"
     );
     assert_eq!(
         ReasoningEffort::Max.display_label_for_provider(ApiProvider::Deepseek),
@@ -337,12 +401,12 @@ fn reasoning_effort_display_label_uses_codex_xhigh() {
     app.api_provider = ApiProvider::OpenaiCodex;
     app.reasoning_effort = ReasoningEffort::Max;
     app.auto_model = false;
-    assert_eq!(app.reasoning_effort_display_label(), "xhigh");
+    assert_eq!(app.reasoning_effort_display_label(), "max");
 
     app.reasoning_effort = ReasoningEffort::Auto;
     app.last_effective_reasoning_effort =
         Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Max));
-    assert_eq!(app.reasoning_effort_display_label(), "auto: xhigh");
+    assert_eq!(app.reasoning_effort_display_label(), "auto: max");
 }
 
 #[test]
@@ -515,9 +579,11 @@ fn auto_reasoning_change_invalidates_the_previous_route_and_receipt() {
         },
         scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
         data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
-        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
-            crate::model_routing::AutoRouteHeuristicReason::ComplexRequest,
+        reason: crate::model_routing::AutoRouteReason::LocalFallback(
+            crate::model_routing::AutoRouteHeuristicReason::DeclaredDefault,
         ),
+        decision: None,
+        router_failure: None,
     });
     app.last_effective_reasoning_effort =
         Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Max));
@@ -1096,8 +1162,10 @@ fn active_turn_zai_receipt_overrides_all_mutable_parallel_route_metadata() {
                 "test-secret-never-persisted",
             )),
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: None,
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -1190,9 +1258,19 @@ fn reasoning_effort_scenario() {
             ReasoningEffort::Auto.normalize_for_provider(ApiProvider::OpenaiCodex),
             ReasoningEffort::Medium
         );
+        // Codex sends the rung the operator picked: the roster offers xhigh,
+        // max and ultra as separate efforts per model.
+        assert_eq!(
+            ReasoningEffort::XHigh.api_value_for_provider(ApiProvider::OpenaiCodex),
+            Some("xhigh")
+        );
         assert_eq!(
             ReasoningEffort::Max.api_value_for_provider(ApiProvider::OpenaiCodex),
-            Some("xhigh")
+            Some("max")
+        );
+        assert_eq!(
+            ReasoningEffort::Ultra.api_value_for_provider(ApiProvider::OpenaiCodex),
+            Some("ultra")
         );
         assert_eq!(
             ReasoningEffort::Off.api_value_for_provider(ApiProvider::OpenaiCodex),
@@ -1241,9 +1319,15 @@ fn reasoning_effort_uses_one_strict_alias_table_and_legacy_fallback() {
     for raw in ["off", "none", "disabled", "false"] {
         assert_eq!(ReasoningEffort::parse_strict(raw), Ok(ReasoningEffort::Off));
     }
-    for raw in ["low", "minimum", "minimal", "light"] {
+    for raw in ["low", "minimum", "light"] {
         assert_eq!(ReasoningEffort::parse_strict(raw), Ok(ReasoningEffort::Low));
     }
+    // `minimal` is its own rung: `parse_strict(as_setting(Minimal))` must not
+    // lose the variant by collapsing it onto `Low` (Slice 4, D3).
+    assert_eq!(
+        ReasoningEffort::parse_strict("minimal"),
+        Ok(ReasoningEffort::Minimal)
+    );
     for raw in ["medium", "mid"] {
         assert_eq!(
             ReasoningEffort::parse_strict(raw),
@@ -1687,7 +1771,9 @@ fn app_new_normalizes_saved_codex_reasoning_effort() {
     for (raw, expected, display) in [
         ("off", ReasoningEffort::Low, "low"),
         ("auto", ReasoningEffort::Medium, "medium"),
-        ("max", ReasoningEffort::Max, "xhigh"),
+        ("max", ReasoningEffort::Max, "max"),
+        ("xhigh", ReasoningEffort::XHigh, "xhigh"),
+        ("ultra", ReasoningEffort::Ultra, "ultra"),
     ] {
         std::fs::write(
             tmp.path().join("settings.toml"),
@@ -2054,7 +2140,8 @@ fn critical_context_pressure_remains_visible_over_transient_info_toasts() {
     app.push_status_toast("Saved", StatusToastLevel::Info, None);
 
     assert_eq!(
-        app.active_status_toast().map(|toast| toast.text),
+        app.active_status_toast(crate::tui::underwater::ShellPhase::Working)
+            .map(|toast| toast.text),
         Some("Context critical: 95%".to_string())
     );
 }
@@ -2121,7 +2208,9 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
         !matches!(chip, crate::route_billing::UsageChip::Money(_)),
         "{chip:?}"
     );
-    let rendered = crate::route_billing::format_usage_chip(&chip).unwrap_or_default();
+    let rendered =
+        crate::route_billing::format_usage_chip(&chip, codewhale_localization::Locale::En)
+            .unwrap_or_default();
     assert!(!rendered.contains('$'), "{rendered}");
     assert!(rendered.contains("Codex OAuth quota"), "{rendered}");
 }
@@ -2129,7 +2218,7 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
 #[test]
 fn provider_switch_keeps_audited_cumulative_spend_visible() {
     let mut app = App::new(test_options(false), &Config::default());
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 10_000,
         output_tokens: 1_000,
         ..Default::default()
@@ -2152,7 +2241,7 @@ fn provider_switch_keeps_audited_cumulative_spend_visible() {
         crate::route_billing::UsageChip::Money(_)
     ));
     assert!(
-        crate::route_billing::format_usage_chip(&app.cumulative_usage_chip())
+        crate::route_billing::format_usage_chip(&app.cumulative_usage_chip(), app.ui_locale)
             .is_some_and(|label| !label.is_empty())
     );
 
@@ -2230,6 +2319,34 @@ fn submit_input_records_absolute_slash_path_as_message_history() {
 
     assert_eq!(submitted, input);
     assert_eq!(app.input_history.last().map(String::as_str), Some(input));
+}
+
+#[test]
+fn submit_input_recalls_slash_commands_and_persists_them_for_the_next_session() {
+    let _env_lock = lock_test_env();
+    let home = tempfile::tempdir().expect("isolated home");
+    let _home = EnvVarGuard::set("HOME", home.path());
+    let _profile = EnvVarGuard::set("USERPROFILE", home.path());
+    let _state = EnvVarGuard::set("CODEWHALE_HOME", home.path().join(".codewhale"));
+    let mut app = App::new(test_options(false), &Config::default());
+    app.input_history.clear();
+    for input in ["/theme", "/theme", "/theme", "/compact", "/compact"] {
+        app.input = input.to_string();
+        app.cursor_position = input.chars().count();
+        assert_eq!(app.submit_input().as_deref(), Some(input));
+    }
+    assert_eq!(app.input_history, ["/theme", "/compact"]);
+    app.history_up();
+    assert_eq!(app.input, "/compact");
+    app.history_up();
+    assert_eq!(app.input, "/theme");
+
+    crate::composer_history::flush_history_writer_for_tests(std::time::Duration::from_secs(5));
+    let mut resumed = App::new(test_options(false), &Config::default());
+    resumed.history_up();
+    assert_eq!(resumed.input, "/compact");
+    resumed.history_up();
+    assert_eq!(resumed.input, "/theme");
 }
 
 #[test]
@@ -3416,44 +3533,6 @@ fn entering_operate_preserves_user_rail_panel() {
 }
 
 #[test]
-fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
-    assert_eq!(AppMode::parse("agent"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("act"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("work"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("2"), Some(AppMode::Plan));
-    assert_eq!(AppMode::parse("auto"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("3"), Some(AppMode::Operate));
-    assert_eq!(AppMode::parse("operate"), Some(AppMode::Operate));
-    // Legacy YOLO spellings resolve to Act; the bypass posture they imply
-    // travels on the permission surface, not on a mode.
-    assert_eq!(AppMode::parse("YOLO"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("4"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("bypass"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("bypass-permissions"), Some(AppMode::Agent));
-    assert_eq!(AppMode::parse("multitask"), None);
-    assert_eq!(AppMode::parse("5"), None);
-    assert_eq!(AppMode::parse("fast"), None);
-    assert_eq!(AppMode::from_setting("multitask"), AppMode::Operate);
-    assert_eq!(AppMode::from_setting("5"), AppMode::Operate);
-
-    assert_eq!(AppMode::Agent.as_setting(), "agent");
-    assert_eq!(AppMode::Plan.display_name(), "Plan");
-    assert_eq!(AppMode::Agent.number(), '1');
-    assert_eq!(AppMode::Operate.number(), '3');
-    assert_eq!(
-        AppMode::CYCLE,
-        [AppMode::Plan, AppMode::Agent, AppMode::Operate]
-    );
-
-    assert_eq!(AppMode::Plan.next(), AppMode::Agent);
-    assert_eq!(AppMode::Agent.next(), AppMode::Operate);
-    assert_eq!(AppMode::Operate.next(), AppMode::Plan);
-    assert_eq!(AppMode::Plan.previous(), AppMode::Operate);
-    assert_eq!(AppMode::Agent.previous(), AppMode::Plan);
-    assert_eq!(AppMode::Operate.previous(), AppMode::Agent);
-}
-
-#[test]
 fn test_cycle_scenario() {
     // Scenario consolidation of: test_cycle_mode_transitions, test_cycle_mode_reverse_transitions
     // from test_cycle_mode_transitions
@@ -3779,8 +3858,17 @@ fn cycle_approval_scenario() {
     }
 }
 
+/// Tab cycles the mode, Shift+Tab cycles the permission posture. They are two
+/// independent axes, and Plan used to veto the second key — which welded them
+/// together on the keyboard: Shift+Tab silently did nothing in Plan.
+///
+/// Allowing it weakens nothing. Plan's read-only guarantee is mode-derived:
+/// `authority` maps `(Plan, _, Bypass)` to `SandboxPolicy::ReadOnly` and
+/// `tool_catalog` gates every write tool on `mode != AppMode::Plan`. So the
+/// cycle moves the durable Act/Operate baseline while the *live* Plan policy
+/// stays `Suggest`, and the new posture lands when the mode leaves Plan.
 #[test]
-fn plan_permission_cycle_is_rejected_without_mutating_agent_baseline() {
+fn plan_permission_cycle_moves_the_baseline_and_leaves_plan_read_only() {
     let _env_lock = lock_test_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("config.toml");
@@ -3791,18 +3879,44 @@ fn plan_permission_cycle_is_rejected_without_mutating_agent_baseline() {
     app.set_agent_approval_posture(ApprovalMode::Auto);
     app.set_mode(AppMode::Plan);
 
-    assert!(!app.cycle_approval_posture());
-    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
-    assert_eq!(app.mode_prefs.agent_approval_mode, ApprovalMode::Auto);
-    assert!(!tmp.path().join("settings.toml").exists());
+    assert!(
+        app.cycle_approval_posture(),
+        "Shift+Tab must still change permissions while in Plan"
+    );
+    assert_eq!(
+        app.mode_prefs.agent_approval_mode,
+        ApprovalMode::Bypass,
+        "the durable baseline advances Auto -> Full Access"
+    );
+    assert_eq!(
+        app.approval_mode,
+        ApprovalMode::Suggest,
+        "Plan's live policy is untouched: it stays read-only and asks"
+    );
+    assert_eq!(
+        app.mode,
+        AppMode::Plan,
+        "changing permissions must not move the mode"
+    );
     assert!(
         app.status_toasts
             .iter()
-            .any(|toast| toast.text.contains("Read Only"))
+            .any(|toast| toast.text.contains("applies in Act and Operate")),
+        "the receipt must say when the new posture starts applying"
+    );
+
+    let persisted = std::fs::read_to_string(tmp.path().join("settings.toml")).expect("settings");
+    assert!(
+        persisted.contains("permission_posture = \"full-access\""),
+        "the posture is durable, not dropped because Plan was active: {persisted}"
     );
 
     app.set_mode(AppMode::Operate);
-    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+    assert_eq!(
+        app.approval_mode,
+        ApprovalMode::Bypass,
+        "leaving Plan projects the posture chosen while in Plan"
+    );
 }
 
 #[test]
@@ -4536,6 +4650,53 @@ fn test_input_history_navigation() {
 
     // Navigate down
     app.history_down();
+}
+
+#[test]
+fn paste_while_navigating_history_detaches_before_down_can_discard_it() {
+    // A paste (insert_str family) while a history entry is on screen must
+    // detach navigation like typing does; otherwise the next Down replaces
+    // the buffer and silently destroys the pasted text.
+    let mut app = App::new(test_options(false), &Config::default());
+    app.input_history.push("older".to_string());
+    app.input_history.push("newer".to_string());
+    app.input = "draft".to_string();
+
+    app.history_up();
+    assert_eq!(app.input, "newer");
+    app.insert_str(" pasted");
+    assert!(app.history_index.is_none());
+    assert_eq!(app.input, "newer pasted");
+
+    app.history_down();
+    assert_eq!(
+        app.input, "newer pasted",
+        "detached edit must survive history keys"
+    );
+}
+
+#[test]
+fn external_edit_while_navigating_history_detaches_stale_state() {
+    // Same hazard through the $EDITOR round-trip: the edited buffer replaces
+    // recalled history, so the stale index, draft, selection, and attachment
+    // positions must not survive it.
+    let mut app = App::new(test_options(false), &Config::default());
+    app.input_history.push("older".to_string());
+    app.input = "draft".to_string();
+
+    app.history_up();
+    assert_eq!(app.input, "older");
+    app.apply_external_edit("edited in vi".to_string());
+    assert!(app.history_index.is_none());
+    assert!(app.history_navigation_draft.is_none());
+    assert!(app.selection_anchor.is_none());
+    assert_eq!(app.input, "edited in vi");
+
+    app.history_down();
+    assert_eq!(
+        app.input, "edited in vi",
+        "detached edit must survive history keys"
+    );
 }
 
 #[test]
@@ -5302,24 +5463,29 @@ fn bare_enter_scenario() {
 }
 
 #[test]
-fn double_tap_takes_the_just_queued_message_only_inside_the_window() {
+fn double_tap_drains_every_queued_message_oldest_first_inside_the_window() {
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.streaming_message_index = Some(0);
     app.queue_message(QueuedMessage::new("older queued".to_string(), None));
     app.queue_message(QueuedMessage::new("just typed follow-up".to_string(), None));
     assert!(
-        app.take_queued_for_double_tap_steer().is_none(),
+        app.take_queued_for_double_tap_steer().is_empty(),
         "no window armed"
     );
     app.arm_double_tap_window();
-    let taken = app
-        .take_queued_for_double_tap_steer()
-        .expect("the window is open");
-    assert_eq!(taken.display, "just typed follow-up");
-    assert_eq!(app.queued_message_count(), 1);
+    let taken = app.take_queued_for_double_tap_steer();
+    assert_eq!(
+        taken
+            .iter()
+            .map(|message| message.display.as_str())
+            .collect::<Vec<_>>(),
+        vec!["older queued", "just typed follow-up"],
+        "the window drains the whole queue in order"
+    );
+    assert_eq!(app.queued_message_count(), 0);
     assert!(
-        app.take_queued_for_double_tap_steer().is_none(),
+        app.take_queued_for_double_tap_steer().is_empty(),
         "one steer per tap"
     );
 }
@@ -6239,7 +6405,7 @@ fn status_classifier_does_not_paint_negated_success_green() {
     assert_ne!(level, StatusToastLevel::Success);
 
     // Genuine successes still classify green.
-    let (level, _, _) = App::classify_status_text("Fleet profile saved: reviewer.toml");
+    let (level, _, _) = App::classify_status_text("Team profile saved: reviewer.toml");
     assert_eq!(level, StatusToastLevel::Success);
 
     // Both cancel spellings classify as Warning.
@@ -6251,7 +6417,7 @@ fn status_classifier_does_not_paint_negated_success_green() {
 
 #[test]
 fn onboarding_provider_copy_is_provider_neutral_in_en() {
-    use crate::localization::{Locale, MessageId, tr};
+    use codewhale_localization::{Locale, MessageId, tr};
 
     let title = tr(Locale::En, MessageId::OnboardProviderTitle);
     let blurb = tr(Locale::En, MessageId::OnboardProviderBlurb);
@@ -6622,68 +6788,31 @@ async fn fixed_route_thinking_cycle_persists_raw_preference() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn interleaved_mode_thinking_and_model_writes_do_not_clobber_each_other() {
+async fn queued_mode_and_thinking_writes_finish_before_a_synchronous_selection() {
     let _lock = lock_test_env();
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let _env = sealed_settings_home(tmp.path());
     let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
-
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::Deepseek;
     app.auto_model = false;
     app.reasoning_effort = ReasoningEffort::Off;
-
-    // Queued, non-blocking: mode then thinking.
     assert_eq!(app.select_mode(AppMode::Plan), SettingSelection::Changed);
     app.apply_reasoning_effort_cycle();
-    let cycled_effort = app.reasoning_effort.as_setting_for_route(
-        app.api_provider,
-        &app.active_route_base_url,
-        &app.model,
-    );
 
-    // The model picker's synchronous write. It must apply *behind* the two
-    // queued selections above, so neither is lost and neither is re-applied
-    // over a newer value.
+    // A newer synchronous effort selection drains the older queued mode and
+    // effort first, so a late background writer cannot restore the old effort.
     app.startup_defaults
-        .apply_blocking(
-            crate::tui::startup_defaults::StartupDefaults::default()
-                .with_default_model("deepseek-chat"),
-        )
-        .expect("model write must land");
-
-    let after_model = Settings::load().expect("reload");
-    let persisted_model = after_model
-        .default_model
-        .clone()
-        .expect("model picker write must be on disk");
-    assert_eq!(
-        after_model.default_mode, "plan",
-        "the queued mode selection must have been applied before the model write"
-    );
-    assert_eq!(
-        after_model.reasoning_effort.as_deref(),
-        Some(cycled_effort),
-        "the queued thinking selection must not be lost by the model write"
-    );
-
-    // A later mode selection must win for its own field and leave the other
-    // two fields exactly as the earlier writes left them.
+        .apply_blocking(crate::tui::startup_defaults::StartupDefaults::reasoning_effort("high"))
+        .expect("effort write must land");
+    let saved = Settings::load_persisted().expect("reload");
+    assert_eq!(saved.default_mode, "plan");
+    assert_eq!(saved.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
     app.startup_defaults.flush();
-
-    let final_settings = Settings::load().expect("reload");
-    assert_eq!(final_settings.default_mode, "operate");
-    assert_eq!(
-        final_settings.default_model.as_deref(),
-        Some(persisted_model.as_str()),
-        "a mode write must not roll back the model"
-    );
-    assert_eq!(
-        final_settings.reasoning_effort.as_deref(),
-        Some(cycled_effort),
-        "a mode write must not roll back the thinking level"
-    );
+    let saved = Settings::load_persisted().expect("reload");
+    assert_eq!(saved.default_mode, "operate");
+    assert_eq!(saved.reasoning_effort.as_deref(), Some("high"));
     assert!(app.startup_defaults.drain_failures().is_empty());
 }
 
@@ -6861,14 +6990,12 @@ async fn rapid_mixed_writes_settle_on_the_last_value_for_every_field() {
         Settings::transact(|settings| settings.set("max_history", &(200 + index).to_string()))
             .expect("the direct write must land");
     }
-    // A model write goes through the synchronous startup-defaults path, which
-    // must land behind everything queued before it.
+    // A synchronous mode selection must land after every queued writer.
     app.startup_defaults
-        .apply_blocking(
-            crate::tui::startup_defaults::StartupDefaults::default()
-                .with_default_model("deepseek-chat"),
-        )
-        .expect("model write must land");
+        .apply_blocking(crate::tui::startup_defaults::StartupDefaults::mode(
+            app.mode,
+        ))
+        .expect("mode write must land");
     app.startup_defaults.flush();
 
     let expected_effort = app.reasoning_effort.as_setting_for_route(
@@ -6882,7 +7009,6 @@ async fn rapid_mixed_writes_settle_on_the_last_value_for_every_field() {
     assert_eq!(saved.reasoning_effort.as_deref(), Some(expected_effort));
     assert_eq!(saved.permission_posture.as_deref(), Some(expected_posture));
     assert_eq!(saved.max_input_history, 204);
-    assert_eq!(saved.default_model.as_deref(), Some("deepseek-chat"));
     assert!(app.startup_defaults.drain_failures().is_empty());
 }
 
@@ -7247,6 +7373,7 @@ fn hotbar_mode_row_for_the_live_mode_still_shows_the_saved_receipt() {
 fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
     let _lock = lock_test_env();
     let temp = tempfile::tempdir().expect("sealed state root");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
     let config_path = temp.path().join("config.toml");
     std::fs::write(
         &config_path,
@@ -7261,12 +7388,11 @@ fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
     let _config_path_guard = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
     let _codewhale_config_path = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
 
-    let config = Config::load(Some(config_path.clone()), None).expect("load sealed config");
-
     // Without an explicit request this launch, the remembered pick still wins:
     // that stickiness is what `/model` exists for.
     let _no_flag = EnvVarGuard::remove("CODEWHALE_MODEL");
     let _no_legacy_flag = EnvVarGuard::remove("DEEPSEEK_MODEL");
+    let config = Config::load(Some(config_path.clone()), None).expect("load sealed config");
     let remembered = App::new(
         TuiOptions {
             model: config.default_model(),
@@ -7281,6 +7407,7 @@ fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
 
     // `--model` reaches this binary as CODEWHALE_MODEL. It must win.
     let _model_flag = EnvVarGuard::set("CODEWHALE_MODEL", "kimi-k3");
+    let config = Config::load(Some(config_path), None).expect("load explicit launch snapshot");
     let requested = App::new(
         TuiOptions {
             model: config.default_model(),

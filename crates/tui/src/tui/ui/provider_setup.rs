@@ -1,5 +1,5 @@
-//! Provider-configuration support: web-config event draining, runtime-preset
-//! file snapshots with rollback, and the provider key verification seam
+//! Provider-configuration support: runtime-preset file snapshots with
+//! rollback, and the provider key verification seam
 //! (TUI_MODULARIZATION.md slice 8).
 
 use super::*;
@@ -78,79 +78,4 @@ pub(crate) fn runtime_preset_error_with_rollback(
             rollback_errors.join("; ")
         )
     }
-}
-
-pub(crate) async fn drain_web_config_events(
-    web_config_session: &mut Option<WebConfigSession>,
-    app: &mut App,
-    config: &mut Config,
-    engine_handle: &EngineHandle,
-) -> bool {
-    let Some(session) = web_config_session.as_mut() else {
-        return true;
-    };
-
-    let mut keep_session = true;
-    while let Ok(event) = session.receiver.try_recv() {
-        match event {
-            WebConfigSessionEvent::Draft(doc) => {
-                match config_ui::apply_document(doc, app, config, false) {
-                    Ok(outcome) if outcome.changed => {
-                        if outcome.requires_engine_sync {
-                            apply_model_and_compaction_update(
-                                engine_handle,
-                                app.compaction_config(),
-                                app.mode,
-                                app.active_route_limits,
-                            )
-                            .await;
-                        }
-                        app.status_message = Some(format!(
-                            "Web config draft applied: {}",
-                            outcome.final_message
-                        ));
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        app.add_message(HistoryCell::System {
-                            content: format!("Web config draft apply failed: {err}"),
-                        });
-                    }
-                }
-            }
-            WebConfigSessionEvent::Committed(doc) => {
-                keep_session = false;
-                match config_ui::apply_document(doc, app, config, true) {
-                    Ok(outcome) => {
-                        if outcome.requires_engine_sync {
-                            apply_model_and_compaction_update(
-                                engine_handle,
-                                app.compaction_config(),
-                                app.mode,
-                                app.active_route_limits,
-                            )
-                            .await;
-                        }
-                        app.add_message(HistoryCell::System {
-                            content: outcome.final_message.clone(),
-                        });
-                        app.status_message = Some(outcome.final_message);
-                    }
-                    Err(err) => {
-                        app.add_message(HistoryCell::System {
-                            content: format!("Web config commit failed: {err}"),
-                        });
-                    }
-                }
-            }
-            WebConfigSessionEvent::Failed(err) => {
-                keep_session = false;
-                app.add_message(HistoryCell::System {
-                    content: format!("Web config session failed: {err}"),
-                });
-            }
-        }
-    }
-
-    keep_session
 }

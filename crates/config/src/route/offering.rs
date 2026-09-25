@@ -194,6 +194,37 @@ pub fn opencode_zen_picker_models() -> Vec<&'static str> {
     models
 }
 
+/// Codewhale API bootstrap rows used only when the account's live
+/// `GET {base}/models` cannot be fetched.
+///
+/// The account catalog is authoritative: it lists exactly the providers the
+/// customer connected, and each row states its own protocol. These three rows
+/// exist so a route can still be selected offline; every consumer that shows
+/// models must say the list is a fallback, not the account's catalog.
+pub const CODEWHALE_FALLBACK_MODELS: &[&str] = &[
+    "deepseek/deepseek-v4-pro",
+    "anthropic/claude-sonnet-5",
+    "openai/gpt-5.6",
+];
+
+/// Endpoint key for one Codewhale API model id.
+///
+/// The live catalog states the protocol per model in `codewhale.protocol`;
+/// this is the offline inference used for the bootstrap rows and for a model
+/// id the local catalog has never seen. Only the `anthropic/` namespace routes
+/// to `{base}/messages`; everything else is OpenAI Chat Completions at
+/// `{base}/chat/completions`. The id alone carries no signal for the
+/// Responses surface — a `responses` row only ever comes from the catalog's
+/// stated `codewhale.protocol`, never from a model name.
+#[must_use]
+pub fn codewhale_endpoint_key_for_model(model: &str) -> &'static str {
+    if model.trim().to_ascii_lowercase().starts_with("anthropic/") {
+        "messages"
+    } else {
+        "chat"
+    }
+}
+
 /// Return curated provider/model transport facts as owned offering rows.
 ///
 /// OpenCode Zen's official catalog serves models over three protocol families.
@@ -202,7 +233,11 @@ pub fn opencode_zen_picker_models() -> Vec<&'static str> {
 #[must_use]
 pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
     // DeepSeek's 2026-07-31 production Flash update added a native Responses
-    // endpoint without changing the model id. Pro remains Chat Completions
+    // endpoint without changing the model id, and the 2026-08 unversioned
+    // rename to `deepseek-flash` kept that wire: DeepSeek's own Codex
+    // integration documents the Responses API as the path for `deepseek-flash`
+    // (legacy `deepseek-v4-flash` ids are served by the same model). The
+    // shipped default therefore rides Responses; Pro remains Chat Completions
     // until its announced Responses rollout. These exact-route transport facts
     // cannot be represented by the Models.dev-shaped fallback asset.
     let deepseek = ProviderId::from("deepseek");
@@ -219,6 +254,16 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
         server_side_web_search: CapabilityState::Supported,
         ..RouteCapabilities::default()
     };
+    // DeepSeek's Vision guide documents image input for `deepseek-flash`
+    // over Chat Completions, Responses and Messages; the legacy
+    // `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` names are served
+    // by the same model (verified 2026-09-23, #6421). Pro stays text-only.
+    // This curated row wins identity collisions over the Models.dev asset, so
+    // correcting only the asset left the resolved route stripping images.
+    let flash_capabilities = RouteCapabilities {
+        image_input: CapabilityState::Supported,
+        ..documented_capabilities
+    };
     let documented_limits = RouteLimits {
         context_tokens: Some(1_000_000),
         input_tokens: None,
@@ -227,10 +272,20 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
     let mut offerings = vec![
         ProviderModelOffering {
             provider: deepseek.clone(),
+            canonical_model: Some(ModelId::from("deepseek-flash")),
+            wire_model_id: WireModelId::from("deepseek-flash"),
+            endpoint_key: "responses".to_string(),
+            default_for_provider: true,
+            limits: documented_limits,
+            capabilities: flash_capabilities,
+            pricing: PricingSku::UnknownOrStale,
+        },
+        ProviderModelOffering {
+            provider: deepseek.clone(),
             canonical_model: Some(ModelId::from("deepseek-v4-pro")),
             wire_model_id: WireModelId::from("deepseek-v4-pro"),
             endpoint_key: "chat".to_string(),
-            default_for_provider: true,
+            default_for_provider: false,
             limits: documented_limits,
             capabilities: documented_capabilities,
             pricing: PricingSku::UnknownOrStale,
@@ -242,7 +297,7 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
             endpoint_key: "responses".to_string(),
             default_for_provider: false,
             limits: documented_limits,
-            capabilities: documented_capabilities,
+            capabilities: flash_capabilities,
             pricing: PricingSku::UnknownOrStale,
         },
         // Vision-experimental sibling of v4-flash, verified live on
@@ -256,13 +311,27 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
             endpoint_key: "chat".to_string(),
             default_for_provider: false,
             limits: documented_limits,
-            capabilities: RouteCapabilities {
-                image_input: CapabilityState::Supported,
-                ..documented_capabilities
-            },
+            capabilities: flash_capabilities,
             pricing: PricingSku::UnknownOrStale,
         },
     ];
+
+    offerings.extend(
+        crate::opencode_go::MODEL_GROUPS
+            .iter()
+            .flat_map(|(endpoint_key, models)| {
+                models.iter().map(move |model| ProviderModelOffering {
+                    provider: ProviderId::from("opencode-go"),
+                    canonical_model: None,
+                    wire_model_id: WireModelId::from(*model),
+                    endpoint_key: (*endpoint_key).to_string(),
+                    default_for_provider: *model == crate::DEFAULT_OPENCODE_GO_MODEL,
+                    limits: RouteLimits::default(),
+                    capabilities: RouteCapabilities::default(),
+                    pricing: PricingSku::UnknownOrStale,
+                })
+            }),
+    );
 
     let provider = ProviderId::from("opencode-zen");
     let groups = [
@@ -289,6 +358,25 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
             pricing: PricingSku::UnknownOrStale,
         })
     }));
+
+    // Codewhale API bootstrap rows. The account's authenticated
+    // `GET {base}/models` is the catalog authority and replaces these as soon
+    // as it is reachable; they exist so the route resolves offline.
+    let codewhale = ProviderId::from("codewhale");
+    offerings.extend(
+        CODEWHALE_FALLBACK_MODELS
+            .iter()
+            .map(|model| ProviderModelOffering {
+                provider: codewhale.clone(),
+                canonical_model: None,
+                wire_model_id: WireModelId::from(*model),
+                endpoint_key: codewhale_endpoint_key_for_model(model).to_string(),
+                default_for_provider: *model == crate::DEFAULT_CODEWHALE_MODEL,
+                limits: RouteLimits::default(),
+                capabilities: RouteCapabilities::default(),
+                pricing: PricingSku::UnknownOrStale,
+            }),
+    );
 
     // Alibaba Cloud Model Studio — one vendor identity in the hand seam
     // (`modelstudio-token-plan`). Plan (token vs coding) and wire dialect

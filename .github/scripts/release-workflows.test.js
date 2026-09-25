@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const {
@@ -34,6 +35,7 @@ const nightly = read(".github/workflows/nightly.yml");
 const candidate = read(".github/workflows/release-candidate.yml");
 const artifacts = read(".github/workflows/release-artifacts.yml");
 const release = read(".github/workflows/release.yml");
+const parityWorkflow = read(".github/workflows/release-parity.yml");
 const republish = read(".github/workflows/release-republish.yml");
 const releaseDockerfile = read("packaging/docker/Dockerfile.release");
 const cnb = read(".cnb.yml");
@@ -58,6 +60,68 @@ assert.match(
   /name: Linux test location \(CNB\)/,
   "the non-PR CNB fallback must be named explicitly",
 );
+
+const npmSmokeJob = ci.match(/^  npm-wrapper-smoke:\n([\s\S]*?)(?=^  \S)/m)?.[1];
+assert.ok(npmSmokeJob, "CI must retain the required npm-wrapper job");
+assert.match(
+  namedStep(npmSmokeJob, "Build wrapper binaries"),
+  /run: cargo build --release --locked -p codewhale-cli -p codewhale-tui/,
+);
+assert.match(
+  namedStep(npmSmokeJob, "Smoke wrapper install and delegated entrypoints"),
+  /run: node scripts\/release\/npm-wrapper-smoke\.js/,
+);
+const npmSmokeSteps = npmSmokeJob.split(/(?=^      - )/m).slice(1);
+// Exercise the workflow's actual Boolean guards. A successful location echo
+// must never substitute for the build/install smoke on a heavy pull request.
+const npmSmokeCases = [
+  // name, event, heavy, OS, trusted, cache success, execute, Linux deps, CNB
+  ["own PR", "pull_request", true, "ubuntu-latest", true, true, true, true, false],
+  ["fork PR", "pull_request", true, "ubuntu-latest", false, true, true, true, false],
+  ["PR cache failure", "pull_request", true, "ubuntu-latest", false, false, true, true, false],
+  ["light PR", "pull_request", false, "ubuntu-latest", true, true, false, false, false],
+  ["manual Ubuntu", "workflow_dispatch", true, "ubuntu-latest", true, true, true, true, false],
+  ["main Ubuntu", "push", true, "ubuntu-latest", true, true, false, false, true],
+  ["main macOS", "push", true, "macos-latest", true, true, true, false, false],
+  ["main Windows", "push", true, "windows-latest", true, true, true, false, false],
+  ["main cache failure", "push", true, "macos-latest", true, false, true, false, false],
+  ["light main", "push", false, "ubuntu-latest", true, true, false, false, false],
+  ["schedule", "schedule", true, "ubuntu-latest", true, true, false, false, false],
+];
+// The sccache GitHub Actions backend is main-only, mirroring rust-cache's
+// save-if: pull requests never install or enable it (cache bloat, PLAN D).
+const sccacheInstallStep = "mozilla-actions/sccache-action@v0.0.11";
+for (const [label, event, heavy, os, trusted, cache, execute, linuxDeps, cnb] of npmSmokeCases) {
+  const ref = event === "pull_request" ? "refs/pull/1/merge" : "refs/heads/main";
+  const onMain = ref === "refs/heads/main";
+  const installed = execute && onMain;
+  const context = {
+    needs: { changes: { outputs: { heavy: String(heavy), trusted: String(trusted) } } },
+    github: { event_name: event, ref },
+    matrix: { os },
+    steps: { sccache: { outcome: installed ? (cache ? "success" : "failure") : "skipped" } },
+  };
+  const jobGuard = npmSmokeJob.match(/^    if: (.+)$/m)?.[1];
+  assert.ok(jobGuard, "the wrapper job must retain its event guard");
+  const jobEnabled = vm.runInNewContext(jobGuard, context);
+  for (const step of npmSmokeSteps) {
+    const name = step.match(/^      - (?:name|uses): (.+)$/m)?.[1];
+    const guard = step.match(/^        if: (.+)$/m)?.[1];
+    assert.ok(name && guard, "every wrapper step must have an explicit guard");
+    let expected = execute;
+    if (name === "Skip npm wrapper smoke for light change") expected = !heavy;
+    else if (name === "Install Linux system dependencies") expected = linuxDeps;
+    else if (name === "Linux smoke location") expected = cnb;
+    else if (name === sccacheInstallStep) expected = installed;
+    else if (name === "Enable sccache" || name === "sccache stats") expected = installed && cache;
+    assert.equal(
+      Boolean(jobEnabled && vm.runInNewContext(guard, context)),
+      expected,
+      `${label}: ${name} must ${expected ? "execute" : "stay skipped"}`,
+    );
+  }
+}
+console.log(`Wrapper CI guards OK: ${npmSmokeCases.length} event cases, ${npmSmokeSteps.length} steps each.`);
 
 assert.match(ci, /^  workflow_dispatch:\n    inputs:\n      expected_sha:/m);
 const manualForceBlock = ci.match(
@@ -138,18 +202,23 @@ assert.doesNotMatch(
 assert.match(candidate, /cache-dependency-path: web\/package-lock\.json/);
 assert.match(candidate, /package-manager-cache: false/);
 assert.match(candidate, /working-directory: web/);
-for (const command of [
-  "npm ci",
+for (const workflow of [candidate, read(".github/workflows/web.yml")]) {
+  for (const command of ["npm ci", "npm test", "npm run check"]) {
+    assert.ok(workflow.includes(`run: ${command}\n`), `missing web gate: ${command}`);
+  }
+}
+// Both workflows use this gate. Preserve every check and its order: checking
+// committed facts after prebuild could silently repair drift before testing it.
+assert.deepEqual(JSON.parse(read("web/package.json")).scripts.check.split(" && "), [
   "npm run check:facts",
+  "npm run check:latest-release",
   "npm run prebuild",
   "npm run check:docs",
-  "npm test",
+  "npm run check:tokens",
   "npm run lint",
-  "npx tsc --noEmit",
+  "tsc --noEmit",
   "npm run build",
-]) {
-  assert.match(candidate, new RegExp(`run: ${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-}
+]);
 assert.match(candidate, /^    needs: \[resolve, web\]$/m);
 assert.match(candidate, /needs\.web\.result == 'success'/);
 
@@ -306,8 +375,22 @@ for (const block of rustCacheBlocks) {
   assert.doesNotMatch(block, /github\.(event|ref|sha)|inputs\./);
 }
 
-const parity = release.match(/\n  parity:\n([\s\S]*?)\n  artifacts:\n/);
-assert.ok(parity, "public release must retain a parity job");
+// One parity gate, called by the release candidate and the public release,
+// and the release refuses a tag without a green RC receipt for its exact SHA.
+const parity = parityWorkflow.match(/\n  parity:\n([\s\S]*)$/);
+assert.ok(parity, "release-parity.yml must define the parity job");
+assert.match(parityWorkflow, /^on:\n  workflow_call:\n/m, "parity must be a reusable workflow");
+for (const [name, source] of [["release.yml", release], ["release-candidate.yml", candidate]]) {
+  const caller = source.match(/\n  parity:\n([\s\S]*?)\n\n/);
+  assert.ok(caller, `${name} must run the parity job`);
+  assert.match(caller[1], /name: Parity\n/, `${name}: the RC receipt check matches the "Parity" job name`);
+  assert.match(caller[1], /uses: \.\/\.github\/workflows\/release-parity\.yml/, `${name} must call the shared parity gate`);
+}
+assert.match(
+  namedStep(release, "Require a green release-candidate receipt for this exact SHA"),
+  /require-rc-receipt\.sh "\$\{GITHUB_REPOSITORY\}" "\$\{SHA\}"/,
+);
+assert.match(release, /^  resolve:\n(?:.*\n)*?      actions: read\n/m, "resolve needs actions: read for the RC receipt");
 assert.doesNotMatch(
   parity[1],
   /ref: \$\{\{ needs\.resolve\.outputs\.sha \}\}/,
@@ -429,14 +512,44 @@ const cnbRustGates = cnb.match(
 assert.ok(cnbRustGates, "CNB must retain the shared Rust workspace gate");
 assert.match(
   cnbRustGates[1],
-  /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked[\s\S]*cargo clippy --workspace --all-targets --all-features --locked -- -D warnings[\s\S]*RUST_MIN_STACK=16777216 cargo test --workspace --all-features --locked/,
+  /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked[\s\S]*cargo clippy --workspace --all-targets --all-features --locked -- -D warnings[\s\S]*RUST_MIN_STACK=16777216 sh scripts\/with-hermetic-test-home.sh cargo test --workspace --all-features --locked/,
   "CNB must serialize the memory-heavy Rust gate and preserve the workspace test stack contract",
 );
-assert.match(
+assert.doesNotMatch(
   cnbRustGates[1],
-  /export HOME="\$\{hermetic_home\}"[\s\S]*export CODEWHALE_HOME="\$\{hermetic_home\}\/\.codewhale"[\s\S]*unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME/,
-  "CNB workspace tests must not read a populated runner ~/.codewhale (#5355)",
+  /export (?:HOME|USERPROFILE|CODEWHALE_HOME)=/,
+  "CNB must reuse the shared test-home boundary without overriding legacy migration fixtures",
 );
+
+// Cover every test invocation, including named parity and narrow crate gates.
+// These launchers protect production dependencies as well as cfg(test) code.
+// `release parity` is 4 rather than 3: parity runs the workspace under nextest
+// for the same one-process-per-test isolation CI's lanes use, and keeps a
+// separate doctest invocation because nextest does not run doctests. release.yml
+// itself runs none: its parity job calls release-parity.yml.
+let hermeticInvocations = 0;
+for (const [label, workflow, expected] of [
+  ["CI", ci, 5],
+  ["release", release, 0],
+  ["release parity", parityWorkflow, 4],
+  ["CNB", cnb, 3],
+]) {
+  const commands = workflow.split("\n").filter((line) =>
+    !line.trimStart().startsWith("#") && /\bcargo (?:test|nextest run)\b/.test(line),
+  );
+  assert.equal(commands.length, expected, `${label} must retain every Rust test invocation`);
+  for (const command of commands) {
+    assert.match(command, /sh scripts\/with-hermetic-test-home.sh cargo (?:test|nextest run)\b/,
+      `${label} Rust tests must use the shared test-home boundary`);
+  }
+  hermeticInvocations += commands.length;
+}
+for (const name of ["Run tests", "Run doctests"]) {
+  const step = namedStep(ciTestJob, name);
+  assert.match(step, /shell: bash/, `${name} must invoke the POSIX helper on Windows too`);
+  assert.match(step, /RUST_MIN_STACK: '16777216'/);
+}
+console.log(`Hermetic Rust workflow invocations OK: ${hermeticInvocations} checks passed.`);
 
 const nextest = read(".config/nextest.toml");
 const integrationGroup = nextest.search(/^filter = 'binary\(integration\)'$/m);
@@ -485,6 +598,11 @@ const cnbTagStamp = cnbTagRelease[1].indexOf(
 const cnbTagBuild = cnbTagRelease[1].indexOf(
   "cargo build --jobs 2 --release --locked \\",
 );
+const cnbTagVersionCheck = cnbTagRelease[1].indexOf(
+  "./scripts/release/check-versions.sh --require-dated-release",
+);
+assert.ok(cnbTagVersionCheck >= 0, "CNB publication must reject undated source candidates");
+assert.ok(cnbTagVersionCheck < cnbTagBuild, "CNB must validate release notes before building public assets");
 assert.match(cnbTagRelease[1], /checkout_sha="\$\(git rev-parse 'HEAD\^\{commit\}'\)"/);
 assert.match(cnbTagRelease[1], /commit_sha="\$\{CNB_COMMIT:-\$\{checkout_sha\}\}"/);
 assert.match(cnbTagRelease[1], /CNB_COMMIT[\s\S]*does not match checkout[\s\S]*exit 1/);
@@ -501,10 +619,18 @@ assert.equal(
   2,
   "both glibc recovery branches must name codewhale-cli",
 );
+// The archive installer never overwrites an existing command: it validates the
+// retired TUI path against the consolidated bytes and leaves upgrades to
+// `codewhale update`, which migrates `codewhale-tui` beside the canonical pair.
 assert.match(
   archiveInstaller,
-  /legacy_tui="\$BIN_DIR\/codewhale-tui"[\s\S]*install_binary "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
-  "archive upgrades must refresh the retired TUI path from consolidated bytes",
+  /legacy_tui="\$BIN_DIR\/codewhale-tui"[\s\S]*check_destination "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
+  "archive installs must validate the retired TUI path against consolidated bytes",
+);
+assert.doesNotMatch(
+  archiveInstaller,
+  /install_binary "\$SCRIPT_DIR\/codewhale" "\$legacy_tui"/,
+  "archive installs must not overwrite an existing retired TUI command",
 );
 assert.doesNotMatch(
   cliDispatcher,
@@ -562,6 +688,7 @@ for (const [name, source] of [
   ["release-candidate.yml", candidate],
   ["release-artifacts.yml", artifacts],
   ["release.yml", release],
+  ["release-parity.yml", parityWorkflow],
   ["release-republish.yml", republish],
   ["ci.yml", ci],
   ["nightly.yml", nightly],
@@ -602,7 +729,9 @@ for (const job of ["bundle", "windows-installer", "assemble", "smoke"]) {
 }
 assert.equal(jobTimeout(nightly, "build"), 90);
 assert.equal(jobTimeout(release, "resolve"), 10);
-assert.equal(jobTimeout(release, "parity"), 20);
+// The v0.9.12 tag push finished every parity step and was then cancelled at
+// 20 minutes inside rust-cache's post-run save; 45 keeps that margin.
+assert.equal(jobTimeout(parityWorkflow, "parity"), 45);
 
 console.log(
   "Workflow contracts OK: 6-target/12-asset single-runtime nightly and exact-head 7-target/34-asset release candidate.",

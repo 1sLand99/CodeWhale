@@ -175,6 +175,10 @@ fn thread_goal_event_serializes_status_and_accounting() {
         tokens_used: 42_001,
         time_used_seconds: 3600,
         continuation_count: 7,
+        last_gap_fingerprint: None,
+        repeated_gap_count: 0,
+        last_gap_pass: None,
+        pause_reason: None,
         created_at: 1,
         updated_at: 2,
     };

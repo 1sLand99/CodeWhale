@@ -10,13 +10,18 @@ import {
   EN_DOCS_SANDBOX,
   EN_DOCS_SUBAGENTS,
   EN_DOCS_WEB,
+  EN_DOCS_WORK,
   EN_DOCS_COMPUTERS,
   EN_DOCS_AUTH,
   EN_DOCS_TRUST,
+  EN_COMPUTER_USE,
   EN_CHANGELOG,
   EN_DOCS_SHELL,
   EN_DOCS_TROUBLESHOOTING,
+  EN_DIGEST,
   EN_HOME,
+  EN_LEGAL_PRIVACY,
+  EN_LEGAL_TERMS,
   fill,
   getChrome,
   getDocsGuide,
@@ -27,14 +32,20 @@ import {
   getDocsSandbox,
   getDocsSubagents,
   getDocsWeb,
+  getDocsWork,
   getDocsComputers,
   getDocsAuth,
   getDocsTrust,
+  getComputerUse,
   getChangelog,
   getDocsShell,
   getDocsTroubleshooting,
+  getDigest,
   getHome,
+  getLegalPrivacy,
+  getLegalTerms,
   pickText,
+  pickTextLocale,
   splitToken,
   splitTokens,
 } from "./dictionaries";
@@ -49,25 +60,18 @@ import type { ChromeDict, HomeDict } from "./dictionaries/types";
 const NON_PROSE_KEYS = new Set([
   "wordmarkSeal",
   "dateLocale",
-  "githubFallback",
   "tickerLiveTag",
-  "sealDecides",
-  "sealWorkflow",
-  "sealStart",
-  "sealBoundaries",
-  "sealSurfaces",
-  "sealCommunity",
 ]);
 
 /** Chrome keys that are real sentences/labels and must be translated. */
 const CHROME_PROSE_KEYS = [
   "skipToContent",
   "navDocs",
+  "navProduct",
   "navCommunity",
   "navPrimaryAria",
   "navHomeAria",
   "wordmarkTag",
-  "starsAria",
   "traceLabel",
   "traceTabsAria",
   "menuOpen",
@@ -108,32 +112,31 @@ const CHROME_LOANWORDS: Record<string, readonly string[]> = {
 const HOME_PROSE_KEYS = [
   "metaTitle",
   "metaDescription",
-  "kicker",
-  "heroTitleA",
-  "heroTitleB",
+  "heroTitle",
   "heroIntro",
-  "installEyebrow",
-  "installRequirement",
-  "installOtherWays",
-  "shotSession",
+  "getCodewhale",
+  "heroInstallAria",
+  "exploreProduct",
+  "shotPreview",
+  "shotBuild",
   "screenshotAlt",
-  "figcaption",
-  "proofHeading",
-  "proofBody",
-  "decidesEyebrow",
-  "decidesHeading",
-  "decidesLede",
-  "workflowHeading",
-  "receiptAria",
-  "receiptInspect",
-  "receiptAct",
-  "receiptReport",
+  "chapterTerminal",
+  "chapterTerminalTitle",
+  "gainHeading",
+  "gainLede",
+  "chapterModels",
+  "modelsHeading",
+  "modelsBody",
+  "modelsLink",
   "startHeading",
   "startLede",
   "startGuideLink",
   "startVocabularyLink",
-  "boundariesBody",
-  "hostedGatewayLocal",
+  "chapterAccount",
+  "availabilityHeading",
+  "availabilityLede",
+  "availabilityNote",
+  "accountLink",
   "surfacesHeading",
   "runtimeLink",
   "installBandHeading",
@@ -153,9 +156,10 @@ function flattenStrings(dict: object): Record<string, string> {
     if (typeof value === "string") {
       out[key] = value;
     } else if (Array.isArray(value)) {
-      value.forEach((pair, i) => {
-        out[`${key}[${i}][0]`] = pair[0];
-        out[`${key}[${i}][1]`] = pair[1];
+      value.forEach((row: string[], i: number) => {
+        row.forEach((cell, j) => {
+          out[`${key}[${i}][${j}]`] = cell;
+        });
       });
     }
   }
@@ -267,10 +271,14 @@ describe("website dictionaries", () => {
       ["docs-subagents", getDocsSubagents, EN_DOCS_SUBAGENTS],
       ["docs-mcp", getDocsMcp, EN_DOCS_MCP],
       ["docs-web", getDocsWeb, EN_DOCS_WEB],
+      ["docs-work", getDocsWork, EN_DOCS_WORK],
       ["docs-computers", getDocsComputers, EN_DOCS_COMPUTERS],
       ["docs-auth", getDocsAuth, EN_DOCS_AUTH],
       ["docs-trust", getDocsTrust, EN_DOCS_TRUST],
       ["changelog", getChangelog, EN_CHANGELOG],
+      ["legal-terms", getLegalTerms, EN_LEGAL_TERMS],
+      ["legal-privacy", getLegalPrivacy, EN_LEGAL_PRIVACY],
+      ["digest", getDigest, EN_DIGEST],
     ] as const) {
       const enKeys = Object.keys(reference).sort();
       for (const locale of [...DICTIONARY_LOCALES, "fr", "und"]) {
@@ -286,6 +294,22 @@ describe("website dictionaries", () => {
         expect(get(locale), `${locale} ${label}`).toBe(reference);
       }
     }
+  });
+
+  it("ships the Computer Use page dictionary for every routed locale", () => {
+    const enKeys = Object.keys(EN_COMPUTER_USE).sort();
+    for (const locale of [...DICTIONARY_LOCALES, "und"]) {
+      expect(Object.keys(getComputerUse(locale)).sort(), `${locale} computer-use keys`).toEqual(enKeys);
+      expect(getComputerUse(locale).steps, `${locale} computer-use steps`).toHaveLength(4);
+    }
+    // The download page is translated for every routed locale, not passed
+    // through: each dictionary locale resolves its own object with its own
+    // primary-button label; only an unknown locale gets the English reference.
+    for (const locale of DICTIONARY_LOCALES) {
+      expect(getComputerUse(locale), `${locale} computer-use`).not.toBe(EN_COMPUTER_USE);
+      expect(getComputerUse(locale).download, `${locale} computer-use download`).not.toBe(EN_COMPUTER_USE.download);
+    }
+    expect(getComputerUse("und")).toBe(EN_COMPUTER_USE);
   });
 
   it("keeps the docs page lists structurally aligned", () => {
@@ -456,16 +480,21 @@ describe("website dictionaries", () => {
     expect(pickText(pair, "zh")).toBe("中文");
     expect(pickText(pair, "en")).toBe("English");
     expect(pickText(pair, "ja"), "non-zh locales read the English side").toBe("English");
+    expect(pickTextLocale("zh")).toBe("zh");
+    for (const locale of ["en", "ja", "ar"]) expect(pickTextLocale(locale)).toBe("en");
   });
 
-  it("keeps workflow and surface lists structurally aligned", () => {
+  it("keeps the gain, models, availability, and surface lists structurally aligned", () => {
     for (const locale of DICTIONARY_LOCALES) {
       const home = getHome(locale);
-      expect(home.workflow, `${locale} workflow`).toHaveLength(4);
+      expect(home.gain, `${locale} gain`).toHaveLength(3);
+      expect(home.modelsFacts, `${locale} modelsFacts`).toHaveLength(3);
+      expect(home.availability, `${locale} availability`).toHaveLength(4);
       expect(home.surfaces, `${locale} surfaces`).toHaveLength(5);
-      for (const pair of [...home.workflow, ...home.surfaces]) {
-        expect(pair[0].length, `${locale} empty title`).toBeGreaterThan(0);
-        expect(pair[1].length, `${locale} empty description`).toBeGreaterThan(0);
+      for (const row of [...home.gain, ...home.modelsFacts, ...home.availability, ...home.surfaces]) {
+        for (const cell of row) {
+          expect(cell.length, `${locale} empty cell`).toBeGreaterThan(0);
+        }
       }
     }
   });
@@ -526,7 +555,7 @@ describe("website dictionaries", () => {
     }
     // Chinese resolves to its OWN dictionary, not the English reference.
     expect(chrome.navDocs).not.toBe(EN_CHROME.navDocs);
-    expect(home.heroTitleA).not.toBe(EN_HOME.heroTitleA);
+    expect(home.heroTitle).not.toBe(EN_HOME.heroTitle);
   });
 
   it("leaves no unmarked English prose in any non-English dictionary", () => {
@@ -583,6 +612,16 @@ describe("website dictionaries", () => {
       expect(byLine, `${locale} tickerBy`).toContain("{handle}");
       const parts = splitToken(byLine, "handle");
       expect(parts.length, `${locale} tickerBy split`).toBe(2);
+    }
+  });
+
+  it("carries {date} through both legal pages' effective-date line", () => {
+    // The date used to sit in the JSX between two translated fragments. Now
+    // it is a fill() token, so a translation that drops it would ship a legal
+    // page that no longer says when it took effect.
+    for (const locale of ["en", "zh"]) {
+      expect(getLegalTerms(locale).updated, `${locale} legal-terms`).toContain("{date}");
+      expect(getLegalPrivacy(locale).updated, `${locale} legal-privacy`).toContain("{date}");
     }
   });
 

@@ -13,8 +13,11 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
-use crate::resource_telemetry::{TokenThroughput, estimate_output_tokens_from_text};
+use crate::resource_telemetry::estimate_output_tokens_from_text;
 use anyhow::{Context, Result};
+use codewhale_config::AppMode;
+use codewhale_core::ContextReference;
+use codewhale_execpolicy::ApprovalMode;
 use codewhale_release::InstallMethod;
 // On Windows the push/pop helpers write the escapes directly; crossterm's
 // PushKeyboardEnhancementFlags / PopKeyboardEnhancementFlags commands are
@@ -46,7 +49,7 @@ use windows::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMo
 use crate::audit::log_sensitive_event;
 use crate::automation_manager::{AutomationManager, AutomationSchedulerConfig, spawn_scheduler};
 use crate::client::{
-    CACHE_WARMUP_MAX_TOKENS, CacheWarmupKey, DeepSeekClient, PromptInspection,
+    CACHE_WARMUP_MAX_TOKENS, CacheWarmupKey, CodewhaleClient, PromptInspection,
     build_cache_warmup_request, inspect_prompt_for_request,
 };
 use crate::commands;
@@ -57,20 +60,17 @@ use crate::config::{
     UpdateConfig, persist_external_credential_consent_for_at,
     revoke_external_credential_consent_for_at,
 };
-use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
 use crate::core::events::Event as EngineEvent;
 use crate::core::ops::{Op, ProviderRuntimeStatus, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance};
 use crate::hooks::{HookEvent, HookExecutor, TurnEndPayloadInput, TurnEndTotals};
 use crate::llm_client::LlmClient;
-use crate::localization::{MessageId, tr};
-use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
-use crate::palette;
 use crate::prompts;
 use crate::route_runtime::{resolve_runtime_route, resolve_runtime_route_for_identity};
+#[cfg(test)]
+use crate::session_manager::create_saved_session_with_id_and_mode;
 use crate::session_manager::{
     OfflineQueueState, QueuedSessionMessage, SavedSession, SessionManager,
-    create_saved_session_with_id_and_mode, create_saved_session_with_mode,
 };
 use crate::settings::Settings;
 use crate::task_manager::{
@@ -89,14 +89,13 @@ use crate::tui::command_palette::{
 use crate::tui::composer_ui::*;
 use crate::tui::context_inspector::ContextInspectorView;
 use crate::tui::event_broker::EventBroker;
-use crate::tui::file_mention::ContextReference;
 use crate::tui::file_picker_relevance;
-use crate::tui::footer_ui::{friendly_subagent_progress, is_noisy_subagent_progress};
+use crate::tui::footer_ui::friendly_subagent_progress;
 use crate::tui::format_helpers;
 use crate::tui::hotbar::actions::HotbarDispatch;
 use crate::tui::key_shortcuts;
 use crate::tui::live_transcript::LiveTranscriptOverlay;
-use crate::tui::mcp_routing::{add_mcp_message, open_mcp_manager_pager};
+use crate::tui::mcp_routing::{add_mcp_message, open_mcp_extensions};
 use crate::tui::mouse_ui::*;
 use crate::tui::notifications;
 use crate::tui::onboarding;
@@ -105,6 +104,9 @@ use crate::tui::persistence_actor::{self, PersistRequest};
 use crate::tui::scrolling::TranscriptScroll;
 use crate::turn_route_plan::{PlannedTurnRoute, TurnRoutePlanRequest, plan_turn_route};
 use crate::work_graph::task_owner_snapshot;
+use codewhale_localization::{MessageId, tr};
+use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
+use codewhale_palette as palette;
 // SelectionAutoscroll unused
 use crate::tui::motion::{FrameRequester, MotionMode};
 use crate::tui::session_picker::SessionPickerView;
@@ -132,28 +134,30 @@ use crate::tui::views::subagent_view_agents;
 use crate::tui::vim_mode;
 use crate::tui::workspace_context;
 
+use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
+
 use super::key_actions;
 
 use super::app::{
-    ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
-    AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
-    GoalControlIntent, OnboardingState, PendingGoalControl, PendingProviderSwitch, QueuedMessage,
-    ReasoningEffort, ScreenMode, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
-    TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
+    ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, App, AppAction,
+    ComposerSubmitAction, ComposerSubmitChord, GoalControlIntent, OnboardingState,
+    PendingGoalControl, PendingProviderSwitch, QueuedMessage, RedactionGateNotice, ScreenMode,
+    StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
+    ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
     looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
-    ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
+    ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
 };
 use super::history::{
-    ExecCell, HistoryCell, ReasoningAction, ToolCell, ToolStatus, history_cells_from_message,
-    summarize_tool_output,
+    ExecCell, HistoryCell, ReasoningAction, ThinkingFold, ToolCell, ToolStatus,
+    history_cells_from_message, summarize_tool_output,
 };
 use super::slash_menu::{
     apply_slash_menu_selection, partial_inline_skill_mention_at_cursor,
     try_autocomplete_slash_command, visible_slash_menu_entries,
 };
-use super::views::{ConfigView, ContextMenuAction, HelpView, ModalKind, ViewEvent};
+use super::views::{ConfigView, ContextMenuAction, HelpView, ModalKind, ViewAction, ViewEvent};
 use super::widgets::pending_input_preview::{ContextPreviewItem, PendingInputPreview};
 use super::widgets::{ChatWidget, ComposerWidget, Renderable};
 
@@ -166,9 +170,8 @@ pub(crate) use self::activity_detail::{
     open_details_pager_for_cell, open_focused_cell_pager, turn_handoff_markdown,
 };
 use self::activity_detail::{
-    copy_focused_cell, copy_focused_cell_metadata, detail_target_cell_index,
-    extract_reasoning_header, open_reasoning_detail_pager, open_tool_details_pager,
-    open_turn_inspector_pager,
+    copy_focused_cell, detail_target_cell_index, extract_reasoning_header,
+    open_reasoning_detail_pager, open_tool_details_pager, open_turn_inspector_pager,
 };
 // Ctrl+O now opens the full recorded Reasoning Detail for the selected or
 // current reasoning block. The whole-turn Turn Inspector moved to Ctrl+Alt+O
@@ -191,15 +194,11 @@ const CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT: f64 = 60.0;
 const UI_IDLE_POLL_MS: u64 = 48;
 const UI_ACTIVE_POLL_MS: u64 = 24;
 const SUBAGENT_HOOK_PREVIEW_LIMIT: usize = 2_048;
-const WEB_CONFIG_POLL_MS: u64 = 16;
 const DISPATCH_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
-/// Minimum wall-clock time a turn may stay in `"in_progress"` before the UI
-/// assumes the engine stalled (e.g. sub-agent hang, lost completion event,
-/// engine panic).  The effective watchdog also respects the configured stream
-/// idle timeout so legitimate long model-reasoning pauses are not interrupted
-/// prematurely.
+/// Wall-clock time a turn may stay in `"in_progress"` with no activity before
+/// the UI assumes the engine stalled (sub-agent hang, lost completion event,
+/// engine panic) — unless the engine heartbeat reports a live bounded wait.
 const TURN_STALL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300);
-const TURN_STALL_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 /// Running tools can legitimately exceed the silent-turn timeout, but a tool
 /// with no progress heartbeat or output beyond this ceiling is treated as hung.
 // Must stay comfortably above `turn_stall_watchdog_timeout` so a running tool
@@ -228,8 +227,6 @@ pub(crate) const UI_GHOSTTY_UNDERWATER_ANIMATION_MS: u64 = 34;
 // transcript under 40 columns. (Named for the file tree — the legacy sidebar
 // this constant once described no longer gates on it.)
 pub(crate) const FILE_TREE_MIN_HOST_WIDTH: u16 = 60;
-const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
-const TURN_META_PREFIX: &str = "<turn_meta>";
 const SESSION_TITLE_MAX_CHARS: usize = 32;
 const VERSION_HINT_TOAST_TTL_MS: u64 = 12_000;
 
@@ -270,15 +267,21 @@ type PendingToolUses = Vec<(String, String, serde_json::Value)>;
 #[derive(Debug)]
 enum TranslationEvent {
     AssistantMessage {
+        origin_session_fingerprint: Option<String>,
+        origin_turn_fingerprint: Option<String>,
         history_index: Option<usize>,
         original_text: String,
         translated: anyhow::Result<String>,
+        usage: Option<codewhale_models::Usage>,
         thinking: Option<String>,
         tool_uses: PendingToolUses,
     },
     Thinking {
+        origin_session_fingerprint: Option<String>,
+        origin_turn_fingerprint: Option<String>,
         placeholder: String,
         translated: anyhow::Result<String>,
+        usage: Option<codewhale_models::Usage>,
     },
 }
 
@@ -361,12 +364,34 @@ fn tui_launch_preflight_rejects_background_process_group() {
     assert!(message.contains("codewhale exec"), "{message}");
 }
 
-fn should_show_resume_hint(session_id: Option<&str>) -> bool {
-    session_id.is_some_and(|id| !id.trim().is_empty())
-}
-
-fn resume_hint_text() -> &'static str {
-    "To continue this session, execute codewhale run --continue"
+fn resume_hint_text(
+    locale: codewhale_localization::Locale,
+    session_id: Option<&str>,
+    terminal_output: bool,
+) -> Option<String> {
+    use codewhale_localization::{MessageId, tr};
+    if !terminal_output {
+        return None;
+    }
+    let session_id = session_id.filter(|id| !id.trim().is_empty())?;
+    // Reconstruct a canonical UUID rather than interpolating a stored string
+    // into a shell command or terminal output. Legacy/noncanonical identities
+    // get the existing picker, never an ambiguous "most recent" shortcut.
+    let canonical = uuid::Uuid::parse_str(session_id)
+        .ok()
+        .map(|id| id.hyphenated().to_string())
+        .filter(|id| id == session_id);
+    let (message, command) = match canonical {
+        Some(id) => (
+            MessageId::ResumeExactSessionHint,
+            format!("codewhale resume {id}"),
+        ),
+        None => (
+            MessageId::ResumeSavedSessionHint,
+            "codewhale resume".to_string(),
+        ),
+    };
+    Some(tr(locale, message).replace("{command}", &command))
 }
 
 struct TerminalCleanupGuard {
@@ -469,6 +494,38 @@ fn spawn_tui_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
     handle
 }
 
+/// Startup and consent-triggered replacement restore the same conversation
+/// before admitting any pending input. The existing engine remains the sole
+/// owner of model-facing history and the frozen system prefix.
+async fn spawn_tui_engine_with_session(app: &mut App, config: &Config) -> Result<EngineHandle> {
+    let handle = spawn_tui_engine(build_engine_config(app, config), config);
+    let restored = async {
+        if !app.api_messages.is_empty() {
+            handle
+                .send(Op::SyncSession {
+                    session_id: app.current_session_id.clone(),
+                    messages: app.api_messages.as_ref().clone(),
+                    system_prompt: app.system_prompt.clone(),
+                    system_prompt_override: false,
+                    model: app.model.clone(),
+                    workspace: app.workspace.clone(),
+                    mode: app.mode,
+                })
+                .await?;
+        }
+        // FIFO snapshot acknowledgement also proves the restore was processed.
+        let snapshot = handle.get_session_snapshot().await?;
+        app.system_prompt = snapshot.system_prompt;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = restored {
+        let _ = handle.send(Op::Shutdown).await;
+        return Err(error);
+    }
+    Ok(handle)
+}
+
 fn configured_instruction_sources(config: &Config) -> Vec<prompts::InstructionSource> {
     config
         .instructions_paths()
@@ -538,7 +595,7 @@ pub(crate) struct CacheWarmupOutcome {
 fn deliver_constitution_draft_result(
     app: &mut App,
     model_label: String,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     outcome: Result<Box<codewhale_config::UserConstitution>, String>,
 ) {
     match outcome {
@@ -586,7 +643,7 @@ fn deliver_fleet_draft_result(
     picked_route: Option<(String, String)>,
     reasoning_effort: Option<String>,
     outcome: Result<Box<crate::fleet::profile::FleetProfileDraft>, String>,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) {
     match outcome {
         Ok(draft) => {
@@ -608,7 +665,7 @@ fn deliver_fleet_draft_result(
                 app.view_stack.push_boxed(boxed);
                 if installed {
                     app.status_message = Some(match locale {
-                        crate::localization::Locale::ZhHans => {
+                        codewhale_localization::Locale::ZhHans => {
                             format!("{model_label} 已起草配置。请查看下方 TOML，然后按 g 保存。")
                         }
                         _ => format!(
@@ -620,7 +677,7 @@ fn deliver_fleet_draft_result(
         }
         Err(reason) => {
             app.status_message = Some(match locale {
-                crate::localization::Locale::ZhHans => {
+                codewhale_localization::Locale::ZhHans => {
                     format!("{model_label} 未能起草配置（{reason}）。按 Enter 仍会插入编写提示。")
                 }
                 _ => format!(
@@ -658,10 +715,15 @@ fn is_work_graph_mutation_tool(name: &str) -> bool {
     )
 }
 
-fn turn_stall_watchdog_timeout(app: &App) -> Duration {
-    let stream_budget = Duration::from_secs(app.stream_chunk_timeout_secs)
-        .saturating_add(TURN_STALL_WATCHDOG_GRACE);
-    TURN_STALL_WATCHDOG_TIMEOUT.max(stream_budget)
+/// UI watchdog bound for an in-progress turn with no activity (#6184).
+///
+/// Decoupled from `stream_chunk_timeout_secs`: tying it to that budget made
+/// the UI watchdog unable to fire before the 900s stream idle timeout. A
+/// quiet model wait is protected by the engine heartbeat instead — while the
+/// engine reports a bounded wait it has not flagged as overdue, the UI defers
+/// to it (`reconcile_turn_liveness_with`).
+fn turn_stall_watchdog_timeout(_app: &App) -> Duration {
+    TURN_STALL_WATCHDOG_TIMEOUT
 }
 
 fn active_turn_has_running_tool(app: &App) -> bool {
@@ -772,11 +834,11 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
             if app.view_stack.top_kind() == Some(ModalKind::FleetDetail) {
                 return;
             }
-            let Some(view) = crate::tui::views::fleet_detail::FleetDetailView::open_for_member(
+            let Some(mut view) = crate::tui::views::fleet_detail::FleetDetailView::open_for_member(
                 app, config, &name, scope, member_id,
             ) else {
                 app.set_sticky_status(
-                    "Selected Fleet is invalid or unreadable; open /fleet fleets to repair or clear the selection. Legacy profiles were not opened."
+                    "Selected team is invalid or unreadable; open /fleet teams to repair or clear the selection. Legacy profiles were not opened."
                         .to_string(),
                     StatusToastLevel::Error,
                     None,
@@ -784,14 +846,53 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
                 return;
             };
             let fleet_name = crate::safe_label::SafeLabel::phrase(&name);
+            let picker = if member_id.is_some() {
+                let (editor_id, target) = view.direct_assignment();
+                let (role, scope) = view.assignment_context();
+                view.route_selection(editor_id, target).map(|selection| {
+                    crate::tui::model_picker::ModelPickerView::new_for_fleet_route(
+                        app, config, target, editor_id, selection,
+                    )
+                    .with_assignment_context(role, scope)
+                })
+            } else {
+                None
+            };
             app.view_stack.push(view);
+            if let Some(picker) = picker {
+                app.view_stack.push(picker);
+            }
             app.status_message = Some(format!(
-                "Editing selected Fleet `{fleet_name}` ({}) — legacy profiles will not be changed.",
+                "Editing selected team `{fleet_name}` ({}) — legacy profiles will not be changed.",
                 scope.label()
             ));
         }
         Ok(FleetSetupEditTarget::LegacyProfiles) => {
             if app.view_stack.top_kind() == Some(ModalKind::FleetSetup) {
+                return;
+            }
+            if let Some(member_id) = member_id {
+                match crate::tui::views::fleet_setup::FleetSetupView::new_for_route_assignment(
+                    app, config, member_id,
+                ) {
+                    Ok(view) => {
+                        if let ViewAction::Emit(ViewEvent::FleetProfileRoutePickRequested {
+                            editor_id,
+                        }) = view.route_pick_request()
+                            && let Some(selection) = view.route_selection(editor_id)
+                        {
+                            let (role, scope) = view.assignment_context();
+                            let picker =
+                                crate::tui::model_picker::ModelPickerView::new_for_fleet_profile(
+                                    app, config, editor_id, selection,
+                                )
+                                .with_assignment_context(role, scope);
+                            app.view_stack.push(view);
+                            app.view_stack.push(picker);
+                        }
+                    }
+                    Err(reason) => app.set_sticky_status(reason, StatusToastLevel::Error, None),
+                }
                 return;
             }
             let _ = app.next_draft_gen();
@@ -806,43 +907,6 @@ fn open_fleet_setup_target(app: &mut App, config: &Config, member_id: Option<&st
         Err(message) => {
             app.set_sticky_status(message, StatusToastLevel::Error, None);
         }
-    }
-}
-
-fn open_fleet_model_target(app: &mut App, config: &Config, member_id: &str) {
-    use crate::tui::views::fleet_setup::{FleetSetupEditTarget, resolve_fleet_setup_edit_target};
-
-    match resolve_fleet_setup_edit_target(&app.workspace) {
-        Ok(FleetSetupEditTarget::SelectedFleet { name, scope }) => {
-            if app.view_stack.top_kind() == Some(ModalKind::FleetDetail) {
-                return;
-            }
-            let Some(mut view) = crate::tui::views::fleet_detail::FleetDetailView::open_for_member(
-                app,
-                config,
-                &name,
-                scope,
-                Some(member_id),
-            ) else {
-                app.set_sticky_status(
-                    "Selected Fleet is invalid or unreadable; open /fleet fleets to repair or clear the selection."
-                        .to_string(),
-                    StatusToastLevel::Error,
-                    None,
-                );
-                return;
-            };
-            view.open_model_picker();
-            app.view_stack.push(view);
-            let fleet_name = crate::safe_label::SafeLabel::phrase(&name);
-            app.status_message = Some(format!(
-                "Editing member `{member_id}` in Fleet `{fleet_name}` — choose a model route.",
-            ));
-        }
-        Ok(FleetSetupEditTarget::LegacyProfiles) => {
-            open_fleet_setup_target(app, config, Some(member_id));
-        }
-        Err(message) => app.set_sticky_status(message, StatusToastLevel::Error, None),
     }
 }
 
@@ -878,6 +942,10 @@ mod dispatch;
 mod dispatch_prepare;
 pub(crate) use dispatch_prepare::*;
 pub(crate) mod fatal_signal_guard;
+// #6169: runtime half of the foreground-ownership contract — restore on stop,
+// rebuild on continue. Sits next to the fatal guard because both write the same
+// teardown table.
+pub(crate) mod job_control_guard;
 mod motion;
 mod observer_hooks;
 mod provider_setup;
@@ -888,6 +956,9 @@ mod terminal;
 mod terminal_input;
 use remote_control_bridge::*;
 use terminal_input::*;
+// #6165: `external_editor` is a sibling of `ui`, and the pump pause now lives
+// inside its `with_suspended_tui` so no editor entry point can forget it.
+pub(crate) use terminal_input::pause_terminal_input_for_child;
 
 pub(crate) use dispatch::*;
 pub(crate) use motion::*;
@@ -923,7 +994,6 @@ async fn execute_command_input(
     engine_handle: &mut EngineHandle,
     task_manager: &SharedTaskManager,
     config: &mut Config,
-    web_config_session: &mut Option<WebConfigSession>,
     input: &str,
 ) -> Result<bool> {
     let _ = app.note_manual_command_for_tip(input);
@@ -953,16 +1023,7 @@ async fn execute_command_input(
         clear_active_provider_api_key_from_memory(app, config);
         app.api_key_env_only = crate::config::active_provider_uses_env_only_api_key(config);
     }
-    apply_command_result(
-        terminal,
-        app,
-        engine_handle,
-        task_manager,
-        config,
-        web_config_session,
-        result,
-    )
-    .await
+    apply_command_result(terminal, app, engine_handle, task_manager, config, result).await
 }
 
 #[derive(Debug, Clone)]
@@ -1036,6 +1097,7 @@ pub(crate) struct ApprovalDecisionEvent {
 }
 
 fn mark_active_turn_cancelled_locally(app: &mut App) {
+    app.retire_action_notices(None);
     // #2739: every local cancel surface (Esc, Ctrl+C, approval abort, paused
     // command abort) must snapshot before it clears turn state. Otherwise
     // --continue reloads the previous save and the interrupted turn vanishes.
@@ -1067,8 +1129,14 @@ pub(crate) fn escape_cancel_request(
     current_streaming_text: &mut String,
     stream_display_clock: &mut StreamDisplayClock,
 ) -> bool {
-    if try_cancel_compaction(app, engine_handle) {
-        return true;
+    let compacting = app.is_compacting || app.manual_compaction_queued;
+    if compacting {
+        try_cancel_compaction(app, engine_handle);
+        if !compact_interrupt_should_stop_turn(app) {
+            return true;
+        }
+        // Mid-turn compact is collateral. Esc/interrupt stops the turn
+        // (Codex/GrokBuild): cancel_compaction alone continues the loop.
     }
     if app.paused || app.paused_goal_objective.is_some() {
         clear_paused_command_state(app, engine_handle);
@@ -1101,6 +1169,10 @@ pub(crate) fn escape_cancel_request(
     }
 }
 
+/// Stream events a local cancel hides until the turn completes. Approval,
+/// sandbox-elevation, and question requests are never silently hidden:
+/// `resolve_stale_parent_request` answers a stale parent request explicitly,
+/// and a child agent's request is always delivered (approvals C1).
 fn suppress_engine_event_after_local_cancel(event: &EngineEvent) -> bool {
     matches!(
         event,
@@ -1113,9 +1185,6 @@ fn suppress_engine_event_after_local_cancel(event: &EngineEvent) -> bool {
             | EngineEvent::ToolCallStarted { .. }
             | EngineEvent::ToolCallHeartbeat
             | EngineEvent::ToolCallComplete { .. }
-            | EngineEvent::ApprovalRequired { .. }
-            | EngineEvent::UserInputRequired { .. }
-            | EngineEvent::ElevationRequired { .. }
             | EngineEvent::SessionUpdated { .. }
     )
 }
@@ -1132,9 +1201,6 @@ fn ignore_stale_stream_event_while_idle(event: &EngineEvent) -> bool {
             | EngineEvent::ToolCallStarted { .. }
             | EngineEvent::ToolCallHeartbeat
             | EngineEvent::ToolCallComplete { .. }
-            | EngineEvent::ApprovalRequired { .. }
-            | EngineEvent::UserInputRequired { .. }
-            | EngineEvent::ElevationRequired { .. }
     )
 }
 
@@ -1324,6 +1390,10 @@ mod provider_key_validation_tests {
 
     struct ConfigPathEnvGuard {
         _tmp: TempDir,
+        // Onboarding completion runs the setup transaction (setup_state.json,
+        // settings.toml) against `CODEWHALE_HOME`; without this guard the
+        // fixture provider landed in the developer's real ~/.codewhale (#5932).
+        _codewhale_home: crate::test_support::EnvVarGuard,
         _codewhale_config_path: crate::test_support::EnvVarGuard,
         _deepseek_config_path: crate::test_support::EnvVarGuard,
         _lock: crate::test_support::TestEnvLock,
@@ -1333,11 +1403,13 @@ mod provider_key_validation_tests {
         fn new() -> Self {
             let lock = crate::test_support::lock_test_env();
             let tmp = TempDir::new().expect("config tempdir");
-            let config_path = tmp.path().join(".codewhale").join("config.toml");
+            let home = tmp.path().join(".codewhale");
+            let config_path = home.join("config.toml");
             std::fs::create_dir_all(config_path.parent().expect("config parent"))
                 .expect("config dir");
             Self {
                 _tmp: tmp,
+                _codewhale_home: crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home),
                 _codewhale_config_path: crate::test_support::EnvVarGuard::set(
                     "CODEWHALE_CONFIG_PATH",
                     &config_path,
@@ -2278,3 +2350,44 @@ fn completed_turn_cost_route_receipt(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn fleet_role_entry_opens_shared_picker_and_cancel_restores_parked_roster() {
+    use crate::tui::views::ModalView;
+    let _env = crate::test_support::lock_test_env();
+    let workspace = tempfile::tempdir().unwrap();
+    let config = Config::default();
+    let mut app = App::new(
+        crate::test_support::test_tui_options(workspace.path()),
+        &config,
+    );
+    app.view_stack
+        .push(crate::tui::views::fleet_roster::FleetRosterView::new(
+            &app, &config,
+        ));
+    open_fleet_setup_target(&mut app, &config, Some("manager"));
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ModelPicker));
+    let mut picker = app.view_stack.pop().unwrap();
+    let action = picker
+        .as_any_mut()
+        .downcast_mut::<crate::tui::model_picker::ModelPickerView>()
+        .unwrap()
+        .handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    let ViewAction::EmitAndClose(ViewEvent::FleetAssignmentPickerDismissed { editor_id }) = action
+    else {
+        panic!("assignment cancel must identify its editor")
+    };
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::FleetSetup));
+    handlers::dismiss_fleet_assignment(&mut app, editor_id);
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::FleetRoster));
+    assert!(
+        !workspace
+            .path()
+            .join(".codewhale/agents/manager.toml")
+            .exists()
+    );
+}

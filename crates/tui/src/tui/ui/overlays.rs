@@ -441,19 +441,23 @@ pub(crate) fn disable_hotbar(app: &mut App, config: &mut Config) {
 }
 
 pub(crate) fn refresh_config_view_if_open(app: &mut App, focus_key: &str) {
-    if app.view_stack.top_kind() == Some(ModalKind::Config) {
-        let filter = app.view_stack.pop().and_then(|mut view| {
-            view.as_any_mut()
-                .downcast_mut::<ConfigView>()
-                .map(|config_view| config_view.filter_query().to_string())
-        });
-        let mut config_view = ConfigView::new_for_app(app);
-        if let Some(filter) = filter {
-            config_view.restore_filter(filter);
-        }
-        config_view.focus_key(focus_key);
-        app.view_stack.push(config_view);
+    if app.view_stack.top_kind() != Some(ModalKind::Config) {
+        return;
     }
+    let Some(mut boxed) = app.view_stack.pop() else {
+        return;
+    };
+    let rebuilt = match boxed.as_any_mut().downcast_ref::<ConfigView>() {
+        Some(previous) => ConfigView::rebuild_preserving(app, previous, focus_key),
+        // Not a `ConfigView`: rebuild from scratch rather than restoring an
+        // unknown modal, matching how the stack got here.
+        None => {
+            let mut fresh = ConfigView::new_for_app(app);
+            fresh.focus_key(focus_key);
+            fresh
+        }
+    };
+    app.view_stack.push(rebuilt);
 }
 
 pub(crate) fn refresh_skills_manager_if_open(
@@ -488,10 +492,12 @@ pub(crate) fn push_approval_request_view(
     description: &str,
     tool_input: &serde_json::Value,
     approval_key: &str,
+    approval_grouping_key: &str,
     intent_summary: Option<&str>,
     default_selection: crate::config::ApprovalDefaultSelection,
+    timeout: Option<std::time::Duration>,
 ) {
-    let request = ApprovalRequest::new_with_intent(
+    let mut request = ApprovalRequest::new_with_intent(
         id,
         tool_name,
         description,
@@ -500,12 +506,26 @@ pub(crate) fn push_approval_request_view(
         intent_summary,
         &app.workspace,
     );
-    app.view_stack
-        .push(ApprovalView::new_with_default_selection(
-            request,
-            app.ui_locale,
-            default_selection,
-        ));
+    // The engine owns the grant scope: a child's grouping key is prefixed
+    // with its agent so "allow for this conversation" never covers the
+    // parent or a sibling (C3). Keep the card's own key only when the
+    // event carries none.
+    if !approval_grouping_key.is_empty() {
+        request.approval_grouping_key = approval_grouping_key.to_string();
+    }
+    // A child's gate never consults saved repo allow rules, so a child card
+    // must not offer "Always allow in this repo" — it would do nothing. The
+    // card names its agent (approvals C1).
+    if crate::tools::subagent::SubAgentManager::is_child_approval_id(id) {
+        request.persistent_allow_rules.clear();
+        if let Some(agent_id) = crate::tui::pending_requests::child_agent_id(id) {
+            request.owner = Some(crate::tui::pending_requests::owner_for(app, agent_id));
+        }
+    }
+    app.view_stack.push(
+        ApprovalView::new_with_default_selection(request, app.ui_locale, default_selection)
+            .with_timeout(timeout),
+    );
 }
 
 /// Push the new `selected_idx` into the live transcript overlay so the

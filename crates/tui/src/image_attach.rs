@@ -42,12 +42,18 @@
 //! PNG/JPEG/GIF/WebP, and so, therefore, do we. Refusing a BMP here with a
 //! readable message beats letting one through to a provider-side 400.
 
+use anyhow::{Result, bail};
+use codewhale_protocol::runtime::{
+    MAX_RUNTIME_IMAGE_BYTES, MAX_RUNTIME_IMAGE_TOTAL_BYTES, MAX_RUNTIME_IMAGES, RuntimeImageInput,
+};
+use image::{DynamicImage, ImageReader, Limits};
+use std::io::Cursor;
 use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::model_profile::SupportState;
-use crate::models::{ContentBlock, ImageUrlContent};
+use codewhale_models::{ContentBlock, ImageUrlContent};
 
 /// Largest source image accepted, in bytes, before base64 expansion.
 ///
@@ -56,6 +62,147 @@ use crate::models::{ContentBlock, ImageUrlContent};
 /// tightest provider limit as the shared limit is what makes a "CodeWhale
 /// accepted it" verdict portable across routes.
 pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Maximum width or height admitted for an input image (8192 px).
+pub const MAX_IMAGE_DIMENSION: u32 = 8192;
+
+/// Maximum total pixels admitted before decoding is aborted (~33.5 megapixels).
+pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+
+/// Memory allocation limit for image decoding (64 MiB).
+pub const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn decode_and_guard_image(bytes: &[u8]) -> Result<(DynamicImage, u32, u32)> {
+    let limits = || {
+        let mut limits = Limits::default();
+        limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+        limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+        limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+        limits
+    };
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(limits());
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|_| anyhow::anyhow!("invalid image header or decompression bomb guard"))?;
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS
+        || width > MAX_IMAGE_DIMENSION
+        || height > MAX_IMAGE_DIMENSION
+    {
+        bail!("image dimensions exceed the decompression bomb guard; downscale or crop first");
+    }
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(limits());
+    let decoded = reader
+        .decode()
+        .map_err(|_| anyhow::anyhow!("invalid image content or decode allocation limit"))?;
+    Ok((decoded, width, height))
+}
+
+/// Validate untrusted inline input before route selection or durable admission.
+/// Return the existing provider-neutral history representation; no file is opened.
+pub(crate) fn prepare_runtime_images(images: &[RuntimeImageInput]) -> Result<Vec<ContentBlock>> {
+    if images.len() > MAX_RUNTIME_IMAGES {
+        bail!("images exceed the {MAX_RUNTIME_IMAGES} attachment limit");
+    }
+    prepare_images_with_limit(
+        images,
+        MAX_RUNTIME_IMAGE_BYTES,
+        Some(MAX_RUNTIME_IMAGE_TOTAL_BYTES),
+    )
+}
+
+/// Internal Engine/history input retains the established local 5 MiB ceiling.
+/// Network callers must first pass `prepare_runtime_images` (4 MiB per image,
+/// 10 images and 5 MiB total). Local history never had those aggregate/count
+/// limits; impose only its existing per-image bound and bounded full decode.
+pub(crate) fn prepare_stored_images(images: &[RuntimeImageInput]) -> Result<Vec<ContentBlock>> {
+    prepare_images_with_limit(images, MAX_IMAGE_BYTES, None)
+}
+
+fn prepare_images_with_limit(
+    images: &[RuntimeImageInput],
+    per_image_limit: usize,
+    total_limit: Option<usize>,
+) -> Result<Vec<ContentBlock>> {
+    let mut total = 0usize;
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            if image.data_base64.len() > per_image_limit.div_ceil(3) * 4 {
+                bail!(
+                    "image {} exceeds the {} MiB limit",
+                    index + 1,
+                    per_image_limit / (1024 * 1024)
+                );
+            }
+            let bytes = STANDARD
+                .decode(&image.data_base64)
+                .map_err(|_| anyhow::anyhow!("image {} has invalid base64", index + 1))?;
+            if bytes.len() > per_image_limit {
+                bail!(
+                    "image {} exceeds the {} MiB limit",
+                    index + 1,
+                    per_image_limit / (1024 * 1024)
+                );
+            }
+            total = total.saturating_add(bytes.len());
+            if total_limit.is_some_and(|limit| total > limit) {
+                bail!("images exceed the 5 MiB total limit");
+            }
+            let attached = encode_image_bytes(&bytes, &format!("image {}", index + 1))?;
+            if image.mime != attached.media_type {
+                bail!("image {} MIME does not match its content", index + 1);
+            }
+            decode_and_guard_image(&bytes)?;
+            // Standard padded base64 is the one replay representation.
+            if STANDARD.encode(&bytes) != image.data_base64 {
+                bail!("image {} base64 is not canonical", index + 1);
+            }
+            Ok(attached.content_block())
+        })
+        .collect()
+}
+
+/// Reuse durable canonical bytes for retry, never reread a path or URL.
+pub(crate) fn runtime_images_from_blocks(
+    blocks: &[ContentBlock],
+) -> Result<Vec<RuntimeImageInput>> {
+    let mut images = Vec::new();
+    for block in blocks {
+        if let ContentBlock::ImageUrl { image_url } = block {
+            if image_url.url.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 + 32 {
+                bail!("stored image exceeds the attachment limit");
+            }
+            let (mime, data) = parse_data_url(&image_url.url)
+                .ok_or_else(|| anyhow::anyhow!("stored image requires canonical inline content"))?;
+            images.push(RuntimeImageInput {
+                mime: mime.to_string(),
+                data_base64: data.to_string(),
+            });
+        }
+    }
+    prepare_stored_images(&images)?;
+    Ok(images)
+}
+
+/// Validate new image-bearing durable records without rewriting their block order.
+/// Legacy schema 2 history continues to use its original interpretation.
+pub(crate) fn validate_stored_image_content(blocks: &[ContentBlock]) -> Result<()> {
+    if blocks.iter().any(|block| {
+        !matches!(
+            block,
+            ContentBlock::Text { .. } | ContentBlock::ImageUrl { .. }
+        )
+    }) {
+        bail!("invalid persisted user image content kind");
+    }
+    if runtime_images_from_blocks(blocks)?.is_empty() {
+        bail!("persisted image input must contain an image");
+    }
+    Ok(())
+}
 
 /// Why a file could not be attached as an image.
 ///
@@ -68,8 +215,13 @@ pub enum ImageAttachError {
     Unreadable { path: String, reason: String },
     /// The file is zero bytes.
     Empty { path: String },
-    /// Over [`MAX_IMAGE_BYTES`].
-    TooLarge { path: String, bytes: usize },
+    /// Over `limit` bytes: [`MAX_IMAGE_BYTES`] for already-encoded bytes, the
+    /// larger source bound when attach-time downscaling applies.
+    TooLarge {
+        path: String,
+        bytes: usize,
+        limit: usize,
+    },
     /// Magic bytes identify a format no provider in the set accepts.
     UnsupportedFormat { path: String, detected: String },
     /// Magic bytes match nothing we recognize as an image.
@@ -85,12 +237,12 @@ impl std::fmt::Display for ImageAttachError {
             Self::Empty { path } => {
                 write!(f, "Cannot attach {path}: the file is empty")
             }
-            Self::TooLarge { path, bytes } => write!(
+            Self::TooLarge { path, bytes, limit } => write!(
                 f,
                 "Cannot attach {path}: {} exceeds the {} per-image limit. \
                  Downscale or crop it first.",
                 human_bytes(*bytes),
-                human_bytes(MAX_IMAGE_BYTES),
+                human_bytes(*limit),
             ),
             Self::UnsupportedFormat { path, detected } => write!(
                 f,
@@ -141,7 +293,9 @@ pub struct PreparedToolImage {
 #[must_use]
 pub fn prepare_tool_image_bytes(bytes: &[u8], mime_type: &str) -> PreparedToolImage {
     let mime_type = mime_type.split(';').next().unwrap_or(mime_type).trim();
-    let valid = sniff_media_type(bytes) == Some(mime_type) && bytes.len() <= MAX_IMAGE_BYTES;
+    let valid = bytes.len() <= MAX_IMAGE_BYTES
+        && sniff_media_type(bytes) == Some(mime_type)
+        && decode_and_guard_image(bytes).is_ok();
     if !valid {
         return PreparedToolImage {
             block: None,
@@ -164,7 +318,11 @@ fn valid_tool_image(mime_type: &str, data: &str) -> bool {
         mime_type,
         "image/png" | "image/jpeg" | "image/gif" | "image/webp"
     ) && data.len() <= MAX_IMAGE_BYTES.div_ceil(3) * 4
-        && STANDARD.decode(data).is_ok()
+        && STANDARD.decode(data).is_ok_and(|bytes| {
+            bytes.len() <= MAX_IMAGE_BYTES
+                && sniff_media_type(&bytes) == Some(mime_type)
+                && decode_and_guard_image(&bytes).is_ok()
+        })
 }
 
 /// Enforce the same one-image limit at the tool execution boundary so plugin
@@ -254,8 +412,8 @@ pub(crate) fn safe_tool_result_content_blocks(
 
 #[must_use]
 pub(crate) fn safe_tool_result_message_projection(
-    messages: &[crate::models::Message],
-) -> Vec<crate::models::Message> {
+    messages: &[codewhale_models::Message],
+) -> Vec<codewhale_models::Message> {
     let mut projected = messages.to_vec();
     for message in &mut projected {
         for block in &mut message.content {
@@ -348,18 +506,11 @@ pub fn encode_image_bytes(bytes: &[u8], path: &str) -> Result<AttachedImage, Ima
         return Err(ImageAttachError::TooLarge {
             path: path.to_string(),
             bytes: bytes.len(),
+            limit: MAX_IMAGE_BYTES,
         });
     }
     let Some(media_type) = sniff_media_type(bytes) else {
-        return Err(match detect_rejected_format(bytes) {
-            Some(detected) => ImageAttachError::UnsupportedFormat {
-                path: path.to_string(),
-                detected: detected.to_string(),
-            },
-            None => ImageAttachError::NotAnImage {
-                path: path.to_string(),
-            },
-        });
+        return Err(format_error(bytes, path));
     };
     let payload = STANDARD.encode(bytes);
     Ok(AttachedImage {
@@ -369,17 +520,42 @@ pub fn encode_image_bytes(bytes: &[u8], path: &str) -> Result<AttachedImage, Ima
     })
 }
 
+fn format_error(bytes: &[u8], path: &str) -> ImageAttachError {
+    match detect_rejected_format(bytes) {
+        Some(detected) => ImageAttachError::UnsupportedFormat {
+            path: path.to_string(),
+            detected: detected.to_string(),
+        },
+        None => ImageAttachError::NotAnImage {
+            path: path.to_string(),
+        },
+    }
+}
+
+/// Longest edge an attached image is sent at. A Retina screenshot is 3–6k px
+/// and often over [`MAX_IMAGE_BYTES`] as PNG; larger images are downscaled
+/// and re-encoded when attached rather than refused.
+pub const ATTACH_MAX_EDGE_PX: u32 = 2048;
+
 /// Read, validate and encode an image file.
+///
+/// Images over [`ATTACH_MAX_EDGE_PX`] or [`MAX_IMAGE_BYTES`] are decoded under
+/// the decompression-bomb guard, fitted to the edge and re-encoded on
+/// `read_media`'s budget ladder (PNG for flat or alpha content, JPEG for
+/// photos). Known limit: an animated GIF that needs downscaling keeps only
+/// its first frame. Sources above `read_media`'s source bound are refused.
 pub fn attach_image_from_path(path: &Path) -> Result<AttachedImage, ImageAttachError> {
     let display = path.display().to_string();
+    let source_limit = crate::tools::read_media::MAX_SOURCE_IMAGE_BYTES;
     // Check the size from metadata first so a multi-gigabyte file is refused
     // without being read into memory.
     if let Ok(meta) = std::fs::metadata(path) {
         let len = meta.len();
-        if len > MAX_IMAGE_BYTES as u64 {
+        if len > source_limit as u64 {
             return Err(ImageAttachError::TooLarge {
                 path: display,
                 bytes: usize::try_from(len).unwrap_or(usize::MAX),
+                limit: source_limit,
             });
         }
     }
@@ -387,7 +563,61 @@ pub fn attach_image_from_path(path: &Path) -> Result<AttachedImage, ImageAttachE
         path: display.clone(),
         reason: error.to_string(),
     })?;
-    encode_image_bytes(&bytes, &display)
+    if bytes.len() > source_limit {
+        return Err(ImageAttachError::TooLarge {
+            path: display,
+            bytes: bytes.len(),
+            limit: source_limit,
+        });
+    }
+    let oversized_edge = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(width, height)| width.max(height) > ATTACH_MAX_EDGE_PX);
+    if bytes.len() <= MAX_IMAGE_BYTES && !oversized_edge {
+        return encode_image_bytes(&bytes, &display);
+    }
+    if sniff_media_type(&bytes).is_none() {
+        return Err(format_error(&bytes, &display));
+    }
+    let unreadable = |reason: String| ImageAttachError::Unreadable {
+        path: display.clone(),
+        reason,
+    };
+    let (image, _, _) =
+        decode_and_guard_image(&bytes).map_err(|error| unreadable(error.to_string()))?;
+    let (encoded, _) =
+        crate::tools::read_media::fit_and_encode(&image, ATTACH_MAX_EDGE_PX, MAX_IMAGE_BYTES, path)
+            .map_err(|error| unreadable(error.to_string()))?;
+    encode_image_bytes(&encoded, &display)
+}
+
+/// Image blocks sent from the latest user prompt onward: this turn's
+/// attachments and tool-result images, not ones replayed from history.
+#[must_use]
+pub fn images_since_last_user_prompt(messages: &[codewhale_models::Message]) -> usize {
+    let is_prompt = |message: &codewhale_models::Message| {
+        message.role == codewhale_models::Role::User
+            && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { .. } | ContentBlock::ImageUrl { .. }
+                )
+            })
+    };
+    let start = messages.iter().rposition(is_prompt).unwrap_or(0);
+    messages[start..]
+        .iter()
+        .flat_map(|message| &message.content)
+        .map(|block| match block {
+            ContentBlock::ImageUrl { .. } => 1,
+            ContentBlock::ToolResult { content_blocks, .. } => {
+                content_blocks.as_ref().map_or(0, Vec::len)
+            }
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Split a `data:<media-type>;base64,<payload>` URL.
@@ -446,7 +676,7 @@ pub struct ExpandedAttachments {
 /// sent, with the failure stated in-band rather than swallowed.
 #[must_use]
 pub fn expand_attachment_blocks(text: &str) -> ExpandedAttachments {
-    let references = crate::tui::file_mention::media_attachment_references(text);
+    let references = codewhale_core::media_attachment_references(text);
     let mut out = ExpandedAttachments::default();
     for reference in references {
         if reference.kind != "image" {
@@ -494,7 +724,7 @@ fn tag_block(text: &str) -> ContentBlock {
 /// The image is replaced in place rather than removed, so the model is told
 /// why it is looking at a gap instead of being left to invent one.
 pub fn strip_images_when_unsupported(
-    messages: &mut [crate::models::Message],
+    messages: &mut [codewhale_models::Message],
     vision: SupportState,
     model: &str,
 ) -> usize {

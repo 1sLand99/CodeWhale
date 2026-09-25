@@ -3,7 +3,7 @@
 //! `SnapshotRepo` shells out to the system `git` binary (we deliberately
 //! avoid `git2` to dodge its LGPL surface). The two paths that matter:
 //!
-//! - `git_dir`  → `~/.deepseek/snapshots/<project_hash>/<worktree_hash>/.git`
+//! - `git_dir`  → `<snapshot state dir>/<project_hash>/<worktree_hash>/.git`
 //! - `work_tree` → the user's actual workspace
 //!
 //! Every git invocation passes both `--git-dir` AND `--work-tree`. That is
@@ -22,11 +22,38 @@ use crate::dependencies::ExternalTool;
 
 use super::paths::{ensure_snapshot_dir, snapshot_git_dir};
 
-/// Identifier for a snapshot — currently the underlying git commit SHA.
+/// Identifier for a snapshot — the underlying git commit id.
+///
+/// The field is private: [`SnapshotId::parse`] is the only way to build one,
+/// so every value handed to `git` as a revision is a full SHA-1 or SHA-256
+/// hex object id and can never be read as an option or a revision expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotId(pub String);
+pub struct SnapshotId(String);
 
 impl SnapshotId {
+    /// Accept exactly a full hex object id: 40 (SHA-1) or 64 (SHA-256)
+    /// ASCII hex digits. Anything else is `InvalidInput`.
+    pub fn parse(id: &str) -> io::Result<Self> {
+        if Self::is_well_formed(id) {
+            Ok(Self(id.to_string()))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "snapshot id must be a full hexadecimal commit id",
+            ))
+        }
+    }
+
+    /// Whether `id` would be accepted by [`SnapshotId::parse`].
+    pub fn is_well_formed(id: &str) -> bool {
+        matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// Take the id string out.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
     /// Borrow the SHA as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -46,6 +73,41 @@ pub struct Snapshot {
     /// `[sid=...] ` label prefix). `None` for legacy snapshots taken
     /// before session tagging existed.
     pub session_id: Option<String>,
+}
+
+/// What a file-scoped restore did to one path, relative to the working tree
+/// it was applied to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRestoreAction {
+    /// Both the snapshot and the working tree had the path; its content came
+    /// back from the snapshot.
+    Modified,
+    /// The snapshot had the path and the working tree no longer did, so the
+    /// restore recreated the file.
+    Recreated,
+    /// The working tree had the path and the snapshot did not, so the restore
+    /// removed the file.
+    Removed,
+}
+
+impl PathRestoreAction {
+    /// Stable wire name, also used by the runtime API response.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Modified => "modified",
+            Self::Recreated => "recreated",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// Report of what [`SnapshotRepo::restore_paths`] did to one path.
+#[derive(Debug, Clone)]
+pub struct PathRestoreOutcome {
+    /// Workspace-relative path that was restored.
+    pub path: PathBuf,
+    /// How the working tree changed.
+    pub action: PathRestoreAction,
 }
 
 /// Wrapper around the per-workspace side-git repo.
@@ -83,7 +145,58 @@ pub const DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT: u64 = 2 * 1024 * 1024 * 1024
 /// will inspect before declaring the workspace "too large". Protects
 /// against a workspace with millions of tiny files (no individual
 /// file is large, but `git add -A` would still take forever).
-const SIZE_WALK_MAX_ENTRIES: usize = 200_000;
+pub const SIZE_WALK_MAX_ENTRIES: usize = 200_000;
+
+/// Which snapshot gate refused a workspace. The recovery differs per gate —
+/// raising `[snapshots] max_workspace_gb` lifts only [`WorkspaceGate::TooLarge`]
+/// — so callers must not offer one gate's remedy for another's failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceGate {
+    /// Snapshot-eligible content exceeds the configured byte cap.
+    TooLarge,
+    /// The bounded walk hit [`SIZE_WALK_MAX_ENTRIES`]. This bound is
+    /// independent of the byte cap: `max_workspace_gb = 0` does not lift it.
+    TooManyEntries,
+}
+
+/// Leading text of the `io::Error` each gate produces. `core::turn` matches on
+/// these to pick the right consequence/recovery notice, so they are one
+/// declaration shared by producer and matcher rather than two literals.
+pub const GATE_TOO_LARGE_MARKER: &str = "workspace too large for snapshots";
+pub const GATE_TOO_MANY_ENTRIES_MARKER: &str = "workspace has too many files for snapshots";
+pub const GATE_UNSAFE_LOCATION_MARKER: &str = "workspace snapshots are disabled";
+
+/// Display a workspace path in gate diagnostics. The diagnostic names the
+/// path the caller passed in — canonicalization is for filesystem and
+/// security logic, not for the message. On Windows `Path::canonicalize`
+/// rewrites more than the verbatim (`\\?\`) prefix (case, 8.3 names), so a
+/// canonical spelling can never be relied on to match what users name; the
+/// verbatim prefix is still stripped when present for readability.
+fn display_workspace_for_gate(workspace: &Path) -> String {
+    let raw = workspace.display().to_string();
+    raw.strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(&raw)
+        .to_string()
+}
+
+impl WorkspaceGate {
+    /// One-line English diagnostic for logs, `/undo`, and the gate matcher.
+    /// The user-facing consequence and recovery are localized by the notice
+    /// surfaces; this string must not restate them.
+    fn describe(self, cap_bytes: u64, workspace: &Path) -> String {
+        let workspace = display_workspace_for_gate(workspace);
+        match self {
+            Self::TooLarge => format!(
+                "{GATE_TOO_LARGE_MARKER}: over {} bytes of snapshot-eligible content in {workspace}",
+                cap_bytes,
+            ),
+            Self::TooManyEntries => format!(
+                "{GATE_TOO_MANY_ENTRIES_MARKER}: over {SIZE_WALK_MAX_ENTRIES} snapshot-eligible entries in {workspace}"
+            ),
+        }
+    }
+}
 
 /// Top-level directory and extension patterns that the snapshot path
 /// already excludes via `BUILTIN_EXCLUDES`. The estimator skips these
@@ -200,7 +313,7 @@ impl SnapshotRepo {
         let work_tree = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
-        let git_dir = snapshot_git_dir(&work_tree);
+        let git_dir = snapshot_git_dir(&work_tree)?;
         if !git_dir.exists() || !git_dir.join("HEAD").exists() {
             return Ok(None);
         }
@@ -210,7 +323,7 @@ impl SnapshotRepo {
     /// Open or initialize the snapshot repo for `workspace`.
     ///
     /// On first use this:
-    /// 1. Creates the `~/.deepseek/snapshots/<…>/.git` dir.
+    /// 1. Creates the `.git` dir under the resolved snapshot store.
     /// 2. Runs `git init --bare=false --quiet`.
     /// 3. Sets a fixed `user.name` / `user.email` so commits don't pick up
     ///    the user's global git identity (we don't want our snapshots to
@@ -238,14 +351,13 @@ impl SnapshotRepo {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "workspace snapshots are disabled for {reason}: {}",
-                    work_tree.display()
+                    "{GATE_UNSAFE_LOCATION_MARKER} for {reason}: {}",
+                    display_workspace_for_gate(workspace)
                 ),
             ));
         }
 
-        let _ = ensure_snapshot_dir(&work_tree)?;
-        let git_dir = snapshot_git_dir(&work_tree);
+        let git_dir = ensure_snapshot_dir(&work_tree)?.join(".git");
 
         let needs_init = !git_dir.exists();
         if needs_init {
@@ -256,15 +368,12 @@ impl SnapshotRepo {
             // existing repo's `MAX_SNAPSHOT_SIZE_MB` budget. Users on
             // workspaces that grew past the cap mid-session get the
             // existing aggressive-pruning path in `snapshot()`.
-            if estimate_workspace_size_bounded(&work_tree, cap_bytes).is_none() {
+            if let Err(gate) =
+                estimate_workspace_size_bounded(&work_tree, cap_bytes, SIZE_WALK_MAX_ENTRIES)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "workspace too large for snapshots (over {} GB of non-excluded content or > {} entries): {}\n  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) if you want snapshots on this workspace.",
-                        cap_bytes / (1024 * 1024 * 1024),
-                        SIZE_WALK_MAX_ENTRIES,
-                        work_tree.display()
-                    ),
+                    gate.describe(cap_bytes, workspace),
                 ));
             }
             let parent = git_dir.parent().ok_or_else(|| {
@@ -421,7 +530,11 @@ impl SnapshotRepo {
             )));
         }
 
-        Ok(SnapshotId(sha))
+        SnapshotId::parse(&sha).map_err(|_| {
+            io_other(format!(
+                "git commit-tree returned a malformed commit id: {sha:?}"
+            ))
+        })
     }
 
     /// Prefix a snapshot label with its owning session id, if any.
@@ -531,7 +644,7 @@ impl SnapshotRepo {
         let checkout = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["checkout", id.as_str(), "--", ":/"],
+            &["checkout", "--end-of-options", id.as_str(), "--", ":/"],
         )?;
         if !checkout.status.success() {
             return Err(io_other(format!(
@@ -541,6 +654,295 @@ impl SnapshotRepo {
         }
         self.remove_paths_missing_from_target(&current_paths, &target_paths)?;
         Ok(())
+    }
+
+    /// File restore never traverses symlinks, directories, or Git metadata.
+    /// Validate every existing component before reading, backing up or writing.
+    pub fn validate_restore_file(&self, rel: &Path) -> io::Result<bool> {
+        if !is_safe_relative_path(rel)
+            || rel.components().any(|part| {
+                part.as_os_str()
+                    .as_encoded_bytes()
+                    .eq_ignore_ascii_case(b".git")
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to restore unsafe path '{}': restore requires a regular workspace file",
+                    rel.display()
+                ),
+            ));
+        }
+        let mut path = self.work_tree.clone();
+        for part in rel.components() {
+            path.push(part);
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta)
+                    if meta.file_type().is_symlink()
+                        || (path == self.work_tree.join(rel) && !meta.is_file())
+                        || (path != self.work_tree.join(rel) && !meta.is_dir()) =>
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "restore refuses directories, symlinks and non-regular files",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+
+    fn snapshot_contains_regular_file(&self, id: &SnapshotId, rel: &Path) -> io::Result<bool> {
+        let entry = run_git(
+            &self.git_dir,
+            &self.work_tree,
+            &[
+                "--literal-pathspecs",
+                "ls-tree",
+                "-z",
+                "--end-of-options",
+                id.as_str(),
+                "--",
+                rel.to_str()
+                    .ok_or_else(|| io_other("restore path must be UTF-8"))?,
+            ],
+        )?;
+        if !entry.status.success() {
+            return Err(io_other(format!(
+                "Failed to inspect snapshot file: {}",
+                String::from_utf8_lossy(&entry.stderr).trim()
+            )));
+        }
+        if entry.stdout.is_empty() {
+            return Ok(false);
+        }
+        if !(entry.stdout.starts_with(b"100644 blob ") || entry.stdout.starts_with(b"100755 blob "))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "snapshot path is not a regular file",
+            ));
+        }
+        Ok(true)
+    }
+
+    /// Return whether `rel` differs between snapshot `id` and the current
+    /// working tree.
+    ///
+    /// This is the single-path counterpart of
+    /// [`Self::work_tree_matches_snapshot`]: it answers "would restoring just
+    /// this file change anything?", which is what file-scoped revert
+    /// cursoring needs. A path that exists in neither the snapshot nor the
+    /// working tree does not differ.
+    pub fn path_differs_from_snapshot(&self, id: &SnapshotId, rel: &Path) -> io::Result<bool> {
+        let in_work = self.validate_restore_file(rel)?;
+        let in_target = self.snapshot_contains_regular_file(id, rel)?;
+        match (in_target, in_work) {
+            // Neither side has it: nothing to restore and nothing to remove.
+            (false, false) => Ok(false),
+            // The snapshot has it and the working tree lost it.
+            (true, false) => Ok(true),
+            // The path was created after the snapshot.
+            (false, true) => Ok(true),
+            (true, true) => {
+                let rel = rel.to_string_lossy().into_owned();
+                let diff = run_git(
+                    &self.git_dir,
+                    &self.work_tree,
+                    &[
+                        "--literal-pathspecs",
+                        "diff",
+                        "--quiet",
+                        "--end-of-options",
+                        id.as_str(),
+                        "--",
+                        rel.as_str(),
+                    ],
+                )?;
+                git_diff_matches(diff).map(|matches| !matches)
+            }
+        }
+    }
+
+    /// Restore only `rel_paths` from snapshot `id`.
+    ///
+    /// This is the file-scoped counterpart of [`Self::restore`]. The
+    /// difference that matters: the whole-tree `git checkout <sha> -- :/` is
+    /// replaced by a pathspec-limited checkout, so a working-tree path outside
+    /// `rel_paths` is never written or deleted. The safety backup reads the workspace.
+    ///
+    /// A path the snapshot does not track is removed from the working tree
+    /// (that is how a file created after the snapshot is reverted), and a path
+    /// the snapshot tracks but the working tree lost is recreated. A path that
+    /// exists in neither side produces no outcome at all, rather than a
+    /// report claiming a change that did not happen.
+    #[cfg(test)]
+    pub fn restore_paths(
+        &self,
+        id: &SnapshotId,
+        rel_paths: &[PathBuf],
+    ) -> io::Result<Vec<PathRestoreOutcome>> {
+        self.restore_paths_checked(id, rel_paths, || Ok(()))
+    }
+
+    pub fn restore_file_if_unchanged(
+        &self,
+        id: &SnapshotId,
+        rel: &Path,
+        expected_hash: &str,
+    ) -> io::Result<Vec<PathRestoreOutcome>> {
+        let verify = || {
+            let actual = if self.validate_restore_file(rel)? {
+                let bytes = std::fs::read(self.work_tree.join(rel))?;
+                format!("sha256:{}", crate::hashing::sha256_hex(bytes))
+            } else {
+                "absent".to_string()
+            };
+            if actual != expected_hash {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "The file changed after the selected change record. Refresh and review it before restoring; nothing was changed.",
+                ));
+            }
+            Ok(())
+        };
+        verify()?;
+        self.restore_paths_checked(id, &[rel.to_path_buf()], verify)
+    }
+
+    fn restore_paths_checked(
+        &self,
+        id: &SnapshotId,
+        rel_paths: &[PathBuf],
+        preflight: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Vec<PathRestoreOutcome>> {
+        if rel_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Validate the entire request before any mutation or backup. A snapshot
+        // directory entry must not turn a file action into recursive checkout.
+        let mut pre_state = Vec::with_capacity(rel_paths.len());
+        for rel in rel_paths {
+            let in_work = self.validate_restore_file(rel)?;
+            let in_target = self.snapshot_contains_regular_file(id, rel)?;
+            pre_state.push((rel.clone(), in_target, in_work));
+        }
+
+        // A durable backup is required for this new destructive API. Ignored
+        // files cannot be removed/overwritten if the snapshot cannot retain them.
+        let target_short = &id.as_str()[..id.as_str().len().min(12)];
+        let backup = self.snapshot_with_session(&format!("pre-restore:{target_short}"), None)?;
+        for (rel, _, in_work) in &pre_state {
+            if *in_work && !self.snapshot_contains_regular_file(&backup, rel)? {
+                return Err(io_other(
+                    "File was excluded from the safety snapshot; nothing was restored",
+                ));
+            }
+            self.validate_restore_file(rel)?;
+        }
+
+        // Recheck after the potentially slow safety snapshot, immediately
+        // before checkout/removal. New editor work is retained in the backup.
+        preflight()?;
+
+        let tracked: Vec<String> = pre_state
+            .iter()
+            .filter(|(_, in_target, _)| *in_target)
+            .map(|(rel, _, _)| rel.to_string_lossy().into_owned())
+            .collect();
+        if !tracked.is_empty() {
+            let mut args: Vec<String> = vec![
+                "--literal-pathspecs".to_string(),
+                "checkout".to_string(),
+                "--end-of-options".to_string(),
+                id.as_str().to_string(),
+                "--".to_string(),
+            ];
+            args.extend(tracked);
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let checkout = run_git(&self.git_dir, &self.work_tree, &arg_refs)?;
+            if !checkout.status.success() {
+                return Err(io_other(format!(
+                    "git checkout failed: {} (safety snapshot {} holds the previous files)",
+                    String::from_utf8_lossy(&checkout.stderr).trim(),
+                    backup.as_str()
+                )));
+            }
+        }
+
+        let mut outcomes = Vec::new();
+        for (rel, in_target, was_in_work) in pre_state {
+            match (in_target, was_in_work) {
+                (true, true) => outcomes.push(PathRestoreOutcome {
+                    path: rel,
+                    action: PathRestoreAction::Modified,
+                }),
+                (true, false) => outcomes.push(PathRestoreOutcome {
+                    path: rel,
+                    action: PathRestoreAction::Recreated,
+                }),
+                (false, true) => {
+                    let path = self.work_tree.join(&rel);
+                    self.validate_restore_file(&rel)?;
+                    // Only the requested file goes; its parent directories
+                    // stay even when emptied, because the request named a
+                    // file, not a tree.
+                    std::fs::remove_file(&path).map_err(|error| {
+                        io_other(format!(
+                            "removing '{}' failed: {error} (safety snapshot {} holds the previous files)",
+                            rel.display(),
+                            backup.as_str()
+                        ))
+                    })?;
+                    outcomes.push(PathRestoreOutcome {
+                        path: rel,
+                        action: PathRestoreAction::Removed,
+                    });
+                }
+                // Already in the snapshot's state.
+                (false, false) => {}
+            }
+        }
+        Ok(outcomes)
+    }
+
+    /// `git diff --stat` between snapshot `id` and the current working tree,
+    /// computed inside the side repo.
+    ///
+    /// This is what restoring `id` *would* change, so it must be captured
+    /// before the restore runs — afterwards the work tree matches the snapshot
+    /// and the diff is empty by construction.
+    ///
+    /// It deliberately runs against the side repo rather than the user's. The
+    /// previous summary ran `git diff --stat` in the workspace with the user's
+    /// `.git`, which reports the user's own uncommitted work: it listed files
+    /// the restore had not touched, and reported nothing when that work
+    /// happened to be committed. Returns `None` when nothing differs.
+    pub fn snapshot_diff_stat(&self, id: &SnapshotId) -> io::Result<Option<String>> {
+        let diff = run_git(
+            &self.git_dir,
+            &self.work_tree,
+            &[
+                "diff",
+                "--stat",
+                "--end-of-options",
+                id.as_str(),
+                "--",
+                ":/",
+            ],
+        )?;
+        if !diff.status.success() {
+            return Err(io_other(format!(
+                "git diff --stat failed: {}",
+                String::from_utf8_lossy(&diff.stderr).trim()
+            )));
+        }
+        let stat = String::from_utf8_lossy(&diff.stdout).trim().to_string();
+        Ok((!stat.is_empty()).then_some(stat))
     }
 
     /// Return whether the current workspace matches the given snapshot's
@@ -556,16 +958,30 @@ impl SnapshotRepo {
         let diff = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["diff", "--quiet", id.as_str(), "--", ":/"],
+            &[
+                "diff",
+                "--quiet",
+                "--end-of-options",
+                id.as_str(),
+                "--",
+                ":/",
+            ],
         )?;
-        Ok(diff.status.success())
+        git_diff_matches(diff)
     }
 
     fn tree_paths(&self, treeish: &str) -> io::Result<HashSet<PathBuf>> {
         let ls = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["ls-tree", "-r", "-z", "--name-only", treeish],
+            &[
+                "ls-tree",
+                "-r",
+                "-z",
+                "--name-only",
+                "--end-of-options",
+                treeish,
+            ],
         )?;
         if !ls.status.success() {
             return Err(io_other(format!(
@@ -625,8 +1041,26 @@ impl SnapshotRepo {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let log = run_git(&self.git_dir, &self.work_tree, &arg_refs)?;
         if !log.status.success() {
-            // No commits yet → empty list.
-            return Ok(Vec::new());
+            let head = run_git(
+                &self.git_dir,
+                &self.work_tree,
+                &["symbolic-ref", "-q", "HEAD"],
+            )?;
+            if head.status.success() {
+                let reference = String::from_utf8_lossy(&head.stdout);
+                let exists = run_git(
+                    &self.git_dir,
+                    &self.work_tree,
+                    &["show-ref", "--verify", "--quiet", reference.trim()],
+                )?;
+                if exists.status.code() == Some(1) {
+                    return Ok(Vec::new());
+                }
+            }
+            return Err(io_other(format!(
+                "git log failed: {}",
+                String::from_utf8_lossy(&log.stderr).trim()
+            )));
         }
         let stdout = String::from_utf8_lossy(&log.stdout);
         let mut out = Vec::new();
@@ -638,12 +1072,14 @@ impl SnapshotRepo {
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(0);
             let subject = parts.next().unwrap_or("").to_string();
-            if sha.is_empty() {
+            // `git log --pretty=format:%H` only emits full hex ids; skip anything
+            // else rather than let it become a revision argument later.
+            let Ok(id) = SnapshotId::parse(&sha) else {
                 continue;
-            }
+            };
             let (session_id, label) = Self::decode_session_label(&subject);
             out.push(Snapshot {
-                id: SnapshotId(sha),
+                id,
                 label,
                 timestamp: ts,
                 session_id,
@@ -855,13 +1291,13 @@ impl SnapshotRepo {
     }
 
     /// Return the side-repo's `.git` directory (for diagnostics).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
     }
 
     /// Return the work tree path (for diagnostics).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn work_tree(&self) -> &Path {
         &self.work_tree
     }
@@ -994,28 +1430,58 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
         .output()
 }
 
+fn git_diff_matches(output: Output) -> io::Result<bool> {
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(io_other(format!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
+}
+
 fn io_other(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
-/// Walk `workspace` and accumulate file sizes, returning `Some(total)`
-/// when the workspace fits under `cap_bytes` and `None` when the walk
-/// exceeds the cap. Honors `.gitignore` (via the `ignore` crate's
-/// `WalkBuilder` defaults) and the snapshot-specific skip list above,
-/// so the measured size reflects what would actually land in a
-/// snapshot commit rather than the raw `du -sh` total.
+/// Walk `workspace` and accumulate file sizes, returning `Ok(total)`
+/// when the workspace fits under `cap_bytes` and `Err(gate)` naming the
+/// bound that tripped. Honors `.gitignore` — whether or not the
+/// workspace is itself a git repo, matching the `git add -A` that the
+/// snapshot commit actually runs against this work tree — and the
+/// snapshot-specific skip list above, so the measured size reflects
+/// what would land in a snapshot commit rather than the raw `du -sh`
+/// total.
 ///
-/// The walk is bounded by both `cap_bytes` and
-/// [`SIZE_WALK_MAX_ENTRIES`] — either trip returns `None`. A
-/// `cap_bytes` of `0` disables the cap entirely (returns `Some(total)`
-/// no matter how large), so config can opt out.
-pub fn estimate_workspace_size_bounded(workspace: &Path, cap_bytes: u64) -> Option<u64> {
+/// The walk is bounded by both `cap_bytes` and `max_entries`, and the
+/// two bounds are reported separately because they have different
+/// recoveries. A `cap_bytes` of `0` disables the byte cap entirely (so
+/// config can opt out) but not the entry bound.
+///
+/// Production passes [`SIZE_WALK_MAX_ENTRIES`] for `max_entries`; it is
+/// a parameter only so the entry bound is reachable in a test without
+/// creating 200,000 inodes. It must not be threaded up through
+/// [`SnapshotRepo::open_or_init_with_cap`]: [`WorkspaceGate::describe`]
+/// interpolates the constant into the user-facing message, so a weaker
+/// injected bound would report a number that did not trip.
+pub fn estimate_workspace_size_bounded(
+    workspace: &Path,
+    cap_bytes: u64,
+    max_entries: usize,
+) -> Result<u64, WorkspaceGate> {
     use ignore::WalkBuilder;
     let mut total: u64 = 0;
     let mut entries: usize = 0;
     let skip: HashSet<&'static str> = SIZE_WALK_SKIP_DIRS.iter().copied().collect();
     let walker = WalkBuilder::new(workspace)
         .hidden(false)
+        // `ignore` defaults to `require_git(true)`, which silently disables
+        // every gitignore rule when the workspace is not inside a git repo.
+        // The snapshot's own `git add -A` honors `.gitignore` regardless, so
+        // without this the estimator over-counts a non-git workspace and can
+        // refuse it while offering a `.gitignore` remedy that cannot work.
+        .require_git(false)
         .follow_links(false)
         .filter_entry(move |entry| {
             // Skip the well-known build-output directories at any depth.
@@ -1029,19 +1495,19 @@ pub fn estimate_workspace_size_bounded(workspace: &Path, cap_bytes: u64) -> Opti
         .build();
     for entry in walker.flatten() {
         entries += 1;
-        if entries > SIZE_WALK_MAX_ENTRIES {
-            return None;
+        if entries > max_entries {
+            return Err(WorkspaceGate::TooManyEntries);
         }
         if let Ok(meta) = entry.metadata()
             && meta.is_file()
         {
             total = total.saturating_add(meta.len());
             if cap_bytes > 0 && total > cap_bytes {
-                return None;
+                return Err(WorkspaceGate::TooLarge);
             }
         }
     }
-    Some(total)
+    Ok(total)
 }
 
 fn unsafe_workspace_snapshot_reason(workspace: &Path, home: Option<&Path>) -> Option<&'static str> {
@@ -1102,6 +1568,30 @@ fn is_safe_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+/// Normalize a caller-supplied path into a safe workspace-relative path.
+///
+/// Accepts either a workspace-relative path or an absolute path inside
+/// `workspace`. Returns `None` when the result is not a plain relative path —
+/// absolute, empty, containing `..`, or pointing outside the workspace. Every
+/// file-scoped restore path passes through here, so a caller never gets to
+/// name a path the snapshot repo would resolve outside the work tree.
+///
+/// The name is literal: leading or trailing spaces, brackets and glob
+/// characters are filename bytes, never trimmed and never patterns. Git is
+/// invoked with `--literal-pathspecs` for every file-scoped operation.
+pub fn workspace_relative_path(workspace: &Path, raw: &str) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(raw);
+    let rel = if candidate.is_absolute() {
+        candidate.strip_prefix(workspace).ok()?.to_path_buf()
+    } else {
+        candidate.to_path_buf()
+    };
+    is_safe_relative_path(&rel).then_some(rel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,49 +1599,51 @@ mod tests {
     use std::fs::{File, FileTimes};
     use tempfile::tempdir;
 
+    #[test]
+    fn snapshot_id_parse_accepts_only_full_hex_object_ids() {
+        let sha1 = "0123456789abcdefABCDEF0123456789abcdef01";
+        let sha256 = "a".repeat(64);
+        assert_eq!(SnapshotId::parse(sha1).expect("sha1").as_str(), sha1);
+        assert!(SnapshotId::parse(&sha256).is_ok());
+        for bad in [
+            "",
+            "HEAD",
+            "abc123",
+            "--output=/tmp/x",
+            "-0123456789abcdef0123456789abcdef0123456",
+            "0123456789abcdef0123456789abcdef0123456g",
+            "0123456789abcdef0123456789abcdef01234567~1",
+            "0123456789abcdef0123456789abcdef012345678",
+        ] {
+            let err = SnapshotId::parse(bad).expect_err(bad);
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
+
     /// Holds the home directory pinned to a tempdir for the lifetime of a test. Also
     /// owns the process-wide env-var mutex so tests across modules
     /// don't trample each other's home env vars.
     pub(super) struct ScopedHome {
-        prev_vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _vars: Vec<crate::test_support::EnvVarGuard>,
         _guard: crate::test_support::TestEnvLock,
     }
-    impl Drop for ScopedHome {
-        fn drop(&mut self) {
-            // SAFETY: process-wide lock still held.
-            unsafe {
-                for (key, prev) in self.prev_vars.drain(..) {
-                    match prev {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-            }
-        }
-    }
     pub(super) fn scoped_home(home: &Path) -> ScopedHome {
+        use crate::test_support::EnvVarGuard;
         let guard = lock_test_env();
-        let prev_vars = ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        // SAFETY: serialised by the global env lock.
-        unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::remove_var("HOMEDRIVE");
-            std::env::remove_var("HOMEPATH");
-        }
         ScopedHome {
-            prev_vars,
+            _vars: vec![
+                EnvVarGuard::set("HOME", home),
+                EnvVarGuard::set("USERPROFILE", home),
+                EnvVarGuard::remove("HOMEDRIVE"),
+                EnvVarGuard::remove("HOMEPATH"),
+                EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale")),
+            ],
             _guard: guard,
         }
     }
 
-    /// Build a side-repo whose snapshot dir lives under the same
-    /// tempdir we're using for `HOME` — so the inner `crate::config::effective_home_dir()`
-    /// lookup stays inside our sandbox. Returns the guard alongside so
-    /// the caller can keep HOME pinned for the rest of the test.
+    /// Build a side-repo inside the test's selected profile. Return its
+    /// environment guard so reads and writes stay isolated for the whole test.
     fn make_repo(tmp: &Path) -> (SnapshotRepo, ScopedHome) {
         let workspace = tmp.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -1188,7 +1680,9 @@ mod tests {
         let before = SnapshotRepo::open_existing(&workspace).expect("open existing");
         assert!(before.is_none());
         assert!(
-            !snapshot_git_dir(&workspace).exists(),
+            !snapshot_git_dir(&workspace)
+                .expect("snapshot path")
+                .exists(),
             "read-only open must not create the side repo"
         );
 
@@ -1233,6 +1727,450 @@ mod tests {
         repo.restore(&id).expect("restore");
         assert!(original.exists());
         assert!(!added.exists(), "restore must remove tracked added files");
+    }
+
+    #[test]
+    fn restore_paths_leaves_unrelated_files_alone() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let wanted = repo.work_tree().join("wanted.txt");
+        let unrelated = repo.work_tree().join("unrelated.txt");
+
+        std::fs::write(&wanted, b"original").unwrap();
+        std::fs::write(&unrelated, b"original").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+
+        std::fs::write(&wanted, b"clobbered").unwrap();
+        std::fs::write(&unrelated, b"also clobbered").unwrap();
+        repo.snapshot("post-turn:1").expect("snapshot 2");
+
+        let outcomes = repo
+            .restore_paths(&id, &[PathBuf::from("wanted.txt")])
+            .expect("scoped restore");
+
+        assert_eq!(std::fs::read_to_string(&wanted).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(&unrelated).unwrap(),
+            "also clobbered",
+            "a file-scoped restore must not touch a path it was not given"
+        );
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].path, PathBuf::from("wanted.txt"));
+        assert_eq!(outcomes[0].action, PathRestoreAction::Modified);
+    }
+
+    #[test]
+    fn only_restore_paths_is_safe_for_a_single_file_action() {
+        // Characterizes the difference the per-file Revert control depends on.
+        // `restore()` is what the TUI's `patch_undo()` and the runtime's
+        // `patch-undo` endpoint both call. It is scoped in *snapshot selection*
+        // (it picks a recent `tool:` snapshot) but not in *effect*: it checks
+        // out the whole tree, so it also rolls back a working-tree path that no
+        // tool touched. That is the data loss #2 removed the control over, and
+        // it is why a per-file action cannot be built on top of it.
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let touched = repo.work_tree().join("touched.txt");
+        let unrelated = repo.work_tree().join("unrelated.txt");
+
+        std::fs::write(&touched, b"v1").unwrap();
+        std::fs::write(&unrelated, b"snapshot-time").unwrap();
+        let id = repo.snapshot("tool:call-1").expect("snapshot");
+
+        // The tool edits one file; something else — the user, another editor —
+        // changes the other one after the snapshot was taken.
+        std::fs::write(&touched, b"v2").unwrap();
+        std::fs::write(&unrelated, b"user-work-in-progress").unwrap();
+
+        repo.restore(&id).expect("whole-tree restore");
+        assert_eq!(std::fs::read_to_string(&touched).unwrap(), "v1");
+        assert_eq!(
+            std::fs::read_to_string(&unrelated).unwrap(),
+            "snapshot-time",
+            "whole-tree restore rolls back a file no tool touched"
+        );
+
+        // Same situation again, but through the file-scoped path the
+        // `file-revert` endpoint uses.
+        std::fs::write(&touched, b"v1").unwrap();
+        std::fs::write(&unrelated, b"snapshot-time").unwrap();
+        let id2 = repo.snapshot("tool:call-2").expect("snapshot 2");
+        std::fs::write(&touched, b"v2").unwrap();
+        std::fs::write(&unrelated, b"user-work-in-progress").unwrap();
+
+        repo.restore_paths(&id2, &[PathBuf::from("touched.txt")])
+            .expect("scoped restore");
+        assert_eq!(std::fs::read_to_string(&touched).unwrap(), "v1");
+        assert_eq!(
+            std::fs::read_to_string(&unrelated).unwrap(),
+            "user-work-in-progress",
+            "the scoped restore must leave the unrelated edit alone"
+        );
+    }
+
+    #[test]
+    fn snapshot_diff_stat_describes_what_a_restore_would_change() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let changed = repo.work_tree().join("changed.txt");
+        let untouched = repo.work_tree().join("untouched.txt");
+
+        std::fs::write(&changed, b"v1").unwrap();
+        std::fs::write(&untouched, b"stable").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+
+        std::fs::write(&changed, b"v2").unwrap();
+
+        let stat = repo
+            .snapshot_diff_stat(&id)
+            .expect("diff stat")
+            .expect("the snapshot differs, so something must be reported");
+        assert!(stat.contains("changed.txt"), "got: {stat}");
+        // The stat describes the restore's effect, not the workspace's whole
+        // uncommitted state — a file the restore will not touch must not appear.
+        assert!(!stat.contains("untouched.txt"), "got: {stat}");
+
+        // After restoring, the two sides agree: nothing left to report. (Which
+        // is why the caller must capture this *before* the restore runs.)
+        repo.restore(&id).expect("restore");
+        assert_eq!(repo.snapshot_diff_stat(&id).expect("diff stat"), None);
+    }
+
+    #[test]
+    fn restore_paths_removes_a_file_created_after_the_snapshot() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let kept = repo.work_tree().join("kept.txt");
+        let created = repo.work_tree().join("created.txt");
+
+        std::fs::write(&kept, b"kept").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+
+        std::fs::write(&created, b"new file").unwrap();
+        repo.snapshot("post-turn:1").expect("snapshot 2");
+
+        let outcomes = repo
+            .restore_paths(&id, &[PathBuf::from("created.txt")])
+            .expect("scoped restore");
+
+        assert!(
+            !created.exists(),
+            "a created file must be removed by revert"
+        );
+        assert!(kept.exists(), "the untouched file must survive");
+        assert_eq!(outcomes[0].action, PathRestoreAction::Removed);
+    }
+
+    #[test]
+    fn restore_paths_recreates_a_file_deleted_after_the_snapshot() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let deleted = repo.work_tree().join("deleted.txt");
+
+        std::fs::write(&deleted, b"content").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+
+        std::fs::remove_file(&deleted).unwrap();
+        repo.snapshot("post-turn:1").expect("snapshot 2");
+
+        let outcomes = repo
+            .restore_paths(&id, &[PathBuf::from("deleted.txt")])
+            .expect("scoped restore");
+
+        assert_eq!(std::fs::read_to_string(&deleted).unwrap(), "content");
+        assert_eq!(outcomes[0].action, PathRestoreAction::Recreated);
+    }
+
+    #[test]
+    fn restore_paths_rejects_parent_traversal() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        std::fs::write(repo.work_tree().join("a.txt"), b"a").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+
+        let err = repo
+            .restore_paths(&id, &[PathBuf::from("../escape.txt")])
+            .expect_err("traversal must be refused");
+        assert!(err.to_string().contains("unsafe path"), "got: {err}");
+    }
+
+    #[test]
+    fn path_differs_from_snapshot_is_scoped_to_the_named_path() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let touched = repo.work_tree().join("touched.txt");
+        let untouched = repo.work_tree().join("untouched.txt");
+
+        std::fs::write(&touched, b"v1").unwrap();
+        std::fs::write(&untouched, b"v1").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+
+        std::fs::write(&touched, b"v2").unwrap();
+
+        assert!(
+            repo.path_differs_from_snapshot(&id, Path::new("touched.txt"))
+                .expect("differs")
+        );
+        assert!(
+            !repo
+                .path_differs_from_snapshot(&id, Path::new("untouched.txt"))
+                .expect("differs")
+        );
+    }
+
+    #[test]
+    fn workspace_relative_path_accepts_inside_paths_and_refuses_outside_ones() {
+        // A real absolute temp path so the fixture is absolute on Windows too
+        // (`/tmp/ws` is a relative path with a root-dir component there).
+        let temp = std::env::temp_dir();
+        let workspace = temp.join("ws");
+        let other = temp.join("other");
+
+        assert_eq!(
+            workspace_relative_path(&workspace, "src/lib.rs"),
+            Some(PathBuf::from("src/lib.rs"))
+        );
+        let inside = workspace.join("src").join("lib.rs");
+        assert_eq!(
+            workspace_relative_path(&workspace, &inside.to_string_lossy()),
+            Some(PathBuf::from("src").join("lib.rs"))
+        );
+        let outside = other.join("lib.rs");
+        assert_eq!(
+            workspace_relative_path(&workspace, &outside.to_string_lossy()),
+            None
+        );
+        assert_eq!(workspace_relative_path(&workspace, "../escape"), None);
+        assert_eq!(
+            workspace_relative_path(&workspace, "src/../../escape"),
+            None
+        );
+        assert_eq!(workspace_relative_path(&workspace, ""), None);
+        // Whitespace and glob characters are literal filename bytes.
+        assert_eq!(
+            workspace_relative_path(&workspace, " padded.txt "),
+            Some(PathBuf::from(" padded.txt "))
+        );
+        assert_eq!(
+            workspace_relative_path(&workspace, "file[12].txt"),
+            Some(PathBuf::from("file[12].txt"))
+        );
+    }
+
+    fn sha256_hash(path: &Path) -> String {
+        format!(
+            "sha256:{}",
+            crate::hashing::sha256_hex(std::fs::read(path).unwrap())
+        )
+    }
+
+    /// The Git primitive treats `[12]` as a pattern even after `--`; the
+    /// file-scoped restore must not. `file[12].txt` and `file1.txt` both exist
+    /// in the snapshot, so only literal pathspecs keep the second one intact.
+    #[test]
+    fn restore_file_if_unchanged_treats_glob_characters_literally() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let literal = repo.work_tree().join("file[12].txt");
+        let sibling = repo.work_tree().join("file1.txt");
+        std::fs::write(&literal, b"literal-before").unwrap();
+        std::fs::write(&sibling, b"sibling-before").unwrap();
+        let id = repo.snapshot("tool:call-1").expect("snapshot");
+        std::fs::write(&literal, b"literal-after").unwrap();
+        std::fs::write(&sibling, b"sibling-after").unwrap();
+
+        assert!(
+            repo.path_differs_from_snapshot(&id, Path::new("file[12].txt"))
+                .unwrap()
+        );
+        let outcomes = repo
+            .restore_file_if_unchanged(&id, Path::new("file[12].txt"), &sha256_hash(&literal))
+            .expect("literal restore");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].action, PathRestoreAction::Modified);
+        assert_eq!(std::fs::read_to_string(&literal).unwrap(), "literal-before");
+        assert_eq!(
+            std::fs::read_to_string(&sibling).unwrap(),
+            "sibling-after",
+            "a bracketed filename must never restore its glob siblings"
+        );
+    }
+
+    #[test]
+    fn restore_file_if_unchanged_refuses_when_the_reviewed_bytes_changed() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let file = repo.work_tree().join("a.txt");
+        std::fs::write(&file, b"v1").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+        std::fs::write(&file, b"v2").unwrap();
+        let reviewed = sha256_hash(&file);
+        // The user edits again after the client captured its change record.
+        std::fs::write(&file, b"v3-user-edit").unwrap();
+
+        let err = repo
+            .restore_file_if_unchanged(&id, Path::new("a.txt"), &reviewed)
+            .expect_err("stale hash must refuse");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v3-user-edit");
+        // `absent` is only valid for a file the client saw as deleted.
+        let err = repo
+            .restore_file_if_unchanged(&id, Path::new("a.txt"), "absent")
+            .expect_err("absent must not match an existing file");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        // The exact current bytes restore.
+        let outcomes = repo
+            .restore_file_if_unchanged(&id, Path::new("a.txt"), &sha256_hash(&file))
+            .expect("current hash restores");
+        assert_eq!(outcomes[0].action, PathRestoreAction::Modified);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v1");
+    }
+
+    #[test]
+    fn restore_file_if_unchanged_handles_deleted_and_created_files() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let deleted = repo.work_tree().join("deleted.txt");
+        std::fs::write(&deleted, b"content").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+        std::fs::remove_file(&deleted).unwrap();
+        let created = repo.work_tree().join("created.txt");
+        std::fs::write(&created, b"new").unwrap();
+
+        let outcomes = repo
+            .restore_file_if_unchanged(&id, Path::new("deleted.txt"), "absent")
+            .expect("recreate");
+        assert_eq!(outcomes[0].action, PathRestoreAction::Recreated);
+        assert_eq!(std::fs::read_to_string(&deleted).unwrap(), "content");
+
+        let outcomes = repo
+            .restore_file_if_unchanged(&id, Path::new("created.txt"), &sha256_hash(&created))
+            .expect("remove");
+        assert_eq!(outcomes[0].action, PathRestoreAction::Removed);
+        assert!(!created.exists());
+        // A created file inside a new directory is removed alone; the
+        // directory the user made stays.
+        let nested_dir = repo.work_tree().join("newdir");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let nested = nested_dir.join("only.txt");
+        std::fs::write(&nested, b"n").unwrap();
+        let outcomes = repo
+            .restore_file_if_unchanged(&id, Path::new("newdir/only.txt"), &sha256_hash(&nested))
+            .expect("remove nested");
+        assert_eq!(outcomes[0].action, PathRestoreAction::Removed);
+        assert!(!nested.exists());
+        assert!(nested_dir.is_dir(), "the parent directory is not pruned");
+        // A path missing on both sides is not a change and reports nothing.
+        assert!(
+            !repo
+                .path_differs_from_snapshot(&id, Path::new("never.txt"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn restore_file_if_unchanged_refuses_directories_git_metadata_and_ignored_files() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let dir = repo.work_tree().join("src");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.rs"), b"fn a() {}").unwrap();
+        std::fs::write(
+            repo.work_tree().join(".gitignore"),
+            "ignored.txt
+",
+        )
+        .unwrap();
+        std::fs::write(repo.work_tree().join("ignored.txt"), b"secret").unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+        std::fs::write(dir.join("lib.rs"), b"fn b() {}").unwrap();
+
+        for rel in ["src", ".git/config", "src/.GIT/x", ".git"] {
+            let err = repo.validate_restore_file(Path::new(rel)).expect_err(rel);
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{rel}");
+        }
+        let err = repo
+            .restore_file_if_unchanged(&id, Path::new("src"), "absent")
+            .expect_err("directories are refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("lib.rs")).unwrap(),
+            "fn b() {}"
+        );
+
+        // A gitignored file is excluded from the safety backup, so removing
+        // it would be unrecoverable: refuse and leave it in place.
+        let ignored = repo.work_tree().join("ignored.txt");
+        let err = repo
+            .restore_file_if_unchanged(&id, Path::new("ignored.txt"), &sha256_hash(&ignored))
+            .expect_err("ignored files are refused");
+        assert!(err.to_string().contains("safety snapshot"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&ignored).unwrap(), "secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_file_if_unchanged_refuses_symlinks_anywhere_in_the_path() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("target.txt"), b"outside").unwrap();
+        std::fs::write(repo.work_tree().join("real.txt"), b"real").unwrap();
+        std::os::unix::fs::symlink(&outside, repo.work_tree().join("linkdir")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("target.txt"),
+            repo.work_tree().join("link.txt"),
+        )
+        .unwrap();
+        let id = repo.snapshot("pre-turn:1").expect("snapshot");
+
+        for rel in ["link.txt", "linkdir/target.txt"] {
+            let err = repo
+                .restore_file_if_unchanged(&id, Path::new(rel), "absent")
+                .expect_err(rel);
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{rel}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("target.txt")).unwrap(),
+            "outside"
+        );
+        // The snapshot side is checked too: a symlink entry in the tree is
+        // not a regular file even when the work tree copy is gone.
+        std::fs::remove_file(repo.work_tree().join("link.txt")).unwrap();
+        let err = repo
+            .restore_file_if_unchanged(&id, Path::new("link.txt"), "absent")
+            .expect_err("snapshot symlink entry");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!repo.work_tree().join("link.txt").exists());
+    }
+
+    #[test]
+    fn list_distinguishes_an_unborn_head_from_broken_history() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        assert!(repo.list(10).expect("unborn HEAD lists nothing").is_empty());
+
+        std::fs::write(repo.work_tree().join("a.txt"), b"a").unwrap();
+        repo.snapshot("pre-turn:1").expect("snapshot");
+        assert_eq!(repo.list(10).unwrap().len(), 1);
+
+        // Point the branch at an object that does not exist: the history is
+        // now broken, which must surface as an error rather than "no
+        // snapshots" (an empty list would let patch-undo drop a turn).
+        let head = String::from_utf8(
+            run_git(repo.git_dir(), repo.work_tree(), &["symbolic-ref", "HEAD"])
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.git_dir().join(head.trim()),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        let err = repo.list(10).expect_err("broken history must error");
+        assert!(err.to_string().contains("git log failed"), "got: {err}");
     }
 
     #[test]
@@ -1411,22 +2349,36 @@ mod tests {
         }
         let before = repo.list(usize::MAX).unwrap();
         assert_eq!(before.len(), 4);
-        // Guard the fixture itself: if load skewed the timestamps so the cut
-        // would not fall between the pairs, say so instead of failing later
-        // with a confusing count mismatch.
+        // Derive the cut from the timestamps actually recorded rather than a
+        // fixed 6s. A fixed cut assumes `repo.snapshot()` is fast: `new:0` is
+        // only ~1.2s plus one git subprocess older than prune time, so on a
+        // loaded Windows runner that subprocess alone pushed it past 6s and
+        // three snapshots were pruned instead of two. (The old fixture guard
+        // could not catch it either — it checked `before[0]` and `before[2]`,
+        // and `before[1]` is the entry that drifts.)
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        // Newest-first: [new:1, new:0, old:1, old:0]. The cut must land
+        // strictly between the pairs, so aim at the midpoint of the 8s gap —
+        // that leaves ~4s of slack against clock drift and a slow runner in
+        // both directions.
+        let survivor = before[1].timestamp;
+        let victim = before[2].timestamp;
         assert!(
-            now - before[0].timestamp < 6 && now - before[2].timestamp > 6,
-            "fixture ages unusable for a 6s cut (newest {}s, oldest-surviving-pair {}s)",
-            now - before[0].timestamp,
-            now - before[2].timestamp
+            survivor - victim >= 8,
+            "fixture needs an 8s gap between the pairs (survivor {survivor}, victim {victim})"
         );
+        let midpoint = victim + (survivor - victim) / 2;
+        assert!(
+            now > midpoint,
+            "fixture cutoff is not before the current time"
+        );
+        let max_age = Duration::from_secs((now - midpoint) as u64);
 
-        // Cut 6s back: the two old snapshots drop, the two new ones survive.
-        let removed = repo.prune_older_than(Duration::from_secs(6)).unwrap();
+        // The two old snapshots drop, the two new ones survive.
+        let removed = repo.prune_older_than(max_age).unwrap();
         assert_eq!(removed, 2, "only the old tail should be removed");
 
         let remaining = repo.list(usize::MAX).unwrap();
@@ -1759,8 +2711,8 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("a.txt"), vec![b'a'; 100]).unwrap();
         std::fs::write(workspace.join("b.txt"), vec![b'b'; 50]).unwrap();
-        let total = estimate_workspace_size_bounded(&workspace, 10_000)
-            .expect("under-cap walk must return Some");
+        let total = estimate_workspace_size_bounded(&workspace, 10_000, SIZE_WALK_MAX_ENTRIES)
+            .expect("under-cap walk must return a total");
         assert!(
             total >= 150,
             "total ({total}) must include both files (≥150 bytes)"
@@ -1768,17 +2720,42 @@ mod tests {
     }
 
     #[test]
-    fn estimate_workspace_size_bounded_returns_none_when_over_cap() {
+    fn estimate_workspace_size_bounded_reports_the_size_gate_when_over_cap() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         // Two 1 KB files, cap at 1 KB — second file should trip the cap.
         std::fs::write(workspace.join("a.bin"), vec![b'a'; 1024]).unwrap();
         std::fs::write(workspace.join("b.bin"), vec![b'b'; 1024]).unwrap();
-        assert!(
-            estimate_workspace_size_bounded(&workspace, 1024).is_none(),
-            "over-cap walk must return None for early bailout"
+        assert_eq!(
+            estimate_workspace_size_bounded(&workspace, 1024, SIZE_WALK_MAX_ENTRIES),
+            Err(WorkspaceGate::TooLarge),
+            "over-cap walk must name the size gate for early bailout"
         );
+    }
+
+    #[test]
+    fn oversize_gate_message_states_the_byte_cap_without_a_remedy() {
+        // The remedy is localized by the notice surfaces; repeating it here is
+        // what produced the doubled warning.
+        let message =
+            WorkspaceGate::TooLarge.describe(2 * 1024 * 1024 * 1024, Path::new("/tmp/ws"));
+        assert!(message.starts_with(GATE_TOO_LARGE_MARKER));
+        assert!(message.contains("/tmp/ws"));
+        assert!(!message.contains("max_workspace_gb"));
+        assert_eq!(message.lines().count(), 1, "the gate message is one line");
+    }
+
+    #[test]
+    fn entry_gate_message_is_distinct_and_never_blames_the_size_cap() {
+        let message = WorkspaceGate::TooManyEntries.describe(0, Path::new("/tmp/ws"));
+        assert!(message.starts_with(GATE_TOO_MANY_ENTRIES_MARKER));
+        assert!(
+            !message.contains(GATE_TOO_LARGE_MARKER),
+            "the entry gate must not be reported as a size trip"
+        );
+        assert!(message.contains(&SIZE_WALK_MAX_ENTRIES.to_string()));
+        assert!(!message.contains("max_workspace_gb"));
     }
 
     #[test]
@@ -1793,7 +2770,7 @@ mod tests {
         std::fs::write(workspace.join("node_modules/big.bin"), vec![0u8; 1_000_000]).unwrap();
         std::fs::write(workspace.join("target/big.bin"), vec![0u8; 1_000_000]).unwrap();
         std::fs::write(workspace.join("src/lib.rs"), b"// real source").unwrap();
-        let total = estimate_workspace_size_bounded(&workspace, 500_000)
+        let total = estimate_workspace_size_bounded(&workspace, 500_000, SIZE_WALK_MAX_ENTRIES)
             .expect("walk must succeed since real source is tiny");
         assert!(
             total < 1_000,
@@ -1808,11 +2785,78 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         // 10 KB file — would trip a 1 KB cap, but cap=0 means no cap.
         std::fs::write(workspace.join("big.bin"), vec![0u8; 10 * 1024]).unwrap();
-        let total =
-            estimate_workspace_size_bounded(&workspace, 0).expect("cap=0 must always return Some");
+        let total = estimate_workspace_size_bounded(&workspace, 0, SIZE_WALK_MAX_ENTRIES)
+            .expect("cap=0 must always return a total");
         assert!(
             total >= 10 * 1024,
             "total ({total}) must include the 10 KB file when cap is disabled"
+        );
+    }
+
+    /// The entry ceiling is the bound that no test could reach before
+    /// `max_entries` became a parameter: 200,000 inodes per run is not a
+    /// price a unit test should pay. A byte-cheap workspace must still be
+    /// refused, and refused as the *entry* gate — reporting `TooLarge` here
+    /// would offer `max_workspace_gb` as a remedy that cannot lift it.
+    #[test]
+    fn entry_ceiling_refuses_a_byte_cheap_workspace_with_too_many_entries() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        for i in 0..10 {
+            std::fs::write(workspace.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        assert_eq!(
+            estimate_workspace_size_bounded(&workspace, 10_000_000, 3),
+            Err(WorkspaceGate::TooManyEntries),
+            "ten tiny files under a 10 MB cap must trip the entry bound, not the byte cap"
+        );
+    }
+
+    /// The invariant documented on `WorkspaceGate::TooManyEntries` and on the
+    /// estimator: `max_workspace_gb = 0` opts out of the byte cap only. A
+    /// future "if `cap_bytes == 0`, skip the walk" shortcut would satisfy
+    /// every other test here and silently delete the ceiling that exists to
+    /// stop a multi-minute `git add -A`.
+    #[test]
+    fn cap_zero_does_not_lift_the_entry_ceiling() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        for i in 0..10 {
+            std::fs::write(workspace.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        assert_eq!(
+            estimate_workspace_size_bounded(&workspace, 0, 3),
+            Err(WorkspaceGate::TooManyEntries),
+            "cap_bytes = 0 disables the byte cap, never the entry ceiling"
+        );
+    }
+
+    /// `ignore` disables gitignore matching entirely when no ancestor holds a
+    /// `.git` (`require_git` defaults to true), but the snapshot's own
+    /// `git add -A --work-tree <workspace>` reads `.gitignore` either way. A
+    /// non-git workspace was therefore measured on content that would never
+    /// be staged — and then told to fix it by editing `.gitignore`.
+    ///
+    /// Deliberately creates no `.git`: the point is the non-repo case.
+    #[test]
+    fn gitignored_content_is_excluded_outside_a_git_repo() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join(".gitignore"), "big.bin\n").unwrap();
+        std::fs::write(workspace.join("big.bin"), vec![0u8; 1_000_000]).unwrap();
+        std::fs::write(workspace.join("src/lib.rs"), b"// real source").unwrap();
+        assert!(
+            !workspace.join(".git").exists(),
+            "this test is only meaningful outside a git repo"
+        );
+        let total = estimate_workspace_size_bounded(&workspace, 500_000, SIZE_WALK_MAX_ENTRIES)
+            .expect("the only large file is gitignored, so the walk must fit under the cap");
+        assert!(
+            total < 1_000,
+            "total ({total}) must exclude the gitignored 1 MB file"
         );
     }
 
@@ -1831,12 +2875,23 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("workspace too large for snapshots"),
+            msg.contains(GATE_TOO_LARGE_MARKER),
             "error must call out the size cap; got: {msg}"
         );
+        let named_owned = workspace.display().to_string();
+        let named = named_owned
+            .strip_prefix(r"\\?\")
+            .or_else(|| named_owned.strip_prefix("//?/"))
+            .unwrap_or(named_owned.as_str());
         assert!(
-            msg.contains("max_workspace_gb"),
-            "error must reference the config knob users can raise; got: {msg}"
+            msg.contains(named),
+            "error must name the workspace it refused; got: {msg}"
+        );
+        // The remedy belongs to the localized notice. Repeating it here is
+        // what produced the doubled, three-line warning users saw.
+        assert!(
+            !msg.contains("max_workspace_gb"),
+            "gate error must not carry its own remedy copy; got: {msg}"
         );
     }
 

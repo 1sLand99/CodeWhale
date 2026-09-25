@@ -3,7 +3,7 @@
     "about": "Offline/stale fallback Models.dev-shaped catalog snapshot for Codewhale (#3385, demoted by #4188).",
     "schema": "Matches crates/config/src/models_dev.rs ModelsDevCatalog ({ models, providers }).",
     "role": "NOT a competing source of truth. Preferred metadata is the live Models.dev catalog published into ProviderLake (#4187). This asset is used only when live/cache rows are unavailable (offline startup, failed refresh, or empty cache).",
-    "source": "Compact offline seed of verified in-repo defaults (context/output from crates/tui/src/models.rs; USD pricing from crates/tui/src/pricing.rs) for providers Codewhale ships with. It is intentionally smaller than a full Models.dev dump; live refresh supersedes these rows on (provider, wire_model_id) identity.",
+    "source": "Compact offline seed of verified in-repo defaults (context/output from crates/models/src/lib.rs; USD pricing from crates/tui/src/pricing.rs) for providers Codewhale ships with. It is intentionally smaller than a full Models.dev dump; live refresh supersedes these rows on (provider, wire_model_id) identity.",
     "honesty": "Pricing is intentionally OMITTED where a flat catalog row would be misleading: DeepSeek-native rows (priced via the time-aware DeepSeek table elsewhere, kept UnknownOrStale at the route layer), Grok 4.6 (rates double once a prompt reaches 200K tokens), aggregator-hosted DeepSeek rows (aggregator account terms, not DeepSeek Platform pricing), Xiaomi MiMo rows (published PAYG rates apply only to sk- pay-as-you-go keys; the catalog cannot distinguish that billing surface from credit/quota Token Plan keys, so MiMo stays unpriced), and Alibaba Model Studio Token/Coding Plan rows (upstream lists zero per-token cost because usage draws on plan quota, not per-token billing; a zero here would read as 'free'). Absent pricing surfaces as PricingSku::UnknownOrStale, never a fabricated zero.",
     "default_rows": "Each provider's `default: true` wire id equals that provider's built-in DEFAULT_*_MODEL so RouteResolver::new() and the descriptor stay in agreement when offline.",
     "curated": "qwen3.8-max (GA) is curated ahead of upstream Models.dev, which as of 2026-08-03 lists only qwen3.8-max-preview; facts verified against the owner's Token Plan console (2026-08-03): ~1M context, 128K output, image understanding, always-on reasoning. deepseek-v4-flash-0731 keeps the console/in-repo wire id for the row upstream serves as deepseek-v4-flash. Coding Plan rows for qwen3.8-max-preview, deepseek-v4-pro, deepseek-v4-flash-0731, and glm-5.2 are curated from the Token Plan upstream entries (upstream alibaba-coding-plan does not list them yet); the in-repo route layer already offers the same model set on both plans. Upstream provider ids alibaba-token-plan(-cn) / alibaba-coding-plan(-cn) were merged onto the CodeWhale provider ids (live refresh normalizes them via ProviderKind aliases; the -cn regional variants stay upstream-id browse rows until Codewhale ships China endpoints).",
@@ -11,7 +11,9 @@
     "pending_release_metadata": "GLM-5.3 is live on the Z.ai Coding Plan (docs.z.ai/devpack/overview and docs.z.ai/devpack/latest-model, recorded 2026-08-13) and is the default direct Z.ai model (DEFAULT_ZAI_MODEL); explicit GLM-5.2 selections keep their own id. First-party wire id is GLM-5.3; OpenRouter mirror is z-ai/glm-5.3. Capability/limit/dialect values still inherit from GLM-5.2 until Z.ai publishes distinct 5.3 numbers. Pricing stays absent: Coding Plan publishes credit multipliers, not a USD PAYG row we can stand behind. Z.ai may auto-route GLM-5.2/GLM-5.1 requests to GLM-5.3 on their side; Codewhale still sends the selected picker id. Do not send a [1m] suffix. Scope stays first-party Z.ai plus the OpenRouter mirror; add third-party gateway rows only against that gateway's own published roster.",
     "glm_5_3_flash_2026_08_26": "GLM-5.3-Flash recorded 2026-08-26 against https://docs.z.ai/guides/overview/pricing: natively multimodal (text/image/video), 1,000,000 context / 131,072 output, reasoning + tools. First-party wire id GLM-5.3-Flash; OpenRouter mirror z-ai/glm-5.3-flash. Durable list prices (not the 50% promo ending 2026-09-09 UTC+8): input 0.15, output 0.50, cache_read 0.03 per 1M. Flash is a picker row and the faster/explore sibling of GLM-5.3; DEFAULT_ZAI_MODEL stays GLM-5.3.",
     "currency_sweep_2026_08_17": "Rows re-verified against official pages on 2026-08-17 (#5470 follow-up): gpt-5.6-terra 2.00/12.00 (cache read 0.20, write 2.50) and gpt-5.6-luna 0.20/1.20 (0.02/0.25) per developers.openai.com model pages; claude-sonnet-5 2.00/10.00 (0.20/2.50) is now Anthropic's standard price (the 2026-09-01 increase was cancelled) and claude-opus-5 5.00/25.00 (0.50/6.25) was added; kimi-k3 3.00/15.00 (0.30) and kimi-k2.7-code-highspeed 1.90/8.00 (0.38) per platform.kimi.ai; MiniMax-M2.7-highspeed 0.60/2.40 (0.06/0.375) per platform.minimax.io; grok-4.5 (500K) and grok-4.3 (1M) carry limits only because xAI doubles their rates past 200K (same rule as grok-4.6); OpenRouter dots-studio/dots-3-note-preview:free carries limits only (its single free endpoint publishes $0, which this seed does not restate as a price).",
-    "coverage": "20 providers, 92 model rows (offline seed only)."
+    "coverage": "21 providers, 99 model rows (offline seed only).",
+    "stepfun_2026_09_19": "Official https://platform.stepfun.ai/docs/en/guides/models/step-5-preview and step-3.7-flash / step-3.5-flash: four coding models, tools and reasoning. Step 5 has 1,000,000 context/output and text/image/video input; Step 3.7 has 256K context and text/image/video input. Its existing 256K output remains models.dev-sourced; no output limit is invented for Step 3.5. Step 3.5-2603 offers low/high effort, Step 3.7 and Step 5 low/medium/high. Base Step 3.5 uses provider-default reasoning. The existing Step 3.7 default is preserved. PAYG costs are deliberately omitted here because the same model ids serve Step Plan subscription quota; endpoint-scoped rates live in pricing.rs. Audio/image generators and retired model ids are not coding routes.",
+    "mimo_v2_6_2026_09_21": "MiMo 2.6 rows staged 2026-09-21 from https://models.dev/catalog.json (xiaomi/mimo-v2.6-pro, xiaomi/mimo-v2.6-flash): reasoning + tool_call true, upstream limits 1,048,576 context / 131,072 output, staged as the family's 1,000,000 / 131,072 to match the in-repo MiMo rows. Both stay unpriced under `honesty` (published PAYG rates cover only sk- pay-as-you-go keys; Token Plan quota cannot be told apart from them). DEFAULT_XIAOMI_MIMO_MODEL stays mimo-v2.5-pro per `default_rows`, so neither new row is `default: true`. Upstream advertises text+image+audio+video+pdf input; the seed keeps the xiaomi-mimo family's verified text-only row until the route is qualified for wider modalities. No first-party -free id exists upstream; none is staged."
   },
   "models": {
     "deepseek-v4-pro": {
@@ -20,8 +22,18 @@
       "family": "deepseek",
       "reasoning": true,
       "tool_call": true,
-      "modalities": { "input": ["text"], "output": ["text"] },
-      "limit": { "context": 1000000, "output": 384000 },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "limit": {
+        "context": 1000000,
+        "output": 384000
+      },
       "open_weights": true
     },
     "deepseek-v4-flash": {
@@ -30,8 +42,18 @@
       "family": "deepseek",
       "reasoning": true,
       "tool_call": true,
-      "modalities": { "input": ["text"], "output": ["text"] },
-      "limit": { "context": 1000000, "output": 384000 },
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "limit": {
+        "context": 1000000,
+        "output": 384000
+      },
       "open_weights": true
     }
   },
@@ -41,18 +63,29 @@
       "name": "DeepSeek",
       "api": "https://api.deepseek.com",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["DEEPSEEK_API_KEY"],
+      "env": [
+        "DEEPSEEK_API_KEY"
+      ],
       "models": {
         "deepseek-v4-pro": {
           "id": "deepseek-v4-pro",
           "base_model": "deepseek-v4-pro",
           "name": "DeepSeek V4 Pro",
           "family": "deepseek",
-          "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-v4-flash": {
           "id": "deepseek-v4-flash",
@@ -61,8 +94,19 @@
           "family": "deepseek",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-v4-flash-vision-exp": {
           "id": "deepseek-v4-flash-vision-exp",
@@ -71,8 +115,41 @@
           "family": "deepseek",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text", "image"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
+        },
+        "deepseek-flash": {
+          "id": "deepseek-flash",
+          "base_model": "deepseek-flash",
+          "name": "DeepSeek V4.1 Flash",
+          "family": "deepseek",
+          "default": true,
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         }
       }
     },
@@ -81,18 +158,44 @@
       "name": "Zhipu AI / Z.ai",
       "api": "https://api.z.ai/api/paas/v4",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["ZAI_API_KEY", "ZHIPU_API_KEY", "GLM_API_KEY"],
+      "env": [
+        "ZAI_API_KEY",
+        "ZHIPU_API_KEY",
+        "GLM_API_KEY"
+      ],
       "models": {
         "GLM-5.2": {
           "id": "GLM-5.2",
           "name": "GLM-5.2",
           "family": "glm",
           "reasoning": true,
-          "reasoning_options": [{ "type": "effort", "values": ["high", "max"] }],
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
+          ],
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 },
-          "cost": { "input": 1.40, "output": 4.40, "cache_read": 0.26 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          },
+          "cost": {
+            "input": 1.4,
+            "output": 4.4,
+            "cache_read": 0.26
+          }
         },
         "GLM-5.3": {
           "id": "GLM-5.3",
@@ -100,10 +203,28 @@
           "family": "glm",
           "default": true,
           "reasoning": true,
-          "reasoning_options": [{ "type": "effort", "values": ["high", "max"] }],
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
+          ],
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "GLM-5.3-Flash": {
           "id": "GLM-5.3-Flash",
@@ -111,11 +232,35 @@
           "family": "glm",
           "attachment": true,
           "reasoning": true,
-          "reasoning_options": [{ "type": "effort", "values": ["high", "max"] }],
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
+          ],
           "tool_call": true,
-          "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 },
-          "cost": { "input": 0.15, "output": 0.50, "cache_read": 0.03 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          },
+          "cost": {
+            "input": 0.15,
+            "output": 0.5,
+            "cache_read": 0.03
+          }
         },
         "glm-5.1": {
           "id": "glm-5.1",
@@ -123,9 +268,23 @@
           "family": "glm",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 202752, "output": 131072 },
-          "cost": { "input": 1.40, "output": 4.40, "cache_read": 0.26 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 202752,
+            "output": 131072
+          },
+          "cost": {
+            "input": 1.4,
+            "output": 4.4,
+            "cache_read": 0.26
+          }
         },
         "GLM-5-Turbo": {
           "id": "GLM-5-Turbo",
@@ -133,9 +292,23 @@
           "family": "glm",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 202752, "output": 131072 },
-          "cost": { "input": 1.20, "output": 4.00, "cache_read": 0.24 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 202752,
+            "output": 131072
+          },
+          "cost": {
+            "input": 1.2,
+            "output": 4.0,
+            "cache_read": 0.24
+          }
         }
       }
     },
@@ -144,7 +317,10 @@
       "name": "Moonshot / Kimi",
       "api": "https://api.moonshot.ai/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+      "env": [
+        "MOONSHOT_API_KEY",
+        "KIMI_API_KEY"
+      ],
       "models": {
         "kimi-k3": {
           "id": "kimi-k3",
@@ -152,9 +328,25 @@
           "family": "kimi-k3",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-          "limit": { "context": 1048576, "output": 131072 },
-          "cost": { "input": 3.00, "output": 15.00, "cache_read": 0.30 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1048576,
+            "output": 131072
+          },
+          "cost": {
+            "input": 3.0,
+            "output": 15.0,
+            "cache_read": 0.3
+          }
         },
         "kimi-k2.7-code": {
           "id": "kimi-k2.7-code",
@@ -163,9 +355,23 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262144 },
-          "cost": { "input": 0.95, "output": 4.00, "cache_read": 0.19 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 262144
+          },
+          "cost": {
+            "input": 0.95,
+            "output": 4.0,
+            "cache_read": 0.19
+          }
         },
         "kimi-k2.7-code-highspeed": {
           "id": "kimi-k2.7-code-highspeed",
@@ -173,9 +379,23 @@
           "family": "kimi",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262144 },
-          "cost": { "input": 1.90, "output": 8.00, "cache_read": 0.38 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 262144
+          },
+          "cost": {
+            "input": 1.9,
+            "output": 8.0,
+            "cache_read": 0.38
+          }
         },
         "kimi-k2.6": {
           "id": "kimi-k2.6",
@@ -183,9 +403,23 @@
           "family": "kimi",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262144 },
-          "cost": { "input": 0.95, "output": 4.00, "cache_read": 0.16 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 262144
+          },
+          "cost": {
+            "input": 0.95,
+            "output": 4.0,
+            "cache_read": 0.16
+          }
         }
       }
     },
@@ -194,7 +428,9 @@
       "name": "MiniMax",
       "api": "https://api.minimax.io/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["MINIMAX_API_KEY"],
+      "env": [
+        "MINIMAX_API_KEY"
+      ],
       "models": {
         "MiniMax-M3": {
           "id": "MiniMax-M3",
@@ -204,11 +440,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            { "type": "thinking", "values": ["adaptive", "disabled"], "default": "adaptive" }
+            {
+              "type": "thinking",
+              "values": [
+                "adaptive",
+                "disabled"
+              ],
+              "default": "adaptive"
+            }
           ],
           "tool_call": true,
-          "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 524288 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 524288
+          }
         },
         "MiniMax-M2.7": {
           "id": "MiniMax-M2.7",
@@ -216,12 +471,33 @@
           "family": "minimax",
           "reasoning": true,
           "reasoning_options": [
-            { "type": "thinking", "values": ["always_on"], "default": "always_on" }
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 204800, "output": 204800 },
-          "cost": { "input": 0.30, "output": 1.20, "cache_read": 0.06, "cache_write": 0.375 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 204800,
+            "output": 204800
+          },
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cache_read": 0.06,
+            "cache_write": 0.375
+          }
         },
         "MiniMax-M2.7-highspeed": {
           "id": "MiniMax-M2.7-highspeed",
@@ -229,12 +505,33 @@
           "family": "minimax",
           "reasoning": true,
           "reasoning_options": [
-            { "type": "thinking", "values": ["always_on"], "default": "always_on" }
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 204800, "output": 204800 },
-          "cost": { "input": 0.60, "output": 2.40, "cache_read": 0.06, "cache_write": 0.375 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 204800,
+            "output": 204800
+          },
+          "cost": {
+            "input": 0.6,
+            "output": 2.4,
+            "cache_read": 0.06,
+            "cache_write": 0.375
+          }
         }
       }
     },
@@ -243,7 +540,9 @@
       "name": "MiniMax (Anthropic-compatible)",
       "api": "https://api.minimax.io/anthropic",
       "npm": "@ai-sdk/anthropic",
-      "env": ["MINIMAX_API_KEY"],
+      "env": [
+        "MINIMAX_API_KEY"
+      ],
       "models": {
         "MiniMax-M3": {
           "id": "MiniMax-M3",
@@ -253,11 +552,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            { "type": "thinking", "values": ["adaptive", "disabled"], "default": "disabled" }
+            {
+              "type": "thinking",
+              "values": [
+                "adaptive",
+                "disabled"
+              ],
+              "default": "disabled"
+            }
           ],
           "tool_call": true,
-          "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 524288 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 524288
+          }
         },
         "MiniMax-M2.7": {
           "id": "MiniMax-M2.7",
@@ -265,12 +583,33 @@
           "family": "minimax",
           "reasoning": true,
           "reasoning_options": [
-            { "type": "thinking", "values": ["always_on"], "default": "always_on" }
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 204800, "output": 204800 },
-          "cost": { "input": 0.30, "output": 1.20, "cache_read": 0.06, "cache_write": 0.375 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 204800,
+            "output": 204800
+          },
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cache_read": 0.06,
+            "cache_write": 0.375
+          }
         },
         "MiniMax-M2.7-highspeed": {
           "id": "MiniMax-M2.7-highspeed",
@@ -278,12 +617,33 @@
           "family": "minimax",
           "reasoning": true,
           "reasoning_options": [
-            { "type": "thinking", "values": ["always_on"], "default": "always_on" }
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 204800, "output": 204800 },
-          "cost": { "input": 0.60, "output": 2.40, "cache_read": 0.06, "cache_write": 0.375 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 204800,
+            "output": 204800
+          },
+          "cost": {
+            "input": 0.6,
+            "output": 2.4,
+            "cache_read": 0.06,
+            "cache_write": 0.375
+          }
         }
       }
     },
@@ -292,7 +652,10 @@
       "name": "Alibaba Cloud Model Studio (Token Plan)",
       "api": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["MODELSTUDIO_API_KEY", "DASHSCOPE_API_KEY"],
+      "env": [
+        "MODELSTUDIO_API_KEY",
+        "DASHSCOPE_API_KEY"
+      ],
       "models": {
         "qwen3.8-max": {
           "id": "qwen3.8-max",
@@ -302,12 +665,29 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "thinking", "values": ["always_on"], "default": "always_on"}
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.8-max-preview": {
           "id": "qwen3.8-max-preview",
@@ -316,13 +696,36 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["low", "medium", "xhigh"]},
-            {"type": "budget_tokens", "min": 0, "max": 262144}
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "xhigh"
+              ]
+            },
+            {
+              "type": "budget_tokens",
+              "min": 0,
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.7-plus": {
           "id": "qwen3.7-plus",
@@ -331,13 +734,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "qwen3.7-max": {
           "id": "qwen3.7-max",
@@ -345,13 +765,28 @@
           "family": "qwen",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.6-flash": {
           "id": "qwen3.6-flash",
@@ -360,13 +795,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 131072}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 131072
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "deepseek-v4-pro": {
           "id": "deepseek-v4-pro",
@@ -374,13 +826,31 @@
           "family": "deepseek-thinking",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-v4-flash-0731": {
           "id": "deepseek-v4-flash-0731",
@@ -388,13 +858,31 @@
           "family": "deepseek-flash",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "glm-5.2": {
           "id": "glm-5.2",
@@ -402,12 +890,28 @@
           "family": "glm",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         }
       }
     },
@@ -416,7 +920,10 @@
       "name": "Alibaba Cloud Model Studio (Token Plan, Anthropic-compatible)",
       "api": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
       "npm": "@ai-sdk/anthropic",
-      "env": ["MODELSTUDIO_API_KEY", "DASHSCOPE_API_KEY"],
+      "env": [
+        "MODELSTUDIO_API_KEY",
+        "DASHSCOPE_API_KEY"
+      ],
       "models": {
         "qwen3.8-max": {
           "id": "qwen3.8-max",
@@ -426,12 +933,29 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "thinking", "values": ["always_on"], "default": "always_on"}
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.8-max-preview": {
           "id": "qwen3.8-max-preview",
@@ -440,13 +964,36 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["low", "medium", "xhigh"]},
-            {"type": "budget_tokens", "min": 0, "max": 262144}
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "xhigh"
+              ]
+            },
+            {
+              "type": "budget_tokens",
+              "min": 0,
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.7-plus": {
           "id": "qwen3.7-plus",
@@ -455,13 +1002,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "qwen3.7-max": {
           "id": "qwen3.7-max",
@@ -469,13 +1033,28 @@
           "family": "qwen",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.6-flash": {
           "id": "qwen3.6-flash",
@@ -484,13 +1063,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 131072}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 131072
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "deepseek-v4-pro": {
           "id": "deepseek-v4-pro",
@@ -498,13 +1094,31 @@
           "family": "deepseek-thinking",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-v4-flash-0731": {
           "id": "deepseek-v4-flash-0731",
@@ -512,13 +1126,31 @@
           "family": "deepseek-flash",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "glm-5.2": {
           "id": "glm-5.2",
@@ -526,12 +1158,28 @@
           "family": "glm",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         }
       }
     },
@@ -540,7 +1188,10 @@
       "name": "Alibaba Cloud Model Studio (Coding Plan)",
       "api": "https://coding-intl.dashscope.aliyuncs.com/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["MODELSTUDIO_API_KEY", "DASHSCOPE_API_KEY"],
+      "env": [
+        "MODELSTUDIO_API_KEY",
+        "DASHSCOPE_API_KEY"
+      ],
       "models": {
         "qwen3.8-max": {
           "id": "qwen3.8-max",
@@ -550,12 +1201,29 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "thinking", "values": ["always_on"], "default": "always_on"}
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.8-max-preview": {
           "id": "qwen3.8-max-preview",
@@ -564,13 +1232,36 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["low", "medium", "xhigh"]},
-            {"type": "budget_tokens", "min": 0, "max": 262144}
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "xhigh"
+              ]
+            },
+            {
+              "type": "budget_tokens",
+              "min": 0,
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.7-plus": {
           "id": "qwen3.7-plus",
@@ -579,13 +1270,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 64000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
         },
         "qwen3.7-max": {
           "id": "qwen3.7-max",
@@ -593,13 +1301,28 @@
           "family": "qwen",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "qwen3.6-flash": {
           "id": "qwen3.6-flash",
@@ -608,13 +1331,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 131072}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 131072
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "deepseek-v4-pro": {
           "id": "deepseek-v4-pro",
@@ -622,13 +1362,31 @@
           "family": "deepseek-thinking",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-v4-flash-0731": {
           "id": "deepseek-v4-flash-0731",
@@ -636,13 +1394,31 @@
           "family": "deepseek-flash",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "glm-5.2": {
           "id": "glm-5.2",
@@ -650,12 +1426,28 @@
           "family": "glm",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         }
       }
     },
@@ -664,7 +1456,10 @@
       "name": "Alibaba Cloud Model Studio (Coding Plan, Anthropic-compatible)",
       "api": "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
       "npm": "@ai-sdk/anthropic",
-      "env": ["MODELSTUDIO_API_KEY", "DASHSCOPE_API_KEY"],
+      "env": [
+        "MODELSTUDIO_API_KEY",
+        "DASHSCOPE_API_KEY"
+      ],
       "models": {
         "qwen3.8-max": {
           "id": "qwen3.8-max",
@@ -674,12 +1469,29 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "thinking", "values": ["always_on"], "default": "always_on"}
+            {
+              "type": "thinking",
+              "values": [
+                "always_on"
+              ],
+              "default": "always_on"
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.8-max-preview": {
           "id": "qwen3.8-max-preview",
@@ -688,13 +1500,36 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["low", "medium", "xhigh"]},
-            {"type": "budget_tokens", "min": 0, "max": 262144}
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "xhigh"
+              ]
+            },
+            {
+              "type": "budget_tokens",
+              "min": 0,
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "qwen3.7-plus": {
           "id": "qwen3.7-plus",
@@ -703,13 +1538,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 64000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 64000
+          }
         },
         "qwen3.7-max": {
           "id": "qwen3.7-max",
@@ -717,13 +1569,28 @@
           "family": "qwen",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 262144}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 262144
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "qwen3.6-flash": {
           "id": "qwen3.6-flash",
@@ -732,13 +1599,30 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "budget_tokens", "max": 131072}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "budget_tokens",
+              "max": 131072
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 65536 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          }
         },
         "deepseek-v4-pro": {
           "id": "deepseek-v4-pro",
@@ -746,13 +1630,31 @@
           "family": "deepseek-thinking",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-v4-flash-0731": {
           "id": "deepseek-v4-flash-0731",
@@ -760,13 +1662,31 @@
           "family": "deepseek-flash",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "toggle"},
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "toggle"
+            },
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "glm-5.2": {
           "id": "glm-5.2",
@@ -774,12 +1694,28 @@
           "family": "glm",
           "reasoning": true,
           "reasoning_options": [
-            {"type": "effort", "values": ["high", "max"]}
+            {
+              "type": "effort",
+              "values": [
+                "high",
+                "max"
+              ]
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": {"input": ["text"], "output": ["text"]},
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         }
       }
     },
@@ -788,7 +1724,10 @@
       "name": "Meta Model API",
       "api": "https://api.meta.ai/v1",
       "npm": "@ai-sdk/openai",
-      "env": ["META_MODEL_API_KEY", "MODEL_API_KEY"],
+      "env": [
+        "META_MODEL_API_KEY",
+        "MODEL_API_KEY"
+      ],
       "models": {
         "muse-spark-1.1": {
           "id": "muse-spark-1.1",
@@ -800,14 +1739,39 @@
           "reasoning_options": [
             {
               "type": "effort",
-              "values": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]
+              "values": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "ultra"
+              ]
             }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image", "pdf", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 32000 },
-          "cost": { "input": 1.25, "output": 4.25, "cache_read": 0.15 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 32000
+          },
+          "cost": {
+            "input": 1.25,
+            "output": 4.25,
+            "cache_read": 0.15
+          }
         },
         "muse-spark-1.2": {
           "id": "muse-spark-1.2",
@@ -819,14 +1783,39 @@
           "reasoning_options": [
             {
               "type": "effort",
-              "values": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]
+              "values": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "ultra"
+              ]
             }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image", "pdf", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 32000 },
-          "cost": { "input": 1.25, "output": 4.25, "cache_read": 0.15 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 32000
+          },
+          "cost": {
+            "input": 1.25,
+            "output": 4.25,
+            "cache_read": 0.15
+          }
         },
         "muse-spark-1.2-contributor": {
           "id": "muse-spark-1.2-contributor",
@@ -838,14 +1827,39 @@
           "reasoning_options": [
             {
               "type": "effort",
-              "values": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]
+              "values": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "ultra"
+              ]
             }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image", "pdf", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 32000 },
-          "cost": { "input": 0.10, "output": 0.20, "cache_read": 0.002 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 32000
+          },
+          "cost": {
+            "input": 0.1,
+            "output": 0.2,
+            "cache_read": 0.002
+          }
         }
       }
     },
@@ -854,7 +1868,9 @@
       "name": "OpenAI-compatible",
       "api": "https://api.openai.com/v1",
       "npm": "@ai-sdk/openai",
-      "env": ["OPENAI_API_KEY"],
+      "env": [
+        "OPENAI_API_KEY"
+      ],
       "models": {
         "gpt-5.5": {
           "id": "gpt-5.5",
@@ -862,9 +1878,23 @@
           "family": "gpt",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1050000, "output": 128000 },
-          "cost": { "input": 5.00, "output": 30.00, "cache_read": 0.50 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 5.0,
+            "output": 30.0,
+            "cache_read": 0.5
+          }
         },
         "gpt-5.5-pro": {
           "id": "gpt-5.5-pro",
@@ -872,9 +1902,22 @@
           "family": "gpt",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1050000, "output": 128000 },
-          "cost": { "input": 30.00, "output": 180.00 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 30.0,
+            "output": 180.0
+          }
         },
         "gpt-5.6": {
           "id": "gpt-5.6",
@@ -885,9 +1928,27 @@
           "reasoning": true,
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
-          "limit": { "context": 1050000, "input": 922000, "output": 128000 },
-          "cost": { "input": 5.00, "output": 30.00, "cache_read": 0.50, "cache_write": 6.25 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1050000,
+            "input": 922000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 5.0,
+            "output": 30.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25
+          }
         },
         "gpt-5.6-sol": {
           "id": "gpt-5.6-sol",
@@ -897,9 +1958,27 @@
           "reasoning": true,
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
-          "limit": { "context": 1050000, "input": 922000, "output": 128000 },
-          "cost": { "input": 5.00, "output": 30.00, "cache_read": 0.50, "cache_write": 6.25 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1050000,
+            "input": 922000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 5.0,
+            "output": 30.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25
+          }
         },
         "gpt-5.6-terra": {
           "id": "gpt-5.6-terra",
@@ -909,9 +1988,27 @@
           "reasoning": true,
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
-          "limit": { "context": 1050000, "input": 922000, "output": 128000 },
-          "cost": { "input": 2.00, "output": 12.00, "cache_read": 0.20, "cache_write": 2.50 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1050000,
+            "input": 922000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 2.0,
+            "output": 12.0,
+            "cache_read": 0.2,
+            "cache_write": 2.5
+          }
         },
         "gpt-5.6-luna": {
           "id": "gpt-5.6-luna",
@@ -921,9 +2018,27 @@
           "reasoning": true,
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
-          "limit": { "context": 1050000, "input": 922000, "output": 128000 },
-          "cost": { "input": 0.20, "output": 1.20, "cache_read": 0.02, "cache_write": 0.25 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1050000,
+            "input": 922000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 0.2,
+            "output": 1.2,
+            "cache_read": 0.02,
+            "cache_write": 0.25
+          }
         },
         "gpt-5.3-codex": {
           "id": "gpt-5.3-codex",
@@ -931,9 +2046,23 @@
           "family": "gpt-codex",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 400000, "output": 128000 },
-          "cost": { "input": 1.75, "output": 14.00, "cache_read": 0.175 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 1.75,
+            "output": 14.0,
+            "cache_read": 0.175
+          }
         }
       }
     },
@@ -942,7 +2071,9 @@
       "name": "Anthropic",
       "api": "https://api.anthropic.com",
       "npm": "@ai-sdk/anthropic",
-      "env": ["ANTHROPIC_API_KEY"],
+      "env": [
+        "ANTHROPIC_API_KEY"
+      ],
       "models": {
         "claude-sonnet-4-6": {
           "id": "claude-sonnet-4-6",
@@ -951,9 +2082,24 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 128000 },
-          "cost": { "input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 3.0,
+            "output": 15.0,
+            "cache_read": 0.3,
+            "cache_write": 3.75
+          }
         },
         "claude-opus-4-8": {
           "id": "claude-opus-4-8",
@@ -961,9 +2107,24 @@
           "family": "claude",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 128000 },
-          "cost": { "input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 5.0,
+            "output": 25.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25
+          }
         },
         "claude-haiku-4-5": {
           "id": "claude-haiku-4-5",
@@ -971,9 +2132,24 @@
           "family": "claude",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 200000, "output": 64000 },
-          "cost": { "input": 1.00, "output": 5.00, "cache_read": 0.10, "cache_write": 1.25 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "cost": {
+            "input": 1.0,
+            "output": 5.0,
+            "cache_read": 0.1,
+            "cache_write": 1.25
+          }
         },
         "claude-opus-5": {
           "id": "claude-opus-5",
@@ -981,9 +2157,24 @@
           "family": "claude",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 128000 },
-          "cost": { "input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 5.0,
+            "output": 25.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25
+          }
         },
         "claude-sonnet-5": {
           "id": "claude-sonnet-5",
@@ -991,9 +2182,24 @@
           "family": "claude",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 128000 },
-          "cost": { "input": 2.00, "output": 10.00, "cache_read": 0.20, "cache_write": 2.50 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 2.0,
+            "output": 10.0,
+            "cache_read": 0.2,
+            "cache_write": 2.5
+          }
         },
         "claude-fable-5": {
           "id": "claude-fable-5",
@@ -1001,9 +2207,24 @@
           "family": "claude",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 128000 },
-          "cost": { "input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "cost": {
+            "input": 10.0,
+            "output": 50.0,
+            "cache_read": 1.0,
+            "cache_write": 12.5
+          }
         }
       }
     },
@@ -1012,7 +2233,9 @@
       "name": "OpenRouter",
       "api": "https://openrouter.ai/api/v1",
       "npm": "@openrouter/ai-sdk-provider",
-      "env": ["OPENROUTER_API_KEY"],
+      "env": [
+        "OPENROUTER_API_KEY"
+      ],
       "models": {
         "deepseek/deepseek-v4-pro": {
           "id": "deepseek/deepseek-v4-pro",
@@ -1022,8 +2245,18 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek/deepseek-v4-flash": {
           "id": "deepseek/deepseek-v4-flash",
@@ -1032,8 +2265,18 @@
           "family": "deepseek",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "qwen/qwen3.8-flash": {
           "id": "qwen/qwen3.8-flash",
@@ -1041,9 +2284,26 @@
           "family": "qwen",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 },
-          "cost": { "input": 0.16, "output": 0.47, "cache_read": 0.016, "cache_write": 0.20 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          },
+          "cost": {
+            "input": 0.16,
+            "output": 0.47,
+            "cache_read": 0.016,
+            "cache_write": 0.2
+          }
         },
         "qwen/qwen3.6-flash": {
           "id": "qwen/qwen3.6-flash",
@@ -1051,9 +2311,22 @@
           "family": "qwen",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 65536 },
-          "cost": { "input": 0.1875, "output": 1.125 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          },
+          "cost": {
+            "input": 0.1875,
+            "output": 1.125
+          }
         },
         "qwen/qwen3.6-plus": {
           "id": "qwen/qwen3.6-plus",
@@ -1061,9 +2334,22 @@
           "family": "qwen",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 65536 },
-          "cost": { "input": 0.325, "output": 1.95 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 65536
+          },
+          "cost": {
+            "input": 0.325,
+            "output": 1.95
+          }
         },
         "qwen/qwen3.6-35b-a3b": {
           "id": "qwen/qwen3.6-35b-a3b",
@@ -1071,9 +2357,23 @@
           "family": "qwen",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262140 },
-          "cost": { "input": 0.14, "output": 1.00, "cache_read": 0.05 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 262140
+          },
+          "cost": {
+            "input": 0.14,
+            "output": 1.0,
+            "cache_read": 0.05
+          }
         },
         "qwen/qwen3.7-plus": {
           "id": "qwen/qwen3.7-plus",
@@ -1081,8 +2381,20 @@
           "family": "qwen",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "cost": { "input": 0.32, "output": 1.28, "cache_read": 0.064, "cache_write": 0.40 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "cost": {
+            "input": 0.32,
+            "output": 1.28,
+            "cache_read": 0.064,
+            "cache_write": 0.4
+          }
         },
         "minimax/minimax-m3": {
           "id": "minimax/minimax-m3",
@@ -1090,9 +2402,23 @@
           "family": "minimax",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 524288 },
-          "cost": { "input": 0.30, "output": 1.20, "cache_read": 0.06 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 524288
+          },
+          "cost": {
+            "input": 0.3,
+            "output": 1.2,
+            "cache_read": 0.06
+          }
         },
         "z-ai/glm-5.2": {
           "id": "z-ai/glm-5.2",
@@ -1100,8 +2426,18 @@
           "family": "glm",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "z-ai/glm-5.3": {
           "id": "z-ai/glm-5.3",
@@ -1109,8 +2445,18 @@
           "family": "glm",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "z-ai/glm-5.3-flash": {
           "id": "z-ai/glm-5.3-flash",
@@ -1119,9 +2465,25 @@
           "attachment": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 },
-          "cost": { "input": 0.15, "output": 0.50, "cache_read": 0.03 }
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          },
+          "cost": {
+            "input": 0.15,
+            "output": 0.5,
+            "cache_read": 0.03
+          }
         },
         "dots-studio/dots-3-note-preview:free": {
           "id": "dots-studio/dots-3-note-preview:free",
@@ -1129,8 +2491,19 @@
           "family": "dots",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text", "image"], "output": ["text"] },
-          "limit": { "context": 512000, "output": 512000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 512000,
+            "output": 512000
+          }
         }
       }
     },
@@ -1139,7 +2512,9 @@
       "name": "Together AI",
       "api": "https://api.together.xyz/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["TOGETHER_API_KEY"],
+      "env": [
+        "TOGETHER_API_KEY"
+      ],
       "models": {
         "deepseek-ai/DeepSeek-V4-Pro": {
           "id": "deepseek-ai/DeepSeek-V4-Pro",
@@ -1149,8 +2524,18 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-ai/DeepSeek-V4-Flash": {
           "id": "deepseek-ai/DeepSeek-V4-Flash",
@@ -1159,8 +2544,18 @@
           "family": "deepseek",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         }
       }
     },
@@ -1169,7 +2564,9 @@
       "name": "Fireworks AI",
       "api": "https://api.fireworks.ai/inference/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["FIREWORKS_API_KEY"],
+      "env": [
+        "FIREWORKS_API_KEY"
+      ],
       "models": {
         "accounts/fireworks/models/deepseek-v4-pro": {
           "id": "accounts/fireworks/models/deepseek-v4-pro",
@@ -1179,8 +2576,18 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         }
       }
     },
@@ -1189,7 +2596,9 @@
       "name": "Novita AI",
       "api": "https://api.novita.ai/openai/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["NOVITA_API_KEY"],
+      "env": [
+        "NOVITA_API_KEY"
+      ],
       "models": {
         "deepseek/deepseek-v4-pro": {
           "id": "deepseek/deepseek-v4-pro",
@@ -1199,8 +2608,18 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek/deepseek-v4-flash": {
           "id": "deepseek/deepseek-v4-flash",
@@ -1209,8 +2628,18 @@
           "family": "deepseek",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         }
       }
     },
@@ -1219,7 +2648,9 @@
       "name": "SiliconFlow",
       "api": "https://api.siliconflow.com/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["SILICONFLOW_API_KEY"],
+      "env": [
+        "SILICONFLOW_API_KEY"
+      ],
       "models": {
         "deepseek-ai/DeepSeek-V4-Pro": {
           "id": "deepseek-ai/DeepSeek-V4-Pro",
@@ -1229,8 +2660,18 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         },
         "deepseek-ai/DeepSeek-V4-Flash": {
           "id": "deepseek-ai/DeepSeek-V4-Flash",
@@ -1239,8 +2680,18 @@
           "family": "deepseek",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 384000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          }
         }
       }
     },
@@ -1249,7 +2700,9 @@
       "name": "Arcee AI",
       "api": "https://api.arcee.ai/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["ARCEE_API_KEY"],
+      "env": [
+        "ARCEE_API_KEY"
+      ],
       "models": {
         "trinity-large-thinking": {
           "id": "trinity-large-thinking",
@@ -1258,9 +2711,22 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262144 },
-          "cost": { "input": 0.25, "output": 0.80 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 262144
+          },
+          "cost": {
+            "input": 0.25,
+            "output": 0.8
+          }
         },
         "trinity-mini": {
           "id": "trinity-mini",
@@ -1268,8 +2734,17 @@
           "family": "trinity",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 128000 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 128000
+          }
         }
       }
     },
@@ -1278,8 +2753,43 @@
       "name": "xAI",
       "api": "https://api.x.ai/v1",
       "npm": "@ai-sdk/xai",
-      "env": ["XAI_API_KEY"],
+      "env": [
+        "XAI_API_KEY"
+      ],
       "models": {
+        "grok-4.7": {
+          "id": "grok-4.7",
+          "name": "Grok 4.7",
+          "family": "grok",
+          "attachment": true,
+          "reasoning": true,
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "default": "high"
+            }
+          ],
+          "tool_call": true,
+          "structured_output": true,
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 500000
+          }
+        },
         "grok-4.6": {
           "id": "grok-4.6",
           "name": "Grok 4.6",
@@ -1288,12 +2798,31 @@
           "attachment": true,
           "reasoning": true,
           "reasoning_options": [
-            { "type": "effort", "values": ["low", "medium", "high", "xhigh"], "default": "high" }
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "default": "high"
+            }
           ],
           "tool_call": true,
           "structured_output": true,
-          "modalities": { "input": ["text", "image"], "output": ["text"] },
-          "limit": { "context": 500000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 500000
+          }
         },
         "grok-4.5": {
           "id": "grok-4.5",
@@ -1301,11 +2830,29 @@
           "family": "grok",
           "reasoning": true,
           "reasoning_options": [
-            { "type": "effort", "values": ["low", "medium", "high"], "default": "high" }
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "default": "high"
+            }
           ],
           "tool_call": true,
-          "modalities": { "input": ["text", "image"], "output": ["text"] },
-          "limit": { "context": 500000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 500000
+          }
         },
         "grok-4.3": {
           "id": "grok-4.3",
@@ -1313,8 +2860,18 @@
           "family": "grok",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text", "image"], "output": ["text"] },
-          "limit": { "context": 1000000 }
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000
+          }
         }
       }
     },
@@ -1323,7 +2880,10 @@
       "name": "Xiaomi MiMo",
       "api": "https://api-mimo.xiaomi.com/v1",
       "npm": "@ai-sdk/openai-compatible",
-      "env": ["XIAOMI_MIMO_API_KEY", "MIMO_API_KEY"],
+      "env": [
+        "XIAOMI_MIMO_API_KEY",
+        "MIMO_API_KEY"
+      ],
       "models": {
         "mimo-v2.5-pro": {
           "id": "mimo-v2.5-pro",
@@ -1332,8 +2892,18 @@
           "default": true,
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
         },
         "mimo-v2.5": {
           "id": "mimo-v2.5",
@@ -1341,8 +2911,184 @@
           "family": "mimo",
           "reasoning": true,
           "tool_call": true,
-          "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 1000000, "output": 131072 }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
+        },
+        "mimo-v2.6-pro": {
+          "id": "mimo-v2.6-pro",
+          "name": "MiMo v2.6 Pro",
+          "family": "mimo",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
+        },
+        "mimo-v2.6-flash": {
+          "id": "mimo-v2.6-flash",
+          "name": "MiMo v2.6 Flash",
+          "family": "mimo",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
+        }
+      }
+    },
+    "stepfun": {
+      "id": "stepfun",
+      "name": "StepFun / StepFlash",
+      "api": "https://api.stepfun.ai/v1",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": [
+        "STEPFUN_API_KEY",
+        "STEP_API_KEY"
+      ],
+      "models": {
+        "step-3.5-flash": {
+          "id": "step-3.5-flash",
+          "name": "Step 3.5 Flash",
+          "family": "step",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 256000
+          },
+          "reasoning_options": [
+            {
+              "type": "thinking",
+              "values": [
+                "adaptive"
+              ]
+            }
+          ]
+        },
+        "step-3.5-flash-2603": {
+          "id": "step-3.5-flash-2603",
+          "name": "Step 3.5 Flash 2603",
+          "family": "step",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 256000
+          },
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "high"
+              ]
+            }
+          ]
+        },
+        "step-3.7-flash": {
+          "id": "step-3.7-flash",
+          "name": "Step 3.7 Flash",
+          "family": "step",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 256000,
+            "output": 256000
+          },
+          "default": true,
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "high"
+              ]
+            }
+          ]
+        },
+        "step-5-preview": {
+          "id": "step-5-preview",
+          "name": "Step 5 Preview",
+          "family": "step",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "video"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 1000000,
+            "output": 1000000
+          },
+          "reasoning_options": [
+            {
+              "type": "effort",
+              "values": [
+                "low",
+                "medium",
+                "high"
+              ]
+            }
+          ]
         }
       }
     }

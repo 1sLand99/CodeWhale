@@ -61,21 +61,6 @@ pub struct TuiLogGuard {
     #[cfg(windows)]
     redirected_stderr_handle: Option<windows::Win32::Foundation::HANDLE>,
     _file: File,
-    // Exposed via `log_path()` for diagnostics (e.g. `/doctor`,
-    // `--print-log-path`). Currently no caller — keep the accessor
-    // wired up so adding one later doesn't require revisiting the
-    // guard struct.
-    #[allow(dead_code)]
-    log_path: PathBuf,
-}
-
-impl TuiLogGuard {
-    /// Path the subscriber is writing to.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn log_path(&self) -> &std::path::Path {
-        &self.log_path
-    }
 }
 
 #[cfg(unix)]
@@ -98,6 +83,7 @@ impl Drop for TuiLogGuard {
 impl Drop for TuiLogGuard {
     fn drop(&mut self) {
         if let Some(handle) = self.saved_stderr_handle.take() {
+            // SAFETY: `handle` is owned here via take; Drop runs once.
             unsafe {
                 let _ = windows::Win32::System::Console::SetStdHandle(
                     windows::Win32::System::Console::STD_ERROR_HANDLE,
@@ -109,6 +95,7 @@ impl Drop for TuiLogGuard {
         // stderr target. This is safe because `SetStdHandle` above already
         // restored the original handle, so nothing references this one.
         if let Some(dup) = self.redirected_stderr_handle.take() {
+            // SAFETY: `dup` is owned here via take; nothing references it.
             unsafe {
                 let _ = windows::Win32::Foundation::CloseHandle(dup);
             }
@@ -204,7 +191,6 @@ pub fn init() -> Result<TuiLogGuard> {
         #[cfg(windows)]
         redirected_stderr_handle,
         _file: file,
-        log_path,
     })
 }
 
@@ -327,8 +313,10 @@ fn redirect_stderr_to(
     // Without this, `_file` and stderr would alias the same HANDLE;
     // a rogue `CloseHandle` on stderr would silently invalidate `_file`.
     let raw = HANDLE(file.as_raw_handle());
+    // SAFETY: pseudo-handle; no preconditions.
     let process = unsafe { GetCurrentProcess() };
     let mut dup = HANDLE::default();
+    // SAFETY: `file` and `dup` are live; pseudo-handle needs no close.
     unsafe {
         DuplicateHandle(
             process,

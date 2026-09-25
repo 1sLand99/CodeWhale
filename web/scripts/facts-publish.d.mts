@@ -1,0 +1,13 @@
+import type { KeyObject } from "node:crypto";
+import type { CloudFactsEnvelope } from "../lib/cloud-facts";
+import type { TrustedKey } from "../lib/cloud-facts/keys";
+export const MAX_ENVELOPE_BYTES: number;
+export function verifyEnvelope(envelope: unknown, publicKeyB64: string): { ok: boolean; errors: string[]; payload?: Record<string, unknown>; sha256?: string };
+export function validateSource(source: unknown): string[];
+export function parseTsKeys(text: string): TrustedKey[];
+export function validateTrustedKeys(keys: readonly TrustedKey[]): readonly TrustedKey[];
+export function activePublishingKey(envelope: CloudFactsEnvelope, keys: readonly TrustedKey[], now?: number): { key: TrustedKey; check: ReturnType<typeof verifyEnvelope> };
+export function emitSql(envelope: unknown, options: { publishedBy?: string; publicKeyB64: string; notes?: string }): string;
+export function readBoundedFile(path: string, maxBytes?: number): Buffer;
+export function readBoundedResponse(response: Response, maxBytes?: number): Promise<string>;
+export function buildEnvelope(options: { privateKey: KeyObject; keyId: string; payload: Record<string, unknown> }): CloudFactsEnvelope;

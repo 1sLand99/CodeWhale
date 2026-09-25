@@ -4,7 +4,7 @@
 //! Every **primary agent turn** — `LlmClient::create_message` and
 //! `create_message_stream`, in Chat Completions, Anthropic Messages, and
 //! OpenAI Responses alike — reaches the wire through
-//! [`crate::client::DeepSeekClient::prepare_outbound_request`], which returns a
+//! [`crate::client::CodewhaleClient::prepare_outbound_request`], which returns a
 //! [`PreparedOutboundRequest`]. The transports send it; the preview command
 //! describes it. Because there is exactly one builder, a preview cannot
 //! report a request different from the one a turn would send.
@@ -44,8 +44,6 @@ pub(crate) enum WireDialect {
     AnthropicMessages,
     /// OpenAI-style `POST /responses`.
     OpenAiResponses,
-    /// Google Antigravity / `agy` cloud-code (`POST /v1internal:streamGenerateContent`).
-    GoogleCloudCode,
 }
 
 impl WireDialect {
@@ -63,7 +61,6 @@ impl WireDialect {
             Self::ChatCompletions => "chat-completions",
             Self::AnthropicMessages => "anthropic-messages",
             Self::OpenAiResponses => "openai-responses",
-            Self::GoogleCloudCode => "google-cloud-code",
         }
     }
 }
@@ -92,8 +89,6 @@ pub(crate) enum RouteShape {
     OpencodeZen,
     /// A user-configured custom/compatible endpoint on a standard dialect.
     CustomCompatible,
-    /// Google Antigravity / `agy` `/v1internal:streamGenerateContent`.
-    CloudCode,
 }
 
 impl RouteShape {
@@ -106,7 +101,6 @@ impl RouteShape {
             Self::CodexResponses => "codex-responses",
             Self::OpencodeZen => "opencode-zen",
             Self::CustomCompatible => "custom-compatible",
-            Self::CloudCode => "cloud-code",
         }
     }
 }
@@ -169,7 +163,6 @@ impl ReasoningReceipt {
             ],
             WireDialect::AnthropicMessages => &["thinking", "output_config"],
             WireDialect::OpenAiResponses => &["reasoning", "include"],
-            WireDialect::GoogleCloudCode => &[],
         }
     }
 
@@ -277,7 +270,7 @@ impl CallerStreamMode {
 
 /// One fully prepared, not-yet-sent outbound request.
 ///
-/// Both `DeepSeekClient::create_message*` and `/preview-request` consume this
+/// Both `CodewhaleClient::create_message*` and `/preview-request` consume this
 /// value. Adding a field here is how a new wire fact becomes visible to the
 /// preview; there is no second builder to keep in sync.
 #[derive(Debug, Clone)]
@@ -545,7 +538,6 @@ impl<'a> WireBodyView<'a> {
             WireDialect::ChatCompletions => (None, "messages"),
             WireDialect::AnthropicMessages => (Some("system"), "messages"),
             WireDialect::OpenAiResponses => (Some("instructions"), "input"),
-            WireDialect::GoogleCloudCode => (None, "request"),
         };
 
         // The system region is accumulated as canonical text so it can be
@@ -638,7 +630,6 @@ fn is_tool_result_item(dialect: WireDialect, item: &Value) -> bool {
         WireDialect::OpenAiResponses => {
             item.get("type").and_then(Value::as_str) == Some("function_call_output")
         }
-        WireDialect::GoogleCloudCode => false,
     }
 }
 
@@ -662,7 +653,6 @@ fn count_attachments(dialect: WireDialect, item: &Value) -> (usize, usize) {
             WireDialect::OpenAiResponses => {
                 matches!(part_type, Some("input_image" | "input_file"))
             }
-            WireDialect::GoogleCloudCode => false,
         };
         if !is_attachment {
             continue;
@@ -1236,7 +1226,7 @@ mod tests {
 /// the same bytes.
 ///
 /// Each case builds a real client for a production route, prepares a request
-/// through [`DeepSeekClient::prepare_outbound_request`] — the value the
+/// through [`CodewhaleClient::prepare_outbound_request`] — the value the
 /// transports send and the preview describes — and compares its whole-body
 /// hash against the dialect's own builder run over the identically
 /// pre-processed request. A divergence here means a second body builder has
@@ -1245,11 +1235,11 @@ mod tests {
 mod dialect_seam_tests {
     use super::*;
     use crate::config::{Config, ProviderConfig, ProvidersConfig};
-    use crate::models::Role;
-    use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Tool};
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt, Tool};
     use serde_json::json;
 
-    use super::super::DeepSeekClient;
+    use super::super::CodewhaleClient;
 
     fn tool(name: &str) -> Tool {
         Tool {
@@ -1288,10 +1278,10 @@ mod dialect_seam_tests {
         }
     }
 
-    fn client(provider: &str, configure: impl FnOnce(&mut ProvidersConfig)) -> DeepSeekClient {
+    fn client(provider: &str, configure: impl FnOnce(&mut ProvidersConfig)) -> CodewhaleClient {
         let mut providers = ProvidersConfig::default();
         configure(&mut providers);
-        DeepSeekClient::new(&Config {
+        CodewhaleClient::new(&Config {
             provider: Some(provider.to_string()),
             providers: Some(providers),
             ..Config::default()
@@ -1315,11 +1305,51 @@ mod dialect_seam_tests {
     /// The exact pre-processing `prepare_outbound_request` applies before the
     /// dialect builder runs. Reproduced here so the reference body is built
     /// from the same input, not from a differently-sanitized one.
-    fn preprocessed(client: &DeepSeekClient, request: MessageRequest) -> MessageRequest {
+    fn preprocessed(client: &CodewhaleClient, request: MessageRequest) -> MessageRequest {
         client
             .bind_request_to_protocol(client.prepare_model_bound_request(request))
             .expect("protocol binding succeeds")
             .0
+    }
+
+    #[test]
+    fn output_cap_reaches_all_three_wire_dialects_with_reasoning_inside_allowance() {
+        let _env = crate::test_support::lock_test_env();
+        for wire in ["chat-completions", "anthropic-messages", "responses"] {
+            let config = Config {
+                provider: Some("output-cap-fixture".into()),
+                providers: Some(ProvidersConfig {
+                    custom: std::collections::HashMap::from([(
+                        "output-cap-fixture".into(),
+                        ProviderConfig {
+                            kind: Some("openai-compatible".into()),
+                            base_url: Some("http://127.0.0.1:18181/v1".into()),
+                            api_key: Some("fixture-output-cap".into()),
+                            model: Some("fixture-model".into()),
+                            wire: Some(wire.into()),
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                }),
+                ..Config::default()
+            };
+            let client = CodewhaleClient::new(&config).unwrap();
+            let mut request = request("fixture-model");
+            request.max_tokens = 1500;
+            let prepared = client.prepare_outbound_request(request, true).unwrap();
+            assert_eq!(prepared.wire_output_cap_tokens(), Some(1500), "{wire}");
+            if let Some(thinking) = prepared
+                .body
+                .pointer("/thinking/budget_tokens")
+                .and_then(Value::as_u64)
+            {
+                assert!(
+                    thinking < 1500,
+                    "reasoning must fit inside the shared allowance"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1436,25 +1466,6 @@ mod dialect_seam_tests {
         assert_eq!(carried["role"], "user");
     }
 
-    /// Same seam, same rejection, on the wire that has always failed closed.
-    #[test]
-    fn seam_refuses_the_interrupted_sentinel_on_cloud_code() {
-        let client = client("antigravity", |providers| {
-            providers.antigravity = configured("agy-test", None, "gemini-3-pro");
-        });
-        let mut request = request("gemini-3-pro");
-        request.system = None;
-        request.tools = None;
-        request
-            .messages
-            .push(message(Role::InterruptedAssistant, "half a thought"));
-
-        let error = client
-            .prepare_outbound_request(request, true)
-            .expect_err("cloud-code has never accepted the interrupted sentinel");
-        assert!(error.to_string().contains("google-cloud-code"), "{error}");
-    }
-
     /// The dialects that have always dropped an unrepresentable role keep
     /// dropping it. Turning that into a hard failure would break live
     /// sessions; the point of the seam is to make the choice explicit, not to
@@ -1558,7 +1569,7 @@ mod dialect_seam_tests {
 
     /// Codex resolves its bearer through OAuth, so the test pins a token the
     /// same way the Responses adapter's own tests do.
-    fn codex_client() -> DeepSeekClient {
+    fn codex_client() -> CodewhaleClient {
         let _env_lock = crate::test_support::lock_test_env();
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");

@@ -471,7 +471,7 @@ pub(crate) fn load_staged_skill_snapshots(
     expected_capability_hash: &str,
 ) -> Result<Vec<PluginSkillSnapshot>, String> {
     let staged_manifest = resolve_manifest_path(staged_root)
-        .ok_or_else(|| "staged plugin has no plugin.json or plugin.toml".to_string())?;
+        .ok_or_else(|| "staged plugin has no plugin.json, .claude-plugin/plugin.json, kimi.plugin.json, or plugin.toml".to_string())?;
     let validated = PluginManifest::validate_from_path(&staged_manifest)?;
     if validated.canonical_root != staged_root
         || validated.content_hash != expected_content_hash
@@ -710,7 +710,17 @@ mod tests {
 
         let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
         let registry = discovery.registry_for_workspace(&workspace);
-        assert!(registry.is_empty());
+        assert!(registry.get("ambient-plugin").is_none());
+        assert!(registry.get("cursor-plugin").is_none());
+        // Only what Codewhale itself ships is present: no ambient root loaded.
+        assert_eq!(
+            registry
+                .list()
+                .iter()
+                .filter(|plugin| plugin.scope != PluginScope::Builtin)
+                .count(),
+            0
+        );
         assert!(!home.join("plugins/state.json").exists());
     }
 }

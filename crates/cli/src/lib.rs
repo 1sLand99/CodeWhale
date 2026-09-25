@@ -21,6 +21,9 @@ use codewhale_app_server::daemon_socket::{DaemonSocketOptions, run_daemon_socket
 use codewhale_app_server::{
     AppServerOptions, run as run_app_server, run_stdio as run_app_server_stdio,
 };
+use codewhale_config::credentials::{
+    clear_provider_api_key_from_config, provider_slot, set_provider_api_key,
+};
 use codewhale_config::route::{ProvidersExport, parse_route_kind};
 use codewhale_config::{
     CliRuntimeOverrides, ConfigApiKeyValueKind, ConfigStore, ConfigToml, ProviderKind,
@@ -36,8 +39,18 @@ use codewhale_telemetry::{
     TelemetryDecision, TurnWall,
 };
 
+fn is_antigravity_legacy_selector(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "antigravity" | "agy"
+    )
+}
+
 /// Catalog-backed `--provider` parser. Replaces the closed 47-arm `ProviderArg` enum.
 fn parse_catalog_route(value: &str) -> std::result::Result<ProviderKind, String> {
+    if is_antigravity_legacy_selector(value) {
+        return Err(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE.to_string());
+    }
     parse_route_kind(value).ok_or_else(|| {
         format!(
             "unknown route '{value}'; expected a catalog route id (see `codewhale providers export --json`)"
@@ -46,7 +59,17 @@ fn parse_catalog_route(value: &str) -> std::result::Result<ProviderKind, String>
 }
 
 fn builtin_provider_arg(value: &str) -> Option<ProviderKind> {
-    parse_route_kind(value)
+    parse_route_kind(value).filter(|provider| *provider != ProviderKind::Antigravity)
+}
+
+/// The legacy tombstone is accepted only by the local Codewhale-state clear
+/// command. Every selectable/auth-consuming parser continues through
+/// [`parse_catalog_route`], which rejects it.
+fn parse_auth_clear_provider(value: &str) -> std::result::Result<ProviderKind, String> {
+    if is_antigravity_legacy_selector(value) {
+        return Ok(ProviderKind::Antigravity);
+    }
+    parse_catalog_route(value)
 }
 
 fn parse_provider_identifier(value: &str) -> std::result::Result<String, String> {
@@ -98,8 +121,8 @@ struct Cli {
     #[arg(
         long,
         value_name = "BOOL",
-        help = "Control anonymous usage counting for this run (default on; \
-                CODEWHALE_TELEMETRY=0 always wins)"
+        help = "Control aggregate usage counting (default on; Codewhale + PostHog; \
+                durable off: config set telemetry false; CODEWHALE_TELEMETRY=0 always wins)"
     )]
     telemetry: Option<bool>,
     #[arg(long)]
@@ -119,6 +142,9 @@ struct Cli {
     no_mouse_capture: bool,
     #[arg(long = "skip-onboarding")]
     skip_onboarding: bool,
+    /// Start a fresh session without automatic resume or crash recovery.
+    #[arg(long)]
+    fresh: bool,
     /// Skip loading project-level config, including the workspace-specific
     /// `[workspace]`/`[projects]` overlay from user config. Must appear before
     /// the subcommand; it is applied before subcommand dispatch.
@@ -147,6 +173,13 @@ struct Cli {
     session_id: Option<String>,
     #[arg(short = 'p', long = "prompt", value_name = "PROMPT")]
     prompt_flag: Option<String>,
+    /// Per-run config override (`KEY=VALUE`), repeatable, never saved.
+    /// Runtime keys: provider, model/default_text_model, verbosity,
+    /// approval_policy, sandbox_mode, telemetry. Dedicated flags win;
+    /// managed policy still applies. `config set` persists instead. Long-only:
+    /// short `-c` is already `--continue`.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    overrides: Vec<String>,
     #[arg(
         value_name = "PROMPT",
         trailing_var_arg = true,
@@ -163,7 +196,10 @@ enum Commands {
     Run(RunArgs),
     /// Run Codewhale diagnostics.
     Doctor(TuiPassthroughArgs),
-    /// List live models from the selected provider.
+    /// List cached models; use --update to refresh configured provider catalogs.
+    #[command(
+        after_help = "Examples:\n  codewhale models --update\n  codewhale models --update --provider openai\n  codewhale models --provider openai-codex --json\n\n--update (alias: --refresh) refreshes configured provider catalogs. --provider ID limits the scope."
+    )]
     Models(TuiPassthroughArgs),
     /// Generate speech audio with Xiaomi MiMo TTS models.
     #[command(visible_alias = "tts")]
@@ -196,6 +232,7 @@ Common forwarded flags:
   --session-id <SESSION_ID>        Resume a previous session by ID or prefix
   --continue                       Continue the most recent session for this workspace
   --output-format <FORMAT>         Output format: text or stream-json
+  --hooks                          Opt in to configured hooks (tool_call_before, shell_env)
 
 Plain `codewhale exec` is a one-shot model response. Use `--auto` for
 non-interactive filesystem/shell tool use, matching the supported automation
@@ -263,6 +300,10 @@ lifecycle generation you observed.
     Eval(TuiPassthroughArgs),
     /// Manage MCP servers.
     Mcp(TuiPassthroughArgs),
+    /// Run the shared ambient pet owner (`pet serve`). Internal: spawned
+    /// lazily by clients when no owner is running.
+    #[command(name = "pet", hide = true)]
+    Pet(TuiPassthroughArgs),
     /// Inspect feature flags.
     Features(TuiPassthroughArgs),
     /// Connect third-party harnesses through Codewhale (e.g. `integrations dsh status`).
@@ -371,7 +412,10 @@ The command prints the completion script to stdout; redirect it to a path your s
     },
     /// Print a usage rollup from the audit log and session store.
     Metrics(MetricsArgs),
-    /// Check for and apply updates to the `codewhale` binary.
+    /// Update this release binary from GitHub (package-managed installs get migration instructions).
+    #[command(
+        after_help = "GitHub Releases is the default source. Supported mirrors are explicit overrides or manifest-failure fallbacks. Checksums are required; older releases never replace a newer build.\n\nThe command prints the executable it will update. If you have multiple installs, run the intended binary by its full path.\n\nNew macOS/Linux install: curl -fsSL https://codewhale.net/install.sh | sh\nInstallation and PATH help: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md"
+    )]
     Update(UpdateArgs),
     /// Export the route catalog (`providers export --json`).
     Providers(ProvidersArgs),
@@ -479,6 +523,9 @@ fn top_level_provider_override(
     let Some(provider) = provider else {
         return Ok(None);
     };
+    if is_antigravity_legacy_selector(provider) {
+        bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
+    }
     if let Some(provider) = builtin_provider_arg(provider) {
         return Ok(Some(provider));
     }
@@ -625,7 +672,11 @@ enum LaneCommand {
     ///
     /// Compatibility spelling for `lane interrupt`; both resolve to the
     /// `lane.interrupt` control-plane verb (#1888).
-    Stop { lane_id: String },
+    Stop {
+        lane_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Interrupt a running lane (durable `lane.interrupt`).
     ///
     /// Accepts an exact lane id, optionally fenced as `<lane-id>@<seq>` so the
@@ -768,22 +819,21 @@ fn start_lane(request: LaneStartRequest) -> Result<()> {
         cwd,
     } = request;
     let kind = RuntimeBackendKind::parse(&runtime)?;
+    // Validate the worktree flags before creating the pending record, so a
+    // bad pairing never leaves an orphaned `pending` lane in the registry.
+    let worktree_request = validate_lane_worktree_flags(worktree_repo, branch, worktree_path)?;
     let reg = LaneRegistry::open_default()?;
     let mut record = reg.create_pending(workflow, fleet, issue, goal, kind, worktree_ttl_secs)?;
-    let worktree = match (worktree_repo, branch) {
-        (Some(repo_root), Some(branch_name)) => {
-            let path = worktree_path
-                .unwrap_or_else(|| repo_root.join(".codewhale").join("lanes").join(&record.id));
-            Some(WorktreeProvision {
-                repo_root,
-                branch: branch_name,
-                path,
-                base_ref: None,
-            })
+    let worktree = worktree_request.map(|(repo_root, branch_name, worktree_path)| {
+        let path = worktree_path
+            .unwrap_or_else(|| repo_root.join(".codewhale").join("lanes").join(&record.id));
+        WorktreeProvision {
+            repo_root,
+            branch: branch_name,
+            path,
+            base_ref: None,
         }
-        (None, None) => None,
-        _ => bail!("--worktree-repo and --branch must be provided together"),
-    };
+    });
     let cmd = if command.is_empty() {
         vec![
             "sh".into(),
@@ -813,6 +863,23 @@ fn start_lane(request: LaneStartRequest) -> Result<()> {
         println!("attach:  {attach}");
     }
     Ok(())
+}
+
+/// Check the `lane start` worktree flags as a set: `--worktree-repo` and
+/// `--branch` come together, and `--worktree-path` needs both.
+fn validate_lane_worktree_flags(
+    worktree_repo: Option<PathBuf>,
+    branch: Option<String>,
+    worktree_path: Option<PathBuf>,
+) -> Result<Option<(PathBuf, String, Option<PathBuf>)>> {
+    match (worktree_repo, branch) {
+        (Some(repo_root), Some(branch_name)) => Ok(Some((repo_root, branch_name, worktree_path))),
+        (None, None) if worktree_path.is_some() => {
+            bail!("--worktree-path requires --worktree-repo and --branch")
+        }
+        (None, None) => Ok(None),
+        _ => bail!("--worktree-repo and --branch must be provided together"),
+    }
 }
 
 /// Print one shared control receipt on the CLI surface.
@@ -986,8 +1053,8 @@ fn run_lane_command(args: LaneArgs) -> Result<()> {
         // `stop` is the historical spelling of `interrupt`. Both go through
         // the same verb so the durable transition, the lifecycle fence, and
         // the receipt are identical.
-        LaneCommand::Stop { lane_id } => {
-            run_lane_control(ControlOperation::LaneInterrupt, Some(&lane_id), false)
+        LaneCommand::Stop { lane_id, json } => {
+            run_lane_control(ControlOperation::LaneInterrupt, Some(&lane_id), json)
         }
         LaneCommand::Start {
             workflow,
@@ -1213,11 +1280,15 @@ fn validate_workflow_source_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The same roots, in the same order, as the TUI's `fleet_search_roots`:
+/// `$CODEWHALE_HOME`, then `<workspace>/.codewhale` (where the Fleet store
+/// saves folder Fleets), then the workspace root for checked-in rosters.
 fn named_fleet_search_roots(workspace: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(home) = codewhale_config::codewhale_home() {
         roots.push(home);
     }
+    roots.push(workspace.join(".codewhale"));
     roots.push(workspace.to_path_buf());
     roots
 }
@@ -1392,8 +1463,14 @@ struct RemoteSetupArgs {
     /// Emit the bundle, do not provision (default).
     #[arg(long, default_value_t = false)]
     generate_only: bool,
-    /// Run the cloud CLI to auto-provision (not yet implemented).
-    #[arg(long, default_value_t = false, conflicts_with = "generate_only")]
+    /// Reserved for cloud auto-provisioning, which is not implemented.
+    /// Hidden from `--help`; passing it makes `remote-setup` fail.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "generate_only",
+        hide = true
+    )]
     apply: bool,
     /// Skip the final confirmation gate (CI / non-interactive).
     #[arg(long, default_value_t = false)]
@@ -1538,7 +1615,7 @@ enum AuthCommand {
     },
     /// Delete a provider's key from config and secret-store storage.
     Clear {
-        #[arg(long, value_parser = parse_catalog_route)]
+        #[arg(long, value_parser = parse_auth_clear_provider)]
         provider: ProviderKind,
     },
     /// List all known providers with their runtime-effective auth state,
@@ -1577,8 +1654,23 @@ enum ConfigCommand {
     Unset {
         key: String,
     },
+    /// Review aggregate usage counting by Codewhale and PostHog (default on).
+    Telemetry {
+        /// Optional compatibility form: enable future sessions under this policy version.
+        #[arg(long, value_name = "VERSION")]
+        accept_notice: Option<u32>,
+    },
     List,
     Path,
+    /// Open the config file in `$VISUAL`/`$EDITOR` (else `vi`).
+    Edit,
+    /// Check the loaded config: unknown keys, empty secrets, malformed
+    /// URLs. Read-only; prints warnings, fails on errors, never prints a
+    /// credential.
+    Doctor,
+    /// Print the effective config (including `--set` overlays) as TOML with
+    /// secrets redacted by key name.
+    Dump,
     /// Import a portable config bundle from a file, HTTPS URL, or stdin (-).
     Import(config_bundles::ImportArgs),
     /// Export a portable, secret-free config bundle.
@@ -1823,6 +1915,55 @@ fn config_store_path_for_dispatch(
     explicit_path
 }
 
+/// Runtime `--set` uses the dedicated flag handoff, so the existing loader
+/// owns profile, provider, managed-policy and requirements precedence. Keep
+/// config read/write commands on their separate, never-saved store overlay.
+fn apply_runtime_set_overrides(cli: &mut Cli) -> Result<()> {
+    let mut values = CliRuntimeOverrides::default();
+    let mut provider = None;
+    for spec in &cli.overrides {
+        let (key, value) = spec
+            .split_once('=')
+            .context("invalid --set: expected KEY=VALUE (value omitted)")?;
+        match key.trim() {
+            "provider" => {
+                provider = Some(
+                    parse_provider_identifier(value)
+                        .map_err(|_| anyhow!("invalid --set provider (value omitted)"))?,
+                );
+            }
+            "model" | "default_text_model" => values.model = Some(value.to_string()),
+            "verbosity" => values.verbosity = Some(value.to_string()),
+            "approval_policy" => values.approval_policy = Some(value.to_string()),
+            "sandbox_mode" => values.sandbox_mode = Some(value.to_string()),
+            "telemetry" => {
+                let mut config = ConfigToml::default();
+                config
+                    .set_value("telemetry", value)
+                    .map_err(|_| anyhow!("invalid --set telemetry: expected a boolean"))?;
+                values.telemetry = config.telemetry;
+            }
+            _ => bail!(
+                "unsupported runtime --set key (value omitted): supported keys are provider, \
+                 model, default_text_model, verbosity, approval_policy, sandbox_mode and \
+                 telemetry; use the dedicated option or config set for other keys"
+            ),
+        }
+        if value.trim().is_empty() {
+            bail!("invalid runtime --set: value must not be empty");
+        }
+    }
+    // A dedicated flag is more specific than a generic --set for the same
+    // field. Repeated --set keys otherwise keep their last value.
+    cli.provider = cli.provider.take().or(provider);
+    cli.model = cli.model.take().or(values.model);
+    cli.verbosity = cli.verbosity.take().or(values.verbosity);
+    cli.approval_policy = cli.approval_policy.take().or(values.approval_policy);
+    cli.sandbox_mode = cli.sandbox_mode.take().or(values.sandbox_mode);
+    cli.telemetry = cli.telemetry.or(values.telemetry);
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let matches = Cli::command().get_matches();
     let project_bundle_scope = config_command_targets_project(&matches);
@@ -1834,6 +1975,20 @@ fn run() -> Result<()> {
     let (proxy, command) = split_lane_log_proxy_command(cli.command.take());
     if let Some(args) = proxy {
         return run_lane_log_proxy_command(args);
+    }
+
+    if !cli.overrides.is_empty() && matches!(command, Some(Commands::Auth(_))) {
+        bail!("--set is not supported by auth commands; use a saved config");
+    }
+    if !cli.overrides.is_empty()
+        && matches!(&command, Some(Commands::AppServer(args)) if !args.http && !args.mobile)
+    {
+        bail!(
+            "--set is not supported by the legacy app-server transport; use app-server --http or a saved config"
+        );
+    }
+    if !matches!(command, Some(Commands::Config(_))) {
+        apply_runtime_set_overrides(&mut cli)?;
     }
 
     let pipe_api_key_handoff = matches!(
@@ -1891,6 +2046,12 @@ fn run() -> Result<()> {
              use the subcommand's own flag (for example `codewhale exec --session-id <id>`)."
         );
     }
+    // Only config inspection needs the store overlay. Runtime overrides use
+    // the dedicated flags above and must never enter a store that another
+    // command (or legacy credential migration) can save.
+    if matches!(command, Some(Commands::Config(_))) {
+        apply_per_run_overrides(&mut store, &cli.overrides)?;
+    }
 
     match command {
         Some(Commands::Run(args)) => {
@@ -1903,7 +2064,8 @@ fn run() -> Result<()> {
             run_tui_in_process(&cli, &resolved_runtime, tui_args("doctor", args))
         }
         Some(Commands::Models(args)) => {
-            let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
+            let resolved_runtime =
+                resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
             run_tui_in_process(&cli, &resolved_runtime, tui_args("models", args))
         }
         Some(Commands::Speech(args)) => {
@@ -1989,6 +2151,19 @@ fn run() -> Result<()> {
         Some(Commands::Mcp(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_tui_in_process(&cli, &resolved_runtime, tui_args("mcp", args))
+        }
+        Some(Commands::Pet(args)) => {
+            // `pet` must reach run_with_args at argv[1]; the TUI passthrough
+            // builder would inject global flags ahead of it and the trailing
+            // PROMPT positional would otherwise swallow `pet serve`.
+            let mut argv = vec!["codewhale".to_string(), "pet".to_string()];
+            argv.extend(args.args);
+            let code = codewhale_tui::run(argv);
+            std::process::exit(if code == std::process::ExitCode::SUCCESS {
+                0
+            } else {
+                1
+            });
         }
         Some(Commands::Integrations(args)) => {
             // Integrations only need route *identity*. Do not recover or
@@ -2102,7 +2277,12 @@ fn run() -> Result<()> {
                 Some(store.path().to_path_buf()),
                 Surface::Cli,
             );
-            let outcome = run_config_command(&mut store, args.command, project_bundle_scope);
+            let outcome = run_config_command(
+                &mut store,
+                args.command,
+                project_bundle_scope,
+                &cli.overrides,
+            );
             finish_cli_telemetry(session, &outcome);
             outcome
         }
@@ -2490,40 +2670,6 @@ fn clear_account_session(profile: Option<&str>) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// Map [`ProviderKind`] to the canonical provider credential slot.
-fn provider_slot(provider: ProviderKind) -> &'static str {
-    // Shared-account families (SiliconFlow China, the four Model Studio
-    // variants) collapse onto one slot; see ProviderKind::secret_store_slot.
-    provider.secret_store_slot()
-}
-
-/// Resolve the store for credential-adjacent writes: provider selection,
-/// `auth_mode` markers, and the plaintext-free metadata that accompanies a
-/// saved key.
-///
-/// Credentials and their metadata are user-global — a key saved while
-/// working in one repo must be visible from every other repo, and the secret
-/// store already is (#5045). When the ambient config path is a
-/// workspace-scoped document (`<repo>/.codewhale/config.toml`), login and
-/// `auth set` must not bind the provider or write auth markers there: the
-/// binding would be invisible from every other repo and would invite
-/// plaintext keys into a committable repo file (#5198). Returns a store
-/// loaded on the user-global document in that case, or `None` when the
-/// ambient store is already correctly scoped, so key + provider binding +
-/// auth markers share one user-global scope by default.
-fn credential_metadata_store(store: &ConfigStore) -> Result<Option<ConfigStore>> {
-    if !codewhale_config::config_path_is_workspace_scoped(store.path()) {
-        return Ok(None);
-    }
-    let global = codewhale_config::default_config_path()?;
-    eprintln!(
-        "ambient config {} is workspace-scoped; writing credential metadata to the user-global {} instead",
-        codewhale_config::quote_os_path(store.path()),
-        codewhale_config::quote_os_path(&global),
-    );
-    ConfigStore::load(Some(global)).map(Some)
-}
-
 #[cfg(test)]
 fn no_keyring_secrets() -> Secrets {
     Secrets::new(std::sync::Arc::new(
@@ -2531,121 +2677,25 @@ fn no_keyring_secrets() -> Secrets {
     ))
 }
 
-fn prepare_provider_api_key_metadata(store: &mut ConfigStore, provider: ProviderKind) {
-    store.config.auth_mode = Some("api_key".to_string());
-    let provider_config = store.config.providers.for_provider_mut(provider);
-    provider_config.auth_mode = Some("api_key".to_string());
-    provider_config.external_credentials = None;
-    if provider == ProviderKind::Xai {
-        provider_config.oauth_credential_generation = None;
-    }
-    if provider == ProviderKind::Deepseek && store.config.default_text_model.is_none() {
-        store.config.default_text_model = Some(
-            store
-                .config
-                .providers
-                .deepseek
-                .model
-                .clone()
-                .unwrap_or_else(|| "deepseek-v4-pro".to_string()),
-        );
-    }
-}
-
-/// Persist a provider credential to the durable secret store without silently
-/// downgrading a backend failure to plaintext config storage.
-fn persist_provider_api_key(
-    store: &mut ConfigStore,
-    secrets: &Secrets,
-    provider: ProviderKind,
-    api_key: &str,
-) -> Result<bool> {
-    if provider == ProviderKind::Xai {
-        return codewhale_config::with_xai_oauth_revocation_transaction(|| {
-            persist_provider_api_key_unlocked(store, secrets, provider, api_key)
-        });
-    }
-    persist_provider_api_key_unlocked(store, secrets, provider, api_key)
-}
-
-fn persist_provider_api_key_unlocked(
-    store: &mut ConfigStore,
-    secrets: &Secrets,
-    provider: ProviderKind,
-    api_key: &str,
-) -> Result<bool> {
-    let original_config = store.config.clone();
-    prepare_provider_api_key_metadata(store, provider);
-    let slot = provider_slot(provider);
-    // A readable prior value is required before a secret-store write so a
-    // later config failure can restore the exact prior state. If the backend
-    // cannot provide that snapshot, fail before changing the config file.
-    let prior_secret = secrets.get(slot);
-    let secret_store_saved = match prior_secret.as_ref().map_err(|error| error.to_string()) {
-        Ok(_) => match secrets.set(slot, api_key) {
-            Ok(()) => {
-                clear_provider_api_key_from_config(store, provider);
-                true
-            }
-            Err(err) => {
-                store.config = original_config;
-                return Err(anyhow::anyhow!(
-                    "Secret storage write failed for {slot}: {err}. Refusing to write the API key in plaintext to {}. Fix the configured secret backend and retry; Codewhale did not change that file.",
-                    codewhale_config::quote_os_path(store.path())
-                ));
-            }
-        },
-        Err(error) => {
-            store.config = original_config;
-            return Err(anyhow::anyhow!(
-                "Secret storage snapshot failed for {slot}: {error}. Refusing to write the API key in plaintext to {}. Fix the configured secret backend and retry; Codewhale did not change that file.",
-                codewhale_config::quote_os_path(store.path())
-            ));
-        }
-    };
-    if let Err(error) = store.save() {
-        store.config = original_config;
-        if secret_store_saved {
-            let current = secrets
-                .get(slot)
-                .map_err(|rollback| anyhow::anyhow!(
-                    "{error}; additionally could not verify secret-store rollback for {slot}: {rollback}"
-                ))?;
-            if current.as_deref() == Some(api_key) {
-                match prior_secret.expect("snapshot succeeded before secret write") {
-                    Some(previous) => secrets.set(slot, &previous),
-                    None => secrets.delete(slot),
-                }
-                .map_err(|rollback| anyhow::anyhow!(
-                    "{error}; additionally failed to restore prior secret-store state for {slot}: {rollback}"
-                ))?;
-            }
-        }
-        return Err(error);
-    }
-    codewhale_config::scrub_plaintext_api_keys_from_config_backup(store.path())?;
-    Ok(secret_store_saved)
-}
-
 fn clear_auth_provider(
     store: &mut ConfigStore,
     secrets: &Secrets,
     provider: ProviderKind,
 ) -> Result<()> {
-    let slot = provider_slot(provider);
-    let original_config = store.config.clone();
-    clear_provider_api_key_from_config(store, provider);
-    if provider == ProviderKind::Xai {
-        let xai = store.config.providers.for_provider_mut(provider);
-        xai.oauth_credential_generation = None;
-        xai.auth_mode = None;
-        xai.external_credentials = None;
+    if provider == ProviderKind::Antigravity {
+        return clear_legacy_antigravity_config(store, secrets);
     }
-    if let Err(error) = store.save() {
-        store.config = original_config;
-        return Err(error);
+    let outcome = codewhale_config::credentials::clear_provider_api_key(store, secrets, provider)?;
+    let slot = outcome.slot;
+    // The secret-store leg used to fail silently here, which meant `auth clear`
+    // could print success while the key was still in the keyring. Say so
+    // instead; the config no longer advertises a key the backend may hold.
+    if let Some(error) = &outcome.secret_store_error {
+        println!(
+            "cleared API key for {slot} from config, but the secret store refused the delete: {error}"
+        );
+        return Ok(());
     }
-    clear_provider_api_key_from_keyring(secrets, provider);
     if provider == ProviderKind::Xai {
         println!("cleared xAI credentials from config, secret store, and owned OAuth storage");
     } else {
@@ -2654,11 +2704,70 @@ fn clear_auth_provider(
     Ok(())
 }
 
-fn clear_provider_api_key_from_config(store: &mut ConfigStore, provider: ProviderKind) {
-    store.config.providers.for_provider_mut(provider).api_key = None;
-    if provider == ProviderKind::Deepseek {
-        store.config.api_key = None;
+/// Remove only Codewhale-owned state for the retired Antigravity route.
+///
+/// This deliberately operates on the already-loaded Codewhale config and its
+/// own secret slot. It never resolves an external credential path, reads an
+/// environment credential, or invokes a Google/Antigravity logout or revoke
+/// flow.
+fn clear_legacy_antigravity_config(store: &mut ConfigStore, secrets: &Secrets) -> Result<()> {
+    let provider = ProviderKind::Antigravity;
+    let slot = provider_slot(provider);
+    let original_config = store.config.clone();
+    let prior_secret = secrets.get(slot).map_err(|error| {
+        anyhow!(
+            "could not snapshot the Codewhale-owned legacy {slot} secret slot before clearing it: {error}; config was not changed"
+        )
+    })?;
+
+    store.config.providers.antigravity = Default::default();
+    store
+        .config
+        .fallback_providers
+        .retain(|fallback| *fallback != provider);
+    if store.config.provider == provider {
+        store.config.provider = ProviderKind::default();
+        store.config.selected_provider_id = None;
     }
+
+    if let Err(error) = secrets.delete(slot) {
+        store.config = original_config;
+        return Err(anyhow!(
+            "could not clear the Codewhale-owned legacy {slot} secret slot: {error}; config was not changed"
+        ));
+    }
+
+    if let Err(error) = store.save() {
+        store.config = original_config;
+        if let Some(previous) = prior_secret {
+            let current = secrets.get(slot).map_err(|rollback| {
+                anyhow!(
+                    "{error}; additionally could not verify rollback of the Codewhale-owned legacy {slot} secret slot: {rollback}"
+                )
+            })?;
+            match current {
+                None => secrets.set(slot, &previous).map_err(|rollback| {
+                    anyhow!(
+                        "{error}; additionally failed to restore the Codewhale-owned legacy {slot} secret slot: {rollback}"
+                    )
+                })?,
+                Some(current) if current == previous => {}
+                Some(_) => {
+                    return Err(anyhow!(
+                        "{error}; additionally the Codewhale-owned legacy {slot} secret slot changed concurrently and was not overwritten during rollback"
+                    ));
+                }
+            }
+        }
+        return Err(error);
+    }
+
+    codewhale_config::scrub_plaintext_api_keys_from_config_backup(store.path())?;
+    codewhale_config::scrub_legacy_antigravity_from_config_backup(store.path())?;
+    println!(
+        "cleared Codewhale-owned legacy Antigravity config, consent, selection, fallback entries, and secret-store slot; Google and Antigravity sessions were not read, revoked, or changed. For Gemini, configure provider google and set GEMINI_API_KEY"
+    );
+    Ok(())
 }
 
 fn provider_env_set(provider: ProviderKind) -> bool {
@@ -2737,10 +2846,6 @@ fn external_credential_target(
             codewhale_config::ExternalCredentialSource::DshCli,
             codewhale_config::default_dsh_credentials_path(),
         ),
-        ProviderKind::Antigravity => (
-            codewhale_config::ExternalCredentialSource::AgyCli,
-            codewhale_config::default_agy_credentials_path(),
-        ),
         ProviderKind::Moonshot => bail!(
             "Kimi is API-key-only in Codewhale. Create a key at https://platform.kimi.ai/console/api-keys; Kimi CLI OAuth import is unsupported."
         ),
@@ -2782,10 +2887,6 @@ fn provider_keyring_api_key(secrets: &Secrets, provider: ProviderKind) -> Option
 
 fn provider_keyring_set(secrets: &Secrets, provider: ProviderKind) -> bool {
     provider_keyring_api_key(secrets, provider).is_some()
-}
-
-fn clear_provider_api_key_from_keyring(secrets: &Secrets, provider: ProviderKind) {
-    let _ = secrets.delete(provider_slot(provider));
 }
 
 /// Delete the keyring credential of every provider that has one stored.
@@ -4168,9 +4269,17 @@ fn run_auth_command_with_secrets_and_runtime(
                 (None, true) => read_api_key_from_stdin()?,
                 (None, false) => prompt_api_key(slot)?,
             };
-            let mut credential_store = credential_metadata_store(store)?;
+            let mut credential_store =
+                codewhale_config::credentials::credential_metadata_store(store)?;
+            if let Some(redirected) = credential_store.as_ref() {
+                eprintln!(
+                    "ambient config {} is workspace-scoped; writing credential metadata to the user-global {} instead",
+                    codewhale_config::quote_os_path(store.path()),
+                    codewhale_config::quote_os_path(redirected.path()),
+                );
+            }
             let store = credential_store.as_mut().unwrap_or(store);
-            let secret_store_saved = persist_provider_api_key(store, secrets, provider, &api_key)?;
+            let secret_store_saved = set_provider_api_key(store, secrets, provider, &api_key)?;
             // Don't print the key. Don't echo length.
             if secret_store_saved {
                 println!(
@@ -4180,6 +4289,7 @@ fn run_auth_command_with_secrets_and_runtime(
             } else {
                 println!("saved API key for {slot} to {}", store.path().display());
             }
+            println!("model unchanged; run `codewhale model resolve` to see the active model");
             Ok(())
         }
         AuthCommand::Get { provider } => {
@@ -4389,6 +4499,7 @@ fn run_config_command(
     store: &mut ConfigStore,
     command: ConfigCommand,
     project_bundle_scope: bool,
+    per_run_overrides: &[String],
 ) -> Result<()> {
     if project_bundle_scope && !codewhale_config::config_path_is_workspace_scoped(store.path()) {
         bail!(
@@ -4396,22 +4507,135 @@ fn run_config_command(
             store.path().display()
         );
     }
+    // A per-run overlay must never leak into the file: commands that write
+    // the store refuse it outright instead of saving a merged document.
+    if !per_run_overrides.is_empty()
+        && matches!(
+            command,
+            ConfigCommand::Set { .. }
+                | ConfigCommand::Unset { .. }
+                | ConfigCommand::Import(_)
+                | ConfigCommand::Telemetry {
+                    accept_notice: Some(_)
+                }
+        )
+    {
+        bail!(
+            "--set is per-run and never saved; it cannot be combined with `config set`, \
+             `config unset`, or `config import`. Drop --set, or use a read command."
+        );
+    }
     match command {
         ConfigCommand::Get { key } => {
+            if per_run_overrides.is_empty() && codewhale_tui::route_preferences::is_route_key(&key)
+            {
+                if let Some(value) = codewhale_tui::route_preferences::get(store.path(), &key)? {
+                    println!("{value}");
+                    return Ok(());
+                }
+                bail!("key not found: {key}");
+            }
+            if codewhale_config::notifications::in_namespace(&key) {
+                let config = codewhale_config::notifications::from_extras(&store.config.extras)?;
+                let keys = if key.eq_ignore_ascii_case("notifications") {
+                    codewhale_config::notifications::NotificationSetting::ALL.to_vec()
+                } else {
+                    vec![codewhale_config::notifications::NotificationSetting::required(&key)?]
+                };
+                for setting in keys {
+                    if key.eq_ignore_ascii_case("notifications") {
+                        println!(
+                            "notifications.{} = {}",
+                            setting.key(),
+                            config.display(setting)
+                        );
+                    } else {
+                        println!("{}", config.display(setting));
+                    }
+                }
+                return Ok(());
+            }
             if let Some(value) = store.config.get_display_value(&key) {
-                println!("{value}");
+                if key == "telemetry" {
+                    println!(
+                        "Usage reporting: {}",
+                        telemetry_preference_status(store.config.telemetry)
+                    );
+                    println!("Details: codewhale config telemetry");
+                } else {
+                    println!("{value}");
+                }
                 return Ok(());
             }
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
-            clear_recorded_telemetry_opt_out_if_reenabled(&key, &value)?;
+            if codewhale_tui::route_preferences::is_route_key(&key) {
+                codewhale_tui::route_preferences::set(store.path(), &key, &value)?;
+                store.reload()?;
+                println!("set {key}");
+                return Ok(());
+            }
+            if codewhale_config::notifications::in_namespace(&key) {
+                let setting = codewhale_config::notifications::NotificationSetting::required(&key)?;
+                codewhale_config::notifications::NotificationConfigUpdate::parse(setting, &value)?
+                    .persist(store.path())?;
+                store.reload()?;
+                println!("set notifications.{}", setting.key());
+                return Ok(());
+            }
             store.config.set_value(&key, &value)?;
-            store.save()?;
-            println!("set {key}");
+            if key == "telemetry" {
+                let enabled = store
+                    .config
+                    .telemetry
+                    .context("telemetry must be true or false")?;
+                let receipt = codewhale_tui::set_telemetry_preference(
+                    Some(store.path().to_path_buf()),
+                    enabled,
+                )?;
+                println!("{receipt}");
+                if enabled {
+                    println!("{}", telemetry::notice::STARTUP_DISCLOSURE);
+                }
+            } else {
+                store.save()?;
+                println!("set {key}");
+            }
+            Ok(())
+        }
+        ConfigCommand::Telemetry { accept_notice } => {
+            println!("{}\n", telemetry::notice::NOTICE_BODY);
+            if let Some(version) = accept_notice {
+                let receipt = codewhale_tui::accept_telemetry_notice(
+                    Some(store.path().to_path_buf()),
+                    version,
+                )?;
+                println!("{receipt}");
+            } else {
+                println!(
+                    "Usage reporting: {}",
+                    telemetry_preference_status(store.config.telemetry)
+                );
+                println!("To enable: codewhale config set telemetry true");
+                println!("To opt out: codewhale config set telemetry false");
+            }
             Ok(())
         }
         ConfigCommand::Unset { key } => {
+            if codewhale_tui::route_preferences::is_route_key(&key) {
+                codewhale_tui::route_preferences::unset(store.path(), &key)?;
+                store.reload()?;
+                println!("unset {key}");
+                return Ok(());
+            }
+            if codewhale_config::notifications::in_namespace(&key) {
+                let setting = codewhale_config::notifications::NotificationSetting::required(&key)?;
+                setting.unset(store.path())?;
+                store.reload()?;
+                println!("unset notifications.{}", setting.key());
+                return Ok(());
+            }
             store.config.unset_value(&key)?;
             store.save()?;
             println!("unset {key}");
@@ -4435,6 +4659,36 @@ fn run_config_command(
             println!("{}", store.path().display());
             Ok(())
         }
+        ConfigCommand::Edit => {
+            let path = store.path().to_path_buf();
+            println!("{}", path.display());
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
+            let status = Command::new(&editor)
+                .arg(&path)
+                .status()
+                .with_context(|| format!("failed to launch editor {editor:?}"))?;
+            if !status.success() {
+                bail!("editor {editor:?} exited with {status}");
+            }
+            Ok(())
+        }
+        ConfigCommand::Doctor => run_config_doctor(store),
+        ConfigCommand::Dump => {
+            if !per_run_overrides.is_empty() {
+                println!(
+                    "# {} per-run --set override(s), not saved",
+                    per_run_overrides.len()
+                );
+            }
+            println!("# {}", store.path().display());
+            print!(
+                "{}",
+                toml::to_string_pretty(&store.config.redacted_toml_value())?
+            );
+            Ok(())
+        }
         ConfigCommand::Import(args) => {
             let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             config_bundles::run_import(&args, store, &workspace)
@@ -4443,24 +4697,89 @@ fn run_config_command(
     }
 }
 
-/// An explicit `telemetry = true` re-enables a machine that previously declined
-/// the notice. Fresh machines keep the notice owed, so the disclosure still
-/// appears on their first interactive launch.
-fn clear_recorded_telemetry_opt_out_if_reenabled(key: &str, value: &str) -> Result<()> {
-    let turning_on = matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on" | "enabled"
-    );
-    if key != "telemetry" || !turning_on {
-        return Ok(());
-    }
-    if let Some(mut state) = SetupState::load()?
-        && state.telemetry_opted_out()
-    {
-        state.record_telemetry_notice(codewhale_config::TELEMETRY_NOTICE_VERSION, true);
-        state.save()?;
+/// Apply per-run `--set KEY=VALUE` overlays to the loaded store in memory.
+/// Nothing is saved; callers that persist must refuse overrides first
+/// (see `run_config_command`).
+fn apply_per_run_overrides(store: &mut ConfigStore, specs: &[String]) -> Result<()> {
+    for spec in specs {
+        let (key, value) = spec
+            .split_once('=')
+            .with_context(|| format!("invalid --set {spec:?}: expected KEY=VALUE"))?;
+        store
+            .config
+            .set_value(key.trim(), value)
+            .with_context(|| format!("invalid --set {spec:?}"))?;
     }
     Ok(())
+}
+
+/// Read-only credential and endpoint check. The dispatcher's extras also
+/// contain settings owned by runtime readers; they are not unknown keys.
+/// Never prints a credential — presence and shape only.
+fn run_config_doctor(store: &ConfigStore) -> Result<()> {
+    println!("# {}", store.path().display());
+    let mut errors: Vec<String> = Vec::new();
+    if !store.config.extras.is_empty() {
+        println!(
+            "note: additional settings are preserved for runtime readers; this check does not classify their support"
+        );
+    }
+
+    let mut secrets: Vec<(String, Option<String>)> =
+        vec![("api_key".to_string(), store.config.api_key.clone())];
+    let mut endpoints: Vec<(String, Option<String>)> =
+        vec![("base_url".to_string(), store.config.base_url.clone())];
+    for provider in ProviderKind::ALL {
+        let table = store.config.providers.for_provider(provider);
+        secrets.push((format!("{provider:?}.api_key"), table.api_key.clone()));
+        endpoints.push((format!("{provider:?}.base_url"), table.base_url.clone()));
+    }
+    for (name, secret) in secrets {
+        if secret
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            errors.push(format!("`{name}` is set but empty"));
+        }
+    }
+    for (name, endpoint) in endpoints {
+        if let Some(url) = endpoint.as_deref()
+            && !url.starts_with("http://")
+            && !url.starts_with("https://")
+        {
+            errors.push(format!("`{name}` is not an http(s) URL: {url}"));
+        }
+    }
+
+    if !errors.is_empty() {
+        for error in &errors {
+            println!("error: {error}");
+        }
+        bail!("doctor: {} error(s): {}", errors.len(), errors.join("; "));
+    }
+    println!("doctor: credentials and endpoints clean");
+    Ok(())
+}
+
+fn telemetry_preference_status(preference: Option<bool>) -> &'static str {
+    let (enabled, source) = codewhale_config::resolved_telemetry_consent(preference);
+    if !enabled {
+        return match source {
+            codewhale_config::TelemetrySource::Env => "Off (environment or run kill switch)",
+            _ => "Off (saved preference)",
+        };
+    }
+    match telemetry::load_setup_state_for_decision() {
+        Some(state) if state.telemetry_opted_out() => "Off (saved opt-out)",
+        None => "Off (privacy state unreadable)",
+        Some(_) => match source {
+            codewhale_config::TelemetrySource::Default => "On (default)",
+            codewhale_config::TelemetrySource::Env | codewhale_config::TelemetrySource::Cli => {
+                "On (environment or run preference)"
+            }
+            codewhale_config::TelemetrySource::Config => "On (saved preference)",
+        },
+    }
 }
 
 fn model_command_provider_hint(
@@ -4522,17 +4841,36 @@ fn run_model_command(
             // re-deriving one from an empty flag set. Re-deriving is what made
             // a Z.ai config report `provider: deepseek` (#4832).
             if queried.is_none() && subcommand_provider.is_none() {
-                let source = resolved_runtime.model_source;
+                let saved = if matches!(resolved_runtime.provider_source, ProviderSource::Config)
+                    && !matches!(
+                        resolved_runtime.model_source,
+                        codewhale_config::ModelSource::Cli | codewhale_config::ModelSource::Env
+                    ) {
+                    Some(codewhale_tui::route_preferences::selected_route(
+                        store.path(),
+                    )?)
+                } else {
+                    None
+                };
+                let provider = saved
+                    .as_ref()
+                    .map_or(resolved_runtime.provider.as_str(), |(provider, _, _)| {
+                        provider.as_str()
+                    });
+                let model = saved
+                    .as_ref()
+                    .map_or(resolved_runtime.model.as_str(), |(_, model, _)| {
+                        model.as_str()
+                    });
+                let source = saved
+                    .as_ref()
+                    .map_or(resolved_runtime.model_source, |(_, _, source)| *source);
                 println!(
                     "requested: {}",
-                    if source.is_explicit() {
-                        resolved_runtime.model.as_str()
-                    } else {
-                        ""
-                    }
+                    if source.is_explicit() { model } else { "" }
                 );
-                println!("resolved: {}", resolved_runtime.model);
-                println!("provider: {}", resolved_runtime.provider.as_str());
+                println!("resolved: {model}");
+                println!("provider: {provider}");
                 println!("used_fallback: {}", !source.is_explicit());
                 println!(
                     "provider_source: {}",
@@ -4580,8 +4918,8 @@ fn run_model_command(
                 bail!("Model name cannot be empty");
             }
             let canonical = canonical_model_for_set(trimmed);
-            store.config.default_text_model = Some(canonical.to_string());
-            store.save()?;
+            codewhale_tui::route_preferences::set(store.path(), "model", canonical)?;
+            store.reload()?;
             println!("Default model set to '{canonical}'");
             Ok(())
         }
@@ -5054,11 +5392,30 @@ fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
     if cli.skip_onboarding {
         args.push("--skip-onboarding".to_string());
     }
+    if cli.fresh {
+        args.push("--fresh".to_string());
+    }
     if cli.no_project_config {
         args.push("--no-project-config".to_string());
     }
     args.extend(passthrough);
     args
+}
+
+/// Set one process environment variable for the CLI-to-TUI bridge.
+///
+/// Callers must guarantee no concurrent environment access: production
+/// callers run pre-runtime on the main thread, and tests serialize on the
+/// shared env lock. All current callers are inside [`apply_tui_env`].
+fn set_tui_env(key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>) {
+    // SAFETY: no concurrent environment access. Production setters run on
+    // the main thread before the TUI runtime starts, and the only other
+    // thread that may be alive is the detached telemetry writer, which
+    // never reads or writes the process environment. Tests serialize on
+    // the shared env lock instead.
+    unsafe {
+        std::env::set_var(key, value);
+    }
 }
 
 fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrough: &[String]) {
@@ -5086,10 +5443,8 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
             || provider.to_string(),
             |provider| provider.as_str().to_string(),
         );
-        unsafe {
-            std::env::set_var("CODEWHALE_PROVIDER", &provider);
-            std::env::set_var("DEEPSEEK_PROVIDER", provider);
-        }
+        set_tui_env("CODEWHALE_PROVIDER", &provider);
+        set_tui_env("DEEPSEEK_PROVIDER", provider);
     }
     if !(uses_raw_tui_provider
         || (cli.profile.is_some()
@@ -5097,95 +5452,65 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
         && matches!(keyring_bridge_source, Some(RuntimeApiKeySource::Keyring))
         && let Some(api_key) = keyring_bridge_api_key
     {
-        unsafe {
-            for var in provider_env_vars(keyring_bridge_provider) {
-                std::env::set_var(var, api_key);
-            }
-            std::env::set_var(
-                codewhale_config::CLI_API_KEY_SOURCE_ENV,
-                RuntimeApiKeySource::Keyring.as_env_value(),
-            );
+        for var in provider_env_vars(keyring_bridge_provider) {
+            set_tui_env(var, api_key);
         }
-    }
-    if let Some(model) = cli.model.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_MODEL", model);
-            std::env::set_var("DEEPSEEK_MODEL", model);
-        }
-    }
-    if let Some(output_mode) = cli.output_mode.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_OUTPUT_MODE", output_mode);
-            std::env::set_var("DEEPSEEK_OUTPUT_MODE", output_mode);
-        }
-    }
-    if let Some(v) = verbosity.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_VERBOSITY", v);
-            std::env::set_var("DEEPSEEK_VERBOSITY", v);
-        }
-    }
-    if let Some(log_level) = cli.log_level.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_LOG_LEVEL", log_level);
-            std::env::set_var("DEEPSEEK_LOG_LEVEL", log_level);
-        }
-    }
-    let telemetry = resolved_runtime.telemetry.to_string();
-    unsafe {
-        std::env::set_var("CODEWHALE_TELEMETRY", &telemetry);
-        std::env::set_var("DEEPSEEK_TELEMETRY", &telemetry);
-    }
-    let floor = cli.telemetry == Some(false) || codewhale_config::telemetry_floor_in_force();
-    unsafe {
-        std::env::set_var(
-            codewhale_config::TELEMETRY_FLOOR_ENV,
-            if floor { "1" } else { "0" },
+        set_tui_env(
+            codewhale_config::CLI_API_KEY_SOURCE_ENV,
+            RuntimeApiKeySource::Keyring.as_env_value(),
         );
     }
+    if let Some(model) = cli.model.as_ref() {
+        set_tui_env("CODEWHALE_MODEL", model);
+        set_tui_env("DEEPSEEK_MODEL", model);
+    }
+    if let Some(output_mode) = cli.output_mode.as_ref() {
+        set_tui_env("CODEWHALE_OUTPUT_MODE", output_mode);
+        set_tui_env("DEEPSEEK_OUTPUT_MODE", output_mode);
+    }
+    if let Some(v) = verbosity.as_ref() {
+        set_tui_env("CODEWHALE_VERBOSITY", v);
+        set_tui_env("DEEPSEEK_VERBOSITY", v);
+    }
+    if let Some(log_level) = cli.log_level.as_ref() {
+        set_tui_env("CODEWHALE_LOG_LEVEL", log_level);
+        set_tui_env("DEEPSEEK_LOG_LEVEL", log_level);
+    }
+    let telemetry = resolved_runtime.telemetry.to_string();
+    set_tui_env("CODEWHALE_TELEMETRY", &telemetry);
+    set_tui_env("DEEPSEEK_TELEMETRY", &telemetry);
+    let floor = cli.telemetry == Some(false) || codewhale_config::telemetry_floor_in_force();
+    set_tui_env(
+        codewhale_config::TELEMETRY_FLOOR_ENV,
+        if floor { "1" } else { "0" },
+    );
     if let Some(endpoint) = resolved_runtime.telemetry_endpoint.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_TELEMETRY_ENDPOINT", endpoint);
-            std::env::set_var("DEEPSEEK_TELEMETRY_ENDPOINT", endpoint);
-        }
+        set_tui_env("CODEWHALE_TELEMETRY_ENDPOINT", endpoint);
+        set_tui_env("DEEPSEEK_TELEMETRY_ENDPOINT", endpoint);
     }
     if let Some(policy) = cli.approval_policy.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_APPROVAL_POLICY", policy);
-            std::env::set_var("DEEPSEEK_APPROVAL_POLICY", policy);
-        }
+        set_tui_env("CODEWHALE_APPROVAL_POLICY", policy);
+        set_tui_env("DEEPSEEK_APPROVAL_POLICY", policy);
     }
     if let Some(mode) = cli.sandbox_mode.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_SANDBOX_MODE", mode);
-            std::env::set_var("DEEPSEEK_SANDBOX_MODE", mode);
-        }
+        set_tui_env("CODEWHALE_SANDBOX_MODE", mode);
+        set_tui_env("DEEPSEEK_SANDBOX_MODE", mode);
     }
     if cli.yolo {
-        unsafe {
-            std::env::set_var("CODEWHALE_YOLO", "true");
-        }
+        set_tui_env("CODEWHALE_YOLO", "true");
     }
     if let Some(api_key) = cli.api_key.as_ref() {
-        unsafe {
-            std::env::set_var(codewhale_config::CLI_API_KEY_ENV, api_key);
-        }
+        set_tui_env(codewhale_config::CLI_API_KEY_ENV, api_key);
         if !uses_raw_tui_provider && (cli.profile.is_none() || cli.provider.is_some()) {
-            unsafe {
-                for var in provider_env_vars(resolved_runtime.provider) {
-                    std::env::set_var(var, api_key);
-                }
+            for var in provider_env_vars(resolved_runtime.provider) {
+                set_tui_env(var, api_key);
             }
         }
-        unsafe {
-            std::env::set_var(codewhale_config::CLI_API_KEY_SOURCE_ENV, "cli");
-        }
+        set_tui_env(codewhale_config::CLI_API_KEY_SOURCE_ENV, "cli");
     }
     if let Some(base_url) = cli.base_url.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_BASE_URL", base_url);
-            std::env::set_var("DEEPSEEK_BASE_URL", base_url);
-        }
+        set_tui_env("CODEWHALE_BASE_URL", base_url);
+        set_tui_env("DEEPSEEK_BASE_URL", base_url);
     }
 }
 
@@ -5224,11 +5549,19 @@ fn run_metrics_command(args: MetricsArgs) -> Result<()> {
     })
 }
 
+/// Maximum bytes read for an API key on stdin. Keys are short; anything
+/// larger is a piped file, not a key.
+const MAX_STDIN_API_KEY_BYTES: u64 = 8 * 1024;
+
 fn read_api_key_from_stdin() -> Result<String> {
     let mut input = String::new();
     io::stdin()
+        .take(MAX_STDIN_API_KEY_BYTES + 1)
         .read_to_string(&mut input)
         .context("failed to read api key from stdin")?;
+    if input.len() as u64 > MAX_STDIN_API_KEY_BYTES {
+        bail!("API key on stdin exceeds the 8 KiB limit");
+    }
     let key = input.trim().to_string();
     if key.is_empty() {
         bail!("empty API key provided");
@@ -5617,6 +5950,144 @@ mod tests {
                 command: ConfigCommand::Path
             }))
         ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "edit"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Edit
+            }))
+        ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "doctor"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Doctor
+            }))
+        ));
+        assert!(matches!(
+            parse_ok(&["codewhale", "config", "dump"]).command,
+            Some(Commands::Config(ConfigArgs {
+                command: ConfigCommand::Dump
+            }))
+        ));
+    }
+
+    #[test]
+    fn parses_repeatable_global_set_overrides() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "--set",
+            "verbosity=concise",
+            "--set",
+            "model=deepseek-v4-flash",
+            "config",
+            "get",
+            "verbosity",
+        ]);
+        assert_eq!(
+            cli.overrides,
+            vec![
+                "verbosity=concise".to_string(),
+                "model=deepseek-v4-flash".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn config_doctor_is_clean_on_minimal_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"concise\"\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        run_config_doctor(&store).expect("clean doctor");
+    }
+
+    #[test]
+    fn config_doctor_preserves_keys_owned_by_other_readers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "zzz_unknown = 1\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        assert!(!store.config.extras.is_empty());
+        run_config_doctor(&store).expect("extras do not establish unsupported settings");
+    }
+
+    #[test]
+    fn config_doctor_fails_on_empty_secret_and_bad_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "api_key = \"\"\nbase_url = \"gopher://x\"\n");
+        let store = ConfigStore::load(Some(path)).expect("load fixture");
+        let error = run_config_doctor(&store).expect_err("doctor must fail");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("api_key") && message.contains("empty"),
+            "{message}"
+        );
+        assert!(
+            message.contains("base_url") && message.contains("http"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn per_run_overrides_apply_in_memory_and_never_save() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"normal\"\n");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("load fixture");
+        apply_per_run_overrides(&mut store, &["verbosity=concise".to_string()])
+            .expect("overlay applies");
+        assert_eq!(store.config.verbosity.as_deref(), Some("concise"));
+        let error = apply_per_run_overrides(&mut store, &["no-equals-here".to_string()])
+            .expect_err("missing = must fail");
+        assert!(format!("{error:#}").contains("KEY=VALUE"));
+        // Nothing was saved: a reload sees the file, not the overlay.
+        let reloaded = ConfigStore::load(Some(path)).expect("reload");
+        assert_eq!(reloaded.config.verbosity.as_deref(), Some("normal"));
+    }
+
+    #[test]
+    fn unsupported_nested_config_set_preserves_original_file_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let original =
+            "# Keep this comment and spacing\n[tools]\nuser_input_timeout_seconds = 7 # fixture\n";
+        write_config_fixture(&path, original);
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        let err = run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "tools.user_input_timeout_seconds".into(),
+                value: "0".into(),
+            },
+            false,
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("[tools]"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn mutating_config_commands_refuse_per_run_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "verbosity = \"normal\"\n");
+        let mut store = ConfigStore::load(Some(path)).expect("load fixture");
+        let overrides = vec!["verbosity=concise".to_string()];
+        let error = run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "verbosity".to_string(),
+                value: "concise".to_string(),
+            },
+            false,
+            &overrides,
+        )
+        .expect_err("set with --set must refuse");
+        assert!(format!("{error:#}").contains("--set"), "{error:#}");
+        // Reads still work under an overlay.
+        run_config_command(&mut store, ConfigCommand::List, false, &overrides)
+            .expect("list with --set");
     }
 
     fn config_dispatch_from(
@@ -5716,7 +6187,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
 
         let mut store = ConfigStore::load(selected_path).expect("load selected project config");
-        run_config_command(&mut store, command, project_bundle_scope)
+        run_config_command(&mut store, command, project_bundle_scope, &[])
             .expect("import project bundle");
         let project = ConfigStore::load(Some(project_path.clone())).expect("reload project");
         let global = ConfigStore::load(Some(global_path.clone())).expect("reload global");
@@ -5742,7 +6213,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
         let mut explicit_store =
             ConfigStore::load(selected_path).expect("load explicit global config");
-        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope, &[])
             .expect_err("project import must reject an explicit non-workspace config");
         assert!(
             error
@@ -5781,7 +6252,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(project_path.as_path()));
 
         let mut store = ConfigStore::load(selected_path).expect("load selected project config");
-        run_config_command(&mut store, command, project_bundle_scope)
+        run_config_command(&mut store, command, project_bundle_scope, &[])
             .expect("export project bundle");
         let body = std::fs::read_to_string(&output_path).expect("read portable export");
         let bundle = config_bundles::parse_bundle_str(&body, "portable.toml")
@@ -5814,7 +6285,7 @@ verbosity = "project-imported"
         assert_eq!(selected_path.as_deref(), Some(global_path.as_path()));
         let mut explicit_store =
             ConfigStore::load(selected_path).expect("load explicit global config");
-        let error = run_config_command(&mut explicit_store, command, project_bundle_scope)
+        let error = run_config_command(&mut explicit_store, command, project_bundle_scope, &[])
             .expect_err("project export must reject an explicit non-workspace config");
         assert!(
             error
@@ -5948,6 +6419,84 @@ verbosity = "project-imported"
                 command: ModelCommand::List { provider: None }
             }))
         ));
+    }
+
+    #[test]
+    fn durable_cli_route_edits_use_canonical_config_and_keep_temporary_overrides_unsaved() {
+        let _env = env_lock();
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.path().to_string_lossy());
+        let _config_path = ScopedEnvVar::remove("CODEWHALE_CONFIG_PATH");
+        let _legacy_config_path = ScopedEnvVar::remove("DEEPSEEK_CONFIG_PATH");
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, "provider = \"deepseek\"\ndefault_text_model = \"deepseek-v4-pro\"\n[providers.zai]\nmodel = \"GLM-5.2\"\n").unwrap();
+        let settings_path = home.path().join("settings.toml");
+        let settings = "default_provider = \"zai\"\n[provider_models]\nzai = \"GLM-5.3\"\n";
+        std::fs::write(&settings_path, settings).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        let runtime = resolved_runtime_for_test(ProviderKind::Deepseek, ProviderSource::Config);
+        run_model_command(
+            &mut store,
+            ModelCommand::Set {
+                model: "GLM-5.2".into(),
+            },
+            None,
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(store.config.provider, ProviderKind::Zai);
+        assert_eq!(store.config.providers.zai.model.as_deref(), Some("GLM-5.2"));
+        assert_eq!(
+            store.config.extras["route_preferences_version"].as_integer(),
+            Some(1)
+        );
+
+        run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "default_text_model".into(),
+                value: "GLM-5.1".into(),
+            },
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(store.config.providers.zai.model.as_deref(), Some("GLM-5.1"));
+        assert_eq!(
+            codewhale_tui::route_preferences::get(&path, "model")
+                .unwrap()
+                .as_deref(),
+            Some("GLM-5.1")
+        );
+        run_config_command(
+            &mut store,
+            ConfigCommand::Unset {
+                key: "providers.zai.model".into(),
+            },
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(store.config.providers.zai.model.is_none());
+        assert_eq!(std::fs::read_to_string(settings_path).unwrap(), settings);
+
+        let before = std::fs::read(&path).unwrap();
+        let overrides = vec!["model=temporary-model".to_string()];
+        assert!(
+            run_config_command(
+                &mut store,
+                ConfigCommand::Set {
+                    key: "model".into(),
+                    value: "GLM-5.2".into(),
+                },
+                false,
+                &overrides
+            )
+            .is_err()
+        );
+        apply_per_run_overrides(&mut store, &overrides).unwrap();
+        assert_eq!(store.config.model.as_deref(), Some("temporary-model"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -6641,9 +7190,73 @@ verbosity = "project-imported"
     }
 
     #[test]
-    fn antigravity_provider_aliases_parse_as_builtin() {
+    fn antigravity_provider_aliases_are_clear_only_and_never_raw_custom() {
         for alias in ["antigravity", "agy"] {
-            assert_eq!(builtin_provider_arg(alias), Some(ProviderKind::Antigravity));
+            assert_eq!(builtin_provider_arg(alias), None, "{alias}");
+            assert_eq!(
+                parse_auth_clear_provider(alias),
+                Ok(ProviderKind::Antigravity),
+                "{alias}"
+            );
+            let error = parse_catalog_route(alias).expect_err("legacy route is not selectable");
+            assert!(error.contains("non-runnable legacy provider"), "{error}");
+            assert!(error.contains("--provider antigravity"), "{error}");
+            assert!(error.contains("google"), "{error}");
+            assert!(error.contains("GEMINI_API_KEY"), "{error}");
+
+            let clear = parse_ok(&["codewhale", "auth", "clear", "--provider", alias]);
+            assert!(matches!(
+                clear.command,
+                Some(Commands::Auth(AuthArgs {
+                    command: AuthCommand::Clear {
+                        provider: ProviderKind::Antigravity,
+                    }
+                }))
+            ));
+
+            for argv in [
+                vec!["codewhale", "auth", "set", "--provider", alias],
+                vec!["codewhale", "auth", "get", "--provider", alias],
+                vec!["codewhale", "auth", "print-api-key", "--provider", alias],
+                vec!["codewhale", "auth", "status", "--provider", alias],
+                vec!["codewhale", "auth", "external-revoke", "--provider", alias],
+                vec![
+                    "codewhale",
+                    "auth",
+                    "external-consent",
+                    "--provider",
+                    alias,
+                    "--mode",
+                    "read-only",
+                    "--yes",
+                ],
+                vec!["codewhale", "model", "list", "--provider", alias],
+                vec!["codewhale", "model", "resolve", "--provider", alias],
+            ] {
+                let error = Cli::try_parse_from(argv)
+                    .expect_err("legacy Antigravity route must be rejected outside auth clear");
+                assert_eq!(error.kind(), ErrorKind::ValueValidation);
+                assert!(
+                    error.to_string().contains("non-runnable legacy provider"),
+                    "{error}"
+                );
+            }
+
+            for command in [
+                Commands::Exec(TuiPassthroughArgs {
+                    args: vec!["Reply OK".into()],
+                }),
+                Commands::Fleet(TuiPassthroughArgs {
+                    args: vec!["status".into()],
+                }),
+            ] {
+                let error = top_level_provider_override(Some(alias), Some(&command))
+                    .expect_err("legacy alias must not fall through as a raw custom provider");
+                assert!(
+                    error.to_string().contains("non-runnable legacy provider"),
+                    "{error}"
+                );
+            }
         }
     }
 
@@ -6824,6 +7437,67 @@ verbosity = "project-imported"
                 command: LaneCommand::Stop { .. }
             }))
         ));
+    }
+
+    #[test]
+    fn named_fleet_search_roots_include_the_saved_workspace_dir() {
+        let workspace = Path::new("/ws");
+        let roots = named_fleet_search_roots(workspace);
+        let tail: Vec<&Path> = roots
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .map(PathBuf::as_path)
+            .collect();
+        assert_eq!(tail, [Path::new("/ws/.codewhale"), Path::new("/ws")]);
+    }
+
+    #[test]
+    fn lane_stop_accepts_json_like_interrupt() {
+        let stop = parse_ok(&["codewhale", "lane", "stop", "lane-a1b2c3d4", "--json"]);
+        assert!(matches!(
+            stop.command,
+            Some(Commands::Lane(LaneArgs {
+                command: LaneCommand::Stop { ref lane_id, json: true }
+            })) if lane_id == "lane-a1b2c3d4"
+        ));
+        let plain = parse_ok(&["codewhale", "lane", "stop", "lane-a1b2c3d4"]);
+        assert!(matches!(
+            plain.command,
+            Some(Commands::Lane(LaneArgs {
+                command: LaneCommand::Stop { json: false, .. }
+            }))
+        ));
+    }
+
+    #[test]
+    fn lane_worktree_flags_are_validated_as_a_set() {
+        let repo = PathBuf::from("/repo");
+        let custom = PathBuf::from("/elsewhere/wt");
+
+        assert!(
+            validate_lane_worktree_flags(None, None, None)
+                .unwrap()
+                .is_none()
+        );
+        let (root, branch, path) = validate_lane_worktree_flags(
+            Some(repo.clone()),
+            Some("feat".to_string()),
+            Some(custom.clone()),
+        )
+        .unwrap()
+        .expect("paired flags provision a worktree");
+        assert_eq!(root, repo);
+        assert_eq!(branch, "feat");
+        assert_eq!(path, Some(custom.clone()));
+
+        let err = validate_lane_worktree_flags(None, None, Some(custom))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--worktree-path requires"), "{err}");
+        assert!(validate_lane_worktree_flags(Some(repo), None, None).is_err());
+        assert!(validate_lane_worktree_flags(None, Some("feat".into()), None).is_err());
     }
 
     #[test]
@@ -7076,10 +7750,11 @@ verbosity = "project-imported"
 
         assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
-        assert_eq!(
-            store.config.default_text_model.as_deref(),
-            Some("deepseek-v4-pro")
-        );
+        // Intentional change: auth set used to pin `deepseek-v4-pro` here,
+        // silently moving a fresh install off the cheaper `deepseek-flash`
+        // provider default. Saving a key must not choose a model.
+        assert!(store.config.default_text_model.is_none());
+        assert!(store.config.providers.deepseek.model.is_none());
         let saved = std::fs::read_to_string(&path).expect("config should be written");
         assert!(!saved.contains("sk-test"), "{saved}");
         assert!(
@@ -7087,7 +7762,7 @@ verbosity = "project-imported"
                 .lines()
                 .any(|line| line.trim_start().starts_with("api_key="))
         );
-        assert!(saved.contains("default_text_model = \"deepseek-v4-pro\""));
+        assert!(!saved.contains("default_text_model"), "{saved}");
         assert_eq!(
             secrets.get("deepseek").expect("read secret").as_deref(),
             Some("sk-test")
@@ -7752,6 +8427,201 @@ verbosity = "project-imported"
         assert_eq!(inner.get("deepseek").unwrap(), None);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn antigravity_clear_removes_only_codewhale_owned_legacy_state() {
+        use codewhale_secrets::{InMemoryKeyringStore, KeyringStore};
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().expect("isolated legacy fixture");
+        let config_path = dir.path().join("config.toml");
+        let external_session_path = dir.path().join("external-antigravity-session.db");
+        let external_session = b"external session bytes must remain unchanged";
+        std::fs::write(&external_session_path, external_session)
+            .expect("write external session trap");
+
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("load empty config");
+        store.config.provider = ProviderKind::Antigravity;
+        store.config.fallback_providers = vec![ProviderKind::Antigravity, ProviderKind::Google];
+        {
+            let legacy = &mut store.config.providers.antigravity;
+            legacy.api_key = Some("legacy-codewhale-fixture-key".to_string());
+            legacy.base_url = Some("https://legacy.invalid/v1".to_string());
+            legacy.model = Some("legacy-fixture-model".to_string());
+            legacy.context_window = Some(1234);
+            legacy.mode = Some("legacy-fixture-mode".to_string());
+            legacy.wire = Some("legacy-fixture-wire".to_string());
+            legacy.auth_mode = Some("oauth".to_string());
+            legacy.insecure_skip_tls_verify = Some(true);
+            legacy
+                .http_headers
+                .insert("X-Legacy-Fixture".to_string(), "fixture".to_string());
+            legacy.path_suffix = Some("legacy-fixture-path".to_string());
+            legacy.external_credentials =
+                Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                    ProviderKind::Antigravity,
+                    codewhale_config::ExternalCredentialSource::AgyCli,
+                    external_session_path.clone(),
+                ));
+            legacy.extras.insert(
+                "legacy_fixture_extra".to_string(),
+                toml::Value::String("remove-me".to_string()),
+            );
+        }
+        store.config.providers.google.api_key = Some("google-fixture-key".to_string());
+        store.config.providers.google.base_url = Some("https://google.example/v1".to_string());
+        store.config.providers.google.model = Some("google-fixture-model".to_string());
+        store.save().expect("save legacy fixture");
+
+        // Released configs accepted the short `[providers.agy]` table alias.
+        // Exercise that on-disk spelling as well as the clear command's alias.
+        let canonical = std::fs::read_to_string(&config_path).expect("read canonical fixture");
+        let alias = canonical.replace("[providers.antigravity", "[providers.agy");
+        std::fs::write(&config_path, alias).expect("write legacy alias fixture");
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("reload alias fixture");
+
+        let inner = Arc::new(InMemoryKeyringStore::new());
+        inner
+            .set("antigravity", "legacy-codewhale-secret-slot")
+            .expect("seed Codewhale-owned legacy secret slot");
+        let secrets = Secrets::new(inner.clone());
+
+        run_auth_command_with_secrets(
+            &mut store,
+            AuthCommand::Clear {
+                provider: ProviderKind::Antigravity,
+            },
+            &secrets,
+        )
+        .expect("legacy clear should succeed");
+
+        assert_eq!(store.config.provider, ProviderKind::default());
+        assert_eq!(store.config.fallback_providers, vec![ProviderKind::Google]);
+        assert!(store.config.providers.antigravity.is_empty());
+        assert_eq!(inner.get("antigravity").unwrap(), None);
+        assert_eq!(
+            store.config.providers.google.api_key.as_deref(),
+            Some("google-fixture-key")
+        );
+        assert_eq!(
+            store.config.providers.google.base_url.as_deref(),
+            Some("https://google.example/v1")
+        );
+        assert_eq!(
+            store.config.providers.google.model.as_deref(),
+            Some("google-fixture-model")
+        );
+        assert_eq!(
+            std::fs::read(&external_session_path).expect("external session trap still exists"),
+            external_session
+        );
+
+        let raw = std::fs::read_to_string(&config_path).expect("read cleared config");
+        assert!(!raw.contains("[providers.antigravity"), "{raw}");
+        assert!(!raw.contains("[providers.agy"), "{raw}");
+        assert!(!raw.contains("legacy_fixture_extra"), "{raw}");
+        assert!(raw.contains("[providers.google]"), "{raw}");
+
+        let backup_path = config_path.with_file_name(format!(
+            "{}.bak",
+            config_path
+                .file_name()
+                .expect("config fixture has a file name")
+                .to_string_lossy()
+        ));
+        let backup = std::fs::read_to_string(backup_path).expect("read cleared config backup");
+        assert!(!backup.contains("[providers.antigravity"), "{backup}");
+        assert!(!backup.contains("[providers.agy"), "{backup}");
+        assert!(!backup.contains("legacy_fixture_extra"), "{backup}");
+        assert!(
+            !backup.contains(&external_session_path.to_string_lossy().to_string()),
+            "{backup}"
+        );
+        assert!(
+            backup.contains("base_url = \"https://google.example/v1\""),
+            "{backup}"
+        );
+        assert!(
+            backup.contains("model = \"google-fixture-model\""),
+            "{backup}"
+        );
+
+        let reloaded = ConfigStore::load(Some(config_path)).expect("reload cleared config");
+        assert_eq!(reloaded.config.provider, ProviderKind::default());
+        assert!(reloaded.config.providers.antigravity.is_empty());
+        assert_eq!(
+            reloaded.config.providers.google.api_key.as_deref(),
+            Some("google-fixture-key")
+        );
+    }
+
+    #[test]
+    fn antigravity_clear_restores_codewhale_secret_when_config_write_fails() {
+        use codewhale_secrets::{InMemoryKeyringStore, KeyringStore};
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().expect("isolated rollback fixture");
+        let config_path = dir.path().join("config.toml");
+        let external_session_path = dir.path().join("external-session.db");
+        let external_session = b"external session rollback trap";
+        std::fs::write(&external_session_path, external_session)
+            .expect("write external session trap");
+        let mut store = ConfigStore::load(Some(config_path.clone())).expect("load absent config");
+        store.config.provider = ProviderKind::Antigravity;
+        store.config.fallback_providers = vec![ProviderKind::Antigravity];
+        store.config.providers.antigravity.api_key = Some("legacy-config-fixture".to_string());
+        store.config.providers.antigravity.external_credentials =
+            Some(codewhale_config::ExternalCredentialConsentToml::read_only(
+                ProviderKind::Antigravity,
+                codewhale_config::ExternalCredentialSource::AgyCli,
+                external_session_path.clone(),
+            ));
+        std::fs::create_dir(&config_path).expect("make config target unwritable as a file");
+
+        let inner = Arc::new(InMemoryKeyringStore::new());
+        inner
+            .set("antigravity", "legacy-secret-fixture")
+            .expect("seed Codewhale-owned legacy slot");
+        let secrets = Secrets::new(inner.clone());
+
+        run_auth_command_with_secrets(
+            &mut store,
+            AuthCommand::Clear {
+                provider: ProviderKind::Antigravity,
+            },
+            &secrets,
+        )
+        .expect_err("config failure must fail the clear transaction");
+
+        assert_eq!(store.config.provider, ProviderKind::Antigravity);
+        assert_eq!(
+            store.config.fallback_providers,
+            vec![ProviderKind::Antigravity]
+        );
+        assert_eq!(
+            store.config.providers.antigravity.api_key.as_deref(),
+            Some("legacy-config-fixture")
+        );
+        assert!(
+            store
+                .config
+                .providers
+                .antigravity
+                .external_credentials
+                .is_some()
+        );
+        assert_eq!(
+            inner
+                .get("antigravity")
+                .expect("read restored slot")
+                .as_deref(),
+            Some("legacy-secret-fixture")
+        );
+        assert_eq!(
+            std::fs::read(external_session_path).expect("external session trap still exists"),
+            external_session
+        );
     }
 
     #[test]
@@ -9373,8 +10243,11 @@ verbosity = "project-imported"
             .map(|provider| provider.kind())
             .collect();
         // Full registry keeps legacy dialect/plan kinds; ALL is the catalog surface.
-        assert_eq!(registry_kinds.len(), 48);
-        assert_eq!(ProviderKind::ALL.len(), 43);
+        assert_eq!(registry_kinds.len(), 52);
+        // The tombstone stays in the registry (old config must still parse
+        // and clear) and left the catalog surface when it stopped being
+        // selectable.
+        assert_eq!(ProviderKind::ALL.len(), 46);
         for kind in ProviderKind::ALL {
             assert!(
                 registry_kinds.contains(&kind),
@@ -9436,6 +10309,112 @@ verbosity = "project-imported"
                 && telemetry_line.contains("wins"),
             "the help string must document the always-winning opt-out: {telemetry_line}"
         );
+        let help = help_for(&["codewhale", "config", "telemetry", "--help"]);
+        assert!(help.contains("PostHog"));
+        assert!(help.contains("--accept-notice"));
+    }
+
+    #[test]
+    fn cli_telemetry_acceptance_is_versioned_and_reuses_settings_persistence() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", temp.path().to_str().unwrap());
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "telemetry = false\nverbosity = \"concise\"\n");
+        let mut state = SetupState::default();
+        state.record_telemetry_notice("3", false);
+        state.save().expect("seed decline");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("load config");
+
+        // An explicit enable command clears a historical decline through Settings.
+        run_config_command(
+            &mut store,
+            ConfigCommand::Set {
+                key: "telemetry".into(),
+                value: "true".into(),
+            },
+            false,
+            &[],
+        )
+        .expect("save configuration preference");
+        assert!(!SetupState::load().unwrap().unwrap().telemetry_opted_out());
+        assert_eq!(
+            telemetry_preference_status(Some(true)),
+            "On (saved preference)"
+        );
+        let before = std::fs::read(SetupState::path().unwrap()).unwrap();
+        run_config_command(
+            &mut store,
+            ConfigCommand::Telemetry {
+                accept_notice: None,
+            },
+            false,
+            &[],
+        )
+        .expect("read notice");
+        assert!(
+            run_config_command(
+                &mut store,
+                ConfigCommand::Telemetry {
+                    accept_notice: Some(3)
+                },
+                false,
+                &[]
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(SetupState::path().unwrap()).unwrap(), before);
+
+        run_config_command(
+            &mut store,
+            ConfigCommand::Telemetry {
+                accept_notice: Some(telemetry::NOTICE_VERSION),
+            },
+            false,
+            &[],
+        )
+        .expect("accept current processor notice");
+        assert_eq!(
+            telemetry_preference_status(Some(true)),
+            "On (saved preference)"
+        );
+        let saved = ConfigStore::load(Some(path)).unwrap();
+        assert_eq!(saved.config.telemetry, Some(true));
+        assert_eq!(saved.config.verbosity.as_deref(), Some("concise"));
+        assert!(
+            !temp.path().join("telemetry").exists(),
+            "acceptance never arms this process"
+        );
+    }
+
+    #[test]
+    fn cli_telemetry_acceptance_refuses_overlays_and_corrupt_privacy_records() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", temp.path().to_str().unwrap());
+        let path = temp.path().join("config.toml");
+        write_config_fixture(&path, "telemetry = false\n");
+        std::fs::write(SetupState::path().unwrap(), "not-json").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        for overrides in [vec![], vec!["telemetry=true".to_string()]] {
+            assert!(
+                run_config_command(
+                    &mut store,
+                    ConfigCommand::Telemetry {
+                        accept_notice: Some(telemetry::NOTICE_VERSION),
+                    },
+                    false,
+                    &overrides
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                std::fs::read_to_string(SetupState::path().unwrap()).unwrap(),
+                "not-json"
+            );
+        }
     }
 
     #[test]
@@ -9510,6 +10489,77 @@ verbosity = "project-imported"
         assert_eq!(
             root_tui_passthrough(&cli).unwrap(),
             vec!["--prompt".to_string(), "Reply with exactly OK.".to_string()]
+        );
+    }
+
+    #[test]
+    fn root_fresh_and_mouse_flags_forward_as_separate_tui_arguments() {
+        for flags in [
+            ["--fresh", "--mouse-capture"],
+            ["--mouse-capture", "--fresh"],
+        ] {
+            let cli = parse_ok(&[
+                "codewhale",
+                "--workspace",
+                "workspace with spaces",
+                "--no-project-config",
+                flags[0],
+                flags[1],
+            ]);
+            assert_eq!(
+                tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+                [
+                    "codewhale",
+                    "--workspace",
+                    "workspace with spaces",
+                    "--mouse-capture",
+                    "--fresh",
+                    "--no-project-config",
+                ],
+                "{flags:?} must remain launch flags, not a joined prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn root_fresh_preserves_quoted_prompt_whitespace_and_split_tail() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "--fresh",
+            "--mouse-capture",
+            "--prompt",
+            "Keep  two spaces\nand a tab\there",
+            "then",
+            "explain them",
+        ]);
+        assert_eq!(
+            tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+            [
+                "codewhale",
+                "--mouse-capture",
+                "--fresh",
+                "--prompt",
+                "Keep  two spaces\nand a tab\there then explain them",
+            ]
+        );
+    }
+
+    #[test]
+    fn root_prompt_tail_does_not_reinterpret_literal_launch_flags() {
+        let cli = parse_ok(&[
+            "codewhale",
+            "Explain",
+            "--fresh",
+            "--mouse-capture",
+            "as literal flags",
+        ]);
+        assert_eq!(
+            tui_argv(&cli, root_tui_passthrough(&cli).unwrap()),
+            [
+                "codewhale",
+                "--prompt",
+                "Explain --fresh --mouse-capture as literal flags",
+            ]
         );
     }
 
@@ -9676,6 +10726,7 @@ verbosity = "project-imported"
             "--mouse-capture",
             "--no-mouse-capture",
             "--skip-onboarding",
+            "--fresh",
             "--continue",
             "--prompt",
         ] {

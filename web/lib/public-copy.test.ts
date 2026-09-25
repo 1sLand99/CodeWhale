@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { FACTS } from "./facts.generated";
 import { RELEASE_CONTRIBUTORS, RELEASE_HELPERS } from "./release-credits";
-import { EN_CHROME, EN_DOCS_SHELL, EN_HOME, getChrome, getHome } from "./i18n/dictionaries";
+import { EN_CHROME, EN_DOCS_SHELL, EN_HOME, getChrome } from "./i18n/dictionaries";
 
 function pageSource(path: string): string {
   return readFileSync(new URL(`../app/[locale]/${path}`, import.meta.url), "utf8");
@@ -37,17 +37,17 @@ describe("public website copy contracts", () => {
     expect(roadmap).not.toContain("Required login / accounts");
     expect(footer).not.toContain("App preview");
     expect(footer).not.toContain("app.codewhale.net");
-    expect(footer).not.toMatch(/Create account|Sign up/);
 
-    // Footer copy is dictionary-driven now, so the same ban has to hold
-    // wherever the strings actually live — in every locale, not just the TSX.
+    // Account entry is a real, working flow (sign-in and registration), so
+    // the chrome may name it. It must never call the app a "preview" or bake
+    // the app host into copy — the links own the destination.
     for (const locale of [
       "en", "zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id",
       "fr", "de", "ca", "hi", "tr", "it", "pl", "ar",
     ]) {
       const values = Object.values(getChrome(locale)).join("\n");
       expect(values, `${locale} chrome`).not.toContain("app.codewhale.net");
-      expect(values, `${locale} chrome`).not.toMatch(/Create account|Sign up|App preview/);
+      expect(values, `${locale} chrome`).not.toMatch(/App preview/);
     }
     expect(EN_CHROME.footerLicense).toBe("MIT license");
   });
@@ -94,15 +94,13 @@ describe("public website copy contracts", () => {
     // the internal "source candidate" / "provider routes" vocabulary.
     expect(EN_HOME.sourceCandidate).toBe("Unreleased");
     expect(EN_HOME.currentSource).toBe("Source");
-    expect(homepage).toContain("fill(d.providerRoutes, { count: providerCount })");
-    expect(EN_HOME.providerRoutes).toBe("{count} providers");
-    for (const locale of ["zh", "ja", "ru", "pt-BR"]) {
-      expect(getHome(locale).providerRoutes, `${locale} providerRoutes`).toContain("{count}");
-      expect(getHome(locale).sourceCandidate.trim().length).toBeGreaterThan(0);
-    }
+    // A development-source route count is not a released-provider total.
+    expect(homepage).not.toContain("<span>{providerRoutes}</span>");
     expect(homepage).not.toContain("releases/tag/v${version}");
     expect(homepage).not.toMatch(/Codewhale v0\.9\.1|\"v0\.9\.1 \u00b7/);
-    expect(install).toContain("publishedRelease.tag");
+    // Installation examples come from the verified guide, never the candidate version.
+    expect(install).toContain("INSTALL_GUIDE.chunks");
+    expect(install).not.toContain("facts.version");
     expect(install).not.toContain('"v0.8.x"');
     expect(install).not.toContain("cnbInstall(facts.version");
     expect(community).toContain("credit (unreleased)");
@@ -122,33 +120,6 @@ describe("public website copy contracts", () => {
     expect(community).not.toContain("<Ticker");
     expect(community).not.toContain("<StatGrid");
     expect(community).not.toContain("Today's dispatch");
-  });
-
-  it("keeps the models settings preview read-only, repository-driven, and responsive", () => {
-    const models = pageSource("models/page.tsx");
-    const styles = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-
-    expect(models).toContain('className="portal-section settings-preview"');
-    expect(models).toContain('isZh ? "只读设置预览" : "Read-only settings preview"');
-    expect(models).toContain("facts.defaultModel");
-    expect(models).toContain("facts.providers.map((provider)");
-    expect(models).toContain('href={p("/docs/configuration")}');
-    expect(models).toContain("does not change your local configuration");
-    expect(models).toContain("不会更改你的本地配置");
-    expect(models).toContain('className="settings-registry-marker"');
-    expect(models).not.toContain('className="settings-status-dot"');
-    expect(models).not.toMatch(/Save settings|Save changes|Apply changes|Create account|Sign up/);
-
-    expect(styles).toContain("--settings-state-active: var(--indigo);");
-    expect(styles).toContain("--settings-state-ready: var(--jade);");
-    expect(styles).toContain("--settings-state-muted: var(--ink-mute);");
-    expect(styles).toMatch(/\.settings-shell\s*\{[^}]*width: min\(100%, 800px\);/s);
-    expect(styles).toMatch(/\.settings-shell\s*\{[^}]*grid-template-columns: 188px minmax\(0, 1fr\);/s);
-    expect(styles).toMatch(/\.settings-preview a:focus-visible\s*\{[^}]*outline:/s);
-    expect(styles).toMatch(/\.settings-preview a\s*\{[^}]*min-height: 44px;/s);
-    expect(styles).toMatch(/\.settings-provider-code\s*\{[^}]*overflow-wrap: anywhere;/s);
-    expect(styles).toMatch(/\.settings-registry-marker\s*\{[^}]*background: var\(--settings-state-muted\);/s);
-    expect(styles).toMatch(/@media \(max-width: 720px\)[\s\S]*?\.settings-shell\s*\{[^}]*grid-template-columns: 1fr;/);
   });
 
   it("keeps current-release website credits in exact changelog parity", () => {

@@ -7,10 +7,12 @@
 //! with path validation to prevent escaping the workspace boundary.
 
 use super::diff_format::make_unified_diff;
+use super::rust_format::{NORMALIZED_NOTE, normalize_edit};
 use super::spec::{
     ApprovalRequirement, RichToolResult, ToolCapability, ToolContext, ToolError, ToolResult,
     ToolSpec, lsp_diagnostics_for_paths, optional_str, optional_u64, required_str,
 };
+use super::syntax_check::guard_edit;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -435,9 +437,26 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
 /// result, which would read as "the file is empty" and invite the model to
 /// probe siblings.
 pub(crate) fn enforce_read_denylist(path: &Path, tool: &str) -> Result<(), ToolError> {
-    match crate::sandbox::read_guard::active().check(path) {
+    // Expand the user's home before authorization, retaining the spelling they
+    // supplied in every denial. This shares the file tools' path resolution;
+    // expansion grants no additional access and never exposes a symlink target.
+    let home_path = path
+        .to_str()
+        .map(super::spec::resolve_home_path)
+        .transpose()?
+        .flatten();
+    if home_path
+        .as_deref()
+        .is_some_and(is_codewhale_credential_path)
+    {
+        return Err(ToolError::permission_denied(format!(
+            "{tool} cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection"
+        )));
+    }
+    match crate::sandbox::read_guard::active().check(home_path.as_deref().unwrap_or(path)) {
         Ok(()) => Ok(()),
-        Err(denial) => {
+        Err(mut denial) => {
+            denial.requested = path.to_path_buf();
             let message = denial.message(tool);
             tracing::warn!(
                 target: "codewhale::sandbox::read_guard",
@@ -460,11 +479,21 @@ pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
         return true;
     }
 
-    let roots = [
-        codewhale_config::codewhale_home(),
-        codewhale_config::legacy_deepseek_home(),
-    ];
-    for root in roots.into_iter().flatten() {
+    // `CODEWHALE_HOME` relocates the *runtime* home; it is not a licence to read
+    // the user's real `~/.codewhale/config.toml`. `codewhale_home()` returns the
+    // override when one is set, so relying on it alone left the ambient store
+    // unguarded whenever that variable pointed elsewhere. Keep the ambient root
+    // in the set alongside the override, mirroring the deliberately
+    // unconditional `~/.codewhale/secrets` entry in `sandbox::read_guard`
+    // (read_guard.rs:481-487). `legacy_deepseek_home()` is already ambient by
+    // construction (paths/src/lib.rs:183-185), so it needs no counterpart.
+    let mut roots: Vec<PathBuf> = Vec::with_capacity(3);
+    roots.extend(codewhale_config::codewhale_home().ok());
+    roots.extend(codewhale_config::legacy_deepseek_home().ok());
+    roots.extend(
+        codewhale_paths::user_home().map(|home| home.join(codewhale_config::CODEWHALE_APP_DIR)),
+    );
+    for root in roots {
         if is_config_or_backup(&candidate, &root.join(codewhale_config::CONFIG_FILE_NAME)) {
             return true;
         }
@@ -480,20 +509,41 @@ pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
 
 // === small-contract-compatible primitive implementation helpers ===
 
-const READ_MAX_LINES: usize = 2_000;
-const READ_MAX_BYTES: usize = 50 * 1024;
+/// Default model-visible byte budget for one `read` call.
+///
+/// Bytes are the *only* default bound: there is no line cap, so an ordinary
+/// source or prose file comes back whole in one call instead of being paged
+/// at some arbitrary line count with most of the budget unspent.
+const READ_DEFAULT_MAX_BYTES: usize = 100_000;
+/// Hard ceiling on a budget the *model* asks for with `max_bytes`. A larger
+/// request clamps down to this; it is never an error.
+const READ_REQUEST_MAX_BYTES: usize = 500_000;
+/// Outer bound on the operator's process-wide `[workshop] read_result_max_bytes`
+/// override, and therefore on any read result.
 const READ_RESULT_ABSOLUTE_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-fn effective_read_max_bytes() -> usize {
-    crate::tools::large_output_router::WorkshopConfig::active_read_result_max_bytes()
-        .map(|n| n.clamp(READ_MAX_BYTES, READ_RESULT_ABSOLUTE_MAX_BYTES))
-        .unwrap_or(READ_MAX_BYTES)
-}
-
-fn effective_read_max_lines() -> usize {
-    match crate::tools::large_output_router::WorkshopConfig::active_read_result_max_bytes() {
-        Some(bytes) if bytes > READ_MAX_BYTES => (bytes / 80).clamp(READ_MAX_LINES, 20_000),
-        _ => READ_MAX_LINES,
+/// Resolve the byte budget for one `read` call from the three layers that can
+/// set it, highest wins:
+///
+/// 1. **The model's own request** — `max_bytes` on this call, clamped to
+///    [`READ_REQUEST_MAX_BYTES`] (500 000).
+/// 2. **The operator's process-wide override** — `[workshop]
+///    read_result_max_bytes`, clamped into
+///    `[READ_DEFAULT_MAX_BYTES, READ_RESULT_ABSOLUTE_MAX_BYTES]` (2 MiB).
+/// 3. **The default** — [`READ_DEFAULT_MAX_BYTES`] (100 000).
+///
+/// The result is `max(1, 2-or-3)`. Both raising layers can only raise: a model
+/// request never shrinks a budget the operator widened, and an operator who
+/// widened it process-wide keeps that floor when the model asks for less.
+fn effective_read_max_bytes(requested: Option<usize>) -> usize {
+    let baseline =
+        crate::tools::large_output_router::WorkshopConfig::active_read_result_max_bytes()
+            .map_or(READ_DEFAULT_MAX_BYTES, |configured| {
+                configured.clamp(READ_DEFAULT_MAX_BYTES, READ_RESULT_ABSOLUTE_MAX_BYTES)
+            });
+    match requested {
+        Some(requested) => baseline.max(requested.min(READ_REQUEST_MAX_BYTES)),
+        None => baseline,
     }
 }
 
@@ -533,6 +583,22 @@ async fn acquire_file_mutation(
     } else {
         Ok(lock.lock_owned().await)
     }
+}
+
+/// Atomic workspace write on the blocking pool: temp create plus fsync plus
+/// rename (and a retry loop on Windows) must not park a Tokio worker
+/// (blocking-call convention, #6149). Error shape matches the historical
+/// inline call.
+async fn run_blocking_write_atomic(path: &Path, contents: Vec<u8>) -> Result<(), ToolError> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::utils::write_atomic_workspace(&path, &contents).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to write {}: {e}", path.display()))
+        })
+    })
+    .await
+    .map_err(|e| ToolError::execution_failed(format!("File write task: {e}")))??;
+    Ok(())
 }
 
 fn check_file_operation_cancelled(context: &ToolContext) -> Result<(), ToolError> {
@@ -586,7 +652,7 @@ fn reject_primitive_unknown(input: &Value, tool: &str, allowed: &[&str]) -> Resu
     )))
 }
 
-fn contract_line_number(input: &Value, key: &str) -> Result<Option<usize>, ToolError> {
+fn contract_nonnegative_int(input: &Value, key: &str) -> Result<Option<usize>, ToolError> {
     let Some(value) = input.get(key) else {
         return Ok(None);
     };
@@ -617,15 +683,18 @@ fn contract_format_size(bytes: usize) -> String {
 struct ContractReadWindow {
     content: String,
     shown_lines: usize,
-    truncated_by_bytes: bool,
-    truncated_by_lines: bool,
+    truncated: bool,
     first_line_too_large: bool,
 }
 
-/// Retain only complete lines from the head, stopping at its own independent
-/// line and UTF-8 byte budgets. A terminal newline is content but does not add
-/// a phantom line to the truncation counter.
-fn contract_read_window(content: &str) -> ContractReadWindow {
+/// Retain only complete lines from the head, stopping at `max_bytes`. A
+/// terminal newline is content but does not add a phantom line to the
+/// truncation counter.
+///
+/// The byte budget is the single bound. There is no line cap to fragment a
+/// file that fits: every retained line costs at least its own newline, so
+/// `max_bytes` already bounds the line count as well.
+fn contract_read_window(content: &str, max_bytes: usize) -> ContractReadWindow {
     let mut lines = if content.is_empty() {
         Vec::new()
     } else {
@@ -634,35 +703,29 @@ fn contract_read_window(content: &str) -> ContractReadWindow {
     if content.ends_with('\n') {
         let _ = lines.pop();
     }
-    let max_bytes = effective_read_max_bytes();
-    let max_lines = effective_read_max_lines();
     if lines.first().is_some_and(|line| line.len() > max_bytes) {
         return ContractReadWindow {
             content: String::new(),
             shown_lines: 0,
-            truncated_by_bytes: true,
-            truncated_by_lines: false,
+            truncated: true,
             first_line_too_large: true,
         };
     }
 
-    if lines.len() <= max_lines && content.len() <= max_bytes {
+    if content.len() <= max_bytes {
         return ContractReadWindow {
             content: content.to_string(),
             shown_lines: lines.len(),
-            truncated_by_bytes: false,
-            truncated_by_lines: false,
+            truncated: false,
             first_line_too_large: false,
         };
     }
 
     let mut kept = Vec::new();
     let mut bytes = 0usize;
-    let mut truncated_by_bytes = false;
-    for line in lines.iter().take(max_lines) {
+    for line in &lines {
         let next = line.len() + usize::from(!kept.is_empty());
         if bytes.saturating_add(next) > max_bytes {
-            truncated_by_bytes = true;
             break;
         }
         kept.push(*line);
@@ -672,8 +735,7 @@ fn contract_read_window(content: &str) -> ContractReadWindow {
     ContractReadWindow {
         content: kept.join("\n"),
         shown_lines,
-        truncated_by_bytes,
-        truncated_by_lines: !truncated_by_bytes,
+        truncated: true,
         first_line_too_large: false,
     }
 }
@@ -688,10 +750,11 @@ impl ReadFileTool {
         input: Value,
         context: &ToolContext,
     ) -> Result<RichToolResult, ToolError> {
-        reject_primitive_unknown(&input, "read", &["path", "offset", "limit"])?;
+        reject_primitive_unknown(&input, "read", &["path", "offset", "limit", "max_bytes"])?;
         let path_str = required_str(&input, "path")?;
-        let offset = contract_line_number(&input, "offset")?;
-        let limit = contract_line_number(&input, "limit")?;
+        let offset = contract_nonnegative_int(&input, "offset")?;
+        let limit = contract_nonnegative_int(&input, "limit")?;
+        let max_bytes = effective_read_max_bytes(contract_nonnegative_int(&input, "max_bytes")?);
         // S1/F2: check the caller's own spelling BEFORE `resolve_path`
         // canonicalizes it. A workspace symlink `notes.txt` -> a denied vault
         // file resolves to the secret's absolute location, and a denial raised
@@ -710,9 +773,13 @@ impl ReadFileTool {
         }
         enforce_read_denylist(&file_path, "read")?;
         check_file_operation_cancelled(context)?;
-        let bytes = fs::read(&file_path).map_err(|error| {
+        let bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Failed to read {}: {error}", file_path.display()))
         })?;
+        // #6283: every read response carries the file's byte size, line
+        // count, and truncation flag so the caller can page deliberately
+        // instead of discovering a huge file one window at a time.
+        let size_bytes = bytes.len();
         check_file_operation_cancelled(context)?;
         if let Some(mime_type) = primitive_image_mime(&bytes) {
             let prepared = crate::image_attach::prepare_tool_image_bytes(&bytes, mime_type);
@@ -744,41 +811,54 @@ impl ReadFileTool {
             None => available,
         };
         let selected_content = selected.join("\n");
-        let window = contract_read_window(&selected_content);
+        let window = contract_read_window(&selected_content, max_bytes);
+        // Truncated means the file holds more than this response shows:
+        // either the byte budget cut the window, or a bounded range stopped
+        // before EOF. A whole file that fits is never truncated.
+        let truncated =
+            window.truncated || limit.is_some() && start + selected.len() < all_lines.len();
         let first_display = start + 1;
         let mut output = if window.first_line_too_large {
             let size = selected.first().map_or(0, |line| line.len());
             format!(
-                "[Line {first_display} is {}, exceeds {} limit. Use bash: sed -n '{first_display}p' {path_str} | head -c {READ_MAX_BYTES}]",
-                contract_format_size(size),
-                contract_format_size(READ_MAX_BYTES)
+                "[Line {first_display} is {}, exceeds the {max_bytes}-byte output budget for this call. Use bash: sed -n '{first_display}p' {path_str} | head -c {max_bytes}]",
+                contract_format_size(size)
             )
         } else {
             window.content
         };
 
-        if !window.first_line_too_large && (window.truncated_by_bytes || window.truncated_by_lines)
-        {
+        if !window.first_line_too_large && window.truncated {
             let last_display = first_display + window.shown_lines.saturating_sub(1);
             let next_offset = last_display + 1;
-            if window.truncated_by_bytes {
-                output.push_str(&format!(
-                    "\n\n[Showing lines {first_display}-{last_display} of {} (50KB limit). Use offset={next_offset} to continue.]",
-                    all_lines.len()
-                ));
-            } else {
-                output.push_str(&format!(
-                    "\n\n[Showing lines {first_display}-{last_display} of {}. Use offset={next_offset} to continue.]",
-                    all_lines.len()
-                ));
+            // Continuation must be exact: name the next offset, and when the
+            // caller asked for a bounded range, the part of that range still
+            // unread. `max_bytes` is only offered while it can still go up.
+            let mut hint = format!("offset={next_offset}");
+            if let Some(limit) = limit {
+                let remaining = limit.saturating_sub(window.shown_lines);
+                if remaining > 0 {
+                    hint.push_str(&format!(" limit={remaining}"));
+                }
             }
+            let raise = if max_bytes < READ_REQUEST_MAX_BYTES {
+                format!(", or max_bytes up to {READ_REQUEST_MAX_BYTES} to read more per call")
+            } else {
+                String::new()
+            };
+            output.push_str(&format!(
+                "\n\n[Showing lines {first_display}-{last_display} of {} ({} total, {max_bytes}-byte output budget). Use {hint} to continue{raise}.]",
+                all_lines.len(),
+                contract_format_size(size_bytes)
+            ));
         } else if limit.is_some() {
             let consumed = selected.len();
             if start + consumed < all_lines.len() {
                 let remaining = all_lines.len() - (start + consumed);
                 let next_offset = start + consumed + 1;
                 output.push_str(&format!(
-                    "\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+                    "\n\n[{remaining} more lines in file ({} total). Use offset={next_offset} to continue.]",
+                    contract_format_size(size_bytes)
                 ));
             }
         }
@@ -789,7 +869,17 @@ impl ReadFileTool {
         context.note_file_read(&file_path);
         Ok(RichToolResult::plain(
             ToolResult::success(output).with_metadata(json!({
-                "evidence_routing": "inline"
+                "evidence_routing": "inline",
+                // The budget this call actually enforced. The context
+                // compactor honors it so an already-bounded read is never
+                // truncated a second time on its way into the conversation.
+                "read_budget_bytes": max_bytes,
+                // #6283: paging contract. `size` is the whole file in bytes,
+                // `line_count` its total lines, `truncated` whether the file
+                // holds more than this response shows.
+                "size": size_bytes,
+                "truncated": truncated,
+                "line_count": all_lines.len()
             })),
         ))
     }
@@ -815,7 +905,7 @@ impl ToolSpec for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (relative to workspace or absolute). Alias: `file_path`"
+                    "description": "Path to the file (relative to workspace, absolute, or ~/ home-relative). Alias: `file_path`"
                 },
                 "start_line": {
                     "type": "integer",
@@ -872,16 +962,38 @@ impl ToolSpec for ReadFileTool {
             return Ok(result);
         }
         if is_image_for_ocr(&file_path) {
-            return read_image_via_ocr(&file_path, path_str);
+            // OCR shells out to tesseract (or runs a Vision pass): the blocking
+            // subprocess call stays on the blocking pool (blocking-call
+            // convention, #6149).
+            let file_path = file_path.clone();
+            let requested_path = path_str.to_string();
+            return tokio::task::spawn_blocking(move || {
+                read_image_via_ocr(&file_path, &requested_path)
+            })
+            .await
+            .map_err(|e| ToolError::execution_failed(format!("Image OCR task: {e}")))?;
         }
 
         // Open before parameter parsing so a missing file keeps the
         // historical "Failed to read …" error shape regardless of the other
-        // arguments.
-        let file = fs::File::open(&file_path).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
-        })?;
-        let file_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX);
+        // arguments. The open and size probe run on the blocking pool —
+        // tool handlers execute on the Tokio runtime (blocking-call
+        // convention, #6149).
+        let file_bytes = tokio::task::spawn_blocking({
+            let file_path = file_path.clone();
+            move || {
+                let file = fs::File::open(&file_path).map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {}",
+                        file_path.display(),
+                        e
+                    ))
+                })?;
+                Ok::<_, ToolError>(file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("File open task: {e}")))??;
 
         let explicit_range = input
             .get("start_line")
@@ -892,8 +1004,7 @@ impl ToolSpec for ReadFileTool {
         // explicit range — otherwise an explicit `start_line = 5` on a
         // tiny file would silently ignore the request.
         if !explicit_range && file_bytes <= SMALL_FILE_BYTES as u64 {
-            drop(file);
-            let contents = fs::read_to_string(&file_path).map_err(|e| {
+            let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to read {}: {}",
                     file_path.display(),
@@ -971,28 +1082,44 @@ impl ToolSpec for ReadFileTool {
         // Bounded read for ranged/large files: skip and take lines through a
         // BufReader instead of materializing the whole file. The stream still
         // runs to EOF so the total line count and whole-file UTF-8 validation
-        // match the historical read_to_string behavior.
-        let (window, total_lines) =
-            read_window_streaming(file, start_line, max_lines).map_err(|e| {
-                ToolError::execution_failed(format!(
-                    "Failed to read {}: {}",
-                    file_path.display(),
-                    e
-                ))
-            })?;
+        // match the historical read_to_string behavior. Open, stream, and hash
+        // all run on the blocking pool (blocking-call convention, #6149).
+        let (window, total_lines, hash) = tokio::task::spawn_blocking({
+            let file_path = file_path.clone();
+            move || {
+                let file = fs::File::open(&file_path).map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {}",
+                        file_path.display(),
+                        e
+                    ))
+                })?;
+                let (window, total_lines) = read_window_streaming(file, start_line, max_lines)
+                    .map_err(|e| {
+                        ToolError::execution_failed(format!(
+                            "Failed to read {}: {}",
+                            file_path.display(),
+                            e
+                        ))
+                    })?;
+                // The window is a slice; the guard needs the whole file. A
+                // second streaming pass digests the rest without ever
+                // materializing it. A failure here only costs the guard — the
+                // read itself already succeeded, so the window is still
+                // returned, just without a hash to pass back to `edit`.
+                // Special files are skipped: reopening a FIFO or device can
+                // block indefinitely (or re-consume a one-shot stream), and a
+                // stream has no stable content an edit guard could pin.
+                let hash = match fs::metadata(&file_path) {
+                    Ok(meta) if meta.is_file() => hash_file_streaming(&file_path).ok(),
+                    _ => None,
+                };
+                Ok::<_, ToolError>((window, total_lines, hash))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("File read task: {e}")))??;
         context.note_file_read(&file_path);
-
-        // The window is a slice; the guard needs the whole file. A second
-        // streaming pass digests the rest without ever materializing it. A
-        // failure here only costs the guard — the read itself already
-        // succeeded, so the window is still returned, just without a hash to
-        // pass back to `edit`. Special files are skipped: reopening a FIFO or
-        // device can block indefinitely (or re-consume a one-shot stream),
-        // and a stream has no stable content an edit guard could pin.
-        let hash = match fs::metadata(&file_path) {
-            Ok(meta) if meta.is_file() => hash_file_streaming(&file_path).ok(),
-            _ => None,
-        };
 
         // `start_line > total_lines` is not an error — it lets the model
         // page past the end without raising. Returns an empty-content
@@ -1190,18 +1317,18 @@ fn render_line_window(
             // combination can ever reveal the elided middle, so the note must
             // not pretend otherwise — name the escape hatch that works.
             output.push_str(&format!(
-                "\n[TRUNCATED] Line {shown_first} alone exceeds 50KB; showing its head + tail. No line window can reveal the middle of one line — use a searched shell slice when needed.\n"
+                "\n[TRUNCATED] Line {shown_first} alone exceeds the {visible_bytes}-byte output budget; showing its head + tail. No line window can reveal the middle of one line — use a searched shell slice when needed.\n"
             ));
         } else {
             let narrower = (shown_last - shown_first).div_ceil(2).max(1);
             output.push_str(&format!(
-                "\n[TRUNCATED] The selected range exceeded 50KB; showing head + tail of lines {shown_first}-{shown_last}. Re-read narrower windows to see the middle, e.g. offset={shown_first} limit={narrower}, then advance offset.\n"
+                "\n[TRUNCATED] The selected range exceeded the {visible_bytes}-byte output budget; showing head + tail of lines {shown_first}-{shown_last}. Re-read narrower windows to see the middle, e.g. offset={shown_first} limit={narrower}, then advance offset.\n"
             ));
         }
     }
     output.push_str("</file>");
 
-    // The file tool self-bounds at 50 KiB and carries its own continuation
+    // The file tool self-bounds at its own byte budget and carries its own continuation
     // contract (`next_start_line`), so the large-output spillover envelope
     // must never re-wrap a read result with a second, weaker truncation.
     ToolResult::success(output).with_metadata(json!({
@@ -1218,20 +1345,20 @@ fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, T
 }
 
 /// Detect an existing PDF by extension or by sniffing `%PDF` magic bytes.
-fn is_pdf(path: &Path) -> Result<bool, ToolError> {
+async fn is_pdf(path: &Path) -> Result<bool, ToolError> {
     let extension_matches = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
-    let mut file = fs::File::open(path).map_err(|error| {
+    let mut file = tokio::fs::File::open(path).await.map_err(|error| {
         ToolError::execution_failed(format!("Failed to read {}: {error}", path.display()))
     })?;
     if extension_matches {
         return Ok(true);
     }
     let mut buf = [0u8; 4];
-    use std::io::Read;
-    Ok(file.read_exact(&mut buf).is_ok() && &buf == b"%PDF")
+    use tokio::io::AsyncReadExt;
+    Ok(file.read_exact(&mut buf).await.is_ok() && &buf == b"%PDF")
 }
 
 fn is_image_for_ocr(path: &Path) -> bool {
@@ -1316,7 +1443,7 @@ async fn read_pdf_if_detected(
     pages: Option<&str>,
     command: super::pdf::PdfTextCommand<'_>,
 ) -> Result<Option<ToolResult>, ToolError> {
-    if !is_pdf(path)? {
+    if !is_pdf(path).await? {
         return Ok(None);
     }
     // Validate the `pages` spec once, up front, so both extractor paths
@@ -1368,16 +1495,16 @@ impl WriteFileTool {
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
 
-        let existed_before = file_path.exists();
+        let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_bytes = if existed_before {
-            fs::read(&file_path).unwrap_or_default()
+            tokio::fs::read(&file_path).await.unwrap_or_default()
         } else {
             Vec::new()
         };
         let prior_contents = String::from_utf8_lossy(&prior_bytes);
 
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
                 ToolError::execution_failed(format!(
                     "Failed to create directory {}: {error}",
                     parent.display()
@@ -1385,26 +1512,34 @@ impl WriteFileTool {
             })?;
         }
         check_file_operation_cancelled(context)?;
-        crate::utils::write_atomic_workspace(&file_path, file_content.as_bytes()).map_err(
-            |error| {
-                ToolError::execution_failed(format!(
-                    "Failed to write {}: {error}",
-                    file_path.display()
-                ))
-            },
+        // Preserve the existing file's line-ending style on overwrite (see
+        // `preserve_prior_line_endings`); otherwise a CRLF (Windows) file is
+        // silently rewritten with LF line endings.
+        let mut written = preserve_prior_line_endings(file_content, &prior_contents);
+        guard_edit(
+            &file_path,
+            path_str,
+            existed_before.then(|| prior_contents.as_ref()),
+            &written,
         )?;
+        if existed_before
+            && let Some(normalized) = normalize_edit(&file_path, &prior_contents, &written).await
+        {
+            written = normalized;
+        }
+        run_blocking_write_atomic(&file_path, written.clone().into_bytes()).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
 
         let outcome = if existed_before { "updated" } else { "created" };
-        let utf16_units = file_content.encode_utf16().count();
+        let utf16_units = written.encode_utf16().count();
         Ok(contract_mutation_result(
             context,
             &file_path,
             path_str,
             prior_contents.as_ref(),
-            file_content,
+            &written,
             outcome,
             format!("Successfully wrote {utf16_units} bytes to {path_str}"),
         )
@@ -1472,9 +1607,11 @@ impl ToolSpec for WriteFileTool {
 
         // Snapshot the existing contents (if any) before we overwrite — used
         // to render an inline diff in the tool result.
-        let existed_before = file_path.exists();
+        let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_contents = if existed_before {
-            fs::read_to_string(&file_path).unwrap_or_default()
+            tokio::fs::read_to_string(&file_path)
+                .await
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -1495,7 +1632,7 @@ impl ToolSpec for WriteFileTool {
 
         // Create parent directories if needed
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to create directory {}: {}",
                     parent.display(),
@@ -1504,17 +1641,32 @@ impl ToolSpec for WriteFileTool {
             })?;
         }
 
-        crate::utils::write_atomic_workspace(&file_path, file_content.as_bytes()).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
-        })?;
+        // Preserve the existing file's line-ending style on overwrite (see
+        // `preserve_prior_line_endings`); a full `write_file` over a CRLF
+        // (Windows) file otherwise silently rewrites every line ending to LF.
+        let mut written = preserve_prior_line_endings(file_content, &prior_contents);
+
+        guard_edit(
+            &file_path,
+            path_str,
+            existed_before.then(|| prior_contents.as_ref()),
+            &written,
+        )?;
+        if existed_before
+            && let Some(normalized) = normalize_edit(&file_path, &prior_contents, &written).await
+        {
+            written = normalized;
+        }
+
+        run_blocking_write_atomic(&file_path, written.clone().into_bytes()).await?;
         context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
-        let diff = make_unified_diff(&display, &prior_contents, file_content);
+        let diff = make_unified_diff(&display, &prior_contents, &written);
         let summary = if existed_before {
-            format!("Wrote {} bytes to {}", file_content.len(), display)
+            format!("Wrote {} bytes to {}", written.len(), display)
         } else {
-            format!("Created {} ({} bytes)", display, file_content.len())
+            format!("Created {} ({} bytes)", display, written.len())
         };
         let body = if diff.is_empty() {
             format!("{summary}\n(no changes)")
@@ -1533,7 +1685,7 @@ impl ToolSpec for WriteFileTool {
         let outcome = if existed_before { "updated" } else { "created" };
         // Keep the execution-owned receipt workspace-relative even though the
         // legacy model-facing output above retains its resolved-path wording.
-        let receipt_diff = make_unified_diff(path_str, &prior_contents, file_content);
+        let receipt_diff = make_unified_diff(path_str, &prior_contents, &written);
         Ok(ToolResult::success(full_body).with_metadata(json!({
             "event": "file.mutation",
             "mutation": {
@@ -1582,6 +1734,21 @@ fn restore_contract_line_endings(text: &str, ending: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Rewrite `content` to match the line-ending style of an existing file's
+/// `prior` content, so a full-file overwrite (`write_file` / contract `write`)
+/// does not silently flip a CRLF (Windows) file to LF — the same policy
+/// `edit_file` applies. A brand-new file (no prior content) is returned
+/// verbatim: there is no style to preserve.
+fn preserve_prior_line_endings(content: &str, prior: &str) -> String {
+    if prior.is_empty() {
+        return content.to_string();
+    }
+    restore_contract_line_endings(
+        &normalize_contract_line_endings(content),
+        contract_line_ending(prior),
+    )
 }
 
 /// Fallback matching view used only after a literal match fails. It follows
@@ -1907,17 +2074,18 @@ impl EditFileTool {
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
 
-        fs::OpenOptions::new()
+        tokio::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&file_path)
+            .await
             .map_err(|error| {
                 ToolError::execution_failed(format!(
                     "Could not edit file {path_str}: target must be readable and writable ({error})"
                 ))
             })?;
         check_file_operation_cancelled(context)?;
-        let raw_bytes = fs::read(&file_path).map_err(|error| {
+        let raw_bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Could not edit file {path_str}: {error}"))
         })?;
         check_file_operation_cancelled(context)?;
@@ -1929,16 +2097,13 @@ impl EditFileTool {
         let normalized = normalize_contract_line_endings(without_bom);
         let updated = apply_contract_edits(&normalized, &edits, path_str)?;
         check_file_operation_cancelled(context)?;
-        let final_content = format!("{bom}{}", restore_contract_line_endings(&updated, ending));
+        let mut final_content = format!("{bom}{}", restore_contract_line_endings(&updated, ending));
+        guard_edit(&file_path, path_str, Some(&raw), &final_content)?;
+        if let Some(normalized) = normalize_edit(&file_path, &raw, &final_content).await {
+            final_content = normalized;
+        }
 
-        crate::utils::write_atomic_workspace(&file_path, final_content.as_bytes()).map_err(
-            |error| {
-                ToolError::execution_failed(format!(
-                    "Failed to write {}: {error}",
-                    file_path.display()
-                ))
-            },
-        )?;
+        run_blocking_write_atomic(&file_path, final_content.clone().into_bytes()).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
@@ -2050,7 +2215,7 @@ impl ToolSpec for EditFileTool {
         let file_path = context.resolve_path(path_str)?;
         context.require_fresh_file_read(&file_path, path_str)?;
 
-        let contents = fs::read_to_string(&file_path).map_err(|e| {
+        let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
         })?;
 
@@ -2105,9 +2270,15 @@ impl ToolSpec for EditFileTool {
                             // missed; show the first lines of the search text
                             // so it can compare against the file's contents.
                             return Err(ToolError::execution_failed(format!(
-                                "Search string not found in {}. The search text starts with:\n{}\nRecovery: call File with action=\"read\" path=\"{path_str}\" to inspect the current contents, then retry with a search string copied from the file.",
+                                "Search string not found in {}. The search text starts with:\n{}\n{}Recovery: retry with the search copied from the lines above, or call File with action=\"read\" path=\"{path_str}\" to inspect the current contents.",
                                 file_path.display(),
                                 preview_search_for_error(search),
+                                nearest_match_hint(
+                                    normalized_contents.as_ref(),
+                                    normalized_search.as_ref(),
+                                    crlf_positions.is_some(),
+                                    search.contains('\r'),
+                                ),
                             )));
                         }
                         [(start, end)] => ((*start, *end), Some("punctuation")),
@@ -2170,15 +2341,25 @@ impl ToolSpec for EditFileTool {
             ));
         }
 
-        crate::utils::write_atomic_workspace(&file_path, updated.as_bytes()).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
-        })?;
+        guard_edit(&file_path, path_str, Some(&contents), &updated)?;
+
+        // #6205 — normalize after the syntax gate so the next turn's anchors
+        // match the bytes on disk rather than the text the model emitted.
+        let normalized_formatting = match normalize_edit(&file_path, &contents, &updated).await {
+            Some(normalized) => {
+                updated = normalized;
+                true
+            }
+            None => false,
+        };
+
+        run_blocking_write_atomic(&file_path, updated.clone().into_bytes()).await?;
 
         // #5209 — never emit a success receipt unless the on-disk write
         // actually applied. A fabricated "Replaced 1 occurrence" + diff is
         // worse than a hard error: models trust it and re-edit the same
         // span 3–5× before noticing nothing changed.
-        let on_disk = fs::read_to_string(&file_path).map_err(|e| {
+        let on_disk = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             ToolError::execution_failed(format!(
                 "Failed to verify write to {}: {}",
                 file_path.display(),
@@ -2205,7 +2386,12 @@ impl ToolSpec for EditFileTool {
             Some(other) => other,
             None => "",
         };
-        let summary = format!("Replaced 1 occurrence in {display}{fuzz_note}");
+        let format_note = if normalized_formatting {
+            NORMALIZED_NOTE
+        } else {
+            ""
+        };
+        let summary = format!("Replaced 1 occurrence in {display}{fuzz_note}{format_note}");
         let body = if diff.is_empty() {
             format!("{summary}\n(no textual changes)")
         } else {
@@ -2388,6 +2574,130 @@ fn preprocessor_directive(line: &str) -> Option<&str> {
 /// Build a short, line-truncated preview of a (possibly very long) search
 /// payload for error messages, so the model can compare what it searched for
 /// against the file's actual contents without the error message ballooning.
+/// The file region most like a search that did not match (#6542), with
+/// 1-based line numbers and a note on whitespace / line-ending differences,
+/// so the next edit can copy the real text instead of re-reading the file.
+///
+/// Known limitation: candidates are anchored on the search's first
+/// non-blank line, so a search whose first line is also wrong may report
+/// no similar region even when later lines exist in the file.
+fn nearest_match_hint(
+    contents: &str,
+    search: &str,
+    file_has_crlf: bool,
+    search_has_cr: bool,
+) -> String {
+    const MAX_SCANNED_LINES: usize = 50_000;
+    const MAX_EXCERPT_LINES: usize = 12;
+    const MAX_EXCERPT_LINE_LEN: usize = 200;
+    const MIN_SCORE: f32 = 0.5;
+
+    let line_ratio = |a: &str, b: &str| -> f32 {
+        let (a, b) = (a.trim(), b.trim());
+        if a == b {
+            1.0
+        } else {
+            similar::TextDiff::from_chars(a, b).ratio()
+        }
+    };
+    let file_lines: Vec<&str> = contents.lines().take(MAX_SCANNED_LINES).collect();
+    let search_lines: Vec<&str> = search.lines().collect();
+    let Some(anchor) = search_lines.iter().position(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
+    let window = search_lines.len().min(file_lines.len()).max(1);
+
+    let mut anchors: Vec<(f32, usize)> = file_lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| *index >= anchor && !line.trim().is_empty())
+        .map(|(index, line)| (line_ratio(search_lines[anchor], line), index - anchor))
+        .collect();
+    anchors.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let best = anchors
+        .into_iter()
+        .take(8)
+        .map(|(_, start)| {
+            let end = (start + window).min(file_lines.len());
+            let score = search_lines
+                .iter()
+                .zip(&file_lines[start..end])
+                .map(|(want, have)| line_ratio(want, have))
+                .sum::<f32>()
+                / window as f32;
+            (score, start, end)
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)));
+
+    let mut notes = Vec::new();
+    if search_has_cr && !file_has_crlf {
+        notes.push(
+            "the search contains carriage returns (CRLF) but the file uses LF line endings"
+                .to_string(),
+        );
+    }
+    let Some((score, start, end)) = best.filter(|(score, ..)| *score >= MIN_SCORE) else {
+        let mut hint = String::from("No similar region found in the file.\n");
+        for note in notes {
+            hint.push_str(&format!("Note: {note}.\n"));
+        }
+        return hint;
+    };
+    let region = &file_lines[start..end];
+    let strip_trailing = |lines: &[&str]| -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.trim_end().to_string())
+            .collect()
+    };
+    let collapse = |lines: &[&str]| -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.split_whitespace())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if strip_trailing(region) == strip_trailing(&search_lines) {
+        notes.push("the closest region differs only in trailing whitespace".to_string());
+    } else if collapse(region) == collapse(&search_lines) {
+        let tabs = |lines: &[&str]| lines.iter().any(|line| line.starts_with('\t'));
+        if tabs(region) != tabs(&search_lines) {
+            notes
+                .push("the closest region differs only in whitespace (tabs vs spaces)".to_string());
+        } else {
+            notes.push("the closest region differs only in whitespace".to_string());
+        }
+    }
+    if file_has_crlf {
+        notes.push("the file uses CRLF line endings; LF in the search is fine".to_string());
+    }
+
+    let width = end.to_string().len();
+    let mut hint = format!(
+        "Closest match (lines {}-{}, {:.0}% similar):\n",
+        start + 1,
+        end,
+        score * 100.0
+    );
+    for (offset, line) in region.iter().take(MAX_EXCERPT_LINES).enumerate() {
+        let mut shown: String = line.chars().take(MAX_EXCERPT_LINE_LEN).collect();
+        if line.chars().count() > MAX_EXCERPT_LINE_LEN {
+            shown.push_str("...");
+        }
+        hint.push_str(&format!("{:>width$}\t{shown}\n", start + offset + 1));
+    }
+    if region.len() > MAX_EXCERPT_LINES {
+        hint.push_str(&format!(
+            "... ({} more lines)\n",
+            region.len() - MAX_EXCERPT_LINES
+        ));
+    }
+    for note in notes {
+        hint.push_str(&format!("Note: {note}.\n"));
+    }
+    hint
+}
+
 fn preview_search_for_error(search: &str) -> String {
     const MAX_PREVIEW_LINES: usize = 3;
     const MAX_PREVIEW_LINE_LEN: usize = 80;
@@ -2644,7 +2954,7 @@ impl ToolSpec for ListDirTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Relative path (default: .)"
+                    "description": "Path to inspect (relative to workspace, absolute, or ~/ home-relative; default: .)"
                 }
             },
             "required": []

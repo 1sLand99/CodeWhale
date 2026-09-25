@@ -39,10 +39,26 @@ cat <<EOF
 
 ## Install
 
-### Recommended — npm (one command, both entrypoints)
+### Recommended — official GitHub release
+
+New macOS/Linux install (checksummed binaries from this release):
+
+\`\`\`bash
+curl -fsSL https://codewhale.net/install.sh | CODEWHALE_VERSION="${tag}" sh
+"\$HOME/.local/bin/codewhale" --version
+\`\`\`
+
+For Windows, use the matching installer or archive below. For an existing
+direct install, run \`codewhale update\`; it prints the executable path and
+keeps newer builds. If the install directory is occupied by a different build,
+use the fresh-directory migration in [the installation guide](https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md).
+
+### Secondary packaging — npm and Cargo
 
 \`\`\`bash
 npm install -g codewhale
+# or build from source
+cargo install codewhale-cli --locked
 \`\`\`
 
 The wrapper downloads the matched \`codewhale\` and \`codew\` command assets

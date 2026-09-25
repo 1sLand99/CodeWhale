@@ -9,12 +9,12 @@ use super::turn_loop::{
     requested_sandbox_escalation, sandbox_escalation_denial, workspace_write_carve_out_applies,
 };
 use crate::config::ApiProvider;
-use crate::models::{SystemBlock, Usage};
 use crate::prompts::{
     InstructionSource, PromptSessionContext, system_prompt_flat_text,
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
+use codewhale_models::{SystemBlock, Usage};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -40,13 +40,105 @@ const REPRESENTATIVE_PROJECT_AUTHORITY_BODY: &str = concat!(
 );
 
 #[test]
-fn cloud_code_system_prompt_rejection_is_localized_from_its_semantic_error() {
-    let error = anyhow::Error::new(
-        crate::client::cloud_code::CloudCodeRequestError::SystemPromptUnsupported,
-    );
-    let message = initial_stream_error_user_message("es-419", &error);
-    assert!(message.contains("No se envió nada"), "{message}");
-    assert!(!message.contains("omit non-empty system"), "{message}");
+fn snapshot_notice_precedes_first_provider_call_and_is_owned_by_session() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    let _env = lock_test_env();
+    let root = tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _user_home = EnvVarGuard::set("HOME", root.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", root.path());
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("large.txt"), vec![b'x'; 4096]).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        // A resumed Engine for session-a must not warn again. Session-b in
+        // the same process/workspace must receive its own first-turn notice.
+        for (session_id, expected_notices) in [("session-a", 1), ("session-b", 1), ("session-a", 0)]
+        {
+            let config = Config::default();
+            let client = std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+            let (engine, handle) = Engine::new_with_model_client(
+                EngineConfig {
+                    session_id: Some(session_id.into()),
+                    snapshots_enabled: true,
+                    snapshots_max_workspace_bytes: 1024,
+                    ..deterministic_engine_config(&workspace)
+                },
+                &config,
+                client.clone(),
+            );
+            let events = std::sync::Arc::clone(&handle.rx_event);
+            let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = std::sync::Arc::clone(&observations);
+            client.push_factory(move |_| {
+                let mut events = events.try_write().expect("fixture owns the event receiver");
+                let mut notices = Vec::new();
+                while let Ok(event) = events.try_recv() {
+                    if let Event::SnapshotsDisabled { reason, .. } = event {
+                        notices.push(reason);
+                    }
+                }
+                observed.lock().unwrap().push(notices);
+                canned::simple_text_turn("snapshot fixture done")
+            });
+            let run = tokio::spawn(engine.run());
+            handle
+                .send(external_user_message_op(
+                    "check snapshots",
+                    AppMode::Agent,
+                    &config,
+                ))
+                .await
+                .unwrap();
+            let snapshot =
+                tokio::time::timeout(Duration::from_secs(10), handle.get_session_snapshot())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            // The Engine catches provider panics, so assertions inside the
+            // factory are not a test oracle. Inspect its observations here.
+            {
+                let observed = observations.lock().unwrap();
+                assert_eq!(
+                    observed.len(),
+                    1,
+                    "factory must have recorded an observation"
+                );
+                assert_eq!(
+                    observed[0].len(),
+                    expected_notices,
+                    "notice must precede provider dispatch for this session"
+                );
+                assert!(observed[0].iter().all(|reason| {
+                    // One rendered line: consequence, cause, and the remedy
+                    // that lifts this gate, each stated once.
+                    reason.lines().count() == 1
+                        && reason.contains("Snapshots and /undo are off")
+                        && reason
+                            .matches(crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY)
+                            .count()
+                            == 1
+                }));
+            }
+            assert_eq!(client.call_count(), 1);
+            assert!(
+                serde_json::to_string(&snapshot.messages)
+                    .unwrap()
+                    .contains("snapshot fixture done")
+            );
+            handle.send(Op::Shutdown).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    });
+    // Await the owned blocking post-turn snapshots before restoring test home.
+    drop(runtime);
 }
 
 #[test]
@@ -58,8 +150,38 @@ fn preview_request_error_preserves_non_semantic_context_chain() {
     );
     assert_eq!(
         initial_stream_error_user_message("en", &error),
-        "request preparation failed"
+        "request preparation failed: root cause"
     );
+}
+
+#[test]
+fn initial_stream_failure_preserves_sanitized_context_and_typed_category() {
+    let error = anyhow::Error::new(crate::llm_client::LlmError::InvalidRequest {
+        status: 400,
+        message: "image input is unsupported; api_key=fixture-credential-value".to_string(),
+    })
+    .context("Responses API request failed");
+    let display = initial_stream_error_user_message("en", &error);
+    assert!(
+        display.contains("Responses API request failed"),
+        "{display}"
+    );
+    assert!(display.contains("Invalid request (400)"), "{display}");
+    assert!(display.contains("image input is unsupported"), "{display}");
+    assert!(!display.contains("fixture-credential-value"), "{display}");
+    assert!(display.contains("[redacted]"), "{display}");
+
+    // The real boundary classifies the original error independently of its
+    // expanded display text. Preserve the typed terminal invalid-input result.
+    let policy_message = error.to_string();
+    let mut envelope = crate::error_taxonomy::envelope_for_llm_error(error, policy_message);
+    envelope.message = display;
+    assert_eq!(
+        envelope.category,
+        crate::error_taxonomy::ErrorCategory::InvalidInput
+    );
+    assert!(!envelope.recoverable);
+    assert_eq!(envelope.code, "llm_invalid_request");
 }
 const REPRESENTATIVE_INLINE_INSTRUCTIONS: &str = "REPRESENTATIVE_INLINE_INSTRUCTIONS";
 const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION";
@@ -83,373 +205,477 @@ fn cancellation_wins_at_the_terminal_child_settlement_seam() {
 }
 
 #[tokio::test]
-async fn terminal_barrier_parks_foreground_child_before_flushing_mailbox() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
+async fn terminal_barrier_keeps_healthy_child_and_late_completion_alive() {
+    use std::sync::atomic::Ordering;
     let turn_token = CancellationToken::new();
     let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
-    let foreground_children = Arc::new(ForegroundChildRegistry::new());
+    let children = Arc::new(ForegroundChildRegistry::new());
     let child_token = turn_token.child_token();
-    let registration = foreground_children
-        .register("agent_terminal_barrier", child_token.clone())
-        .expect("foreground child registers before settlement");
-    let parking_signal = registration.parking_signal();
-    let child_settled = Arc::new(AtomicBool::new(false));
-    let child_settled_for_task = Arc::clone(&child_settled);
+    let registration = children
+        .register(child_token.clone(), "agent_healthy")
+        .unwrap();
+    let parking = registration.parking_signal();
+    let (complete_tx, mut complete_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let child = tokio::spawn(async move {
-        child_token.cancelled().await;
-        child_settled_for_task.store(true, Ordering::SeqCst);
+        release_rx.await.unwrap();
+        assert!(!child_token.is_cancelled());
+        complete_tx.send("existing completion inbox").unwrap();
         drop(registration);
     });
-
-    // Detached work is deliberately not registered in the turn barrier.
-    let detached_token = CancellationToken::new();
-    let flush_after_child_settled = Arc::new(AtomicBool::new(false));
-    let flush_observer = Arc::clone(&flush_after_child_settled);
-    let child_settled_for_flush = Arc::clone(&child_settled);
     let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
-    let drain_handle = tokio::spawn(async move {
+    let drain_handle = tokio::spawn(async {
         let _ = flush_rx.await;
-        flush_observer.store(
-            child_settled_for_flush.load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
     });
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token.clone(),
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+        settle_grace: Duration::from_secs(1),
+    };
+    tokio::time::timeout(Duration::from_secs(1), barrier.continue_and_flush())
+        .await
+        .unwrap();
+    assert_eq!(children.active_count(), 1);
+    assert!(!turn_token.is_cancelled());
+    assert!(!parking.load(Ordering::Acquire));
+    release_tx.send(()).unwrap();
+    assert_eq!(complete_rx.recv().await, Some("existing completion inbox"));
+    child.await.unwrap();
+    assert_eq!(children.active_count(), 0);
+}
 
+#[tokio::test]
+async fn terminal_barrier_explicit_cancel_still_joins_owned_child() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    let child_token = turn_token.child_token();
+    let registration = children
+        .register(child_token.clone(), "agent_owned")
+        .unwrap();
+    let child = tokio::spawn(async move {
+        child_token.cancelled().await;
+        drop(registration);
+    });
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let drain_handle = tokio::spawn(async {
+        let _ = flush_rx.await;
+    });
     let barrier = TurnMailboxBarrier {
         mailbox,
         cancel_token: turn_token,
-        foreground_children,
+        foreground_children: Arc::clone(&children),
         flush_tx,
         drain_handle,
+        settle_grace: Duration::from_secs(1),
     };
-    tokio::time::timeout(Duration::from_secs(1), barrier.park_and_flush())
+    let unsettled = tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
         .await
-        .expect("the terminal barrier parks and joins its owned child");
-    child
-        .await
-        .expect("foreground child task exits after cancellation");
-
-    assert!(child_settled.load(Ordering::SeqCst));
-    assert!(
-        parking_signal.load(Ordering::Acquire),
-        "normal turn completion must request a resumable park before cancellation"
-    );
-    assert!(
-        flush_after_child_settled.load(Ordering::SeqCst),
-        "mailbox flushing, and therefore TurnComplete, waits for the owned child"
-    );
-    assert!(
-        !detached_token.is_cancelled(),
-        "explicitly detached work is not owned by the terminal barrier"
-    );
+        .unwrap();
+    assert!(unsettled.is_empty(), "cooperative children join cleanly");
+    child.await.unwrap();
+    assert_eq!(children.active_count(), 0);
 }
 
+/// Regression for #6184: a foreground child parked on an await that never
+/// observes its cancel token must not withhold the terminal turn event. The
+/// join gives up at `settle_grace` and names the child it left behind.
 #[tokio::test]
-async fn rejected_manual_compaction_route_closes_typed_lifecycle() {
-    let _env_lock = lock_test_env();
-    let _api_key = EnvVarGuard::remove("DEEPSEEK_API_KEY");
-    let route_config = Config {
-        provider: Some("deepseek".to_string()),
-        api_key: Some(String::new()),
-        default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
-        ..Config::default()
-    };
-    let route = resolve_runtime_route(
-        &route_config,
-        ApiProvider::Deepseek,
-        Some(crate::config::DEFAULT_TEXT_MODEL),
-    )
-    .expect("structurally resolve route without credential");
-    assert!(
-        route.clone().validate().is_err(),
-        "fixture must fail at engine route installation"
-    );
-    let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
-
-    engine
-        .handle_manual_compaction_op(
-            "compact-route-invalid".to_string(),
-            route,
-            CompactionConfig::default(),
-        )
-        .await;
-
-    let mut started_id = None;
-    let mut failed_id = None;
-    let mut order = Vec::new();
-    let mut events = handle.rx_event.write().await;
-    while let Ok(event) = events.try_recv() {
-        match event {
-            Event::CompactionStarted { id, auto, .. } => {
-                assert!(!auto);
-                started_id = Some(id);
-                order.push("started");
-            }
-            Event::CompactionFailed { id, auto, message } => {
-                assert!(!auto);
-                assert!(message.contains("provider route is not ready"));
-                failed_id = Some(id);
-                order.push("failed");
-            }
-            Event::Error { .. } => order.push("error"),
-            _ => {}
-        }
-    }
-    assert_eq!(order, ["started", "failed", "error"]);
-    assert_eq!(started_id, failed_id);
-}
-
-#[tokio::test]
-async fn queued_manual_compaction_cancellation_is_idempotent_and_skips_route_activation() {
-    let _env_lock = lock_test_env();
-    let _api_key = EnvVarGuard::remove("DEEPSEEK_API_KEY");
-    let route_config = Config {
-        provider: Some("deepseek".to_string()),
-        api_key: Some(String::new()),
-        default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
-        ..Config::default()
-    };
-    let route = resolve_runtime_route(
-        &route_config,
-        ApiProvider::Deepseek,
-        Some(crate::config::DEFAULT_TEXT_MODEL),
-    )
-    .expect("structurally resolve route without credential");
-    let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
-    let id = "compact-cancel-before-start";
-
-    handle.cancel_compaction(id).expect("first cancel accepted");
-    handle
-        .cancel_compaction(id)
-        .expect("replayed cancel remains idempotent");
-    engine
-        .handle_manual_compaction_op(id.to_string(), route, CompactionConfig::default())
-        .await;
-
-    let mut events = handle.rx_event.write().await;
-    let drained = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-    assert!(matches!(
-        drained.as_slice(),
-        [
-            Event::CompactionStarted { id: started, auto: false, .. },
-            Event::CompactionCancelled { id: cancelled, auto: false, .. },
-            Event::TurnComplete { status: TurnOutcomeStatus::Interrupted, .. }
-        ] if started == id && cancelled == id
-    ));
-    assert!(
-        !drained
-            .iter()
-            .any(|event| matches!(event, Event::Error { .. })),
-        "pre-start cancellation must not activate or validate the provider route"
-    );
-
-    let retry = engine
-        .claim_compaction(id)
-        .expect("the same stable id can be retried after terminal settlement");
-    assert!(!retry.is_cancelled());
-    handle
-        .cancel_compaction(id)
-        .expect("running cancel accepted");
-    assert!(
-        retry.is_cancelled(),
-        "running cancellation reaches its token"
-    );
-    engine.finish_compaction(id);
-}
-
-struct BlockingEmergencyCompactionModelClient {
-    entered: std::sync::Arc<tokio::sync::Notify>,
-    request_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[async_trait::async_trait]
-impl crate::core::model_client::ModelClient for BlockingEmergencyCompactionModelClient {
-    fn provider_name(&self) -> &str {
-        "deepseek"
-    }
-
-    fn model(&self) -> &str {
-        crate::config::DEFAULT_TEXT_MODEL
-    }
-
-    async fn create_message(
-        &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
-        let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
-        self.entered.notify_one();
-        std::future::pending().await
-    }
-
-    async fn create_message_stream(
-        &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
-        anyhow::bail!("emergency compaction uses the non-streaming model boundary")
-    }
-
-    async fn health_check(&self) -> anyhow::Result<bool> {
-        Ok(true)
-    }
-}
-
-#[tokio::test]
-async fn emergency_compaction_cancellation_drops_provider_and_never_mutates_context() {
-    let route_config = Config {
-        provider: Some("deepseek".to_string()),
-        default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
-        ..Config::default()
-    };
-    let (mut engine, handle) = Engine::new(EngineConfig::default(), &route_config);
-    engine.session.messages = (0..8)
-        .map(|index| Message {
-            role: if index % 2 == 0 {
-                Role::User
-            } else {
-                Role::Assistant
-            },
-            content: vec![ContentBlock::Text {
-                text: format!("preserve emergency context item {index}"),
-                cache_control: None,
-            }],
-        })
-        .collect::<Vec<_>>()
-        .into();
-    let messages_before = engine.session.messages.clone();
-    let checkpoint_before = engine.session.compaction_summary_prompt.clone();
-    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
-    let request_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let client = std::sync::Arc::new(BlockingEmergencyCompactionModelClient {
-        entered: std::sync::Arc::clone(&entered),
-        request_dropped: std::sync::Arc::clone(&request_dropped),
+async fn terminal_barrier_cancel_names_child_that_ignores_cancellation() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    let child_token = turn_token.child_token();
+    // The fake child keeps its registration for the whole test — it never
+    // observes the cancel token, like a task parked on a blocking await.
+    let registration = children
+        .register(child_token.clone(), "agent_stuck")
+        .unwrap();
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let drain_handle = tokio::spawn(async {
+        let _ = flush_rx.await;
     });
-
-    let recovery = tokio::spawn(async move {
-        let recovered = engine
-            .recover_context_overflow(client.as_ref(), "cancellation regression")
-            .await;
-        (engine, recovered)
-    });
-
-    let started_id = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let event = handle
-                .rx_event
-                .write()
-                .await
-                .recv()
-                .await
-                .expect("emergency compaction start event");
-            if let Event::CompactionStarted { id, auto: true, .. } = event {
-                break id;
-            }
-        }
-    })
-    .await
-    .expect("emergency compaction publishes its stable id");
-    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token.clone(),
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+        settle_grace: Duration::from_millis(50),
+    };
+    // Esc latches the turn token before the barrier runs, so the grace
+    // window — not the token — is the bound under test.
+    turn_token.cancel();
+    let unsettled = tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
         .await
-        .expect("emergency provider request starts");
-
-    handle
-        .cancel_compaction(started_id.clone())
-        .expect("exact emergency cancellation accepted");
-    let (engine, recovered) = tokio::time::timeout(Duration::from_secs(1), recovery)
-        .await
-        .expect("emergency cancellation settles promptly")
-        .expect("recovery task");
-
-    assert!(!recovered);
-    assert_eq!(&*engine.session.messages, &*messages_before);
-    assert_eq!(engine.session.compaction_summary_prompt, checkpoint_before);
+        .expect("the bounded join must not wait on a parked child");
+    assert_eq!(unsettled, vec!["agent_stuck".to_string()]);
     assert!(
-        request_dropped.load(std::sync::atomic::Ordering::SeqCst),
-        "cancellation must drop the in-flight provider future"
+        child_token.is_cancelled(),
+        "the bounded join still cancels the child's token"
     );
+    assert_eq!(
+        children.active_count(),
+        1,
+        "the stuck child is left registered — leaked, not awaited"
+    );
+    drop(registration);
+    assert_eq!(children.active_count(), 0);
+}
 
-    let mut events = handle.rx_event.write().await;
-    let drained = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-    assert!(matches!(
-        drained.as_slice(),
-        [Event::CompactionCancelled { id, auto: true, .. }] if id == &started_id
-    ));
+/// Regression for #6184: the mailbox drainer parked in an untimed
+/// `tx_event.send().await` (event channel full, UI not draining) must not
+/// withhold the terminal turn event. `flush` gives up at `settle_grace` and
+/// aborts the drainer, so the turn settles instead of waiting hours.
+#[tokio::test]
+async fn terminal_barrier_flush_bounds_a_drainer_parked_on_a_full_event_channel() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    // The wedged shape from the report: a one-slot event channel, already
+    // full, with nobody draining — so the drainer's forward parks in `send`.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<()>(1);
+    event_tx.send(()).await.unwrap();
+    let drain_handle = tokio::spawn(async move {
+        // Parked forever: the channel is full and the receiver never drains.
+        let _ = event_tx.send(()).await;
+    });
+    // Give the drainer a moment to park before the flush races it.
+    tokio::task::yield_now().await;
+    let (flush_tx, _flush_rx) = tokio::sync::oneshot::channel();
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token,
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+        settle_grace: Duration::from_millis(50),
+    };
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(2), barrier.continue_and_flush())
+        .await
+        .expect("flush must give up at its grace, not park with the drainer");
     assert!(
-        !drained.iter().any(|event| matches!(
-            event,
-            Event::CompactionCompleted { .. } | Event::CompactionFailed { .. }
-        )),
-        "a canceled emergency pass must have one canceled terminal event"
+        started.elapsed() < Duration::from_secs(2),
+        "flush returned in {:?}",
+        started.elapsed()
+    );
+    // Abort receipt: an aborted drainer drops its sender half, so the
+    // buffered item drains and the channel then reads closed.
+    assert!(event_rx.recv().await.is_some());
+    assert!(
+        event_rx.recv().await.is_none(),
+        "aborted drainer must release the event channel"
     );
 }
+
+/// A turn that fails without user cancellation runs the same barrier with a
+/// live turn token: Esc during the join must still break it rather than sit
+/// out the whole grace period (#6184).
+#[tokio::test]
+async fn terminal_barrier_cancel_join_breaks_on_fresh_esc() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    let registration = children
+        .register(turn_token.child_token(), "agent_stuck")
+        .unwrap();
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let drain_handle = tokio::spawn(async {
+        let _ = flush_rx.await;
+    });
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token.clone(),
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+        settle_grace: Duration::from_secs(30),
+    };
+    let esc = turn_token.clone();
+    let esc_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        esc.cancel();
+    });
+    let unsettled = tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
+        .await
+        .expect("a fresh Esc must break the join before its grace expires");
+    assert_eq!(unsettled, vec!["agent_stuck".to_string()]);
+    esc_task.await.unwrap();
+    drop(registration);
+}
+
+mod compaction;
+
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
-/// R1 inverted this: the ordinary engine default used to be
-/// `UNBOUNDED_MODEL_STEPS = u32::MAX`, i.e. an agent loop with no finite
-/// bound. The default is now finite and every host resolves from it.
 #[test]
-fn ordinary_engine_default_has_a_finite_step_budget() {
+fn ordinary_engine_default_does_not_install_a_step_budget() {
     assert_eq!(
         DEFAULT_MODEL_STEPS,
         crate::core::engine::turn_budget::DEFAULT_MAX_MODEL_STEPS
     );
-    const { assert!(DEFAULT_MODEL_STEPS < u32::MAX) };
     assert_eq!(EngineConfig::default().max_steps, DEFAULT_MODEL_STEPS);
+    let mut turn = TurnContext::new(EngineConfig::default().max_steps);
+    assert_eq!(turn.step_limit(), None);
+    assert_eq!(turn.stop_diagnostics.effective_max_steps, None);
+    // No substitute ceiling or overflow may stop an uncapped turn.
+    turn.step = u32::MAX - 1;
+    assert!(turn.next_step());
+    assert!(turn.next_step());
+    assert!(!turn.at_max_steps());
+    assert_eq!(turn.steps_used(), u32::MAX);
 }
 
 #[test]
-fn registry_first_scenario() {
-    // Scenario consolidation of: registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled, registry_first_guidance_is_attached_to_the_shell_fallback_once
-    // from registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled
-    {
-        let enabled = EngineConfig::default();
-        let (engine, _handle) = Engine::new(enabled, &Config::default());
-        let prompt = crate::prompts::system_prompt_flat_text(
-            engine
-                .session
-                .system_prompt
-                .as_ref()
-                .expect("system prompt"),
-        );
-        assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+fn registry_instruction_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
+    let enabled = EngineConfig::default();
+    let (engine, _handle) = Engine::new(enabled, &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+    assert!(prompt.contains("registry_sync"));
+    assert!(prompt.contains("start_registry_mcp_server"));
+
+    let mut disabled = EngineConfig::default();
+    disabled.features.disable(Feature::Mcp);
+    let (engine, _handle) = Engine::new(disabled, &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(!prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+}
+
+/// The regression this test exists for. A real DeepSeek turn — "build a
+/// self-contained HTML focus timer, read a local fixture, verify it" — spent
+/// its steps on five `tool_search` calls for `registry_sync`, a deferred-schema
+/// retry, and reasoning about starting a browser MCP server, because the
+/// always-visible instruction ordered Registry discovery *before* code
+/// execution or a manual implementation and named two tools that are not in the
+/// catalog head.
+///
+/// Two properties keep that from coming back, and both are about this prompt,
+/// not about a second policy surface: discovery is never ordered ahead of
+/// ordinary local work, and the deferred-tool cost of reaching the Registry
+/// tools is stated where the model reads about them.
+#[test]
+fn registry_instruction_does_not_gate_ordinary_local_work() {
+    let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(prompt.contains("## MCP Registry"));
+
+    for ordered in [
+        "must call `registry_sync`",
+        "before `exec_shell`",
+        "you must call `start_registry_mcp_server`",
+        "not a reason to skip Registry discovery",
+    ] {
         assert!(
-            prompt.contains("must call `registry_sync` with a `query` describing that capability")
+            !prompt.contains(ordered),
+            "Registry guidance must not order discovery ahead of ordinary work: {ordered:?}"
         );
+    }
 
-        let mut disabled = EngineConfig::default();
-        disabled.features.disable(Feature::Mcp);
-        let (engine, _handle) = Engine::new(disabled, &Config::default());
-        let prompt = crate::prompts::system_prompt_flat_text(
-            engine
-                .session
-                .system_prompt
-                .as_ref()
-                .expect("system prompt"),
+    // Available capability comes first, and the deferred cost is disclosed
+    // where the model reads about the two tools it would have to hunt for.
+    assert!(prompt.contains("Prefer what is already available"));
+    assert!(prompt.contains("not a step before ordinary work"));
+    assert!(prompt.contains("Both Registry tools are deferred"));
+    assert!(prompt.contains("load one with `tool_search`"));
+
+    // The trust boundary the instruction is actually load-bearing for: a
+    // Registry package is started through the approved host path, never
+    // installed or run through the shell.
+    assert!(prompt.contains("rather than installing or running its package command"));
+}
+
+/// A provider's input bill describes one route's tokenization of one prompt.
+/// The compaction gate and the preflight guard lift the honest estimate to
+/// it, so a bill carried across a route switch would measure the next
+/// request with the previous route's tokenizer and prefix. Re-installing the
+/// same route keeps the carry-over #5577 relies on; a different route drops
+/// it.
+/// A named custom provider keeps its name, model string, and (absent) limits
+/// across a config reload that points it at a different server. A different
+/// server is a different tokenizer, so the bill from the old one must not
+/// measure the first request to the new one (post-merge finding on #6380).
+#[test]
+fn custom_route_endpoint_change_forgets_the_previous_bill() {
+    let mut custom = HashMap::new();
+    custom.insert(
+        "lm-studio".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+            model: Some("local-model".to_string()),
+            api_key: Some("local-test-key".to_string()),
+            ..crate::config::ProviderConfig::default()
+        },
+    );
+    let config = Config {
+        provider: Some("lm-studio".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &config);
+    let install = |engine: &mut Engine, config: &Config| {
+        let route = resolve_runtime_route(config, ApiProvider::Custom, Some("local-model"))
+            .expect("resolve lm-studio")
+            .validate()
+            .expect("preflight lm-studio");
+        engine.install_validated_runtime_route(route);
+    };
+    install(&mut engine, &config);
+    engine.session.latest_parent_input_tokens = Some(150_000);
+
+    install(&mut engine, &config);
+    assert_eq!(
+        engine.session.latest_parent_input_tokens,
+        Some(150_000),
+        "the same endpoint keeps the last bill"
+    );
+
+    let mut reloaded = config;
+    reloaded
+        .providers
+        .as_mut()
+        .and_then(|providers| providers.custom.get_mut("lm-studio"))
+        .expect("named custom provider")
+        .base_url = Some("http://127.0.0.1:18182/v1".to_string());
+    install(&mut engine, &reloaded);
+    assert_eq!(engine.api_provider_identity, "lm-studio");
+    assert_eq!(
+        engine.session.latest_parent_input_tokens, None,
+        "a new endpoint under the same name drops the old server's bill"
+    );
+}
+
+/// A catalog refresh can keep a route's name, base URL, model, and limits and
+/// still move it to another endpoint key or wire protocol. Chat Completions
+/// and Responses serialize a prompt differently, so the bill from one must
+/// not measure the first request on the other (post-merge finding on #6381).
+#[test]
+fn route_protocol_change_forgets_the_previous_bill() {
+    use codewhale_config::route::{RequestProtocol, ResolvedEndpoint};
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let chat = ResolvedEndpoint {
+        base_url: "https://gateway.example/v1".to_string(),
+        endpoint_key: "chat".to_string(),
+        protocol: RequestProtocol::ChatCompletions,
+    };
+    engine.active_route_endpoint = Some(chat.clone());
+    let identity = engine.api_provider_identity.clone();
+    let provider_id = engine.api_provider_id.clone();
+    let model = engine.session.model.clone();
+    let limits = engine.active_route_limits;
+
+    engine.session.latest_parent_input_tokens = Some(150_000);
+    engine.forget_input_bill_if_route_changes(
+        &identity,
+        provider_id.as_deref(),
+        Some(&chat),
+        &model,
+        limits,
+    );
+    assert_eq!(
+        engine.session.latest_parent_input_tokens,
+        Some(150_000),
+        "the same endpoint keeps the last bill"
+    );
+
+    let responses = ResolvedEndpoint {
+        endpoint_key: "responses".to_string(),
+        protocol: RequestProtocol::Responses,
+        ..chat
+    };
+    engine.forget_input_bill_if_route_changes(
+        &identity,
+        provider_id.as_deref(),
+        Some(&responses),
+        &model,
+        limits,
+    );
+    assert_eq!(
+        engine.session.latest_parent_input_tokens, None,
+        "a new endpoint key or protocol at the same URL drops the bill"
+    );
+}
+
+#[test]
+fn route_switch_forgets_the_previous_routes_input_bill() {
+    let mut custom = HashMap::new();
+    for (name, base_url, model) in [
+        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+    ] {
+        custom.insert(
+            name.to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                api_key: Some("local-test-key".to_string()),
+                ..crate::config::ProviderConfig::default()
+            },
         );
-        assert!(!prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
     }
-    // from registry_first_guidance_is_attached_to_the_shell_fallback_once
-    {
-        let mut catalog = vec![api_tool("read_file"), api_tool("exec_shell")];
+    let config = Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &config);
+    let route_a = || {
+        resolve_runtime_route(&config, ApiProvider::Custom, Some("model-a"))
+            .expect("resolve custom A")
+            .validate()
+            .expect("preflight custom A")
+    };
+    engine.install_validated_runtime_route(route_a());
+    engine.session.latest_parent_input_tokens = Some(150_000);
 
-        apply_registry_first_shell_guidance(&mut catalog);
-        let after_first = catalog
-            .iter()
-            .find(|tool| tool.name == "exec_shell")
-            .expect("shell tool")
-            .description
-            .clone();
-        apply_registry_first_shell_guidance(&mut catalog);
+    engine.install_validated_runtime_route(route_a());
+    assert_eq!(
+        engine.session.latest_parent_input_tokens,
+        Some(150_000),
+        "re-installing the same route keeps the last bill"
+    );
 
-        let after_second = &catalog
-            .iter()
-            .find(|tool| tool.name == "exec_shell")
-            .expect("shell tool")
-            .description;
-        assert_eq!(after_second, &after_first);
-        assert!(after_second.contains("registry_sync"));
-        assert!(after_second.contains("start_registry_mcp_server"));
-    }
+    let mut target = config.clone();
+    target.provider = Some("custom-b".to_string());
+    let route_b = resolve_runtime_route(&target, ApiProvider::Custom, Some("model-b"))
+        .expect("resolve custom B")
+        .validate()
+        .expect("preflight custom B");
+    engine.install_validated_runtime_route(route_b);
+    assert_eq!(
+        engine.session.latest_parent_input_tokens, None,
+        "a different route drops the previous route's bill"
+    );
 }
 
 #[test]
@@ -482,7 +708,7 @@ fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
     assert_eq!(engine.api_provider_identity, "custom-a");
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("custom A client")
             .base_url(),
@@ -500,7 +726,7 @@ fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
     assert_eq!(engine.api_provider_identity, "custom-b");
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("custom B client")
             .base_url(),
@@ -549,14 +775,14 @@ fn custom_route_config_reload_rebuilds_client_when_identity_is_unchanged() {
     assert_eq!(engine.api_provider_identity, "lm-studio");
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("reloaded custom client")
             .base_url(),
         "http://127.0.0.1:18182/v1"
     );
     assert_eq!(
-        engine.api_config.deepseek_base_url(),
+        engine.api_config.active_route_base_url(),
         "http://127.0.0.1:18182/v1"
     );
 }
@@ -583,7 +809,7 @@ fn failed_same_identity_route_preflight_leaves_old_client_untouched() {
         ..Config::default()
     };
     let (engine, _handle) = Engine::new(EngineConfig::default(), &config);
-    assert!(engine.deepseek_client.is_some());
+    assert!(engine.codewhale_client.is_some());
 
     let mut invalid = config;
     invalid
@@ -597,9 +823,9 @@ fn failed_same_identity_route_preflight_leaves_old_client_untouched() {
 
     assert!(err.contains("must be an http(s) URL with a host"), "{err}");
     assert_eq!(engine.api_provider_identity, "lm-studio");
-    assert!(engine.deepseek_client.is_some());
+    assert!(engine.codewhale_client.is_some());
     assert!(engine.model_client.is_some());
-    assert!(engine.deepseek_client_error.is_none());
+    assert!(engine.codewhale_client_error.is_none());
 }
 
 #[tokio::test]
@@ -670,7 +896,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
     assert_eq!(engine.api_provider, ApiProvider::Openai);
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("builtin client")
             .base_url(),
@@ -679,14 +905,17 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
 
     let run_task = tokio::spawn(engine.run());
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "verify exact route".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: Box::new(
                 resolve_runtime_route(&config, ApiProvider::Custom, Some("local-model"))
                     .expect("resolve exact custom route"),
             ),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -696,14 +925,14 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send exact custom turn");
 
@@ -793,7 +1022,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
 
 struct GatedGoalModelClient {
     calls: std::sync::atomic::AtomicUsize,
-    requests: std::sync::Mutex<Vec<crate::models::MessageRequest>>,
+    requests: std::sync::Mutex<Vec<codewhale_models::MessageRequest>>,
     second_request_entered: std::sync::Arc<tokio::sync::Notify>,
     release_second_request: std::sync::Arc<tokio::sync::Notify>,
     first_usage: Option<Usage>,
@@ -829,14 +1058,14 @@ impl crate::core::model_client::ModelClient for IndexedGatedGoalModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("indexed gate regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let call = self
             .calls
@@ -873,14 +1102,14 @@ impl crate::core::model_client::ModelClient for FirstRequestGatedGoalModelClient
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("mailbox regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let call = self
             .calls
@@ -920,14 +1149,14 @@ impl crate::core::model_client::ModelClient for FailingGoalModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("failure regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         anyhow::bail!(self.message.clone())
@@ -939,7 +1168,7 @@ impl crate::core::model_client::ModelClient for FailingGoalModelClient {
 }
 
 impl GatedGoalModelClient {
-    fn captured_requests(&self) -> Vec<crate::models::MessageRequest> {
+    fn captured_requests(&self) -> Vec<codewhale_models::MessageRequest> {
         self.requests
             .lock()
             .expect("goal model request lock")
@@ -959,14 +1188,14 @@ impl crate::core::model_client::ModelClient for GatedGoalModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("goal regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        request: crate::models::MessageRequest,
+        request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let call = self
             .calls
@@ -986,9 +1215,9 @@ impl crate::core::model_client::ModelClient for GatedGoalModelClient {
         let mut events = crate::llm_client::mock::canned::simple_text_turn("still working");
         if call == 1
             && let Some(usage) = self.first_usage.clone()
-            && let Some(crate::models::StreamEvent::MessageDelta { usage: slot, .. }) = events
+            && let Some(codewhale_models::StreamEvent::MessageDelta { usage: slot, .. }) = events
                 .iter_mut()
-                .find(|event| matches!(event, crate::models::StreamEvent::MessageDelta { .. }))
+                .find(|event| matches!(event, codewhale_models::StreamEvent::MessageDelta { .. }))
         {
             *slot = Some(usage);
         }
@@ -1052,11 +1281,14 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
     let goal_state = engine.config.goal_state.clone();
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "first turn".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("keep going".to_string()),
             goal_token_budget: Some(50_000),
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -1066,14 +1298,14 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send first goal turn");
 
@@ -1188,6 +1420,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
                 .expect("second goal model request was never entered");
                 handle
                     .send(Op::SetGoalStatus {
+                        goal_id: None,
                         status: crate::tools::goal::GoalStatus::Paused,
                         clear: false,
                     })
@@ -1330,11 +1563,14 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "start the saturated goal turn".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("survive a saturated mailbox".to_string()),
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -1344,14 +1580,14 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send saturated goal turn");
     tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
@@ -1370,6 +1606,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
         handle
             .tx_op
             .try_send(Op::SetGoalStatus {
+                goal_id: None,
                 status,
                 clear: false,
             })
@@ -1457,27 +1694,32 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
     let goal_state = engine.config.goal_state.clone();
     let run_task = tokio::spawn(engine.run());
-    let send_message = |content: &str| Op::SendMessage {
-        content: content.to_string(),
-        mode: AppMode::Agent,
-        route: resolved_route_for_test(&config, "local-model"),
-        compaction: Box::new(CompactionConfig::default()),
-        goal_objective: Some("coalesce queued goal turns".to_string()),
-        goal_token_budget: None,
-        goal_status: crate::tools::goal::GoalStatus::Active,
-        reasoning_effort: None,
-        reasoning_effort_auto: false,
-        auto_model: false,
-        allow_shell: false,
-        trust_mode: false,
-        auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
-        translation_enabled: false,
-        allowed_tools: None,
-        dynamic_tools: Vec::new(),
-        hook_executor: None,
-        verbosity: None,
-        provenance: UserInputProvenance::ExternalUser,
+    let send_message = |content: &str| {
+        Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: content.to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, "local-model"),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective: Some("coalesce queued goal turns".to_string()),
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
     };
 
     handle
@@ -1502,6 +1744,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         .expect("coalesced synthetic continuation was never entered");
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -1904,6 +2147,7 @@ async fn goal_pause_during_configured_delay_cancels_pending_continuation() {
 
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -2203,7 +2447,7 @@ async fn queued_not_started_turn_cancels_older_goal_continuation() {
     );
     let goal_state = engine.config.goal_state.clone();
     engine.model_client = None;
-    engine.deepseek_client_error = Some("deterministic missing model client".to_string());
+    engine.codewhale_client_error = Some("deterministic missing model client".to_string());
 
     handle
         .send(active_goal_message_op(
@@ -2355,6 +2599,92 @@ async fn initial_goal_failure_projects_blocked_state() {
     run_task.await.expect("engine task");
 }
 
+/// A goal the runtime stopped (its turn failed) resumes when the person
+/// writes again; the host still reports Blocked because it only learns of
+/// the resume from this turn's GoalUpdated.
+#[tokio::test]
+async fn user_message_resumes_a_goal_only_the_runtime_blocked() {
+    let objective = "resume after a runtime stop";
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "turn deadline elapsed".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    let run_task = tokio::spawn(engine.run());
+    let settle = || async {
+        tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+            .await
+            .expect("turn did not settle")
+            .expect("session snapshot")
+    };
+
+    handle
+        .send(active_goal_message_op(&config, "start", objective, None))
+        .await
+        .expect("send goal turn");
+    settle().await;
+    let blocked = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(blocked.status, "blocked");
+
+    let Op::SendMessage(mut spec) = active_goal_message_op(&config, "continue", objective, None)
+    else {
+        unreachable!()
+    };
+    spec.goal_status = crate::tools::goal::GoalStatus::Blocked;
+    handle
+        .send(Op::SendMessage(spec))
+        .await
+        .expect("send continue");
+    settle().await;
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let resumed = goal_state.lock().expect("goal lock").snapshot();
+    assert_ne!(
+        resumed.goal_id, blocked.goal_id,
+        "the continue turn ran as a resumed goal revision"
+    );
+
+    // A blocker the model reported is a judgement: the next message is an
+    // ordinary turn and the goal stays blocked on that report.
+    goal_state
+        .lock()
+        .expect("goal lock")
+        .mark_blocked("needs the staging credentials".to_string())
+        .unwrap();
+    let reported = goal_state.lock().expect("goal lock").snapshot();
+    let Op::SendMessage(mut spec) = active_goal_message_op(&config, "continue", objective, None)
+    else {
+        unreachable!()
+    };
+    spec.goal_status = crate::tools::goal::GoalStatus::Blocked;
+    handle
+        .send(Op::SendMessage(spec))
+        .await
+        .expect("send ordinary turn");
+    settle().await;
+    let after = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(after.status, "blocked");
+    assert_eq!(after.goal_id, reported.goal_id);
+    assert_eq!(
+        after.blocker.as_deref(),
+        Some("needs the staging credentials")
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
 #[tokio::test]
 async fn initial_goal_interruption_keeps_goal_active() {
     let objective = "keep goal active after interrupted turn";
@@ -2448,6 +2778,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
         handle
             .tx_op
             .try_send(Op::SetGoalStatus {
+                goal_id: None,
                 status,
                 clear: false,
             })
@@ -2456,7 +2787,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
     assert_eq!(handle.tx_op.capacity(), 0, "fixture must saturate mailbox");
     engine
         .tx_subagent_completion
-        .send(SubAgentCompletion {
+        .try_send(SubAgentCompletion {
             owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_during_backpressure".to_string(),
             payload: "ready child completion".to_string(),
@@ -2479,7 +2810,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
         let EngineRunInput::Operation(op) = input else {
             panic!("idle child completion beat queued control {index}");
         };
-        let Op::SetGoalStatus { status, clear } = *op else {
+        let Op::SetGoalStatus { status, clear, .. } = *op else {
             panic!("unexpected operation before queued control {index}");
         };
         assert!(!clear);
@@ -2547,13 +2878,14 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
     handle
         .tx_op
         .try_send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
         .expect("queue unsaturated pause");
     engine
         .tx_subagent_completion
-        .send(SubAgentCompletion {
+        .try_send(SubAgentCompletion {
             owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_without_backpressure".to_string(),
             payload: "ready child completion".to_string(),
@@ -2576,6 +2908,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
     assert!(matches!(
         *first,
         Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false
         }
@@ -2649,11 +2982,14 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "start budgeted goal".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("finish within budget".to_string()),
             goal_token_budget: Some(10),
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -2663,14 +2999,14 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send budgeted goal turn");
 
@@ -2976,6 +3312,7 @@ async fn queued_goal_clear_refreshes_prompt_and_cancels_stale_continuation() {
     // synthetic continuation that TurnComplete schedules.
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Active,
             clear: true,
         })
@@ -3080,7 +3417,7 @@ fn goal_custom_route_config() -> Config {
 }
 
 #[tokio::test]
-async fn explicit_natural_goal_activates_before_provider_request() {
+async fn ordinary_prose_never_activates_a_goal() {
     let request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release_request = std::sync::Arc::new(tokio::sync::Notify::new());
     let model = std::sync::Arc::new(FirstRequestGatedGoalModelClient {
@@ -3105,11 +3442,14 @@ async fn explicit_natural_goal_activates_before_provider_request() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "hello - take over and make it your /goal to solve navier stokes".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -3119,35 +3459,36 @@ async fn explicit_natural_goal_activates_before_provider_request() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send explicit natural goal turn");
 
-    let mut saw_goal_before_turn = false;
+    // #6290 rework: the natural-language `/goal` prose parser is gone. The
+    // same wording that used to activate a goal is now an ordinary turn;
+    // only the model (`create_goal`) or the `/goal` command creates one.
+    let mut saw_goal = false;
     loop {
         let event = tokio::time::timeout(model_turn_event_timeout(), async {
             handle.rx_event.write().await.recv().await
         })
         .await
-        .expect("explicit goal event timeout")
-        .expect("explicit goal event");
+        .expect("prose goal event timeout")
+        .expect("prose goal event");
         match event {
-            Event::GoalUpdated { snapshot } => {
-                assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
-                assert_eq!(snapshot.status, "active");
-                saw_goal_before_turn = true;
+            Event::GoalUpdated { .. } => {
+                saw_goal = true;
             }
             Event::TurnStarted { .. } => {
                 assert!(
-                    saw_goal_before_turn,
-                    "durable goal must be published before provider work starts"
+                    !saw_goal,
+                    "ordinary prose must not publish a goal before provider work starts"
                 );
                 break;
             }
@@ -3158,28 +3499,15 @@ async fn explicit_natural_goal_activates_before_provider_request() {
     tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
         .await
         .expect("provider request was never entered");
-    let snapshot = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
-    assert!(snapshot.is_active());
-
-    // Stop autonomous continuation after the one provider-boundary receipt.
-    handle
-        .send(Op::SetGoalStatus {
-            status: crate::tools::goal::GoalStatus::Paused,
-            clear: false,
-        })
-        .await
-        .expect("queue goal pause");
     release_request.notify_one();
     let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
         .await
-        .expect("goal pause did not settle")
-        .expect("post-goal session snapshot");
+        .expect("turn did not settle")
+        .expect("post-turn session snapshot");
+    let snapshot = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(snapshot.objective.as_deref(), None);
+    assert!(!snapshot.is_active());
     assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(
-        goal_state.lock().expect("goal lock").snapshot().status,
-        "paused"
-    );
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
@@ -3214,11 +3542,14 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: prompt.to_string(),
+            images: Vec::new(),
             mode,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -3228,14 +3559,14 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send probe turn");
 
@@ -3263,6 +3594,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
         // Stop autonomous continuation after the one provider call.
         handle
             .send(Op::SetGoalStatus {
+                goal_id: None,
                 status: crate::tools::goal::GoalStatus::Paused,
                 clear: false,
             })
@@ -3287,17 +3619,19 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
 }
 
 #[tokio::test]
-async fn operate_turns_a_work_prompt_into_the_goal_but_work_mode_does_not() {
+async fn operate_never_promotes_wording_to_a_goal() {
     let prompt =
         "Migrate the settings loader to the new config crate and keep the old keys readable";
 
+    // The verb-list promotion is gone: an ordinary work prompt is an ordinary
+    // turn in every mode, and the model decides goals through `create_goal`
+    // (docs/design/TUI_DECONSTRUCTION.md, founder clarification 2026-09-09).
     let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, prompt).await;
     assert_eq!(
-        objective.as_deref(),
-        Some(prompt),
-        "Operate must publish the prompt as the goal before the provider call"
+        objective, None,
+        "the host must not infer a goal from wording"
     );
-    assert!(active, "Operate goal must be active in engine state");
+    assert!(!active);
     assert_eq!(contracts, 1, "Operate appends its contract exactly once");
 
     let (objective, active, contracts) = operate_goal_probe(AppMode::Agent, prompt).await;
@@ -3305,11 +3639,60 @@ async fn operate_turns_a_work_prompt_into_the_goal_but_work_mode_does_not() {
     assert!(!active);
     assert_eq!(contracts, 0, "Work never sees the Operate contract");
 
+    // #6290 rework: even an explicit-looking declaration is ordinary
+    // prose now — the host never parses it, and the model decides goals
+    // through `create_goal`.
     let (objective, active, contracts) =
-        operate_goal_probe(AppMode::Operate, "thanks, looks good").await;
-    assert_eq!(objective, None, "chat stays chat even in Operate");
+        operate_goal_probe(AppMode::Operate, "Please set /goal to ship the release").await;
+    assert_eq!(
+        objective, None,
+        "prose asking for a goal must not create one host-side"
+    );
     assert!(!active);
-    assert_eq!(contracts, 1, "the contract is about the mode, not the goal");
+    assert_eq!(contracts, 1);
+}
+
+#[tokio::test]
+async fn operate_leaves_followup_and_long_questions_as_ordinary_turns() {
+    let report = "what about like rust or docker builds or something";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, report).await;
+    assert_eq!(
+        objective, None,
+        "conversational followup must remain ordinary turn in Operate"
+    );
+    assert!(!active);
+    assert_eq!(contracts, 1);
+
+    let long_q =
+        "why did the build fail on the last step when running under docker on macos with rust 1.80";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, long_q).await;
+    assert_eq!(
+        objective, None,
+        "long question without punctuation must remain ordinary turn"
+    );
+    assert!(!active);
+    assert_eq!(contracts, 1);
+
+    let zh_followup = "那 rust 或者 docker 构建呢";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, zh_followup).await;
+    assert_eq!(
+        objective, None,
+        "Chinese followup must remain ordinary turn in Operate"
+    );
+    assert!(!active);
+    assert_eq!(contracts, 1);
+}
+
+#[tokio::test]
+async fn operate_does_not_create_a_goal_when_the_work_request_declines_one() {
+    let prompt = "Run one bounded cancellation check. Do not edit files, inspect other files, create a goal, spawn agents, or start any other tool.";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, prompt).await;
+    assert_eq!(objective, None);
+    assert!(!active);
+    assert_eq!(
+        contracts, 1,
+        "the ordinary Operate turn still reaches the model"
+    );
 }
 
 #[tokio::test]
@@ -3343,33 +3726,50 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
     let goal_state = engine.config.goal_state.clone();
     let run_task = tokio::spawn(engine.run());
 
-    let send = |content: &str, goal_objective: Option<String>, goal_status| Op::SendMessage {
-        content: content.to_string(),
-        mode: AppMode::Operate,
-        route: resolved_route_for_test(&config, "local-model"),
-        compaction: Box::new(CompactionConfig::default()),
-        goal_objective,
-        goal_token_budget: None,
-        goal_status,
-        reasoning_effort: None,
-        reasoning_effort_auto: false,
-        auto_model: false,
-        allow_shell: false,
-        trust_mode: false,
-        auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
-        translation_enabled: false,
-        allowed_tools: None,
-        dynamic_tools: Vec::new(),
-        hook_executor: None,
-        verbosity: None,
-        provenance: UserInputProvenance::ExternalUser,
+    let send = |content: &str, goal_objective: Option<String>, goal_status| {
+        Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: content.to_string(),
+            images: Vec::new(),
+            mode: AppMode::Operate,
+            route: resolved_route_for_test(&config, "local-model"),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective,
+            goal_token_budget: None,
+            goal_status,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
     };
 
-    let first =
+    let first_objective =
         "Migrate the settings loader to the new config crate and keep the old keys readable";
+    // #6290 rework: prose no longer creates goals, so the unfinished goal
+    // this test needs is seeded directly — the same `GoalState::create` path
+    // the `/goal` command and the model's `create_goal` tool use.
+    goal_state
+        .lock()
+        .expect("goal lock")
+        .create(first_objective.to_string(), None)
+        .expect("seed unfinished goal");
     handle
-        .send(send(first, None, crate::tools::goal::GoalStatus::Active))
+        .send(send(
+            first_objective,
+            Some(first_objective.to_string()),
+            crate::tools::goal::GoalStatus::Active,
+        ))
         .await
         .expect("send first Operate turn");
     tokio::time::timeout(model_turn_event_timeout(), first_entered.notified())
@@ -3377,10 +3777,11 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         .expect("first provider request was never entered");
     assert_eq!(
         goal_state.lock().expect("goal lock").objective(),
-        Some(first)
+        Some(first_objective)
     );
     handle
         .send(Op::SetGoalStatus {
+            goal_id: None,
             status: crate::tools::goal::GoalStatus::Paused,
             clear: false,
         })
@@ -3397,7 +3798,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
     handle
         .send(send(
             "Refactor the provider table so it survives a config reload",
-            Some(first.to_string()),
+            Some(first_objective.to_string()),
             crate::tools::goal::GoalStatus::Paused,
         ))
         .await
@@ -3417,7 +3818,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         "the contract must not repeat on later Operate turns"
     );
     let goal = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(goal.objective.as_deref(), Some(first));
+    assert_eq!(goal.objective.as_deref(), Some(first_objective));
     assert_eq!(goal.status, "paused");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -3985,6 +4386,89 @@ async fn started_nonretryable_continuation_failure_blocks_goal_with_bounded_reas
 }
 
 #[tokio::test]
+async fn headless_host_drains_existing_engine_completion_inbox_before_exit() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().unwrap();
+    let config = goal_custom_route_config();
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "child evidence integrated by the existing Engine",
+    )]));
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".into(),
+            terminal_chrome_enabled: false,
+            ..deterministic_engine_config(workspace.path())
+        },
+        &config,
+        mock.clone(),
+    );
+    assert!(engine.subagent_settlement_snapshot().await.is_settled());
+    // Reproduce the host boundary: the parent already ended, and a terminal
+    // child's receipt is waiting for the Engine's normal idle fan-in path.
+    engine
+        .tx_event
+        .send(Event::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await
+        .unwrap();
+    engine
+        .tx_subagent_completion
+        .try_send(SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
+            agent_id: "headless-settled-child".into(),
+            payload: "bounded local fixture evidence".into(),
+        })
+        .unwrap();
+    let pending = engine.subagent_settlement_snapshot().await;
+    assert_eq!(pending.running_children, 0);
+    assert_eq!(pending.pending_completions, 1);
+    assert!(
+        !pending.is_settled(),
+        "terminal child alone cannot release the host"
+    );
+
+    let run = tokio::spawn(engine.run());
+    let mut events = crate::exec_agent::ExecAgentEvents::new(
+        handle.clone(),
+        Instant::now() + model_turn_event_timeout(),
+    );
+    let mut content = String::new();
+    let mut starts = 0;
+    tokio::time::timeout(model_turn_event_timeout(), async {
+        loop {
+            match events.next().await.expect("host event") {
+                Event::TurnStarted { .. } => starts += 1,
+                Event::MessageDelta { content: delta, .. } => content.push_str(&delta),
+                Event::TurnComplete { status, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("bounded headless settlement");
+    assert_eq!(starts, 1, "fan-in uses exactly one existing Engine turn");
+    assert_eq!(mock.call_count(), 1);
+    assert!(content.contains("child evidence integrated"));
+    assert!(!handle.is_cancelled());
+    handle.send(Op::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -4027,11 +4511,14 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "one host-owned turn".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: Some("keep going".to_string()),
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -4041,14 +4528,14 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send host-owned goal turn");
 
@@ -4083,6 +4570,155 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn cancellation_during_blocked_idle_handoff_survives_turn_admission() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for child_completion in [true, false] {
+        let workspace = tempdir().unwrap();
+        let config = goal_custom_route_config();
+        let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "must not dispatch after cancellation",
+        )]));
+        let (mut engine, mut handle) = Engine::new_with_model_client(
+            EngineConfig {
+                model: "local-model".into(),
+                terminal_chrome_enabled: false,
+                ..deterministic_engine_config(workspace.path())
+            },
+            &config,
+            mock.clone(),
+        );
+        // Force the handoff to stop at its status send after its initial
+        // cancellation check and before handle_send_message admits a turn.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        engine.tx_event = tx;
+        handle.rx_event = Arc::new(RwLock::new(rx));
+        engine.tx_event.send(Event::status("full")).await.unwrap();
+        let completion = SubAgentCompletion {
+            owner_session_id: engine.session.id.clone(),
+            agent_id: "cancel-race-child".into(),
+            payload: "retained-after-cancel-race".into(),
+        };
+        let mut wake: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> =
+            if child_completion {
+                Box::pin(engine.handle_idle_subagent_completion(completion))
+            } else {
+                Box::pin(engine.handle_idle_shell_completion_wake())
+            };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut wake)
+                .await
+                .is_err(),
+            "the full event channel must hold the handoff before admission"
+        );
+        handle.cancel_with_reason(CancelReason::External);
+        handle.rx_event.write().await.try_recv().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut wake)
+            .await
+            .expect("cancelled handoff returns without a provider call");
+        drop(wake);
+        assert_eq!(mock.call_count(), 0);
+        assert!(handle.is_cancelled());
+        assert!(engine.delivered_subagent_completion_ids.is_empty());
+        assert_eq!(
+            engine.rx_subagent_completion.len(),
+            usize::from(child_completion)
+        );
+        if child_completion {
+            assert!(
+                engine
+                    .rx_subagent_completion
+                    .try_recv()
+                    .unwrap()
+                    .payload
+                    .contains("retained-after-cancel-race")
+            );
+        }
+        // A new explicit user action still receives a fresh turn control.
+        let _turn = engine.begin_turn_control();
+        assert!(!handle.is_cancelled());
+        let existing_child = engine.cancel_token.child_token();
+        drop(_turn);
+        let _automatic =
+            engine.begin_turn_control_for_provenance(UserInputProvenance::SubAgentHandoff);
+        handle.cancel();
+        assert!(
+            existing_child.is_cancelled(),
+            "stopping an automatic continuation must also stop earlier request siblings"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelled_parent_defers_child_receipts_until_an_explicit_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for reason in [CancelReason::User, CancelReason::External] {
+        let workspace = tempdir().unwrap();
+        let config = Config::default();
+        let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "Explicit continuation completed.",
+        )]));
+        let (mut engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &config,
+            mock.clone(),
+        );
+        handle.cancel_with_reason(reason);
+        // Exercise a completion selected just before cancellation arrived.
+        engine
+            .handle_idle_subagent_completion(SubAgentCompletion {
+                owner_session_id: engine.session.id.clone(),
+                agent_id: "cancelled-worker".into(),
+                payload: "parked-child-evidence".into(),
+            })
+            .await;
+        assert_eq!(
+            mock.call_count(),
+            0,
+            "cancellation must forbid a model wake"
+        );
+        assert!(engine.delivered_subagent_completion_ids.is_empty());
+        assert_eq!(engine.rx_subagent_completion.len(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), engine.next_run_input(false))
+                .await
+                .is_err(),
+            "the idle loop must leave the receipt queued without spinning"
+        );
+
+        let run = tokio::spawn(engine.run());
+        handle
+            .send(external_user_message_op(
+                "Continue explicitly",
+                AppMode::Agent,
+                &config,
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = handle.rx_event.write().await.recv().await {
+                if matches!(event, Event::TurnComplete { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("explicit turn completes");
+        assert_eq!(mock.call_count(), 1);
+        let snapshot = handle.get_session_snapshot().await.unwrap();
+        assert!(
+            serde_json::to_string(&snapshot.messages)
+                .unwrap()
+                .contains("parked-child-evidence"),
+            "the next explicit turn must retain the completion receipt"
+        );
+        handle.send(Op::Shutdown).await.unwrap();
+        run.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -4135,7 +4771,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     let run_task = tokio::spawn(engine.run());
 
     tx_subagent_completion
-        .send(SubAgentCompletion {
+        .try_send(SubAgentCompletion {
             owner_session_id,
             agent_id: "agent_deferred".to_string(),
             payload: "deferred child result".to_string(),
@@ -4151,11 +4787,14 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     );
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "claim the next turn".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -4165,14 +4804,14 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send explicit host turn");
 
@@ -4320,8 +4959,8 @@ async fn idle_subagent_delivery_releases_claim_when_route_fails_before_recording
 
 #[test]
 fn subagent_mailbox_keeps_lifecycle_events_reliable() {
-    use crate::models::Usage;
     use crate::tools::subagent::MailboxMessage;
+    use codewhale_models::Usage;
 
     assert!(subagent_mailbox_message_is_best_effort(
         &MailboxMessage::progress("agent_a", "step 1")
@@ -4361,14 +5000,14 @@ fn subagent_mailbox_keeps_lifecycle_events_reliable() {
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
             source_id: "response-a".to_string(),
-            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            route: Box::new(crate::cost_status::EffectiveRouteEnvelope::capture(
                 None,
                 ApiProvider::Deepseek,
                 "deepseek",
                 "model",
                 Some(ApiProvider::Deepseek.default_base_url()),
                 chrono::Utc::now(),
-            ),
+            )),
             usage: Usage::default(),
         }
     ));
@@ -4431,8 +5070,8 @@ fn subagent_mailbox_samples_best_effort_events_per_agent() {
 
 #[test]
 fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
-    use crate::models::Usage;
     use crate::tools::subagent::{FleetRole, MailboxMessage};
+    use codewhale_models::Usage;
 
     let mut last_sent_at = HashMap::new();
     let start = Instant::now();
@@ -4455,14 +5094,14 @@ fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
             source_id: "response-a".to_string(),
-            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            route: Box::new(crate::cost_status::EffectiveRouteEnvelope::capture(
                 None,
                 ApiProvider::Deepseek,
                 "deepseek",
                 "model",
                 Some(ApiProvider::Deepseek.default_base_url()),
                 chrono::Utc::now(),
-            ),
+            )),
             usage: Usage::default(),
         },
         start,
@@ -4512,11 +5151,142 @@ fn catalog_tool(name: &str) -> Tool {
     }
 }
 
+#[test]
+fn shell_denial_filters_search_catalog_without_expanding_allow_grants() {
+    let raw_names = [
+        "bash",
+        "Bash",
+        "exec_shell",
+        "task_shell_start",
+        "task_gate_run",
+        "terminal/run",
+        "terminal/send",
+        "terminal/reset",
+        "exec_shell_interact",
+        "exec_interact",
+        "code_execution",
+        "js_execution",
+        "rlm_eval",
+    ];
+    for rule in ["Bash", "eXeC_sHeLl", "baSH*", "exec_shell*"] {
+        let surface = policy_for_catalog(
+            raw_names.into_iter().map(catalog_tool).collect(),
+            None,
+            Some(vec![rule.into()]),
+            ApprovalMode::Suggest,
+        );
+        for name in raw_names {
+            assert!(surface.denies_call(name, &json!({})), "{rule}: {name}");
+            assert!(
+                surface.catalog.iter().all(|tool| tool.name != name),
+                "{rule}: {name}"
+            );
+        }
+    }
+    let allowed = policy_for_catalog(
+        raw_names.into_iter().map(catalog_tool).collect(),
+        Some(vec!["Bash".into()]),
+        None,
+        ApprovalMode::Suggest,
+    );
+    for name in raw_names.into_iter().skip(3) {
+        assert!(
+            !allowed.passes_allow_list(name),
+            "Bash must not grant {name}"
+        );
+    }
+}
+
+#[test]
+fn shell_denial_preserves_task_reads_and_bounded_verification_actions() {
+    let mut tasks = catalog_tool("tasks");
+    tasks.input_schema =
+        json!({"type":"object", "properties":{"action":{"enum":["list", "read", "gate_run"]}}});
+    let surface = policy_for_catalog(
+        vec![
+            tasks,
+            catalog_tool("Run"),
+            catalog_tool("task_shell_wait"),
+            catalog_tool("terminal/cancel"),
+        ],
+        None,
+        Some(vec!["Bash".into()]),
+        ApprovalMode::Suggest,
+    );
+    let tasks = surface
+        .catalog
+        .iter()
+        .find(|tool| tool.name == "tasks")
+        .unwrap();
+    assert_eq!(
+        tasks.input_schema["properties"]["action"]["enum"],
+        json!(["list", "read"])
+    );
+    assert!(!surface.denies_call("tasks", &json!({"action":"list"})));
+    assert!(surface.denies_call("tasks", &json!({"action":"gate_run"})));
+    assert!(!surface.denies_call("task_shell_wait", &json!({})));
+    assert!(!surface.denies_call("terminal/cancel", &json!({})));
+    assert!(!surface.denies_call(
+        "Run",
+        &json!({"action":"tests", "args":"-p fixture selected_test"})
+    ));
+    assert!(!surface.denies_call("Run", &json!({"action":"verifiers", "commands":[]})));
+    assert!(surface.denies_call(
+        "Run",
+        &json!({"action":"tests", "args":"--config build.rustc=malicious"})
+    ));
+    assert!(surface.denies_call(
+        "Run",
+        &json!({"action":"verifiers", "commands":[{"program":"sh"}]})
+    ));
+}
+
+#[test]
+fn shell_denial_applies_to_new_durable_execution_without_hiding_management() {
+    use super::tool_catalog::tool_call_denied;
+    let rules = vec!["Bash".to_string()];
+    for (family, actions) in [
+        ("tasks", vec!["create", "gate_run"]),
+        ("automation", vec!["create", "update", "resume", "run"]),
+    ] {
+        for action in actions {
+            assert!(
+                tool_call_denied(Some(&rules), family, &json!({"action": action})),
+                "{family}/{action}"
+            );
+        }
+    }
+    for (family, actions) in [
+        ("tasks", vec!["list", "read", "cancel"]),
+        ("automation", vec!["list", "read", "pause", "delete"]),
+    ] {
+        for action in actions {
+            assert!(
+                !tool_call_denied(Some(&rules), family, &json!({"action": action})),
+                "{family}/{action}"
+            );
+        }
+    }
+    let fetch_rules = vec!["fetch_url".to_string()];
+    for family in ["rlm", "rlm_open"] {
+        assert!(tool_call_denied(
+            Some(&fetch_rules),
+            family,
+            &json!({"action":"open", "url":"https://example.com/document"})
+        ));
+        assert!(!tool_call_denied(
+            Some(&fetch_rules),
+            family,
+            &json!({"action":"open", "content":"local fixture"})
+        ));
+    }
+}
+
 fn policy_for_catalog(
     catalog: Vec<Tool>,
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Option<Vec<String>>,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
 ) -> ToolSurfacePolicy {
     ToolSurfacePolicy::new(
         crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(PathBuf::from("."))),
@@ -4529,6 +5299,7 @@ fn policy_for_catalog(
         disallowed_tools,
         None,
         approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     )
 }
 
@@ -4548,7 +5319,7 @@ fn tool_catalog_scenario() {
             catalog,
             Some(vec!["read_file".to_string(), "exec_shell".to_string()]),
             Some(vec!["exec_shell".to_string()]),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
         let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["read_file"]);
@@ -4559,7 +5330,7 @@ fn tool_catalog_scenario() {
             vec![catalog_tool("read_file"), catalog_tool("exec_shell")],
             None,
             None,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
         assert!(surface.catalog.iter().any(|tool| tool.name == "read_file"));
         assert!(surface.catalog.iter().any(|tool| tool.name == "exec_shell"));
@@ -4588,7 +5359,7 @@ fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
         catalog,
         Some(shell_only.to_vec()),
         None,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
 
     let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
@@ -4617,7 +5388,7 @@ fn tool_surface_policy_never_reintroduces_denied_synthetic_tools() {
             JS_EXECUTION_TOOL_NAME.to_string(),
         ]),
         Some(denied),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
 
     for denied_name in [
@@ -4662,7 +5433,7 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
         vec![catalog_tool("read_file")],
         Some(vec![TOOL_SEARCH_NAME.to_string()]),
         Some(vec![TOOL_SEARCH_NAME.to_string()]),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert!(!policy.allows_tool(TOOL_SEARCH_NAME));
     let mut turn = crate::core::turn::TurnContext::new(4);
@@ -4685,285 +5456,82 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
 }
 
 #[tokio::test]
-async fn turn_owned_children_receive_exactly_one_coordination_pass_even_at_step_ceiling() {
+async fn healthy_owned_children_do_not_force_another_parent_model_turn() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     for max_steps in [1, 4] {
         let workspace = tempdir().expect("tempdir");
-        let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-            canned::simple_text_turn("The requested work is complete."),
-            canned::simple_text_turn("I have settled the remaining child work."),
+        let mock = Arc::new(MockLlmClient::new(vec![
+            canned::simple_text_turn("The workflow is running; I will report its result."),
+            canned::tool_call_turn("must-not-run", "read_file", r#"{"path":"state.txt"}"#),
         ]));
         let client: crate::core::model_client::SharedModelClient = mock.clone();
-        let engine_config = EngineConfig {
+        let config = EngineConfig {
             max_steps,
             ..deterministic_engine_config(workspace.path())
         };
         let (mut engine, _handle) =
-            Engine::new_with_model_client(engine_config, &Config::default(), client);
-        let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
-        let registry = crate::tools::ToolRegistry::new(context);
+            Engine::new_with_model_client(config, &Config::default(), client);
+        let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+            workspace.path().to_path_buf(),
+        ));
         let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
-        let foreground_children = Arc::new(ForegroundChildRegistry::new());
-        let registration = foreground_children
-            .register("agent_turn_owned_test", CancellationToken::new())
-            .expect("foreground child registers before settlement");
+        let children = Arc::new(ForegroundChildRegistry::new());
+        let child_cancel = CancellationToken::new();
+        let registration = children
+            .register(child_cancel.clone(), "agent_child")
+            .expect("child registered");
         let mut turn = crate::core::turn::TurnContext::new(max_steps);
 
         let (status, error) = engine
-            .run_turn(
-                &mut turn,
-                surface,
-                Some(Arc::clone(&foreground_children)),
-                None,
-            )
+            .run_turn(&mut turn, surface, Some(Arc::clone(&children)), None)
             .await;
 
         assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-        assert_eq!(
-            mock.call_count(),
-            2,
-            "max_steps={max_steps} must dispatch exactly one coordination pass"
-        );
-        let requests = mock.captured_requests();
-        let coordination_text = requests[1]
-            .messages
-            .iter()
-            .flat_map(|message| message.content.iter())
-            .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
+        assert_eq!(mock.call_count(), 1, "no forced coordination request");
+        assert_eq!(mock.remaining_turns(), 1, "extra tool turn remains unused");
+        assert_eq!(children.active_count(), 1);
+        assert!(!child_cancel.is_cancelled());
+        assert!(!engine.session.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text, .. }
+                    if text.contains("turn_owned_children_active"))
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            coordination_text.contains(
-                "agent(action=\"wait\", agent_id=\"agent_turn_owned_test\", until=\"all\")"
-            ),
-            "{coordination_text}"
-        );
-        assert!(coordination_text.contains("detached=true"));
-        assert!(coordination_text.contains("resume_from=\"<agent_id>\""));
-        assert_eq!(
-            turn.step, 1,
-            "the ceiling grace must reuse the already-advanced provider slot"
-        );
-
+        }));
         drop(registration);
     }
 }
 
 #[tokio::test]
-async fn turn_owned_coordination_tool_result_gets_one_finalization_response_at_step_ceiling() {
+async fn user_steer_during_parent_answer_still_gets_a_reply_with_healthy_children() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
     let workspace = tempdir().expect("tempdir");
-    fs::write(workspace.path().join("state.txt"), "settlement-proof\n").expect("write fixture");
-    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::simple_text_turn("The primary task is complete."),
-        canned::tool_call_turn(
-            "call-coordination-read",
-            "read_file",
-            r#"{"path":"state.txt"}"#,
-        ),
-        canned::simple_text_turn("The coordination result is incorporated."),
-    ]));
+    fs::write(workspace.path().join("state.txt"), "steer-proof\n").expect("fixture");
+    let mock = Arc::new(MockLlmClient::new(Vec::new()));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
-    let engine_config = EngineConfig {
-        max_steps: 1,
-        ..deterministic_engine_config(workspace.path())
-    };
-    let (mut engine, _handle) =
-        Engine::new_with_model_client(engine_config, &Config::default(), client);
-    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
-    let mut tool_registry = crate::tools::ToolRegistry::new(context);
-    tool_registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
-    let tools = Some(tool_registry.to_api_tools_with_cache(true));
-    let surface = test_tool_surface(&engine, tool_registry, tools, AppMode::Agent);
-    let foreground_children = Arc::new(ForegroundChildRegistry::new());
-    let registration = foreground_children
-        .register("agent_tool_roundtrip", CancellationToken::new())
-        .expect("foreground child registers before settlement");
-    let mut turn = crate::core::turn::TurnContext::new(1);
-
-    let (status, error) = engine
-        .run_turn(
-            &mut turn,
-            surface,
-            Some(Arc::clone(&foreground_children)),
-            None,
-        )
-        .await;
-
-    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-    assert_eq!(mock.call_count(), 3);
-    let requests = mock.captured_requests();
-    assert!(
-        requests[2]
-            .messages
-            .iter()
-            .flat_map(|message| message.content.iter())
-            .any(|block| matches!(
-                block,
-                ContentBlock::ToolResult { tool_use_id, .. }
-                    if tool_use_id == "call-coordination-read"
-            ))
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
     );
-    assert_eq!(mock.remaining_turns(), 0);
-
-    drop(registration);
-}
-
-#[tokio::test]
-async fn turn_owned_coordination_output_limit_grace_is_bounded() {
-    use crate::llm_client::mock::{MockLlmClient, canned};
-
-    let truncated = |id: &str| {
-        vec![
-            canned::message_start(id),
-            canned::text_block_start(0),
-            canned::text_delta(0, "partial coordination response"),
-            canned::block_stop(0),
-            canned::message_delta("max_output_tokens", None),
-            canned::message_stop(),
-        ]
-    };
-    let workspace = tempdir().expect("tempdir");
-    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::simple_text_turn("The primary task is complete."),
-        truncated("coordination-truncated-1"),
-        truncated("coordination-truncated-2"),
-        canned::simple_text_turn("must remain unused"),
-    ]));
-    let client: crate::core::model_client::SharedModelClient = mock.clone();
-    let engine_config = EngineConfig {
-        max_steps: 1,
-        ..deterministic_engine_config(workspace.path())
-    };
-    let (mut engine, _handle) =
-        Engine::new_with_model_client(engine_config, &Config::default(), client);
-    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
-    let tool_registry = crate::tools::ToolRegistry::new(context);
-    let surface = test_tool_surface(&engine, tool_registry, None, AppMode::Agent);
-    let foreground_children = Arc::new(ForegroundChildRegistry::new());
-    let registration = foreground_children
-        .register("agent_bounded_truncation", CancellationToken::new())
-        .expect("foreground child registers before settlement");
-    let mut turn = crate::core::turn::TurnContext::new(1);
-
-    let (status, error) = engine
-        .run_turn(
-            &mut turn,
-            surface,
-            Some(Arc::clone(&foreground_children)),
-            None,
-        )
-        .await;
-
-    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-    assert_eq!(mock.call_count(), 3, "coordination grace must be finite");
-    assert_eq!(
-        mock.remaining_turns(),
-        1,
-        "a third grace reply is forbidden"
-    );
-
-    drop(registration);
-}
-
-#[tokio::test]
-async fn turn_owned_coordination_tool_grace_is_bounded_below_step_ceiling() {
-    use crate::llm_client::mock::{MockLlmClient, canned};
-
-    let workspace = tempdir().expect("tempdir");
-    fs::write(workspace.path().join("state.txt"), "settlement-proof\n").expect("write fixture");
-    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::simple_text_turn("The primary task is complete."),
-        canned::tool_call_turn(
-            "call-coordination-read-1",
-            "read_file",
-            r#"{"path":"state.txt"}"#,
-        ),
-        canned::tool_call_turn(
-            "call-coordination-read-2",
-            "read_file",
-            r#"{"path":"state.txt"}"#,
-        ),
-        canned::simple_text_turn("must remain unused"),
-    ]));
-    let client: crate::core::model_client::SharedModelClient = mock.clone();
-    let engine_config = EngineConfig {
-        max_steps: 8,
-        ..deterministic_engine_config(workspace.path())
-    };
-    let (mut engine, _handle) =
-        Engine::new_with_model_client(engine_config, &Config::default(), client);
-    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
-    let mut tool_registry = crate::tools::ToolRegistry::new(context);
-    tool_registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
-    let tools = Some(tool_registry.to_api_tools_with_cache(true));
-    let surface = test_tool_surface(&engine, tool_registry, tools, AppMode::Agent);
-    let foreground_children = Arc::new(ForegroundChildRegistry::new());
-    let registration = foreground_children
-        .register("agent_bounded_tools", CancellationToken::new())
-        .expect("foreground child registers before settlement");
-    let mut turn = crate::core::turn::TurnContext::new(8);
-
-    let (status, error) = engine
-        .run_turn(
-            &mut turn,
-            surface,
-            Some(Arc::clone(&foreground_children)),
-            None,
-        )
-        .await;
-
-    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-    assert_eq!(
-        mock.call_count(),
-        3,
-        "two accepted coordination responses must exhaust the grace even below max_steps"
-    );
-    assert_eq!(
-        mock.remaining_turns(),
-        1,
-        "a third coordination response is forbidden"
-    );
-
-    drop(registration);
-}
-
-#[tokio::test]
-async fn steer_during_final_coordination_response_gets_its_own_provider_reply() {
-    use crate::llm_client::mock::{MockLlmClient, canned};
-
-    let workspace = tempdir().expect("tempdir");
-    fs::write(workspace.path().join("state.txt"), "settlement-proof\n").expect("write fixture");
-    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::simple_text_turn("The primary task is complete."),
-        canned::tool_call_turn(
-            "call-coordination-read-1",
-            "read_file",
-            r#"{"path":"state.txt"}"#,
-        ),
-    ]));
-    let client: crate::core::model_client::SharedModelClient = mock.clone();
-    let engine_config = EngineConfig {
-        max_steps: 8,
-        ..deterministic_engine_config(workspace.path())
-    };
-    let (mut engine, handle) =
-        Engine::new_with_model_client(engine_config, &Config::default(), client);
-    let tx_steer = handle.tx_steer.clone();
     mock.push_factory(move |_request| {
-        tx_steer
-            .try_send("Include this user steer in the final answer.".to_string())
-            .expect("test steer channel remains open");
-        canned::tool_call_turn(
-            "call-coordination-read-2",
-            "read_file",
-            r#"{"path":"state.txt"}"#,
-        )
+        let turn_id = handle
+            .turn_controls
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .map(|control| control.id);
+        handle
+            .tx_steer
+            .try_send(handle::SteerInput {
+                turn_id,
+                content: "Also read state.txt and include its evidence.".to_string(),
+                outcome: None,
+            })
+            .expect("steer channel open");
+        canned::simple_text_turn("The workflow is still running.")
     });
     mock.push_turn(canned::tool_call_turn(
         "call-steer-read",
@@ -4971,66 +5539,49 @@ async fn steer_during_final_coordination_response_gets_its_own_provider_reply() 
         r#"{"path":"state.txt"}"#,
     ));
     mock.push_turn(canned::simple_text_turn(
-        "The queued user steer is now handled.",
+        "The user-requested evidence is steer-proof.",
     ));
-
-    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
-    let mut tool_registry = crate::tools::ToolRegistry::new(context);
-    tool_registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
-    let tools = Some(tool_registry.to_api_tools_with_cache(true));
-    let surface = test_tool_surface(&engine, tool_registry, tools, AppMode::Agent);
-    let foreground_children = Arc::new(ForegroundChildRegistry::new());
-    let registration = foreground_children
-        .register("agent_steer_handoff", CancellationToken::new())
-        .expect("foreground child registers before settlement");
+    let mut registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    registry.register(Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+    let children = Arc::new(ForegroundChildRegistry::new());
+    let child_cancel = CancellationToken::new();
+    let registration = children
+        .register(child_cancel.clone(), "agent_child")
+        .expect("child registered");
     let mut turn = crate::core::turn::TurnContext::new(8);
 
     let (status, error) = engine
-        .run_turn(
-            &mut turn,
-            surface,
-            Some(Arc::clone(&foreground_children)),
-            None,
-        )
+        .run_turn(&mut turn, surface, Some(Arc::clone(&children)), None)
         .await;
 
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-    assert_eq!(mock.call_count(), 5);
+    assert_eq!(mock.call_count(), 3);
     let requests = mock.captured_requests();
-    let steer_request_text = requests[3]
-        .messages
-        .iter()
-        .flat_map(|message| message.content.iter())
-        .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.as_str()),
-            _ => None,
+    assert!(requests[1].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text, .. }
+                if text.contains("Also read state.txt and include its evidence."))
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        steer_request_text.contains("Include this user steer in the final answer."),
-        "{steer_request_text}"
-    );
-    assert!(
-        requests[4]
-            .messages
-            .iter()
-            .flat_map(|message| message.content.iter())
-            .any(|block| matches!(
-                block,
-                ContentBlock::ToolResult { tool_use_id, .. }
-                    if tool_use_id == "call-steer-read"
-            )),
-        "the steer-authorized tool result must reach a finalization response"
-    );
+    }));
+    assert!(requests[2].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { tool_use_id, .. }
+                if tool_use_id == "call-steer-read")
+        })
+    }));
+    assert_eq!(children.active_count(), 1);
+    assert!(!child_cancel.is_cancelled());
     assert_eq!(mock.remaining_turns(), 0);
-
     drop(registration);
 }
 
 /// Compose one assistant turn that proposes `calls` as a single parallel
 /// tool-call batch: `(call_id, tool_name, args_json)` per block, in order.
-fn tool_batch_turn(calls: &[(&str, &str, &str)]) -> Vec<crate::models::StreamEvent> {
+fn tool_batch_turn(calls: &[(&str, &str, &str)]) -> Vec<codewhale_models::StreamEvent> {
     use crate::llm_client::mock::canned;
 
     let mut events = vec![canned::message_start("mock_tool_batch")];
@@ -5297,6 +5848,90 @@ async fn tool_call_budget_persists_across_model_steps_within_a_turn() {
     );
 }
 
+/// #5986: a provider that cuts the stream at its output limit omits the
+/// closing `ContentBlockStop` for the tool block in flight. The mid-stream
+/// mirror had already assigned the truncated buffer's best-effort parse
+/// (the repair ladder appends the missing `}`), and dispatch reads
+/// `tool.input` directly — so the cut call used to execute with a partial
+/// argument. The post-stream finalization pass must send it down the same
+/// malformed-arguments gate a normal block stop applies.
+#[tokio::test]
+async fn truncated_tool_call_without_block_stop_never_dispatches() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("fixture.txt"), "fixture\n").expect("write fixture");
+    // Cut mid-argument, right after a complete string value: stage 4 of the
+    // repair ladder appends one `}` and the text parses — synthesized.
+    let cut_turn = vec![
+        canned::message_start("mock_msg_cut"),
+        canned::tool_use_block_start(0, "call-cut", "read_file"),
+        canned::tool_input_delta(0, r#"{"path": "fixture.txt""#),
+        // Deliberately no block_stop(0): the output limit ended the turn.
+        canned::message_delta("max_tokens", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        cut_turn,
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), None, mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let (_, result) = completions
+        .iter()
+        .find(|(id, _)| id == "call-cut")
+        .expect("the cut tool call still reports a completion");
+    let reason = result
+        .as_ref()
+        .expect_err("a truncated tool call must never execute")
+        .to_string();
+    assert!(
+        reason.contains("malformed tool arguments"),
+        "expected the malformed-arguments gate, got: {reason}"
+    );
+}
+
+/// The control for the cut-stream pass: when the omitted block stop is the
+/// only irregularity and the buffered arguments were structurally complete,
+/// the tool still dispatches. Otherwise every provider that skips closing
+/// events would lose all of its tool calls.
+#[tokio::test]
+async fn complete_tool_call_without_block_stop_still_dispatches() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("fixture.txt"), "fixture\n").expect("write fixture");
+    let no_stop_turn = vec![
+        canned::message_start("mock_msg_nostop"),
+        canned::tool_use_block_start(0, "call-complete", "read_file"),
+        canned::tool_input_delta(0, r#"{"path": "fixture.txt"}"#),
+        canned::message_delta("tool_use", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        no_stop_turn,
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), None, mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let (_, result) = completions
+        .iter()
+        .find(|(id, _)| id == "call-complete")
+        .expect("the tool call reports a completion");
+    let output = result
+        .as_ref()
+        .expect("structurally complete arguments still dispatch")
+        .content
+        .clone();
+    assert!(output.contains("fixture"), "{output}");
+}
+
 /// #4415 AC(c): a write-first named-file task carries a scoped-write
 /// authority envelope naming its exact files. The existing allowed-paths
 /// machinery (`ToolAuthorityEnvelope`, enforced at the registry boundary)
@@ -5376,7 +6011,7 @@ fn empty_allowed_tools_surface_is_empty_and_sends_no_tools_field() {
         vec![catalog_tool("read_file")],
         Some(Vec::new()),
         None,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
 
     assert!(surface.catalog.is_empty());
@@ -5576,11 +6211,14 @@ fn active_goal_message_op(
     objective: &str,
     token_budget: Option<u32>,
 ) -> Op {
-    Op::SendMessage {
+    Op::SendMessage(TurnSpec {
+        max_output_tokens: None,
         content: content.to_string(),
+        images: Vec::new(),
         mode: AppMode::Agent,
         route: resolved_route_for_test(config, "local-model"),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective: Some(objective.to_string()),
         goal_token_budget: token_budget,
         goal_status: crate::tools::goal::GoalStatus::Active,
@@ -5590,14 +6228,14 @@ fn active_goal_message_op(
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
-    }
+    })
 }
 
 fn system_prompt_text(prompt: SystemPrompt) -> String {
@@ -5612,11 +6250,14 @@ fn system_prompt_text(prompt: SystemPrompt) -> String {
 }
 
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
-    Op::SendMessage {
+    Op::SendMessage(TurnSpec {
+        max_output_tokens: None,
         content: content.to_string(),
+        images: Vec::new(),
         mode,
         route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective: None,
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,
@@ -5626,22 +6267,25 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         allow_shell: true,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
-    }
+    })
 }
 
 fn auto_review_message_op(content: &str, config: &Config) -> Op {
-    Op::SendMessage {
+    Op::SendMessage(TurnSpec {
+        max_output_tokens: None,
         content: content.to_string(),
+        images: Vec::new(),
         mode: AppMode::Agent,
         route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
         compaction: Box::new(CompactionConfig::default()),
+        initial_routed_usage: Box::default(),
         goal_objective: None,
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,
@@ -5651,14 +6295,14 @@ fn auto_review_message_op(content: &str, config: &Config) -> Op {
         allow_shell: true,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Auto,
+        approval_mode: ApprovalMode::Auto,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
-    }
+    })
 }
 
 struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -5696,14 +6340,14 @@ impl crate::core::model_client::ModelClient for FailingGuardianModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("fixture guardian transport failure")
     }
 
     async fn create_message_stream(
         &self,
-        request: crate::models::MessageRequest,
+        request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         crate::core::model_client::ModelClient::create_message_stream(&self.inner, request).await
     }
@@ -5725,8 +6369,8 @@ impl crate::core::model_client::ModelClient for BlockingGuardianModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         let _drop_signal = DropSignal(std::sync::Arc::clone(&self.guardian_dropped));
         self.guardian_entered.notify_one();
         std::future::pending().await
@@ -5734,7 +6378,7 @@ impl crate::core::model_client::ModelClient for BlockingGuardianModelClient {
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
 
@@ -5771,14 +6415,14 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         std::future::pending().await
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
         self.entered.notify_one();
@@ -5793,7 +6437,7 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
 fn test_tool_surface(
     engine: &Engine,
     registry: crate::tools::ToolRegistry,
-    tools: Option<Vec<crate::models::Tool>>,
+    tools: Option<Vec<codewhale_models::Tool>>,
     mode: AppMode,
 ) -> ToolSurfacePolicy {
     ToolSurfacePolicy::new(
@@ -5807,6 +6451,7 @@ fn test_tool_surface(
         engine.config.disallowed_tools.clone(),
         engine.config.max_tool_calls,
         engine.session.approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     )
 }
 
@@ -5860,7 +6505,7 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
 #[tokio::test]
 async fn normal_repl_kernel_persists_across_user_turns() {
     use crate::llm_client::mock::{MockLlmClient, canned};
-    use crate::models::{ContentBlock, Message, MessageResponse, Usage};
+    use codewhale_models::{ContentBlock, Message, MessageResponse, Usage};
 
     let workspace = tempdir().expect("tempdir");
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
@@ -5918,8 +6563,11 @@ async fn normal_repl_kernel_persists_across_user_turns() {
     assert_eq!(first_turn.usage.output_tokens, 11);
     let child_usage_event = {
         let mut events = handle.rx_event.write().await;
+        // Kernel child calls carry their own routed cost receipt, so their
+        // per-call telemetry arrives as `RoutedTurnUsage` rather than the
+        // parent-route `TurnUsage` receipt.
         std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
-            Event::TurnUsage { usage, .. }
+            Event::RoutedTurnUsage { usage, .. }
                 if usage.input_tokens == 7 && usage.output_tokens == 11 =>
             {
                 Some(usage)
@@ -5983,7 +6631,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
 
 async fn snapshot_for_catalog(
     workspace: &Path,
-    catalog: Option<Vec<crate::models::Tool>>,
+    catalog: Option<Vec<codewhale_models::Tool>>,
 ) -> crate::tool_inspection::ToolInspectionSnapshot {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -6013,7 +6661,7 @@ async fn snapshot_for_catalog(
 async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() {
     let workspace = tempdir().expect("tempdir");
     let absent = snapshot_for_catalog(workspace.path(), None).await;
-    let deferred_only = crate::models::Tool {
+    let deferred_only = codewhale_models::Tool {
         tool_type: Some("function".to_string()),
         name: "deferred_fixture".to_string(),
         description: "Deferred fixture".to_string(),
@@ -6036,6 +6684,147 @@ async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() 
     assert!(present_empty.tools_field_present);
     assert_eq!(present_empty.tool_count, 0);
     assert_eq!(present_empty.payload_json_bytes, Some(2));
+}
+
+#[tokio::test]
+async fn terminal_diagnostics_distinguish_narration_from_missing_protocol_tool_calls() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::tool_inspection::TurnStopReason;
+
+    for finish in ["end_turn", "tool_calls", "tool_use"] {
+        let workspace = tempdir().expect("tempdir");
+        let response = vec![
+            canned::message_start("stop_diagnostic_fixture"),
+            canned::text_block_start(0),
+            canned::text_delta(0, "I will edit the file. 我现在修改文件。"),
+            canned::block_stop(0),
+            canned::message_delta(
+                finish,
+                Some(Usage {
+                    input_tokens: 100,
+                    output_tokens: 12,
+                    reasoning_tokens: Some(4),
+                    prompt_cache_hit_tokens: Some(80),
+                    prompt_cache_miss_tokens: Some(20),
+                    ..Usage::default()
+                }),
+            ),
+            canned::message_stop(),
+        ];
+        let mock = std::sync::Arc::new(MockLlmClient::new(vec![response]));
+        let client: crate::core::model_client::SharedModelClient = mock.clone();
+        let (mut engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &Config::default(),
+            client,
+        );
+        let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+            workspace.path().to_path_buf(),
+        ));
+        let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+        let mut turn = crate::core::turn::TurnContext::new(4);
+        let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+        let expected = if finish == "end_turn" {
+            assert!(
+                error.is_none(),
+                "ordinary narration is not a protocol error"
+            );
+            TurnStopReason::ProviderNoToolCall
+        } else {
+            assert_eq!(status, TurnOutcomeStatus::Failed);
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("supplied no tool call"))
+            );
+            TurnStopReason::ProviderToolCallMissing
+        };
+        let snapshot = turn
+            .terminal_request_snapshot(status)
+            .expect("terminal request snapshot");
+        let terminal = snapshot.terminal.as_ref().expect("terminal facts");
+        assert_eq!(terminal.reason, Some(expected));
+        assert_eq!(terminal.model_requests_started, 1);
+        assert_eq!(terminal.last_reported_input_tokens, Some(100));
+        assert_eq!(terminal.last_response_tool_calls, Some(0));
+        assert_eq!(terminal.last_response_tool_calls_suppressed, Some(0));
+        assert_eq!(
+            terminal.last_provider_finish_reason.as_ref().unwrap().value,
+            finish
+        );
+        assert_eq!(
+            mock.captured_requests().len(),
+            1,
+            "narration must not synthesize continuation"
+        );
+        assert_eq!(turn.usage.input_tokens, 100);
+        assert_eq!(
+            turn.usage.output_tokens, 12,
+            "reasoning is an output subset, not additional output"
+        );
+        assert!(snapshot.render_text().contains("Terminal diagnostics"));
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(json["terminal"]["model_requests_started"], 1);
+        let mut events = handle.rx_event.write().await;
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, Event::ToolCallStarted { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_diagnostics_merge_cumulative_usage_within_one_request() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let usage = Usage {
+        input_tokens: 100,
+        output_tokens: 12,
+        reasoning_tokens: Some(4),
+        prompt_cache_hit_tokens: Some(80),
+        prompt_cache_miss_tokens: Some(20),
+        ..Usage::default()
+    };
+    let mut start = canned::message_start("cumulative_usage_fixture");
+    if let StreamEvent::MessageStart { message } = &mut start {
+        message.usage = usage.clone();
+    }
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![vec![
+        start,
+        canned::text_block_start(0),
+        canned::text_delta(0, "Done."),
+        canned::block_stop(0),
+        canned::message_delta("end_turn", Some(usage.clone())),
+        canned::message_delta("end_turn", Some(usage.clone())),
+        canned::message_stop(),
+    ]]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.captured_requests().len(), 1);
+    assert_eq!(
+        turn.usage, usage,
+        "repeated cumulative receipts are counted once"
+    );
+    let mut events = handle.rx_event.write().await;
+    let usages = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::TurnUsage { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usages, vec![usage]);
 }
 
 #[tokio::test]
@@ -6088,8 +6877,12 @@ async fn tool_result_followed_by_terminal_empty_assistant_fails_turn() {
         canned::message_delta("stop", None),
         canned::message_stop(),
     ];
+    // #6310: an answerless clean stop is retried (exact prefix, then nudged)
+    // before the turn fails, so the fixture stays empty for every attempt.
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
         canned::tool_call_turn("call-read", "read_file", r#"{"path":"README.md"}"#),
+        empty_terminal_turn.clone(),
+        empty_terminal_turn.clone(),
         empty_terminal_turn,
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
@@ -6107,11 +6900,17 @@ async fn tool_result_followed_by_terminal_empty_assistant_fails_turn() {
 
     let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
     assert_eq!(status, TurnOutcomeStatus::Failed);
-    assert_eq!(mock.call_count(), 2, "tool step then empty provider step");
+    assert_eq!(
+        mock.call_count(),
+        4,
+        "tool step, empty provider step, then exactly two bounded retries"
+    );
+    assert_eq!(turn.stop_diagnostics.empty_stop_retries, 2);
     assert!(
         error
             .as_deref()
-            .is_some_and(|message| message.contains("terminal stop reason `stop`")),
+            .is_some_and(|message| message.contains("terminal stop reason `stop`")
+                && message.contains("after 2 retries")),
         "terminal empty response must produce a precise failure: {error:?}"
     );
 
@@ -6141,6 +6940,139 @@ async fn tool_result_followed_by_terminal_empty_assistant_fails_turn() {
     );
 }
 
+fn empty_clean_stop_turn() -> Vec<StreamEvent> {
+    use crate::llm_client::mock::canned;
+    vec![
+        canned::message_start("mock_empty_clean_stop"),
+        canned::message_delta("stop", None),
+        canned::message_stop(),
+    ]
+}
+
+async fn run_empty_stop_fixture(
+    turns: Vec<Vec<StreamEvent>>,
+) -> (
+    std::sync::Arc<crate::llm_client::mock::MockLlmClient>,
+    Engine,
+    crate::core::turn::TurnContext,
+    TurnOutcomeStatus,
+    Option<String>,
+) {
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(crate::llm_client::mock::MockLlmClient::new(turns));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    (mock, engine, turn, status, error)
+}
+
+/// #6310: one clean `stop` with no text, reasoning or tool call is retried
+/// with the identical request and the turn completes on the real answer.
+#[tokio::test]
+async fn empty_clean_stop_is_retried_once_and_the_turn_completes() {
+    use crate::llm_client::mock::canned;
+
+    let (mock, engine, turn, status, error) = run_empty_stop_fixture(vec![
+        empty_clean_stop_turn(),
+        canned::simple_text_turn("the recovered answer"),
+    ])
+    .await;
+
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 2, "exactly one retry");
+    assert_eq!(turn.stop_diagnostics.empty_stop_retries, 1);
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests[0].messages.len(),
+        requests[1].messages.len(),
+        "the first retry is an exact-prefix re-request"
+    );
+    let transcript =
+        serde_json::to_string(&engine.session.messages.iter().collect::<Vec<_>>()).unwrap();
+    assert_eq!(transcript.matches("the recovered answer").count(), 1);
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| message.role != Role::Assistant || !message.content.is_empty()),
+        "the empty response must not be persisted"
+    );
+}
+
+/// #6310: the second retry carries the request-scoped nudge, which never
+/// joins the session; the retry after that budget is not attempted.
+#[tokio::test]
+async fn empty_clean_stop_second_retry_is_nudged_and_never_persisted() {
+    use crate::llm_client::mock::canned;
+
+    let (mock, engine, turn, status, error) = run_empty_stop_fixture(vec![
+        empty_clean_stop_turn(),
+        empty_clean_stop_turn(),
+        canned::simple_text_turn("answer after nudge"),
+    ])
+    .await;
+
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 3);
+    assert_eq!(turn.stop_diagnostics.empty_stop_retries, 2);
+    let requests = mock.captured_requests();
+    let nudge = crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE;
+    let carries_nudge = |request: &codewhale_models::MessageRequest| {
+        serde_json::to_string(&request.messages)
+            .unwrap()
+            .contains(nudge)
+    };
+    assert!(!carries_nudge(&requests[0]));
+    assert!(!carries_nudge(&requests[1]), "first retry is exact-prefix");
+    assert!(carries_nudge(&requests[2]), "second retry is nudged");
+    assert_eq!(requests[2].messages.len(), requests[0].messages.len() + 1);
+    assert!(
+        !serde_json::to_string(&engine.session.messages.iter().collect::<Vec<_>>())
+            .unwrap()
+            .contains(nudge),
+        "the nudge is request-scoped and never written to the session"
+    );
+}
+
+/// #6310: an empty response on every attempt fails visibly once the budget
+/// is spent, with the retries recorded in stop diagnostics.
+#[tokio::test]
+async fn empty_clean_stop_every_time_fails_after_the_retry_budget() {
+    let (mock, _engine, turn, status, error) = run_empty_stop_fixture(vec![
+        empty_clean_stop_turn(),
+        empty_clean_stop_turn(),
+        empty_clean_stop_turn(),
+    ])
+    .await;
+
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(
+        mock.call_count(),
+        1 + crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES as usize
+    );
+    assert_eq!(
+        turn.stop_diagnostics.empty_stop_retries,
+        crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES
+    );
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("terminal stop reason `stop`")
+                && message.contains("after 2 retries")),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalog() {
     use crate::llm_client::mock::{MockLlmClient, canned};
@@ -6161,7 +7093,7 @@ async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalo
     // the turn an empty catalog and nothing would be transmitted. Hand the
     // engine an explicit catalog instead: the registry is still the source of
     // the *facts*, including the fact that this tool is not model-visible.
-    let tools = Some(vec![crate::models::Tool {
+    let tools = Some(vec![codewhale_models::Tool {
         tool_type: None,
         name: "read_file".to_string(),
         description: "Read a file".to_string(),
@@ -6271,6 +7203,287 @@ fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
         subagents_enabled: false,
         ..EngineConfig::default()
     }
+}
+
+/// The compaction budget is measured against the real system prompt, and the
+/// skills block in that prompt is discovered from the developer's home as well
+/// as from the workspace. Left ambient, this test counts whatever skills the
+/// machine happens to have installed into its token budget: 39 of them trip a
+/// seventh compaction pass on a developer box while CI, with an empty home,
+/// sees six and passes. That is the #5359 leak class, and the isolated home is
+/// what makes `deterministic_engine_config` actually deterministic here.
+#[test]
+fn automatic_compaction_continues_one_task_and_suppresses_failed_passes() {
+    let _env = lock_test_env();
+    let home = tempdir().unwrap();
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _user_home = EnvVarGuard::set("HOME", home.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", home.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use crate::llm_client::mock::{MockLlmClient, canned};
+        for fail_summary in [false, true] {
+            let workspace = tempdir().unwrap();
+            fs::write(
+                workspace.path().join("README.md"),
+                "verified fixture evidence",
+            )
+            .unwrap();
+            let mock = std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+            for step in 0..16 {
+                mock.push_turn(vec![
+                    canned::message_start(&format!("response-{step}")),
+                    canned::text_block_start(0),
+                    canned::text_delta(0, &format!("Step {step}: {}", "x".repeat(32_000))),
+                    canned::block_stop(0),
+                    canned::tool_use_block_start(1, &format!("read-{step}"), "File"),
+                    canned::tool_input_delta(1, r#"{"action":"read","path":"README.md"}"#),
+                    canned::block_stop(1),
+                    canned::message_delta("tool_use", None),
+                    canned::message_stop(),
+                ]);
+            }
+            mock.push_turn(canned::simple_text_turn(
+                "All sixteen reads verified; task complete.",
+            ));
+            for checkpoint in 0..8 {
+                let content = if fail_summary {
+                    json!([{"type":"tool_use","id":"unexpected","name":"File","input":{}}])
+                } else {
+                    json!([{"type":"text","text":format!("Current objective: complete all sixteen reads. Checkpoint {checkpoint}: earlier reads verified. Preserve the user's no-publication constraint. Continue the remaining File reads, then report the observed evidence.")}])
+                };
+                mock.push_message_response(serde_json::from_value(json!({
+                    "id":format!("summary-{checkpoint}"), "type":"message", "role":"assistant",
+                    "content":content, "model":"mock-model", "usage":{"input_tokens":0,"output_tokens":0}
+                })).unwrap());
+            }
+            let config = Config::default();
+            let (engine, handle) = Engine::new_with_model_client(
+                deterministic_engine_config(workspace.path()),
+                &config,
+                mock.clone(),
+            );
+            let task = tokio::spawn(engine.run());
+            let mut op = external_user_message_op(
+                "Complete all sixteen reads; do not publish.",
+                AppMode::Agent,
+                &config,
+            );
+            if let Op::SendMessage(TurnSpec {
+                compaction,
+                auto_approve,
+                ..
+            }) = &mut op
+            {
+                compaction.token_threshold = 40_000;
+                *auto_approve = true;
+            }
+            handle.send(op).await.unwrap();
+            let mut completed = 0;
+            let mut failed = 0;
+            {
+                let mut rx = handle.rx_event.write().await;
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                    {
+                        Event::CompactionCompleted { auto: true, .. } => completed += 1,
+                        Event::CompactionFailed { auto: true, .. } => failed += 1,
+                        Event::TurnComplete { status, error, .. } => {
+                            assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let requests = mock.captured_requests();
+            let streaming = requests
+                .iter()
+                .filter(|r| r.stream == Some(true))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                streaming.len(),
+                17,
+                "one user request must continue through all tool steps"
+            );
+            if fail_summary {
+                assert_eq!(
+                    (completed, failed),
+                    (0, 1),
+                    "failed compaction must not loop at every tool boundary"
+                );
+            } else {
+                assert!(
+                    (2..=6).contains(&completed),
+                    "expected repeated useful compaction: {completed}"
+                );
+                assert_eq!(failed, 0);
+            }
+            for request in &requests {
+                assert_eq!(
+                    request.system, streaming[0].system,
+                    "the stable system prefix must survive every pass"
+                );
+                assert_eq!(
+                    request.tools, streaming[0].tools,
+                    "summarizing must reuse the tool prefix"
+                );
+                if request.stream == Some(false) {
+                    assert_eq!(request.tool_choice, Some(json!("none")));
+                }
+                let mut calls = HashSet::new();
+                for message in &request.messages {
+                    for block in &message.content {
+                        match block {
+                            ContentBlock::ToolUse { id, .. } => {
+                                calls.insert(id);
+                            }
+                            ContentBlock::ToolResult { tool_use_id, .. } => assert!(
+                                calls.contains(tool_use_id),
+                                "orphan tool result after compaction"
+                            ),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let snapshot = handle.get_session_snapshot().await.unwrap();
+            assert!(snapshot.messages.iter().any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text {text,..} if text.contains("All sixteen reads verified")))));
+            handle.send(Op::Shutdown).await.unwrap();
+            task.await.unwrap();
+        }
+    });
+}
+
+#[tokio::test]
+async fn initial_routed_usage_is_total_only_emitted_once_and_keeps_parent_route_separate() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let _cost_scope = crate::cost_status::test_scope();
+    let workspace = tempdir().expect("tempdir");
+    let parent_usage = Usage {
+        input_tokens: 11,
+        output_tokens: 3,
+        ..Usage::default()
+    };
+    let classifier_usage = Usage {
+        input_tokens: 7,
+        output_tokens: 5,
+        ..Usage::default()
+    };
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![vec![
+        canned::message_start("parent-response"),
+        canned::text_block_start(0),
+        canned::text_delta(0, "done"),
+        canned::block_stop(0),
+        canned::message_delta("end_turn", Some(parent_usage.clone())),
+        canned::message_stop(),
+    ]]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let api_config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &api_config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    let mut op = external_user_message_op("account for classifier", AppMode::Agent, &api_config);
+    let Op::SendMessage(TurnSpec {
+        initial_routed_usage,
+        ..
+    }) = &mut op
+    else {
+        unreachable!("external_user_message_op always builds SendMessage");
+    };
+    let mut missing_usage_route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Openai,
+        "openai",
+        "classifier-model",
+        Some(ApiProvider::Openai.default_base_url()),
+        chrono::Utc::now(),
+    );
+    missing_usage_route.billing_mode = crate::cost_status::RouteBillingMode::Metered;
+    **initial_routed_usage = crate::cost_status::RuntimeUsageBatch {
+        records: vec![crate::cost_status::RuntimeUsageRecord {
+            source_id: "auto-router:engine-fixture".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: crate::cost_status::EffectiveRouteEnvelope::capture(
+                    None,
+                    ApiProvider::Openai,
+                    "openai",
+                    "classifier-model",
+                    Some(ApiProvider::Openai.default_base_url()),
+                    chrono::Utc::now(),
+                ),
+                usage: classifier_usage.clone(),
+            },
+        }],
+        drop_records: vec![crate::cost_status::RuntimeUsageDropRecord {
+            source_id: "auto-router:engine-fixture:missing-usage".to_string(),
+            route: missing_usage_route,
+        }],
+        // One exact route-aware missing receipt plus two residual gaps whose
+        // route identity was truncated upstream.
+        dropped_records: 3,
+    };
+    handle.send(op).await.expect("send routed-usage turn");
+
+    let mut routed_events = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    let (total_usage, terminal_parent_usage, dropped_records) = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for routed-usage turn")
+            .expect("engine event stream closed");
+        match event {
+            Event::RoutedTurnUsage { usage, .. } => routed_events.push(usage),
+            Event::TurnComplete {
+                usage,
+                parent_route_usage,
+                routed_usage_dropped_records,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break (usage, parent_route_usage, routed_usage_dropped_records);
+            }
+            _ => {}
+        }
+    };
+    drop(rx);
+
+    assert_eq!(routed_events, vec![classifier_usage.clone()]);
+    assert_eq!(terminal_parent_usage, parent_usage);
+    assert_eq!(total_usage.input_tokens, 18);
+    assert_eq!(total_usage.output_tokens, 8);
+    assert_eq!(dropped_records, 2);
+    let initial_cost = crate::cost_status::drain();
+    assert!(
+        initial_cost.usage_source_fingerprints.contains(
+            &crate::cost_status::usage_source_fingerprint(
+                "auto-router:engine-fixture:missing-usage"
+            )
+        ),
+        "exact missing-usage response identity was not settled"
+    );
+    assert!(
+        initial_cost
+            .unpriced_reasons
+            .contains("provider_success_missing_usage"),
+        "metered missing-usage route was not marked incomplete"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
 }
 
 #[tokio::test]
@@ -6567,13 +7780,13 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
 
     for (approval_mode, auto_approve, posture, expected_denial) in [
         (
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             false,
             "Auto-Review",
             "Sandbox escalation requires a one-shot user approval",
         ),
         (
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             true,
             "Full Access",
             "requires a one-shot user approval",
@@ -6588,7 +7801,7 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
             ),
             canned::simple_text_turn("Escalation was unavailable."),
         ]));
-        if matches!(approval_mode, crate::tui::approval::ApprovalMode::Auto) {
+        if matches!(approval_mode, ApprovalMode::Auto) {
             // Let Auto-Review's independent guardian approve the bounded
             // fixture call so this test reaches the separate rule under test:
             // unattended postures still cannot mint a sandbox escalation.
@@ -6612,11 +7825,11 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
             AppMode::Agent,
             &config,
         );
-        let Op::SendMessage {
+        let Op::SendMessage(TurnSpec {
             approval_mode: op_approval_mode,
             auto_approve: op_auto_approve,
             ..
-        } = &mut op
+        }) = &mut op
         else {
             panic!("user message op")
         };
@@ -6663,7 +7876,7 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
 async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
-    const TOOL_ROUNDS: usize = 20;
+    const TOOL_ROUNDS: usize = 201;
     const FINAL_ANSWER: &str = "All productive tool rounds completed.";
 
     let workspace = tempdir().expect("tempdir");
@@ -6731,7 +7944,7 @@ async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
                 assert_eq!(
                     mock.call_count(),
                     TOOL_ROUNDS + 1,
-                    "the final provider request must follow tool round 20"
+                    "productive work must finish beyond the former 200-step default"
                 );
                 assert!(
                     saw_final_answer,
@@ -6888,6 +8101,139 @@ async fn max_steps_exhaustion_fails_as_budget_never_completed() {
         crate::core::termination::classify_turn_termination(status, Some(category), false, false),
         crate::core::termination::RunTerminationReason::BudgetExhausted
     );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn goal_turn_uses_goal_step_allowance_and_pauses_budget_limit_after_final_report() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let config = goal_custom_route_config();
+    // The model makes one tool step (consuming the 1-step goal allowance),
+    // then writes its bounded final report when granted it.
+    let turns = vec![
+        canned::tool_call_turn(
+            "call-step-1",
+            "File",
+            r#"{"action":"read","path":"state.txt"}"#,
+        ),
+        canned::simple_text_turn("final report: one step of progress made"),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(turns));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("state.txt"), "still-working\n").expect("write fixture");
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            workspace: workspace.path().to_path_buf(),
+            max_steps: 200,
+            goal_max_steps: Some(1),
+            goal_objective: Some("finish the migration".to_string()),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(active_goal_message_op(
+            &config,
+            "Work on the goal.",
+            "finish the migration",
+            None,
+        ))
+        .await
+        .expect("send goal-budget trajectory");
+
+    let mut rx = handle.rx_event.write().await;
+    let (status, _) = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for goal-budget trajectory")
+            .expect("engine event");
+        if let Event::TurnComplete { status, error, .. } = event {
+            break (status, error);
+        }
+    };
+    drop(rx);
+
+    // The final report closes the turn cleanly; the unfinished goal then
+    // pauses BudgetLimit instead of re-arming another full goal turn (#5994).
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    let snapshot = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(snapshot.status, "paused");
+    assert_eq!(
+        snapshot.pause_reason,
+        Some(crate::tools::goal::GoalPauseReason::BudgetLimit)
+    );
+    // The mock served exactly the tool step plus the final report; any
+    // re-armed continuation would have needed a third provider turn.
+    assert_eq!(mock.call_count(), 2);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn interactive_turn_keeps_ordinary_ceiling_when_goal_allowance_is_configured() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("state.txt"), "still-working\n").expect("write fixture");
+    // No active goal: the [goal] allowance must never raise the ordinary
+    // interactive ceiling.
+    let turns = vec![
+        canned::tool_call_turn(
+            "call-step-1",
+            "File",
+            r#"{"action":"read","path":"state.txt"}"#,
+        ),
+        canned::tool_call_turn(
+            "call-step-2",
+            "File",
+            r#"{"action":"read","path":"state.txt"}"#,
+        ),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(turns));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        goal_max_steps: Some(1_000),
+        ..deterministic_engine_config(workspace.path())
+    };
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Keep reading until done.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send interactive trajectory");
+
+    let mut rx = handle.rx_event.write().await;
+    let (status, error) = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for interactive trajectory")
+            .expect("engine event");
+        if let Event::TurnComplete { status, error, .. } = event {
+            break (status, error);
+        }
+    };
+    drop(rx);
+
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    let error = error.expect("budget exhaustion carries a terminal error");
+    assert!(error.contains("limit: 1"), "{error}");
+    assert!(error.contains("max_steps"), "{error}");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
@@ -7454,8 +8800,8 @@ async fn engine_cancellation_drops_active_injected_model_request() {
     task.await.expect("engine task");
 }
 
-fn guardian_fixture_response(text: &str) -> crate::models::MessageResponse {
-    crate::models::MessageResponse {
+fn guardian_fixture_response(text: &str) -> codewhale_models::MessageResponse {
+    codewhale_models::MessageResponse {
         id: "guardian-fixture".to_string(),
         r#type: "message".to_string(),
         role: "assistant".to_string(),
@@ -7476,7 +8822,7 @@ fn guardian_fixture_response(text: &str) -> crate::models::MessageResponse {
 }
 
 fn guardian_tool_results<'a>(
-    request: &'a crate::models::MessageRequest,
+    request: &'a codewhale_models::MessageRequest,
     call_id: &str,
 ) -> Vec<(&'a str, Option<bool>)> {
     request
@@ -7529,7 +8875,12 @@ async fn collect_guardian_journey_with_receipts(
                     "duplicate tool result"
                 );
             }
-            Event::TurnUsage { usage, .. } => usage_events.push(usage),
+            // Guardian consults carry their own routed receipt; both the
+            // parent-route and routed per-call telemetry count as reaching
+            // the cost UI.
+            Event::TurnUsage { usage, .. } | Event::RoutedTurnUsage { usage, .. } => {
+                usage_events.push(usage);
+            }
             Event::ToolGateDecision {
                 tool_id,
                 gate,
@@ -7723,7 +9074,7 @@ async fn auto_review_guardian_parse_and_transport_failures_deny_closed() {
             r#"{"action":"write","path":".env","content":"must-not-run\n"}"#,
         );
         let follow_up_id = call_id.clone();
-        let follow_up = move |request: &crate::models::MessageRequest| {
+        let follow_up = move |request: &codewhale_models::MessageRequest| {
             let results = guardian_tool_results(request, &follow_up_id);
             assert_eq!(results.len(), 1, "reviewer failure must pair one result");
             let result = results[0];
@@ -7929,7 +9280,7 @@ fn auto_review_plan_decision(
     tool_name: &str,
     tool_input: &Value,
     run_origin: crate::tui::auto_review::RunOrigin,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
     workspace_trusted: bool,
     workspace: Option<&Path>,
 ) -> (AutoReviewPlanDecision, Value) {
@@ -7954,7 +9305,7 @@ fn auto_review_scenario() {
             "exec_shell",
             &json!({"command": "git push origin main"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -7976,7 +9327,7 @@ fn auto_review_scenario() {
             "read_file",
             &json!({"path": "Cargo.toml"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -7991,7 +9342,7 @@ fn auto_review_scenario() {
             "exec_shell",
             &json!({"command": "git remote -v && git rev-parse --show-toplevel && git branch --show-current && git rev-parse HEAD && git tag --list 'v0.8.65'"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8007,7 +9358,7 @@ fn auto_review_scenario() {
             "mystery_tool",
             &json!({"value": true}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8027,7 +9378,7 @@ fn auto_review_scenario() {
             "github_publish_release",
             &json!({"tag": "v0.8.64"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
             true,
             None,
         );
@@ -8049,7 +9400,7 @@ fn auto_review_scenario() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8068,7 +9419,7 @@ fn auto_review_scenario() {
             "write_file",
             &json!({"path": "src/lib.rs", "content": "pub fn ready() {}\n"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             Some(tmp.path()),
         );
@@ -8087,7 +9438,7 @@ fn auto_review_scenario() {
                 "write_file",
                 &json!({"path": path, "content": "blocked"}),
                 crate::tui::auto_review::RunOrigin::Interactive,
-                crate::tui::approval::ApprovalMode::Auto,
+                ApprovalMode::Auto,
                 true,
                 Some(tmp.path()),
             );
@@ -8102,7 +9453,7 @@ fn auto_review_scenario() {
 
 #[test]
 fn repo_law_asks_only_in_ask_posture() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     assert!(!repo_law_must_block_without_prompt(
         ApprovalMode::Suggest,
@@ -8211,18 +9562,30 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         .into_iter()
         .map(str::to_string)
         .collect();
+    let always_load: HashSet<String> = [
+        "mcp_static_read",
+        "mcp_dynamic_render",
+        "mcp_alpha_authenticate",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
     replace_runtime_mcp_tools(
         &mut catalog,
         &mut active,
         &universe,
         vec![api_tool("mcp_static_read"), api_tool("mcp_dynamic_render")],
+        AppMode::Agent,
+        &always_load,
+        crate::model_profile::ToolSurfaceBudget::Standard,
     );
 
     let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["exec_shell", "mcp_static_read", "mcp_dynamic_render"],
-        "the synthetic authenticate tool leaves after its own login; engine tools stay"
+        vec!["exec_shell", "mcp_dynamic_render", "mcp_static_read"],
+        "the synthetic authenticate tool leaves after its own login; engine tools stay; \
+         the refreshed slice is name-sorted like the initial catalog (#5939)"
     );
     assert!(active.contains("mcp_static_read"));
     assert!(active.contains("mcp_dynamic_render"));
@@ -8243,6 +9606,9 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
         &mut active,
         &universe,
         vec![api_tool("mcp_alpha_authenticate")],
+        AppMode::Agent,
+        &always_load,
+        crate::model_profile::ToolSurfaceBudget::Standard,
     );
     let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
@@ -8252,6 +9618,69 @@ fn runtime_mcp_refresh_replaces_the_pool_slice() {
     );
     assert!(active.contains("mcp_alpha_authenticate"));
     assert!(!active.contains("mcp_dynamic_render"));
+}
+
+#[test]
+fn runtime_mcp_refresh_keeps_the_pool_deferred_and_the_active_set_narrow() {
+    // #5939: a mid-turn MCP refresh must not flip the whole pool into the
+    // request. Seed a catalog with N deferred MCP tools (one activated by a
+    // ToolSearch earlier in the turn) plus one default-active native tool.
+    let native = api_tool("exec_shell");
+    let mut catalog = vec![native];
+    let mut universe: HashSet<String> = HashSet::new();
+    for index in 0..6 {
+        let name = format!("mcp_server_tool_{index}");
+        let mut tool = api_tool(&name);
+        tool.defer_loading = Some(true);
+        universe.insert(name);
+        catalog.push(tool);
+    }
+    let mut active: HashSet<String> = ["exec_shell", "mcp_server_tool_2"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let requested_before = active_tools_for_step(&catalog, &active).len();
+    assert_eq!(requested_before, 2);
+
+    // The pool's raw projection: seven tools (one new), every one of them
+    // `defer_loading = false`.
+    let refreshed: Vec<Tool> = (0..7)
+        .map(|index| api_tool(&format!("mcp_server_tool_{index}")))
+        .collect();
+    universe.insert("mcp_server_tool_6".to_string());
+    let always_load: HashSet<String> = HashSet::new();
+    replace_runtime_mcp_tools(
+        &mut catalog,
+        &mut active,
+        &universe,
+        refreshed,
+        AppMode::Agent,
+        &always_load,
+        crate::model_profile::ToolSurfaceBudget::Standard,
+    );
+
+    let requested_after = active_tools_for_step(&catalog, &active);
+    let names: Vec<&str> = requested_after
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["exec_shell", "mcp_server_tool_2"],
+        "only the previously activated MCP tool and the native head stay in the request"
+    );
+    assert!(
+        catalog
+            .iter()
+            .filter(|tool| tool.name.starts_with("mcp_server_tool_"))
+            .all(|tool| tool.defer_loading == Some(true)),
+        "the refreshed pool is deferred like the initial catalog"
+    );
+    assert_eq!(
+        catalog.len(),
+        8,
+        "the new tool joined the catalog, deferred"
+    );
 }
 
 #[test]
@@ -8276,11 +9705,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
     let workspace = tmp.path();
-    let ask = (
-        crate::tui::app::AppMode::Agent,
-        crate::tui::approval::ApprovalMode::Suggest,
-        false,
-    );
+    let ask = (AppMode::Agent, ApprovalMode::Suggest, false);
     let carve_out = |tool: &str, input: &serde_json::Value| {
         workspace_write_carve_out_applies(
             ask.0,
@@ -8320,26 +9745,10 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
 
     // Full Access, Auto-Review, Never, and Plan are untouched by the carve-out.
     for (mode, approval_mode, auto_approve) in [
-        (
-            crate::tui::app::AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Bypass,
-            true,
-        ),
-        (
-            crate::tui::app::AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Auto,
-            false,
-        ),
-        (
-            crate::tui::app::AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Never,
-            false,
-        ),
-        (
-            crate::tui::app::AppMode::Plan,
-            crate::tui::approval::ApprovalMode::Suggest,
-            false,
-        ),
+        (AppMode::Agent, ApprovalMode::Bypass, true),
+        (AppMode::Agent, ApprovalMode::Auto, false),
+        (AppMode::Agent, ApprovalMode::Never, false),
+        (AppMode::Plan, ApprovalMode::Suggest, false),
     ] {
         assert!(
             !workspace_write_carve_out_applies(
@@ -8476,7 +9885,7 @@ fn auto_review_scenario_2() {
             "exec_shell",
             &json!({"command": "rm -rf /"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8501,7 +9910,7 @@ fn auto_review_scenario_2() {
                 tool_name,
                 &input,
                 crate::tui::auto_review::RunOrigin::Interactive,
-                crate::tui::approval::ApprovalMode::Auto,
+                ApprovalMode::Auto,
                 true,
                 None,
             );
@@ -8534,7 +9943,7 @@ fn auto_review_scenario_2() {
             "exec_shell",
             &json!({"command": "rm -rf ~/", "background": true}),
             crate::tui::auto_review::RunOrigin::Background,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             true,
             None,
         );
@@ -8556,7 +9965,7 @@ fn auto_review_scenario_2() {
             "exec_shell",
             &json!({"command": "rm -rf ~/", "background": true}),
             crate::tui::auto_review::RunOrigin::Background,
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
             true,
             None,
         );
@@ -8600,7 +10009,7 @@ fn auto_review_routes_shell_commands_requiring_approval_to_reviewer() {
             "exec_shell",
             &json!({"command": command}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8624,7 +10033,7 @@ fn full_access_blocks_detached_catastrophic_tools_without_prompting() {
             "exec_shell",
             &json!({"command": "rm -rf ~/", "background": true}),
             run_origin,
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
             true,
             None,
         );
@@ -8660,7 +10069,7 @@ fn auto_review_plan_decision_uses_configured_policy() {
         "exec_shell",
         &json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
         true,
         None,
     );
@@ -8691,7 +10100,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(
@@ -8714,7 +10123,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
         );
 
         assert_eq!(
@@ -8736,7 +10145,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "git status"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(decision, None);
@@ -8755,7 +10164,7 @@ fn canonical_bash_run_honors_legacy_typed_ask_rules() {
         "Bash",
         &json!({"action": "run", "command": "cargo test --workspace"}),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
     );
 
     assert_eq!(
@@ -8783,7 +10192,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -8793,7 +10202,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         ),
         None
     );
@@ -8803,7 +10212,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/other"),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         ),
         None
     );
@@ -8824,7 +10233,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(
@@ -8847,7 +10256,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "/repo/secrets/api_key.txt"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(
@@ -8870,7 +10279,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
         );
 
         assert_eq!(
@@ -8892,7 +10301,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "docs/readme.md"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(decision, None);
@@ -8911,7 +10320,7 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
         "File",
         &json!({"action": "write", "path": "src/lib.rs", "content": "new\n"}),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
     );
 
     assert_eq!(
@@ -8948,7 +10357,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert_eq!(fully_allowed, Some(ToolAskRuleDecision::Allow));
 
@@ -8962,7 +10371,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert_eq!(partially_allowed, None);
 }
@@ -8986,7 +10395,7 @@ fn engine_handle_cancel_tracks_latest_turn_token() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
     let stale_token = engine.cancel_token.clone();
 
-    engine.reset_cancel_token();
+    let _turn_control = engine.begin_turn_control();
     handle.cancel();
 
     assert!(engine.cancel_token.is_cancelled());
@@ -9487,6 +10896,7 @@ fn tool_exec_outcome_tracks_duration() {
         started_at: Instant::now(),
         terminal: ToolExecutionOutcome::from_legacy(Ok(ToolResult::success("ok"))),
         content_blocks: Vec::new(),
+        original_content_digest: None,
     };
 
     assert!(outcome.started_at.elapsed().as_nanos() > 0);
@@ -9552,7 +10962,19 @@ fn core_primitives_and_todo_write_default_to_eager() {
 
 #[test]
 fn default_active_contract_keeps_discovery_and_core_tools_eager() {
-    const EXPECTED_NATIVE: [&str; 6] = ["read", "write", "edit", "bash", "agent", "todo_write"];
+    const EXPECTED_NATIVE: [&str; 11] = [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "agent",
+        "workflow",
+        "todo_write",
+        "create_goal",
+        "get_goal",
+        "update_goal",
+        "load_skill",
+    ];
     assert_eq!(
         default_active_native_tool_names(),
         EXPECTED_NATIVE.as_slice()
@@ -9565,7 +10987,12 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
         AppMode::Agent,
         &always_load,
     );
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     let active = initial_active_tools(&catalog);
     let expected = EXPECTED_NATIVE
         .into_iter()
@@ -9586,7 +11013,15 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
 #[test]
 fn non_yolo_mode_retains_default_defer_policy() {
     let always_load = HashSet::new();
-    for core in ["read", "write", "edit", "bash", "agent", "todo_write"] {
+    for core in [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "agent",
+        "todo_write",
+        "load_skill",
+    ] {
         assert!(!should_default_defer_tool(core, &always_load));
     }
     for searchable in [
@@ -9594,7 +11029,6 @@ fn non_yolo_mode_retains_default_defer_policy() {
         "File",
         "Git",
         "Run",
-        "load_skill",
         "remember",
         REQUEST_USER_INPUT_NAME,
         "read_file",
@@ -9794,7 +11228,12 @@ fn plugin_or_benchmark_tools_remain_searchable_not_eager() {
         &always_load,
     );
 
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
 
     let active = initial_active_tools(&catalog);
     assert!(!active.contains("KB_search"));
@@ -9973,6 +11412,10 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
     // decision; a deliberately nonexistent PATH root makes its real dependency
     // probes return absent without inheriting the developer or CI host.
     let _path = EnvVarGuard::set("PATH", tmp.path().join("no-host-interpreters"));
+    // Shell syntax is part of the tool schema. A bare name plus the empty
+    // PATH resolves to the same `bash` spelling on Unix and Windows without
+    // executing or requiring that interpreter. Do not inherit the host shell.
+    let _shell = EnvVarGuard::set("SHELL", "bash");
     // The macOS Vision OCR probe is a framework check that ignores PATH, so
     // the profile neutralizes it explicitly: every host presents no local OCR
     // capability here, matching the no-host-interpreters PATH pin above.
@@ -10006,7 +11449,7 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
             model: DEFAULT_TEXT_MODEL.to_string(),
             capabilities: codewhale_config::route::RouteCapabilities::default(),
             limits: None,
-            client: engine.deepseek_client.clone(),
+            client: engine.codewhale_client.clone(),
             api_config: Box::new(api_config.clone()),
             locale_tag: engine.config.locale_tag.clone(),
             role_models: engine.subagent_role_models(),
@@ -10019,7 +11462,7 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
             true,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
         let build = engine
             .build_turn_tool_registry_and_catalog(
@@ -10043,7 +11486,8 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
     }
 
     serde_json::json!({
-        "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-v1",
+        "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-bash-v2",
+        "execution_shell": crate::shell_dispatcher::global_dispatcher().kind().binary(),
         "modes": mode_metrics,
     })
 }
@@ -10068,11 +11512,16 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
     let expected_active = HashSet::from([
         "agent",
         "bash",
+        "create_goal",
+        "get_goal",
+        "update_goal",
         "edit",
         "read",
         "todo_write",
         "tool_search",
+        "workflow",
         "write",
+        "load_skill",
     ]);
 
     for mode in ["plan", "act", "operate"] {
@@ -10083,6 +11532,7 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
             "edit",
             "bash",
             "agent",
+            "workflow",
             "tool_search",
             "create_goal",
             "get_goal",
@@ -10096,7 +11546,7 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
         assert_eq!(
             metric_tool_names(&payload, mode, "active"),
             expected_active,
-            "{mode} must keep the same Pi-small request head"
+            "{mode} must keep the same request head including goal controls"
         );
     }
 
@@ -10118,10 +11568,49 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
 #[allow(clippy::await_holding_lock)]
 #[allow(clippy::print_stdout)]
 async fn print_mode_tool_catalog_metrics() {
-    println!(
-        "TOOL_CATALOG_METRICS {}",
-        measure_production_mode_tool_catalogs().await
+    let metrics = measure_production_mode_tool_catalogs().await;
+    assert_eq!(
+        metrics["execution_shell"], "bash",
+        "run this exact metric in a fresh process so its shell fixture owns dispatcher initialization"
     );
+    println!("TOOL_CATALOG_METRICS {metrics}");
+}
+
+#[test]
+fn runtime_contract_tool_metric_is_independent_of_inherited_shell() {
+    let metric = "core::engine::tests::print_mode_tool_catalog_metrics";
+    let samples: Vec<serde_json::Value> = ["/bin/zsh", "pwsh"]
+        .into_iter()
+        .map(|shell| {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    metric,
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("SHELL", shell)
+                .output()
+                .expect("run exact metric in a fresh process");
+            assert!(
+                output.status.success(),
+                "metric failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("metric UTF-8")
+                .lines()
+                .find_map(|line| {
+                    line.split_once("TOOL_CATALOG_METRICS ")
+                        .map(|(_, payload)| serde_json::from_str(payload).expect("metric JSON"))
+                })
+                .expect("metric marker")
+        })
+        .collect();
+    assert_eq!(samples[0], samples[1], "host shell changed the fixture");
+    assert_eq!(samples[0]["execution_shell"], "bash");
 }
 
 #[test]
@@ -10159,7 +11648,7 @@ fn print_mode_runtime_contract_metrics() {
         );
         let prompt_bytes = system_prompt_flat_text(&prompt).len();
         let prompt_blocks = match &prompt {
-            crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
+            codewhale_models::SystemPrompt::Blocks(blocks) => blocks.len(),
             _ => 1,
         };
         mode_metrics.insert(
@@ -10188,7 +11677,7 @@ fn representative_prompt(
     instructions: Option<&[InstructionSource]>,
     user_memory_block: Option<&str>,
     goal_objective: Option<&str>,
-) -> crate::models::SystemPrompt {
+) -> codewhale_models::SystemPrompt {
     system_prompt_for_mode_with_context_skills_and_session(
         workspace,
         None,
@@ -10204,10 +11693,10 @@ fn representative_prompt(
     )
 }
 
-fn prompt_block_count(prompt: &crate::models::SystemPrompt) -> usize {
+fn prompt_block_count(prompt: &codewhale_models::SystemPrompt) -> usize {
     match prompt {
-        crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
-        crate::models::SystemPrompt::Text(_) => 1,
+        codewhale_models::SystemPrompt::Blocks(blocks) => blocks.len(),
+        codewhale_models::SystemPrompt::Text(_) => 1,
     }
 }
 
@@ -10251,7 +11740,7 @@ fn normalize_representative_prompt(text: &str, workspace: &Path, home: &Path) ->
 
 fn representative_stage(
     name: &'static str,
-    prompt: crate::models::SystemPrompt,
+    prompt: codewhale_models::SystemPrompt,
     workspace: &Path,
     home: &Path,
 ) -> RepresentativePromptStage {
@@ -10605,7 +12094,7 @@ fn print_skill_discovery_turn_metrics() {
 }
 
 #[test]
-fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
+fn deferred_first_use_executes_well_formed_calls_and_hydrates_malformed_ones() {
     let mut apply_patch = api_tool("apply_patch");
     apply_patch.defer_loading = Some(true);
     apply_patch.input_schema = json!({
@@ -10619,40 +12108,48 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     let catalog = vec![apply_patch];
     let active_at_batch_start = HashSet::new();
     let mut hydrated_this_batch = HashSet::new();
-    let result = maybe_hydrate_requested_deferred_tool(
-        "apply_patch",
-        &json!({"patch": "*** Begin Patch\n*** End Patch"}),
-        &catalog,
-        &active_at_batch_start,
-        &mut hydrated_this_batch,
-    )
-    .expect("first deferred use should hydrate");
-
-    assert!(!active_at_batch_start.contains("apply_patch"));
-    assert!(hydrated_this_batch.contains("apply_patch"));
-    assert!(result.success);
-    assert!(result.content.contains("Tool `apply_patch` was deferred"));
-    assert!(result.content.contains("patch: string"));
-    assert!(result.content.contains("The tool was not executed"));
-
-    let metadata = result.metadata.expect("metadata");
-    assert_eq!(metadata["event"], "tool.schema_hydrated");
-    assert_eq!(metadata["executed"], false);
-    assert_eq!(metadata["retry_required"], true);
-
-    let second_result = maybe_hydrate_requested_deferred_tool(
-        "apply_patch",
-        &json!({"patch": "*** Begin Patch\n*** End Patch"}),
-        &catalog,
-        &active_at_batch_start,
-        &mut hydrated_this_batch,
-    )
-    .expect("later calls in the same batch should hydrate instead of executing");
-    assert_eq!(second_result.metadata.unwrap()["executed"], false);
-    assert_eq!(
-        hydrated_this_batch,
-        HashSet::from(["apply_patch".to_string()])
+    // A call already shaped like the unseen schema must not lose its turn.
+    assert!(
+        maybe_hydrate_requested_deferred_tool(
+            "apply_patch",
+            &json!({"patch": "*** Begin Patch\n*** End Patch"}),
+            &catalog,
+            &active_at_batch_start,
+            &mut hydrated_this_batch,
+        )
+        .is_none(),
+        "a well-formed first call executes"
     );
+    assert!(
+        hydrated_this_batch.contains("apply_patch"),
+        "the executed tool still activates for later requests"
+    );
+
+    for malformed in [
+        json!({}),
+        json!({"diff": "*** Begin Patch\n*** End Patch"}),
+        json!({"patch": "x", "path": "src/lib.rs"}),
+        json!("*** Begin Patch"),
+    ] {
+        let mut hydrated = HashSet::new();
+        let result = maybe_hydrate_requested_deferred_tool(
+            "apply_patch",
+            &malformed,
+            &catalog,
+            &active_at_batch_start,
+            &mut hydrated,
+        )
+        .unwrap_or_else(|| panic!("{malformed} must return the schema instead of executing"));
+        assert!(hydrated.contains("apply_patch"));
+        assert!(result.success);
+        assert!(result.content.contains("Tool `apply_patch` was deferred"));
+        assert!(result.content.contains("patch: string"));
+        assert!(result.content.contains("The tool was not executed"));
+        let metadata = result.metadata.expect("metadata");
+        assert_eq!(metadata["event"], "tool.schema_hydrated");
+        assert_eq!(metadata["executed"], false);
+        assert_eq!(metadata["retry_required"], true);
+    }
 
     let mut active_next_batch = active_at_batch_start.clone();
     active_next_batch.extend(hydrated_this_batch);
@@ -10660,13 +12157,148 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     assert!(
         maybe_hydrate_requested_deferred_tool(
             "apply_patch",
-            &json!({"patch": "*** Begin Patch\n*** End Patch"}),
+            &json!({}),
             &catalog,
             &active_next_batch,
             &mut hydrated_next_batch,
         )
         .is_none(),
-        "tools hydrated in a previous batch should execute normally"
+        "tools hydrated in a previous batch execute normally, even malformed"
+    );
+}
+
+/// E3: the first call to a deferred tool hydrates its schema and tells the
+/// model to retry. That hint is model-facing; it reaches the model in the
+/// tool result and must not surface as a user status line.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn deferred_tool_first_use_does_not_emit_a_retry_status() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_e3_map\",\"type\":\"function\",\"function\":{\"name\":\"project_map\",",
+        // Malformed on purpose: a well-formed first call now executes, and
+        // this test covers the schema hint returned for a malformed one.
+        "\"arguments\":\"{\\\"not_a_project_map_field\\\":true}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e3-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e3-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("call_e3_map"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let run_task = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: "Map this project".to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        }))
+        .await
+        .expect("send model turn");
+
+    let mut hydration_result = None;
+    let mut statuses = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for turn event")
+    {
+        match event {
+            Event::Status { message, .. } => statuses.push(message),
+            Event::ToolCallComplete { name, result, .. } if name == "project_map" => {
+                hydration_result = Some(result);
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+
+    let hydration = hydration_result
+        .expect("the deferred call completes")
+        .expect("hydration result");
+    assert!(
+        hydration.content.contains("was deferred"),
+        "the model still gets the retry hint: {}",
+        hydration.content
+    );
+    assert!(
+        statuses
+            .iter()
+            .all(|status| !status.contains("Loaded deferred tool")),
+        "{statuses:?}"
     );
 }
 
@@ -10725,7 +12357,7 @@ fn request_user_input_stays_deferred_but_can_be_dynamically_activated() {
 
 #[test]
 fn auto_review_hides_question_tool_while_other_postures_keep_it() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     for (posture, expected) in [
         (ApprovalMode::Suggest, true),
@@ -10761,12 +12393,9 @@ fn legacy_full_access_bit_keeps_question_tool_as_effective_full_access() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
     );
-    assert_eq!(
-        authority.approval_mode_for_session(),
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(authority.approval_mode_for_session(), ApprovalMode::Bypass);
 
     let surface = policy_for_catalog(
         vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
@@ -11039,7 +12668,7 @@ async fn run_shell_command_op_executes_without_approval_modal() {
             true,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         )
         .await;
 
@@ -11130,7 +12759,7 @@ async fn run_shell_command_op_skips_approval_when_auto_approved() {
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         )
         .await;
 
@@ -11195,7 +12824,7 @@ async fn run_shell_command_op_allows_readonly_shell_in_auto_mode() {
                 true,
                 false,
                 false,
-                crate::tui::approval::ApprovalMode::Auto,
+                ApprovalMode::Auto,
             )
             .await;
     });
@@ -11256,7 +12885,7 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         )
         .await;
 
@@ -11310,9 +12939,10 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         "\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n",
     );
-    // Operate turns the work prompt into a goal, so after the approved shell
-    // runs, the model must seal the goal through the same `update_goal` tool
-    // a live Operate turn uses; only then does the final "done" arrive.
+    // The goal this fixture seals is seeded directly (prose no longer
+    // creates goals since the #6290 rework); after the approved shell runs,
+    // the model seals it through the same `update_goal` tool a live Operate
+    // turn uses, and only then does the final "done" arrive.
     let goal_seal_marker = "goal-seal-receipt-0902";
     let goal_sse = concat!(
         "data: {\"id\":\"chatcmpl-operate-goal\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
@@ -11338,8 +12968,8 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         .with_priority(1)
         .mount(&server)
         .await;
-    // The first `update_goal` call only loads the deferred tool; the retry —
-    // the request carrying the deferral receipt — is the one that executes.
+    // Goal control must execute immediately: continuation cannot depend on
+    // discovering or retrying the very tool that lets the model stop it.
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(body_string_contains("was deferred and has now been loaded"))
@@ -11348,7 +12978,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(goal_sse),
         )
-        .expect(1)
+        .expect(0)
         .with_priority(2)
         .mount(&server)
         .await;
@@ -11392,16 +13022,26 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         },
         &api_config,
     );
+    engine
+        .config
+        .goal_state
+        .lock()
+        .expect("goal lock")
+        .create("write the requested local fixture".to_string(), None)
+        .expect("seed fixture goal");
     let handle_for_approval = handle.clone();
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
-            content: "write the requested local fixture".to_string(),
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: "Write the requested local fixture to the workspace".to_string(),
+            images: Vec::new(),
             mode: AppMode::Operate,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
-            goal_objective: None,
+            initial_routed_usage: Box::default(),
+            goal_objective: Some("write the requested local fixture".to_string()),
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
             reasoning_effort: None,
@@ -11410,14 +13050,14 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             allow_shell: true,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Operate model turn");
 
@@ -11433,18 +13073,8 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             Event::ApprovalRequired { id, tool_name, .. } => {
                 saw_approval = true;
                 assert_eq!(tool_name, "Bash");
-                // Operate turned this work prompt into the goal; pause it
-                // before the turn ends so the goal-continuation loop cannot
-                // queue passes nobody answers in this mock. The goal-complete
-                // `update_goal` response below stays: it is the receipt a
-                // real Operate turn seals with.
-                handle_for_approval
-                    .send(Op::SetGoalStatus {
-                        status: crate::tools::goal::GoalStatus::Paused,
-                        clear: false,
-                    })
-                    .await
-                    .expect("queue goal pause");
+                // The seeded fixture goal is orthogonal to this gate:
+                // Operate uses the normal approval flow either way.
                 handle_for_approval
                     .approve_tool_call(id)
                     .await
@@ -11474,9 +13104,234 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     );
     assert!(saw_shell_result);
     assert!(saw_complete);
+    let requests = server.received_requests().await.expect("recorded requests");
+    let first: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("request JSON");
+    for name in ["create_goal", "get_goal", "update_goal"] {
+        assert!(
+            first["tools"]
+                .as_array()
+                .expect("wire tools")
+                .iter()
+                .any(|tool| tool["function"]["name"] == name),
+            "first provider request must expose {name} without discovery"
+        );
+    }
     let written = std::fs::read_to_string(workspace.path().join("operate-mode-approved.txt"))
         .expect("workspace-scoped shell output");
     assert_eq!(written.trim_end(), "operate-approved");
+}
+
+/// Drives one model turn whose single `Bash` call needs approval, publishes
+/// `change_to` (as a runtime PATCH does) while the approval is pending, then
+/// approves. Returns the call's result and whether the file was written.
+async fn posture_change_during_approval_wait(
+    change_to: (AppMode, ApprovalMode, bool),
+) -> (Result<crate::tools::spec::ToolResult, ToolError>, bool) {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e2\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_e2_shell\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo approved > e2-approved.txt\\\"}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e2\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e2-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e2-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("call_e2_shell"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let run_task = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: "Record the approval fixture in the workspace".to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        }))
+        .await
+        .expect("send model turn");
+
+    let (mode, approval_mode, auto_approve) = change_to;
+    let mut shell_result = None;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for turn event")
+    {
+        match event {
+            Event::ApprovalRequired { id, .. } => {
+                // The PATCH lands while the approval card is open.
+                handle
+                    .try_send(Op::ChangeMode {
+                        mode,
+                        allow_shell: true,
+                        trust_mode: false,
+                        auto_approve,
+                        approval_mode,
+                        configured_sandbox_mode: None,
+                    })
+                    .expect("publish posture change");
+                handle.approve_tool_call(id).await.expect("approve shell");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
+                shell_result = Some(result);
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    let written = workspace.path().join("e2-approved.txt").exists();
+    (shell_result.expect("the approved call completes"), written)
+}
+
+#[test]
+fn live_runtime_authority_narrows_only_when_a_grant_is_withdrawn() {
+    let at = |mode, approval_mode, sandbox: Option<&str>| {
+        LiveRuntimeAuthority::from_fields(
+            mode,
+            true,
+            false,
+            approval_mode == ApprovalMode::Bypass,
+            approval_mode,
+            sandbox.map(str::to_string),
+        )
+    };
+    let ask = at(AppMode::Agent, ApprovalMode::Suggest, None);
+    assert!(!ask.narrows(&ask));
+    assert!(!at(AppMode::Agent, ApprovalMode::Auto, None).narrows(&ask));
+    assert!(!at(AppMode::Agent, ApprovalMode::Bypass, None).narrows(&ask));
+    assert!(!ask.narrows(&at(AppMode::Plan, ApprovalMode::Suggest, None)));
+    assert!(at(AppMode::Plan, ApprovalMode::Suggest, None).narrows(&ask));
+    assert!(at(AppMode::Operate, ApprovalMode::Suggest, None).narrows(&ask));
+    assert!(ask.narrows(&at(AppMode::Agent, ApprovalMode::Bypass, None)));
+    assert!(at(AppMode::Agent, ApprovalMode::Never, None).narrows(&ask));
+    assert!(at(AppMode::Agent, ApprovalMode::Suggest, Some("read-only")).narrows(&ask));
+    assert!(
+        !at(
+            AppMode::Agent,
+            ApprovalMode::Suggest,
+            Some("workspace-write")
+        )
+        .narrows(&at(
+            AppMode::Agent,
+            ApprovalMode::Suggest,
+            Some("read-only")
+        ))
+    );
+    assert!(at(AppMode::Agent, ApprovalMode::Suggest, Some("custom")).narrows(&ask));
+    let mut no_shell = ask.clone();
+    no_shell.allow_shell = false;
+    assert!(no_shell.narrows(&ask));
+}
+
+/// E2: approving a call must never invalidate the call it approves. A posture
+/// PATCH that is equal or broader (Ask -> Auto-Review, Ask -> Full Access)
+/// while the approval card is open leaves the approved call running.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn broader_posture_patch_during_approval_wait_keeps_the_approved_call() {
+    let _lock = lock_test_env();
+    for change_to in [
+        (AppMode::Agent, ApprovalMode::Auto, false),
+        (AppMode::Agent, ApprovalMode::Bypass, true),
+        (AppMode::Agent, ApprovalMode::Suggest, false),
+    ] {
+        let (result, written) = posture_change_during_approval_wait(change_to).await;
+        let result = result.unwrap_or_else(|err| panic!("{change_to:?}: {err}"));
+        assert!(result.success, "{change_to:?}: {result:?}");
+        assert!(written, "{change_to:?}: the approved shell ran");
+    }
+}
+
+/// E2 counterpart: a narrowing PATCH (Work -> Plan, Ask -> Never) still sends
+/// the approved call back to the model instead of running it under a grant
+/// the user has since withdrawn.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn narrower_posture_patch_during_approval_wait_fails_the_call() {
+    let _lock = lock_test_env();
+    for change_to in [
+        (AppMode::Plan, ApprovalMode::Suggest, false),
+        (AppMode::Agent, ApprovalMode::Never, false),
+    ] {
+        let (result, written) = posture_change_during_approval_wait(change_to).await;
+        let err = result.expect_err("narrowed posture fails the call");
+        assert!(
+            err.to_string()
+                .contains("Permissions changed before this tool call executed"),
+            "{change_to:?}: {err}"
+        );
+        assert!(!written, "{change_to:?}: the shell must not run");
+    }
 }
 
 #[tokio::test]
@@ -11549,11 +13404,14 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "continue from the completed child".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -11565,14 +13423,14 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             // Exercise the valid legacy/host shape where the named posture is
             // authoritative but the redundant bit is stale.
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::SubAgentHandoff,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -11685,11 +13543,14 @@ async fn assert_full_access_model_tool_batch_is_blocked(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "exercise the Full Access execution boundary".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -11699,14 +13560,14 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Full Access model turn");
 
@@ -11890,11 +13751,14 @@ async fn assert_full_access_model_tool_batch_runs(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "exercise the Full Access auto-approval boundary".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -11904,14 +13768,14 @@ async fn assert_full_access_model_tool_batch_runs(
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Full Access model turn");
 
@@ -12052,7 +13916,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
             "write_file",
             &tool_input,
             workspace.path(),
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before repo law tightens the plan"
@@ -12166,11 +14030,14 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "continue autonomously".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12180,14 +14047,14 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             allow_shell: true,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            approval_mode: ApprovalMode::Auto,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Auto-Review model turn");
 
@@ -12343,7 +14210,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             "exec_shell",
             &tool_input,
             workspace.path(),
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before the safety floor tightens the plan"
@@ -12352,11 +14219,14 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "please run a background shell".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12366,14 +14236,14 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -12492,11 +14362,14 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "please run a background shell".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12506,14 +14379,14 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            approval_mode: ApprovalMode::Auto,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -12628,11 +14501,14 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "please publish this crate".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12642,14 +14518,14 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -12768,11 +14644,14 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "please open the PR".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -12782,14 +14661,14 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -12845,7 +14724,7 @@ async fn run_shell_command_op_preserves_plan_mode_shell_block() {
             false,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         )
         .await;
 
@@ -13100,7 +14979,7 @@ fn plan_mode_registry_can_expose_agent_launcher_without_shell_tools() {
     let tmp = tempdir().expect("tempdir");
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     let context = engine.build_tool_context(AppMode::Plan, false);
-    let client = DeepSeekClient::new(&Config {
+    let client = CodewhaleClient::new(&Config {
         api_key: Some("test-key".to_string()),
         ..Config::default()
     })
@@ -13141,8 +15020,8 @@ fn plan_mode_registry_can_expose_agent_launcher_without_shell_tools() {
 #[test]
 fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() {
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
     use crate::worker_profile::ShellPolicy;
+    use ApprovalMode;
 
     #[derive(Clone, Copy)]
     enum ExpectedSandbox {
@@ -13273,7 +15152,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             _ => panic!("{}: unexpected sandbox policy {sandbox:?}", case.name),
         }
 
-        let client = DeepSeekClient::new(&Config {
+        let client = CodewhaleClient::new(&Config {
             api_key: Some("test-key".to_string()),
             ..Config::default()
         })
@@ -13366,7 +15245,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
 #[test]
 fn engine_context_honors_stricter_config_under_full_access() {
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -13391,7 +15270,7 @@ fn engine_context_honors_stricter_config_under_full_access() {
 
 #[test]
 fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     struct ProvenanceCase {
         name: &'static str,
@@ -13575,7 +15454,7 @@ fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     let route = TurnRouteContext {
         provider: ApiProvider::Deepseek,
@@ -13602,6 +15481,27 @@ fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
     );
     assert!(context.trust_mode);
     assert!(context.auto_approve);
+    assert_eq!(
+        context.approval_mode,
+        ApprovalMode::Bypass,
+        "the turn's posture travels with the context its tools see"
+    );
+    // Auto-Review is the case the legacy bit cannot express: folding `false`
+    // alone would read as Ask, so this is what proves the posture itself is
+    // carried rather than re-derived.
+    let auto_review = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        true,
+        false,
+        false,
+        ApprovalMode::Auto,
+    );
+    assert_eq!(
+        engine
+            .build_tool_context_for_turn(&auto_review, &route)
+            .approval_mode,
+        ApprovalMode::Auto
+    );
     assert_eq!(context.route_context_window, Some(123_456));
     assert_eq!(context.route_capabilities, route.capabilities);
     assert_eq!(
@@ -13700,7 +15600,7 @@ fn agent_mode_elevates_writes_without_granting_network() {
 fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
     use crate::core::authority::{SandboxNetworkAccess, sandbox_policy_for_turn};
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let workspace = PathBuf::from("/tmp/example-workspace");
 
@@ -13799,7 +15699,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
         panic!("expected session update event");
     };
 
-    assert_eq!(messages, vec![assistant]);
+    assert_eq!(*messages, vec![assistant]);
 }
 
 #[tokio::test]
@@ -13875,7 +15775,7 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             configured_sandbox_mode: None,
         })
         .await
@@ -13914,10 +15814,50 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
     );
 }
 
+/// A posture change announces itself in product words (§19): Permissions,
+/// then Plan / Work / Operate. A republished identical posture says nothing.
+#[tokio::test]
+async fn posture_change_status_uses_permissions_and_work() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(config, &Config::default());
+    let publish = |handle: &EngineHandle| {
+        handle
+            .try_send(Op::ChangeMode {
+                mode: AppMode::Agent,
+                allow_shell: true,
+                trust_mode: false,
+                auto_approve: true,
+                approval_mode: ApprovalMode::Bypass,
+                configured_sandbox_mode: None,
+            })
+            .expect("publish live runtime authority");
+    };
+    publish(&handle);
+    assert!(engine.apply_pending_runtime_authority().await);
+    publish(&handle);
+    assert!(!engine.apply_pending_runtime_authority().await);
+
+    let mut statuses = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(event) = rx.try_recv() {
+        if let Event::Status { message } = event {
+            statuses.push(message);
+        }
+    }
+    assert_eq!(
+        statuses,
+        vec!["Permissions: Full Access · Work".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools() {
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -13981,12 +15921,21 @@ async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools(
                 .elevated_sandbox_policy,
             Some(expected_sandbox),
         );
+        // Tools carry the posture the turn resolved, so a task they create can
+        // pin the authority it was actually granted.
+        assert_eq!(
+            engine
+                .live_tool_context(Some(&registry))
+                .expect("live registry context")
+                .approval_mode,
+            posture,
+        );
     }
 }
 
 #[test]
 fn turn_approval_mode_prefers_auto_approve_flag() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     assert_eq!(
         agent_approval_mode_for_turn(true, ApprovalMode::Suggest),
@@ -14000,7 +15949,7 @@ fn turn_approval_mode_prefers_auto_approve_flag() {
 
 #[test]
 fn messages_with_turn_metadata_returns_stored_session_messages() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -14389,7 +16338,9 @@ async fn compaction_keeps_todos_out_of_the_prefix() {
 
 #[tokio::test]
 async fn compaction_completed_reports_complete_post_input_tokens() {
+    let _env = crate::test_support::lock_test_env();
     let tmp = tempdir().expect("tempdir");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
@@ -14408,7 +16359,7 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
     ))));
 
     let messages_only =
-        crate::compaction::estimate_input_tokens_conservative(&engine.session.messages, None);
+        crate::compaction::estimate_input_tokens_for_pressure(&engine.session.messages, None);
     let expected = engine.estimated_input_tokens();
     assert!(expected > messages_only);
 
@@ -14416,9 +16367,20 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
         .emit_compaction_completed(
             "compact_test".to_string(),
             false,
-            "Compaction complete".to_string(),
+            "Made room".to_string(),
             Some(4),
             Some(1),
+            super::compaction::CompactionPass {
+                trigger: "manual",
+                path: crate::compaction::CompactionPath::Summary,
+                tokens_before: 9000,
+                threshold_tokens: 8000,
+                usage: Usage {
+                    input_tokens: 120,
+                    output_tokens: 15,
+                    ..Default::default()
+                },
+            },
         )
         .await;
 
@@ -14436,6 +16398,37 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
         panic!("expected CompactionCompleted, got {event:?}");
     };
     assert_eq!(post_input_tokens, Some(expected as u64));
+    let log = std::fs::read_to_string(tmp.path().join("audit.log")).unwrap();
+    let records = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|row| row["event"] == "compaction.completed")
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    let details = &records[0]["details"];
+    assert_eq!(details["messages_before"], 4);
+    assert_eq!(details["messages_after"], 1);
+    assert_eq!(details["reduction_ratio"], 0.75);
+    assert_eq!(details["estimated_tokens_before"], 9000);
+    assert_eq!(details["estimated_tokens_after"], expected);
+    assert_eq!(details["threshold_tokens"], 8000);
+    assert_eq!(details["summarizer_usage"]["input_tokens"], 120);
+    assert_eq!(details["trigger"], "manual");
+    assert_eq!(details["path"], "summary");
+    assert!(!log.contains("post-compaction message"));
+    engine
+        .record_compaction_event(
+            "compaction.refused",
+            serde_json::json!({
+                "trigger": "auto", "reason": "retained_floor", "threshold_tokens": 8000,
+            }),
+        )
+        .await;
+    assert!(
+        std::fs::read_to_string(tmp.path().join("audit.log"))
+            .unwrap()
+            .contains("compaction.refused")
+    );
 }
 
 /// `fork_context` is captured once at turn start, so a `work_update` followed
@@ -14503,6 +16496,57 @@ async fn same_turn_fork_carries_the_updated_todo() {
     );
 }
 
+/// U1: hosts resend the compaction config on every model or route sync. An
+/// unchanged config must not produce a status line, which used to overwrite
+/// a real error (the missing-key notice) in the footer.
+#[tokio::test]
+async fn unchanged_compaction_config_is_acknowledged_silently() {
+    let tmp = tempdir().expect("tempdir");
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..Default::default()
+        },
+        &Config::default(),
+    );
+    let current = engine.config.compaction.clone();
+    let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SetCompaction {
+            config: current.clone(),
+        })
+        .await
+        .expect("send unchanged config");
+    let mut changed = current;
+    changed.enabled = !changed.enabled;
+    let expected = if changed.enabled {
+        "Make room automatically: on"
+    } else {
+        "Make room automatically: off"
+    };
+    handle
+        .send(Op::SetCompaction { config: changed })
+        .await
+        .expect("send changed config");
+
+    let mut rx = handle.rx_event.write().await;
+    let first_status = loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("status after a real change")
+            .expect("event");
+        if let Event::Status { message } = event {
+            break message;
+        }
+    };
+    assert_eq!(
+        first_status, expected,
+        "the unchanged config produced no status; only the real change did"
+    );
+    drop(rx);
+    run.abort();
+}
+
 #[tokio::test]
 async fn change_mode_op_updates_current_mode_and_emits_status() {
     let tmp = tempdir().expect("tempdir");
@@ -14520,7 +16564,7 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             configured_sandbox_mode: None,
         })
         .await
@@ -14568,14 +16612,14 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
     engine.session.allow_shell = false;
     engine.session.trust_mode = false;
     engine.session.auto_approve = false;
-    engine.session.approval_mode = crate::tui::approval::ApprovalMode::Suggest;
+    engine.session.approval_mode = ApprovalMode::Suggest;
 
     let agent_authority = crate::core::authority::TurnAuthority::from_effective_fields(
         AppMode::Agent,
         true,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Never,
+        ApprovalMode::Never,
     );
     engine.apply_runtime_mode_policy(&agent_authority);
 
@@ -14585,17 +16629,14 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
     assert!(!engine.session.trust_mode);
     assert!(!engine.config.trust_mode);
     assert!(!engine.session.auto_approve);
-    assert_eq!(
-        engine.session.approval_mode,
-        crate::tui::approval::ApprovalMode::Never
-    );
+    assert_eq!(engine.session.approval_mode, ApprovalMode::Never);
 
     let full_access_authority = crate::core::authority::TurnAuthority::from_effective_fields(
         AppMode::Agent,
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     engine.apply_runtime_mode_policy(&full_access_authority);
 
@@ -14604,10 +16645,7 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
     assert!(engine.session.trust_mode);
     assert!(engine.config.trust_mode);
     assert!(engine.session.auto_approve);
-    assert_eq!(
-        engine.session.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(engine.session.approval_mode, ApprovalMode::Bypass);
 }
 
 #[tokio::test]
@@ -15150,7 +17188,7 @@ async fn edit_last_turn_preserves_current_mode() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             configured_sandbox_mode: None,
         })
         .await
@@ -15477,7 +17515,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ImageUrl {
-                image_url: crate::models::ImageUrlContent {
+                image_url: codewhale_models::ImageUrlContent {
                     url: "data:image/png;base64,AAAA".to_string(),
                 },
             }],
@@ -15592,9 +17630,41 @@ async fn provider_runtime_status_reports_configured_zai_cap_without_client() {
 fn detects_context_length_errors_from_provider_payloads() {
     let msg = r#"SSE stream request failed: HTTP 400 Bad Request: {"error":{"message":"This model's maximum context length is 131072 tokens. However, you requested 153056 tokens (148960 in the messages, 4096 in the completion).","type":"invalid_request_error"}}"#;
     assert!(is_context_length_error_message(msg));
+    // llama.cpp's server wording (#6374): a genuine overflow on a local route
+    // must enter the bounded recovery path too.
+    assert!(is_context_length_error_message(
+        r#"SSE stream request failed: HTTP 400 Bad Request: {"error":{"code":400,"message":"the request exceeds the available context size. try increasing the context size or enable context shift","type":"invalid_request_error"}}"#
+    ));
     assert!(!is_context_length_error_message(
         "SSE stream request failed: HTTP 400 Bad Request: model not found"
     ));
+}
+
+/// #6374: the exhausted-recovery message must name levers the reader has.
+#[test]
+fn context_overflow_exhausted_message_names_levers_that_exist_in_the_mode() {
+    let headless = super::context::context_overflow_exhausted_message(false, 2, 98_739, 97_280);
+    assert!(
+        !headless.contains("/compact") && !headless.contains("/clear"),
+        "a headless host has no command layer: {headless}"
+    );
+    assert!(
+        headless.contains("2 emergency compaction passes"),
+        "{headless}"
+    );
+    assert!(
+        headless.contains("CODEWHALE_MAX_OUTPUT_TOKENS"),
+        "{headless}"
+    );
+    let interactive = super::context::context_overflow_exhausted_message(true, 1, 98_739, 97_280);
+    assert!(
+        interactive.contains("/compact") && interactive.contains("/clear"),
+        "{interactive}"
+    );
+    assert!(
+        interactive.contains("1 emergency compaction pass "),
+        "{interactive}"
+    );
 }
 
 #[test]
@@ -15716,6 +17786,115 @@ fn route_input_limit_blocks_oversized_preflight_before_transport() {
     assert!(
         estimated_input > usize::try_from(budget.input_budget_ceiling).unwrap(),
         "the turn-loop preflight must recover before constructing a network request"
+    );
+}
+
+/// #6374: the preflight guard measured a ×1.5-inflated estimate against the
+/// honest input ceiling, so a route refused at two thirds of its budget with
+/// the request never leaving the machine. The window here is calibrated so the
+/// honest estimate sits below the ceiling and the inflated one above it; the
+/// turn must reach the model with its history untouched.
+#[tokio::test]
+async fn preflight_guard_measures_honest_input_against_the_input_ceiling() {
+    let _lock = lock_test_env();
+    let _output_env = ScopedDeepSeekMaxOutputTokens::unset();
+    let workspace = tempdir().expect("workspace");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", workspace.path());
+    let mock = std::sync::Arc::new(crate::llm_client::mock::MockLlmClient::new(vec![
+        crate::llm_client::mock::canned::simple_text_turn("continuing"),
+    ]));
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        EngineConfig {
+            terminal_chrome_enabled: false,
+            ..deterministic_engine_config(workspace.path())
+        },
+        &Config::default(),
+        mock.clone(),
+    );
+    // Only the preflight guard is under test; the auto-compaction gate stays out.
+    engine.config.compaction.enabled = false;
+    let history: Vec<Message> = [
+        (Role::User, "x".repeat(120_000)),
+        (Role::Assistant, "y".repeat(100_000)),
+        (Role::User, "please continue".to_string()),
+    ]
+    .into_iter()
+    .map(|(role, text)| Message {
+        role,
+        content: vec![ContentBlock::Text {
+            text,
+            cache_control: None,
+        }],
+    })
+    .collect();
+    for message in &history {
+        engine.session.add_message(message.clone());
+    }
+    let system = engine.session.system_prompt.clone();
+    let honest = crate::compaction::estimate_input_tokens_for_pressure(&history, system.as_ref());
+    let inflated = crate::compaction::estimate_input_tokens_conservative(&history, system.as_ref());
+    assert!(
+        inflated > honest + 20_000,
+        "fixture must separate the estimators: honest {honest}, inflated {inflated}"
+    );
+    let output_cap = 4_096u64;
+    let target_ceiling = u64::try_from((honest + inflated) / 2).unwrap();
+    engine.active_route_limits = Some(codewhale_config::route::RouteLimits {
+        context_tokens: Some(
+            target_ceiling + output_cap + crate::context_budget::CONTEXT_HEADROOM_TOKENS,
+        ),
+        input_tokens: None,
+        output_tokens: Some(output_cap),
+    });
+    let ceiling = route_context_budget_for_route(
+        engine.api_provider,
+        &engine.session.model,
+        engine.active_route_limits,
+        0,
+    )
+    .expect("route limits produce a budget")
+    .input_budget_ceiling;
+    let ceiling = usize::try_from(ceiling).unwrap();
+    assert!(
+        honest < ceiling && ceiling < inflated,
+        "calibration: honest {honest} < ceiling {ceiling} < inflated {inflated}"
+    );
+
+    let registry =
+        crate::tools::ToolRegistry::new(crate::tools::spec::ToolContext::new(workspace.path()));
+    let catalog = registry.to_api_tools_with_cache(true);
+    let surface = crate::core::engine::tool_catalog::ToolSurfacePolicy::new(
+        registry,
+        Some(catalog),
+        codewhale_config::AppMode::Agent,
+        &engine.config.tools_always_load,
+        &[],
+        false,
+        None,
+        None,
+        Some(4),
+        engine.session.approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
+    let (status, error) = engine
+        .run_turn(
+            &mut crate::core::turn::TurnContext::new(8),
+            surface,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "the only model request is the turn itself, not an emergency compaction"
+    );
+    let request = mock.last_request().expect("the turn reached the model");
+    assert_eq!(
+        request.messages.len(),
+        history.len(),
+        "history reached the model without an emergency compaction pass"
     );
 }
 
@@ -16047,6 +18226,37 @@ fn evidence_bounded_preview_is_not_recompacted() {
 }
 
 #[test]
+fn budgeted_read_result_is_not_truncated_a_second_time_by_the_context_compactor() {
+    // C05: `read` bounds itself to an explicit per-call byte budget. The 12K
+    // context hard limit used to re-truncate that bounded result into a 900-
+    // char snippet, discarding both the content and the continuation footer.
+    let content = format!(
+        "{}\n\n[Showing lines 1-100 of 2000 (100000-byte output budget). Use offset=101 to continue.]",
+        "r".repeat(90_000)
+    );
+    let budgeted = ToolResult::success(content.clone()).with_metadata(json!({
+        "evidence_routing": "inline",
+        "read_budget_bytes": 100_000
+    }));
+    let passed_through = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &budgeted);
+    assert_eq!(passed_through, content);
+    assert!(passed_through.contains("Use offset=101 to continue"));
+
+    // The same bytes without a declared budget still take the ordinary path,
+    // which is what proves the metadata (not the tool name) did the work.
+    let unbudgeted = ToolResult::success(content.clone());
+    let compacted = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &unbudgeted);
+    assert!(compacted.contains("output compacted to protect context"));
+
+    // A result that overran its own declared budget is not exempt.
+    let overrun = ToolResult::success(content).with_metadata(json!({
+        "read_budget_bytes": 1_000
+    }));
+    let compacted_overrun = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &overrun);
+    assert!(compacted_overrun.contains("output compacted to protect context"));
+}
+
+#[test]
 fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window() {
     let content = "route-effective context\n".repeat(900);
     let output = ToolResult::success(content.clone());
@@ -16099,6 +18309,36 @@ fn subagent_results_are_summarized_before_parent_context_insertion() {
     assert!(context.contains("`File` actions like `read` or `list`"));
     assert!(!context.contains("read_file") && !context.contains("list_dir"));
     assert!(context.contains("handle_read"));
+}
+
+#[test]
+fn wait_payloads_survive_parent_context_compaction() {
+    let raw = json!({
+        "action": "wait",
+        "until": "all",
+        "all_settled": true,
+        "settled": [{"agent_id": "agent_1234abcd", "status": "Completed"}],
+        "still_running": [],
+        "waited_ms": 1234,
+        "timed_out": false,
+        "note": "joined the fan-out"
+    })
+    .to_string();
+    let output = ToolResult::success(raw.clone());
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        !context.contains("status=unknown"),
+        "a wait envelope must not be projected as an unknown snapshot: {context}"
+    );
+    assert!(context.contains("agent_1234abcd"));
+    assert!(context.contains("still_running"));
+    assert!(context.contains("waited_ms"));
+    assert_eq!(
+        context, raw,
+        "small coordination payloads pass through verbatim"
+    );
 }
 
 #[test]
@@ -16601,12 +18841,9 @@ Current local date:"
 }
 
 #[test]
-fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
-    // Diet acceptance (captains-log #18/#21/#22): two identical consecutive
-    // turns must produce byte-identical `<turn_meta>` blocks. Pre-diet the
-    // block carried session totals, context-pressure counts, and goal usage
-    // rates that drifted between turns even with unchanged inputs; today the
-    // block carries only facts that are stable across ordinary turns.
+fn turn_metadata_keeps_stable_fields_while_pressure_reports_live_estimates() {
+    // Live estimates belong in appended turn metadata, never in the pinned
+    // system prefix. Unrelated metadata remains stable as the transcript grows.
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         model: "deepseek-v4-flash".to_string(),
@@ -16668,20 +18905,34 @@ fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
     let first = message_for(&engine);
     let first_meta = meta_of(&first);
     assert!(
+        !first_meta.contains("Context pressure:"),
+        "automatic continuity must not ask the user to manage context: {first_meta}"
+    );
+    assert!(!first_meta.contains("/compact"));
+    engine.config.compaction.enabled = false;
+    let first = message_for(&engine);
+    let first_meta = meta_of(&first);
+    assert!(
         first_meta.contains("Context pressure: critical"),
         "fixture must exercise the pressure line: {first_meta}"
     );
 
-    // Turn 2 builds with the first message already in the session, exactly as
-    // a real turn sequence would; the block must not change.
     engine.session.add_message(first);
     let second = message_for(&engine);
     let second_meta = meta_of(&second);
-
+    let without_pressure = |metadata: &str| {
+        metadata
+            .lines()
+            .filter(|line| !line.contains("Context pressure:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     assert_eq!(
-        first_meta, second_meta,
-        "turn_meta must be byte-identical across identical consecutive turns"
+        without_pressure(&first_meta),
+        without_pressure(&second_meta)
     );
+    assert!(second_meta.contains("Estimated input:"));
+    assert!(second_meta.contains("Making room automatically is off"));
 }
 
 #[tokio::test]
@@ -16935,7 +19186,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         if inheriting_provenances.contains(&provenance) {
@@ -16943,11 +19194,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
             assert!(policy.allow_shell, "{provenance:?}");
             assert!(policy.trust_mode, "{provenance:?}");
             assert!(policy.auto_approve, "{provenance:?}");
-            assert_eq!(
-                policy.approval_mode,
-                crate::tui::approval::ApprovalMode::Auto,
-                "{provenance:?}"
-            );
+            assert_eq!(policy.approval_mode, ApprovalMode::Auto, "{provenance:?}");
             assert!(policy.status().is_none(), "{provenance:?}");
         } else {
             assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
@@ -16956,7 +19203,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
             assert!(!policy.auto_approve, "{provenance:?}");
             assert_eq!(
                 policy.approval_mode,
-                crate::tui::approval::ApprovalMode::Suggest,
+                ApprovalMode::Suggest,
                 "{provenance:?}"
             );
             assert!(
@@ -16988,7 +19235,7 @@ fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
             true,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
 
         assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
@@ -16997,7 +19244,7 @@ fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
         assert!(!policy.auto_approve, "{provenance:?}");
         assert_eq!(
             policy.approval_mode,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             "{provenance:?}"
         );
         assert!(policy.status().is_none(), "{provenance:?}");
@@ -17013,14 +19260,11 @@ fn full_access_posture_normalizes_a_stale_auto_approve_bit() {
         true,
         true,
         false,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
 
     assert_eq!(policy.mode, AppMode::Agent);
-    assert_eq!(
-        policy.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(policy.approval_mode, ApprovalMode::Bypass);
     assert!(policy.auto_approve);
     assert!(policy.status().is_none());
 }
@@ -17042,7 +19286,7 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
                 true,
                 true,
                 true,
-                crate::tui::approval::ApprovalMode::Bypass,
+                ApprovalMode::Bypass,
             );
 
             assert_eq!(policy.mode, AppMode::Agent, "{provenance:?} {content}");
@@ -17051,7 +19295,7 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
             assert!(!policy.auto_approve, "{provenance:?} {content}");
             assert_eq!(
                 policy.approval_mode,
-                crate::tui::approval::ApprovalMode::Suggest,
+                ApprovalMode::Suggest,
                 "{provenance:?} {content}"
             );
             assert!(
@@ -17069,21 +19313,21 @@ fn external_prompt_wording_never_changes_effective_mode_or_authority() {
     let cases = [
         (
             AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             false,
             false,
             "你在帮我看看 外卖部分还哪里没有使用多语言",
         ),
         (
             AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
             true,
             true,
             "check the failing tests and review the logs",
         ),
         (
             AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             false,
             false,
             "检查外卖模块并修复缺少的多语言注入",
@@ -17120,16 +19364,13 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     assert_eq!(review_wording.mode, AppMode::Agent);
     assert!(review_wording.allow_shell);
     assert!(review_wording.trust_mode);
     assert!(review_wording.auto_approve);
-    assert_eq!(
-        review_wording.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(review_wording.approval_mode, ApprovalMode::Bypass);
     assert!(
         review_wording.status().is_none(),
         "external user wording must not content-downgrade standing authority"
@@ -17142,16 +19383,13 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     assert_eq!(later_user_instruction.mode, AppMode::Agent);
     assert!(later_user_instruction.allow_shell);
     assert!(later_user_instruction.trust_mode);
     assert!(later_user_instruction.auto_approve);
-    assert_eq!(
-        later_user_instruction.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(later_user_instruction.approval_mode, ApprovalMode::Bypass);
     assert!(
         later_user_instruction.status().is_none(),
         "a fresh external write instruction must not inherit the prior review-only downgrade"
@@ -17202,7 +19440,7 @@ fn turn_metadata_projects_permission_posture_as_fact_only() {
     // #4780 + turn-meta diet: the active posture remains an actionable fact.
     // Never adds one actionable constraint so the model cannot waste a turn
     // asking for an approval the host is configured not to provide.
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let cases = [
         (ApprovalMode::Suggest, "Ask"),
@@ -17253,7 +19491,7 @@ fn turn_metadata_projects_permission_posture_as_fact_only() {
 
 #[test]
 fn turn_metadata_preserves_standing_full_access_for_subagent_handoff() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -17972,7 +20210,12 @@ fn tool_search_activates_discovered_deferred_tools() {
         },
     ];
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     let mut active = initial_active_tools(&catalog);
     let result = execute_tool_search(
         TOOL_SEARCH_NAME,
@@ -17997,7 +20240,12 @@ fn tool_search_scenario() {
             AppMode::Agent,
             &always_load,
         );
-        ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+        ensure_advanced_tooling(
+            &mut catalog,
+            AppMode::Agent,
+            &always_load,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
+        );
 
         let mut active = initial_active_tools(&catalog);
         assert!(!active.contains(REQUEST_USER_INPUT_NAME));
@@ -18058,7 +20306,12 @@ fn tool_search_scenario() {
     {
         let mut catalog = Vec::new();
         let always_load = HashSet::new();
-        ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+        ensure_advanced_tooling(
+            &mut catalog,
+            AppMode::Agent,
+            &always_load,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
+        );
 
         let tool = catalog
             .iter()
@@ -18088,7 +20341,12 @@ fn tool_search_catalog_with_matches(count: usize) -> Vec<Tool> {
         })
         .collect::<Vec<_>>();
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     catalog
 }
 
@@ -18099,6 +20357,46 @@ fn tool_search_reference_count(result: &ToolResult) -> usize {
         .and_then(|metadata| metadata.get("tool_references"))
         .and_then(|references| references.as_array())
         .map_or(0, Vec::len)
+}
+
+#[tokio::test]
+async fn execute_tools_dispatches_through_common_executor() {
+    use crate::tools::file_tool::ReadTool;
+    use crate::tools::registry::ToolRegistryBuilder;
+    use crate::tools::spec::ToolContext;
+
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("note.txt"), "alpha\n").expect("write note");
+    let context = ToolContext::new(tmp.path());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(ReadTool))
+        .build(context.clone());
+    let path = tmp
+        .path()
+        .join("note.txt")
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    let code = format!(
+        "const r = await tools.call('read', {{ path: '{path}' }}); return JSON.stringify(r).includes('alpha');"
+    );
+    let (tx_event, _rx_event) = mpsc::channel(8);
+    let result = Engine::execute_tool_with_lock(
+        Arc::new(RwLock::new(())),
+        false,
+        false,
+        tx_event,
+        None,
+        EXECUTE_TOOLS_TOOL_NAME.to_string(),
+        json!({"code": code}),
+        tmp.path().to_path_buf(),
+        Some(&registry),
+        None,
+        Some(context),
+    )
+    .await
+    .expect("execute_tools should dispatch");
+    assert!(result.content.contains("\"nested_calls\":1"));
+    assert!(result.content.contains("true"));
 }
 
 #[tokio::test]
@@ -18145,7 +20443,12 @@ async fn code_execution_scenario() {
 fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     let mut plan_catalog = vec![api_tool("read_file")];
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut plan_catalog, AppMode::Plan, &always_load);
+    ensure_advanced_tooling(
+        &mut plan_catalog,
+        AppMode::Plan,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     assert!(
         !plan_catalog
             .iter()
@@ -18154,7 +20457,12 @@ fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     );
 
     let mut agent_catalog = vec![api_tool("read_file")];
-    ensure_advanced_tooling(&mut agent_catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut agent_catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     assert!(
         agent_catalog
             .iter()
@@ -18659,6 +20967,27 @@ fn final_tool_scenario() {
             json!({"raw_arguments": "{not json"})
         );
     }
+    // A `write` whose stream was cut at its output limit, right after a
+    // complete string value. `arg_repair` CAN make this parse by appending
+    // one `}`, and before the repair ladder reported provenance that guess
+    // was dispatched — writing a file containing only "first line" while the
+    // model was still mid-argument. It must now take the malformed path, so
+    // the model is told to re-issue instead.
+    {
+        let state = tool_state(json!({}), r#"{"path": "notes.md", "content": "first line""#);
+        assert_eq!(
+            final_tool_input(&state),
+            json!({"raw_arguments": r#"{"path": "notes.md", "content": "first line""#}),
+            "a truncated write must not be dispatched as a completed argument"
+        );
+    }
+    // The guard must not fire on arguments that were merely sloppy: a
+    // trailing comma is structurally complete and still has to dispatch, or
+    // every DeepSeek chunk-boundary repair would start failing tool calls.
+    {
+        let state = tool_state(json!({}), r#"{"command": "ls -la",}"#);
+        assert_eq!(final_tool_input(&state), json!({"command": "ls -la"}));
+    }
 }
 
 // === #103 transparent stream-retry policy =====================================
@@ -19021,6 +21350,7 @@ struct FlakyNetworkDropModelClient {
     calls: std::sync::atomic::AtomicUsize,
     failures: usize,
     terminal_before_drop: bool,
+    content_before_drop: bool,
 }
 
 #[async_trait::async_trait]
@@ -19035,14 +21365,14 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("flaky-network regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
         let call = self
@@ -19063,7 +21393,7 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
                 if let StreamEvent::MessageStart { message } = &mut message_start {
                     message.usage = start_usage;
                 }
-                let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+                let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                     Ok(message_start),
                     Ok(canned::text_block_start(0)),
                     Ok(canned::text_delta(0, "billed truncated fragment")),
@@ -19075,10 +21405,18 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
                 ];
                 return Ok(Box::pin(futures_util::stream::iter(events)));
             }
+            if !self.content_before_drop {
+                return Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(canned::message_start("empty_then_drop")),
+                    Err(anyhow::anyhow!(
+                        "Stream read error: error decoding response body"
+                    )),
+                ])));
+            }
             // Partial content first — this flips `any_content_received` so
             // the #103 transparent retry cannot fire — then the transport
             // dies the way the 0.9.4 Terminal-Bench crashes did.
-            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+            let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                 Ok(canned::message_start("flaky_msg")),
                 Ok(canned::text_block_start(0)),
                 Ok(canned::text_delta(
@@ -19112,6 +21450,7 @@ async fn run_headless_turn_with_flaky_network(
         calls: std::sync::atomic::AtomicUsize::new(0),
         failures,
         terminal_before_drop: false,
+        content_before_drop: true,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -19126,11 +21465,14 @@ async fn run_headless_turn_with_flaky_network(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19140,14 +21482,14 @@ async fn run_headless_turn_with_flaky_network(
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send flaky-network turn");
 
@@ -19174,6 +21516,17 @@ async fn run_headless_turn_with_flaky_network(
 async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
     let (model, events) = run_headless_turn_with_flaky_network(1).await;
 
+    let terminal = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => snapshot.terminal.as_ref(),
+            _ => None,
+        })
+        .expect("terminal diagnostics through existing event authority");
+    assert_eq!(terminal.model_requests_started, 2);
+    assert_eq!(terminal.stream_resumes, 1);
+    assert_eq!(terminal.transparent_stream_retries, 0);
+
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
         2,
@@ -19193,11 +21546,11 @@ async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
     );
     assert!(error.is_none(), "recovered turn must not report an error");
     assert!(
-        events.iter().any(|event| matches!(
+        !events.iter().any(|event| matches!(
             event,
-            Event::Status { message } if message.contains("Connection interrupted; retrying (1/")
+            Event::Status { message } if message.contains("Reconnecting") || message.contains("Connection interrupted")
         )),
-        "the retry must be announced on the status channel: {events:?}"
+        "a successful first retry should remain quiet: {events:?}"
     );
     assert!(
         !events
@@ -19213,7 +21566,7 @@ async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
             Event::SessionUpdated { messages, .. } => Some(messages),
             _ => None,
         })
-        .flatten()
+        .flat_map(|messages| messages.iter())
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -19232,11 +21585,53 @@ async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
 }
 
 #[tokio::test]
+async fn terminal_diagnostics_count_transparent_stream_requests_without_extra_snapshots() {
+    let workspace = tempdir().expect("tempdir");
+    let model = std::sync::Arc::new(FlakyNetworkDropModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        failures: 1,
+        terminal_before_drop: false,
+        content_before_drop: false,
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let snapshot = turn
+        .terminal_request_snapshot(status)
+        .expect("terminal snapshot");
+    let terminal = snapshot.terminal.expect("terminal facts");
+    assert_eq!(terminal.model_requests_started, 2);
+    assert_eq!(terminal.transparent_stream_retries, 1);
+    assert_eq!(terminal.stream_resumes, 0);
+    assert_eq!(terminal.model_step_index, 0);
+    let mut events = handle.rx_event.write().await;
+    let snapshots = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| matches!(event, Event::ToolRequestSnapshot { .. }))
+        .count();
+    assert_eq!(
+        snapshots, 1,
+        "request construction is distinct from stream retries"
+    );
+}
+
+#[tokio::test]
 async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retried() {
     let model = std::sync::Arc::new(FlakyNetworkDropModelClient {
         calls: std::sync::atomic::AtomicUsize::new(0),
         failures: 1,
         terminal_before_drop: true,
+        content_before_drop: true,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -19251,11 +21646,14 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19265,14 +21663,14 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send terminal-then-drop turn");
 
@@ -19317,7 +21715,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
     );
     assert!(!events.iter().any(|event| matches!(
         event,
-        Event::Status { message } if message.contains("Connection interrupted; retrying")
+        Event::Status { message } if message.contains("Reconnecting")
     )));
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -19355,11 +21753,14 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19369,14 +21770,14 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send midstream-error turn");
 
@@ -19456,14 +21857,14 @@ impl crate::core::model_client::ModelClient for CancelAfterTerminalUsageModelCli
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("unused")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
 
@@ -19588,6 +21989,7 @@ async fn run_interactive_turn_with_flaky_network(
         calls: std::sync::atomic::AtomicUsize::new(0),
         failures,
         terminal_before_drop: false,
+        content_before_drop: true,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -19602,11 +22004,14 @@ async fn run_interactive_turn_with_flaky_network(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19616,14 +22021,14 @@ async fn run_interactive_turn_with_flaky_network(
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send interactive flaky-network turn");
 
@@ -19669,11 +22074,11 @@ async fn interactive_turn_preserves_partial_reply_and_recovers_after_network_dro
     );
     assert!(error.is_none(), "recovered turn must not report an error");
     assert!(
-        events.iter().any(|event| matches!(
+        !events.iter().any(|event| matches!(
             event,
-            Event::Status { message } if message.contains("preserving partial reply and retrying (1/")
+            Event::Status { message } if message.contains("Reconnecting") || message.contains("Connection interrupted")
         )),
-        "the interactive retry must be announced on the status channel: {events:?}"
+        "a successful first retry should remain quiet: {events:?}"
     );
     assert!(
         !events
@@ -19760,14 +22165,14 @@ impl crate::core::model_client::ModelClient for ThinkingOnlyDropModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("thinking-only drop regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
         let call = self
@@ -19779,11 +22184,11 @@ impl crate::core::model_client::ModelClient for ThinkingOnlyDropModelClient {
             // visible streams before the transport dies. This still flips
             // `any_content_received`, which is what routes the drop to the
             // interactive resume path instead of the transparent retry.
-            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+            let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                 Ok(canned::message_start("thinking_only_msg")),
                 Ok(StreamEvent::ContentBlockStart {
                     index: 0,
-                    content_block: crate::models::ContentBlockStart::Thinking {
+                    content_block: codewhale_models::ContentBlockStart::Thinking {
                         thinking: String::new(),
                     },
                 }),
@@ -19830,11 +22235,14 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -19844,14 +22252,14 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send thinking-only drop turn");
 
@@ -19886,30 +22294,10 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
         .expect("terminal TurnComplete");
     assert_eq!(status, TurnOutcomeStatus::Completed);
 
-    // Only hidden reasoning streamed, so the recovery copy must say "retrying"
-    // and must never claim a partial reply was preserved.
-    let retry_statuses = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Status { message } if message.contains("Connection interrupted") => {
-                Some(message.clone())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        retry_statuses.len(),
-        1,
-        "exactly one bounded retry per drop: {events:?}"
-    );
-    assert!(
-        retry_statuses[0].contains("retrying (1/"),
-        "the retry status must be announced: {retry_statuses:?}"
-    );
-    assert!(
-        !retry_statuses[0].contains("preserving partial reply"),
-        "a thinking-only drop has no visible text to preserve: {retry_statuses:?}"
-    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::Status { message } if message.contains("Reconnecting") || message.contains("Connection interrupted")
+    )), "a thinking-only first retry must remain quiet");
 
     // The persisted conversation keeps the operator's turn and exactly one
     // authoritative assistant answer — no synthetic `[runtime]` user message,
@@ -19972,6 +22360,9 @@ struct ReasoningOnlyCleanFinishModelClient {
     calls: std::sync::atomic::AtomicUsize,
     reasoning_only: usize,
     stop_reason: &'static str,
+    /// Every outbound request's messages, in order, so a test can tell a
+    /// request-scoped nudge from one written into the session.
+    requests: std::sync::Mutex<Vec<Vec<codewhale_models::Message>>>,
 }
 
 #[async_trait::async_trait]
@@ -19986,16 +22377,19 @@ impl crate::core::model_client::ModelClient for ReasoningOnlyCleanFinishModelCli
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("reasoning-only recovery uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.push(_request.messages.clone());
+        }
         let call = self
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -20003,11 +22397,11 @@ impl crate::core::model_client::ModelClient for ReasoningOnlyCleanFinishModelCli
         if call <= self.reasoning_only {
             // A protocol-complete response that opened and closed only a
             // thinking block: no text, no tool call, and a clean stop reason.
-            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+            let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                 Ok(canned::message_start("reasoning_only_msg")),
                 Ok(StreamEvent::ContentBlockStart {
                     index: 0,
-                    content_block: crate::models::ContentBlockStart::Thinking {
+                    content_block: codewhale_models::ContentBlockStart::Thinking {
                         thinking: String::new(),
                     },
                 }),
@@ -20036,10 +22430,27 @@ async fn run_reasoning_only_turn(
     std::sync::Arc<ReasoningOnlyCleanFinishModelClient>,
     Vec<Event>,
 ) {
+    run_reasoning_only_turn_with_reprompts(
+        reasoning_only,
+        stop_reason,
+        crate::config::DEFAULT_REASONING_ONLY_REPROMPTS,
+    )
+    .await
+}
+
+async fn run_reasoning_only_turn_with_reprompts(
+    reasoning_only: usize,
+    stop_reason: &'static str,
+    max_reprompts: u32,
+) -> (
+    std::sync::Arc<ReasoningOnlyCleanFinishModelClient>,
+    Vec<Event>,
+) {
     let model = std::sync::Arc::new(ReasoningOnlyCleanFinishModelClient {
         calls: std::sync::atomic::AtomicUsize::new(0),
         reasoning_only,
         stop_reason,
+        requests: std::sync::Mutex::new(Vec::new()),
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -20048,16 +22459,20 @@ async fn run_reasoning_only_turn(
         snapshots_enabled: false,
         subagents_enabled: false,
         terminal_chrome_enabled: true,
+        reasoning_only_max_reprompts: max_reprompts,
         ..EngineConfig::default()
     };
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
     let run_task = tokio::spawn(engine.run());
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
             content: "solve the task".to_string(),
+            images: Vec::new(),
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -20067,14 +22482,14 @@ async fn run_reasoning_only_turn(
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send reasoning-only turn");
     let mut events = Vec::new();
@@ -20096,11 +22511,23 @@ async fn run_reasoning_only_turn(
     (model, events)
 }
 
-/// A reasoning-only clean-stop response is re-requested (cheap: the prefix is
-/// cached) and the turn recovers with the real answer instead of dead-ending.
+/// A reasoning-only clean-stop response is re-requested and the turn recovers
+/// with the real answer. Local fixtures make no cache-hit or billing claim.
 #[tokio::test]
 async fn reasoning_only_clean_stop_is_retried_and_recovers() {
     let (model, events) = run_reasoning_only_turn(1, "stop").await;
+
+    let terminal = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => snapshot.terminal.as_ref(),
+            _ => None,
+        })
+        .expect("terminal diagnostics through existing event authority");
+    assert_eq!(terminal.model_requests_started, 2);
+    assert_eq!(terminal.reasoning_only_reprompts, 1);
+    assert_eq!(terminal.transparent_stream_retries, 0);
+    assert_eq!(terminal.status, Some(TurnOutcomeStatus::Completed));
 
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -20147,6 +22574,28 @@ async fn reasoning_only_clean_stop_is_retried_and_recovers() {
 async fn reasoning_only_length_stop_fails_without_retry() {
     let (model, events) = run_reasoning_only_turn(1, "length").await;
 
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => snapshot.terminal.as_ref(),
+            _ => None,
+        })
+        .expect("terminal request diagnostics");
+    assert!(
+        diagnostic
+            .last_prepared_output_limit_tokens
+            .is_some_and(|tokens| tokens > 0)
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Error { envelope, .. }
+                if envelope.message.contains("response output limit")
+                    && envelope.message.contains("including reasoning")
+        )),
+        "a length stop must explain the actual output constraint"
+    );
+
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -20169,6 +22618,58 @@ async fn reasoning_only_length_stop_fails_without_retry() {
     assert_eq!(status, TurnOutcomeStatus::Failed);
 }
 
+/// The reasoning-only nudge rides one request and is never written to the
+/// session.
+///
+/// This is the distinction that matters: a nudge added with
+/// `add_session_message` would persist into the transcript, the exports, and
+/// every later turn's context — a message the user never sent. A
+/// request-scoped nudge appears in exactly one outbound request and leaves the
+/// conversation as it found it.
+///
+/// The two are told apart by message counts across successive requests. With
+/// a ceiling of 3 the model is asked four times. Persisted, the counts would
+/// grow cumulatively (n, n, n+1, n+2); request-scoped, the nudged requests
+/// each carry exactly one extra message over the same baseline.
+#[tokio::test]
+async fn the_reasoning_only_nudge_rides_one_request_and_never_joins_the_session() {
+    let (model, _events) = run_reasoning_only_turn_with_reprompts(usize::MAX, "stop", 3).await;
+
+    let requests = model.requests.lock().expect("captured requests").clone();
+    assert_eq!(requests.len(), 4, "one initial request plus three retries");
+
+    let baseline = requests[0].len();
+    assert_eq!(
+        requests[1].len(),
+        baseline,
+        "the first retry is a bare cached-prefix re-request, with no nudge"
+    );
+    assert_eq!(
+        requests[2].len(),
+        baseline + 1,
+        "the second retry carries the nudge"
+    );
+    assert_eq!(
+        requests[3].len(),
+        baseline + 1,
+        "the nudge did not accumulate: it was spent on the previous request, \
+         not added to the session"
+    );
+
+    let nudge = crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE;
+    let carries_nudge = |messages: &Vec<codewhale_models::Message>| {
+        serde_json::to_string(messages)
+            .expect("messages serialize")
+            .contains(nudge)
+    };
+    assert!(!carries_nudge(&requests[0]), "no nudge before any failure");
+    assert!(!carries_nudge(&requests[1]), "no nudge on the first retry");
+    assert!(
+        carries_nudge(&requests[2]),
+        "nudge present once retrying again"
+    );
+}
+
 /// A model that only ever returns reasoning is bounded: it retries up to the
 /// ceiling and then fails honestly rather than looping forever.
 #[tokio::test]
@@ -20177,8 +22678,8 @@ async fn reasoning_only_forever_is_bounded_then_fails() {
 
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
-        1 + super::MAX_REASONING_ONLY_REPROMPTS as usize,
-        "reasoning-only retries are bounded by MAX_REASONING_ONLY_REPROMPTS"
+        1 + crate::config::DEFAULT_REASONING_ONLY_REPROMPTS as usize,
+        "reasoning-only retries are bounded by [reasoning_only] max_reprompts"
     );
     let status = events
         .iter()
@@ -20231,6 +22732,16 @@ async fn headless_turn_fails_with_real_error_after_network_drop_budget_exhausted
     assert_eq!(
         error_events, 1,
         "only the final, budget-exhausted attempt may emit an error event: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+                Event::Status { message } if message == "Reconnecting…"
+            ))
+            .count(),
+        1,
+        "a persistent retry gets one progress notice, not one per attempt"
     );
 }
 
@@ -20381,7 +22892,7 @@ async fn post_edit_hook_injects_diagnostics_message_before_next_request() {
     assert_eq!(last.role, "user");
     // turn_meta is now at the tail of the content array (PR #2517).
     let meta = match last.content.last() {
-        Some(crate::models::ContentBlock::Text { text, .. }) => text.clone(),
+        Some(codewhale_models::ContentBlock::Text { text, .. }) => text.clone(),
         other => panic!("expected text block at tail, got {other:?}"),
     };
     assert!(meta.starts_with("<turn_meta>\n"));
@@ -20389,7 +22900,7 @@ async fn post_edit_hook_injects_diagnostics_message_before_next_request() {
         .content
         .iter()
         .find_map(|block| match block {
-            crate::models::ContentBlock::Text { text, .. }
+            codewhale_models::ContentBlock::Text { text, .. }
                 if text.contains("<diagnostics file=\"") =>
             {
                 Some(text)
@@ -20504,11 +23015,12 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     use tokio::sync::mpsc;
 
     // Create a channel with the smallest possible capacity.
-    let (tx_op, _rx_op) = mpsc::channel::<Op>(1);
+    let (tx_op, rx_op) = mpsc::channel::<Op>(1);
 
     // Construct a minimal EngineHandle with the tiny channel.
     let cancel_token = CancellationToken::new();
     let handle = EngineHandle {
+        goal_state: new_shared_goal_state(),
         tx_op,
         rx_event: Arc::new(RwLock::new(mpsc::channel::<Event>(1).1)),
         cancel_token: Arc::new(StdMutex::new(cancel_token)),
@@ -20516,6 +23028,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         tx_approval: mpsc::channel(1).0,
         tx_user_input: mpsc::channel(1).0,
         tx_steer: mpsc::channel(1).0,
+        turn_controls: Arc::new(StdMutex::new(handle::TurnControls::default())),
         shared_paused: Arc::new(StdMutex::new(false)),
         client_preflight_required: true,
         live_runtime_authority: Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
@@ -20524,11 +23037,12 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
                 false,
                 false,
                 false,
-                crate::tui::approval::ApprovalMode::Suggest,
+                ApprovalMode::Suggest,
                 None,
             ),
         ))),
         compaction_cancellation: Arc::new(StdMutex::new(CompactionCancellationState::default())),
+        turn_heartbeat: turn_heartbeat::TurnHeartbeat::new(),
     };
 
     // Fill the op channel with one message (capacity = 1).
@@ -20545,15 +23059,16 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         allow_shell: true,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Auto,
+        approval_mode: ApprovalMode::Auto,
         configured_sandbox_mode: None,
     });
-    assert!(result.is_err(), "try_send should fail when channel is full");
+    let error = result.expect_err("try_send should fail when channel is full");
+    assert!(matches!(
+        error.downcast_ref::<mpsc::error::TrySendError<Op>>(),
+        Some(mpsc::error::TrySendError::Full(Op::ChangeMode { .. }))
+    ));
     let authority = handle.runtime_permission_authority();
-    assert_eq!(
-        authority.approval_mode,
-        crate::tui::approval::ApprovalMode::Auto
-    );
+    assert_eq!(authority.approval_mode, ApprovalMode::Auto);
     assert!(!authority.auto_approve);
 
     handle
@@ -20568,11 +23083,17 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
             .is_none(),
         "cancellation authority remains visible even when its wake-up op cannot fit"
     );
+    drop(rx_op);
+    let error = handle.try_send(Op::ListSubAgents).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<mpsc::error::TrySendError<Op>>(),
+        Some(mpsc::error::TrySendError::Closed(Op::ListSubAgents))
+    ));
 }
 
 #[tokio::test]
 async fn full_mailbox_posture_update_supersedes_queued_change_mode() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -20689,6 +23210,480 @@ async fn reload_mcp_op_recovers_from_invalid_initial_config_in_process() {
 }
 
 #[tokio::test]
+async fn mcp_boot_reports_ready_server_before_stalled_server_finishes() {
+    assert_incremental_mcp_boot(false).await;
+}
+
+#[tokio::test]
+async fn first_turn_waits_for_explicit_mcp_schema_without_waiting_for_unrelated_server() {
+    let Some(node) = crate::dependencies::resolve_node() else {
+        return;
+    };
+    let tmp = tempdir().expect("tempdir");
+    let server = tmp.path().join("server.mjs");
+    let release = tmp.path().join("release-slow");
+    let release_fast = tmp.path().join("release-fast");
+    fs::write(&server, r#"import fs from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
+readline.createInterface({ input: process.stdin }).on('line', async line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method === 'initialize') {
+    fs.writeFileSync(path.join(process.argv[3], 'started-' + process.argv[2]), 'ready');
+    while (!fs.existsSync(path.join(process.argv[3], 'release-' + process.argv[2]))) await new Promise(r => setTimeout(r, 10));
+  }
+  const result = request.method === 'initialize'
+    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: process.argv[2], version: '1' } }
+    : { tools: ['ready', 'denied', 'hidden'].map(name => ({ name, inputSchema: { type: 'object' } })) };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});"#).expect("fixture");
+    let config_path = tmp.path().join("mcp.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec(&json!({
+            // `slow` must still be connecting when the fast build completes,
+            // and `fast` must not be declared dead while a cold Windows runner
+            // spawns Node. Ordering here is proven by the release files below,
+            // never by a timeout, so this bound only has to outlast the test.
+            "timeouts": { "connect_timeout": 120 },
+            "servers": {
+                "fast": { "command": node, "args": [server, "fast", tmp.path()] },
+                // `slow` is deliberately unselected: `required` keeps it in
+                // the eager boot set under lazy boot (#6033) so it can stand
+                // in for "an unrelated server still connecting".
+                "slow": { "command": node, "args": [server, "slow", tmp.path()], "required": true },
+                "failed": { "command": "codewhale-missing-mcp-fixture-38911" }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let api_config = Config::default();
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            mcp_config_path: config_path,
+            tools_always_load: HashSet::from(["mcp_fast_ready".to_string()]),
+            ..Default::default()
+        },
+        &api_config,
+    );
+    engine
+        .start_mcp_session_boot(McpConnectRefresh::IfChanged)
+        .await
+        .expect("session boot starts");
+    assert!(
+        engine.mcp_tools().await.is_empty(),
+        "ordinary startup remains nonblocking"
+    );
+    // Separate Windows/CI process startup from the schema-wait assertion.
+    // Both children have received initialize, but neither can answer until
+    // this test releases its own gate. No fixed delay stands in for readiness.
+    // The budget is generous because it covers two cold Node spawns on a
+    // windows-latest runner that has just finished a ~15 min compile; a tight
+    // bound here fails the setup, not the behavior under test.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !tmp.path().join("started-fast").exists() || !tmp.path().join("started-slow").exists()
+        {
+            engine.drain_mcp_boot_updates().await;
+            for name in ["fast", "slow"] {
+                assert!(
+                    !engine.mcp_connection_errors.contains_key(name),
+                    "{name} fixture failed before initialize: {:?}",
+                    engine.mcp_connection_errors.get(name)
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both MCP fixtures must reach initialize before checking first-turn ordering");
+    let route = TurnRouteContext {
+        provider: ApiProvider::Deepseek,
+        model: DEFAULT_TEXT_MODEL.to_string(),
+        capabilities: codewhale_config::route::RouteCapabilities::default(),
+        limits: None,
+        client: engine.codewhale_client.clone(),
+        api_config: Box::new(api_config),
+        locale_tag: engine.config.locale_tag.clone(),
+        role_models: engine.subagent_role_models(),
+        auto_model: false,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+    };
+    let policy = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        false,
+        false,
+        false,
+        ApprovalMode::Suggest,
+    );
+    let build = {
+        let build = engine.build_turn_tool_registry_and_catalog(
+            &policy,
+            &[],
+            Some(vec![
+                "mcp_fast_ready".to_string(),
+                "mcp_failed_ready".to_string(),
+            ]),
+            SubAgentWiring::Inert,
+            McpAccess::Connect,
+            route,
+            "",
+        );
+        tokio::pin!(build);
+        std::future::poll_fn(|cx| {
+            assert!(
+                std::future::Future::poll(build.as_mut(), cx).is_pending(),
+                "the first turn must wait for the explicitly selected fast schema"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        fs::write(&release_fast, "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), build).await
+    };
+    let unrelated_pending = !release.exists()
+        && engine.mcp_boot_in_flight
+        && !engine.mcp_connection_errors.contains_key("slow");
+    let connected = engine
+        .mcp_pool
+        .as_ref()
+        .unwrap()
+        .lock()
+        .await
+        .connected_servers()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    engine.cancel_token.cancel();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        engine.wait_for_explicit_mcp_boot(Some(&["mcp_slow_ready".to_string()])),
+    )
+    .await
+    .expect("stop interrupts explicit schema wait");
+    let _turn_control = engine.begin_turn_control();
+    fs::write(&release, "release").unwrap();
+    let build = build.unwrap_or_else(|error| {
+        panic!(
+            "explicit fast/failed selections must not wait for slow: {error:?}; connected={connected:?}; errors={:?}",
+            engine.mcp_connection_errors
+        )
+    });
+    assert!(
+        unrelated_pending,
+        "success must precede the unrelated server's release, completion, or timeout"
+    );
+    let active = build.surface.active.unwrap_or_default();
+    assert_eq!(
+        active
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["mcp_fast_ready"]
+    );
+    assert!(engine.mcp_connection_errors.contains_key("failed"));
+
+    // The unrelated connection finishes during the same turn. Refresh into a
+    // narrowed policy, then execute the actual tool-search activation path.
+    let policy = ToolSurfacePolicy::new(
+        ToolRegistryBuilder::new().build(ToolContext::for_empty_registry()),
+        Some(vec![api_tool("read")]),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[],
+        false,
+        Some(vec![
+            "tool_search".into(),
+            "mcp_slow_ready".into(),
+            "mcp_slow_denied".into(),
+        ]),
+        Some(vec!["mcp_slow_denied".into()]),
+        None,
+        ApprovalMode::Suggest,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
+    let mut catalog = policy.catalog.clone();
+    let mut active = policy.active_names.clone();
+    catalog.push(api_tool("mcp_removed_ready"));
+    active.insert("mcp_removed_ready".to_string());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !catalog.iter().any(|tool| tool.name == "mcp_slow_ready") {
+            engine
+                .refresh_boot_mcp_catalog(&policy, &mut catalog, &mut active)
+                .await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completed tools join this turn");
+    assert!(
+        !active.contains("mcp_slow_ready"),
+        "fresh MCP tools stay deferred"
+    );
+    assert!(
+        !active.contains("mcp_removed_ready"),
+        "removed authority leaves active tools"
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|tool| !tool.name.starts_with("mcp_") || tool.name == "mcp_slow_ready")
+    );
+    let result = tool_catalog::execute_tool_search_with_cache(
+        "tool_search",
+        &json!({"query":"mcp_slow_ready", "match":"regex"}),
+        &catalog,
+        &mut active,
+        &mut engine.session.tool_activation_cache,
+    )
+    .expect("real search");
+    assert!(result.success);
+    assert!(active.contains("mcp_slow_ready"));
+    engine.wait_for_mcp_boot().await;
+}
+
+#[tokio::test]
+async fn mcp_boot_does_not_restore_servers_removed_during_handshake() {
+    assert_incremental_mcp_boot(true).await;
+}
+
+async fn assert_incremental_mcp_boot(invalidate_config: bool) {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        tracing::warn!("skipping MCP stdio fixture because node is unavailable");
+        return;
+    }
+    let tmp = tempdir().expect("tempdir");
+    let server = tmp.path().join("server.mjs");
+    let release = tmp.path().join("release-slow");
+    std::fs::write(
+        &server,
+        r#"import fs from 'node:fs';
+import readline from 'node:readline';
+const lines = readline.createInterface({ input: process.stdin });
+lines.on('line', async (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (process.argv[2] === 'slow' && request.method === 'initialize') {
+    while (!fs.existsSync(process.argv[3])) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  const result = request.method === 'initialize'
+    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} },
+        serverInfo: { name: process.argv[2], version: '1' } }
+    : { tools: [{ name: 'ready', inputSchema: { type: 'object' } }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});
+"#,
+    )
+    .expect("server fixture");
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&serde_json::json!({
+            "timeouts": { "connect_timeout": 30 },
+            "servers": {
+                // Both marked `required` so lazy boot (#6033) still starts
+                // them eagerly — this test proves progress ordering, not the
+                // lazy/eligible split.
+                "fast": { "command": "node", "args": [server, "fast", release], "required": true },
+                "slow": { "command": "node", "args": [server, "slow", release], "required": true }
+            }
+        }))
+        .expect("config JSON"),
+    )
+    .expect("MCP config");
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            mcp_config_path: config_path.clone(),
+            ..Default::default()
+        },
+        &Config::default(),
+    );
+    let pool = engine.ensure_mcp_pool().await.expect("engine pool");
+    let task = tokio::spawn(async move { engine.run().await });
+    let mut events = handle.rx_event.write().await;
+    // This proves ordering, not Node cold-start speed on a loaded runner.
+    let progress = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(event) = events.recv().await {
+            if let Event::McpSessionBoot {
+                snapshot,
+                connecting,
+                finished: false,
+                ..
+            } = event
+                && connecting == ["slow"]
+            {
+                return snapshot;
+            }
+        }
+        panic!("engine event channel closed");
+    })
+    .await;
+    let ready_tools = pool.lock().await.to_api_tools();
+    if invalidate_config {
+        std::fs::write(
+            &config_path,
+            r#"{"servers":{"slow":{"command":"node","disabled":true}}}"#,
+        )
+        .expect("remove servers");
+        pool.lock()
+            .await
+            .reload_if_config_changed()
+            .await
+            .expect("reload config");
+    }
+    // Release and shut down even when testing the old batch-buffered behavior.
+    std::fs::write(&release, "continue").expect("release stalled fixture");
+    let finished = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(event) = events.recv().await {
+            if let Event::McpSessionBoot {
+                snapshot,
+                finished: true,
+                ..
+            } = event
+            {
+                return snapshot;
+            }
+        }
+        panic!("engine event channel closed");
+    })
+    .await;
+    drop(events);
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    task.await.expect("engine task");
+    let progress = progress.expect("fast server must be visible before slow server is released");
+    assert!(
+        progress
+            .servers
+            .iter()
+            .any(|row| row.name == "fast" && row.connected)
+    );
+    assert!(
+        progress
+            .servers
+            .iter()
+            .any(|row| row.name == "slow" && !row.connected)
+    );
+    assert!(ready_tools.iter().any(|tool| tool.name == "mcp_fast_ready"));
+    assert!(!ready_tools.iter().any(|tool| tool.name == "mcp_slow_ready"));
+    let finished = finished.expect("finished boot");
+    if invalidate_config {
+        assert_eq!(finished.servers.len(), 1);
+        assert!(!finished.servers[0].enabled);
+        assert!(!finished.servers[0].connected);
+        assert!(pool.lock().await.to_api_tools().is_empty());
+    } else {
+        assert!(finished.servers.iter().all(|row| row.connected));
+    }
+}
+
+/// Lazy boot (#6033): a configured server nobody selected and nobody marked
+/// `required` must not be spawned at session start. The fixture writes a
+/// `started-<name>` marker when it receives `initialize`, so the lazy
+/// server's absence is proven by the file that never appears — not by a
+/// timeout on "it would have started by now".
+#[tokio::test]
+async fn lazy_boot_leaves_unselected_servers_unspawned() {
+    let Some(node) = crate::dependencies::resolve_node() else {
+        return;
+    };
+    let tmp = tempdir().expect("tempdir");
+    let server = tmp.path().join("server.mjs");
+    fs::write(
+        &server,
+        r#"import fs from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method === 'initialize') {
+    fs.writeFileSync(path.join(process.argv[3], 'started-' + process.argv[2]), 'ready');
+  }
+  const result = request.method === 'initialize'
+    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: process.argv[2], version: '1' } }
+    : { tools: [{ name: 'ready', inputSchema: { type: 'object' } }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});"#,
+    )
+    .expect("fixture");
+    let config_path = tmp.path().join("mcp.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec(&serde_json::json!({
+            "servers": {
+                "eager": { "command": node, "args": [server, "eager", tmp.path()], "required": true },
+                "lazy": { "command": node, "args": [server, "lazy", tmp.path()] }
+            }
+        }))
+        .unwrap(),
+    )
+    .expect("MCP config");
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            mcp_config_path: config_path,
+            ..Default::default()
+        },
+        &Config::default(),
+    );
+    let task = tokio::spawn(async move { engine.run().await });
+    let mut events = handle.rx_event.write().await;
+    let finished = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(event) = events.recv().await {
+            if let Event::McpSessionBoot {
+                snapshot,
+                connecting,
+                finished: true,
+                ..
+            } = event
+            {
+                return (snapshot, connecting);
+            }
+        }
+        panic!("engine event channel closed");
+    })
+    .await
+    .expect("boot must finish");
+    drop(events);
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    task.await.expect("engine task");
+
+    let (snapshot, connecting) = finished;
+    assert!(
+        tmp.path().join("started-eager").exists(),
+        "a required server is still eager"
+    );
+    assert!(
+        !tmp.path().join("started-lazy").exists(),
+        "an unselected, unrequired server must not be spawned at boot"
+    );
+    assert!(connecting.is_empty());
+    let lazy = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "lazy")
+        .expect("configured lazy server still appears in the snapshot");
+    assert!(!lazy.connected);
+    assert!(lazy.error.is_none(), "lazy is a state, not a failure");
+    let eager = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "eager")
+        .expect("required server in snapshot");
+    assert!(eager.connected);
+}
+
+#[tokio::test]
 async fn mcp_boot_updates_preserve_authority_errors_and_replace_ordinary_errors() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
@@ -20733,6 +23728,10 @@ async fn mcp_boot_updates_preserve_authority_errors_and_replace_ordinary_errors(
         ])
     );
     assert!(!engine.mcp_connection_errors.contains_key("stale-transport"));
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("mcp-session-boot")
+    );
 
     engine.mcp_connection_errors.insert(
         "stale-between-updates".to_string(),
@@ -20764,6 +23763,78 @@ async fn mcp_boot_updates_preserve_authority_errors_and_replace_ordinary_errors(
 }
 
 #[tokio::test]
+async fn mcp_boot_catalog_refresh_declares_prefix_before_mailbox_delivery() {
+    let tmp = tempdir().expect("tempdir");
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..Default::default()
+        },
+        &Config::default(),
+    );
+    engine.mcp_boot_generation = Some(1);
+    engine.mcp_boot_in_flight = true;
+    engine.session.pending_prefix_change_reason = None;
+    let _tools = engine.mcp_tools().await;
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("mcp-session-boot")
+    );
+
+    engine.session.pending_prefix_change_reason = None;
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    engine.mcp_boot_rx = Some(rx);
+    tx.try_send(McpBootUpdate::Progress {
+        generation: 1,
+        authority_errors: Arc::new(HashMap::new()),
+        connection_errors: HashMap::new(),
+        connecting: vec!["slow".to_string()],
+    })
+    .expect("queue progress");
+    engine.drain_mcp_boot_updates().await;
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("mcp-session-boot")
+    );
+}
+
+#[tokio::test]
+async fn subagent_completion_inbox_is_bounded() {
+    let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let tx = engine.tx_subagent_completion.clone();
+    let completion = SubAgentCompletion {
+        owner_session_id: engine.session.id.clone(),
+        agent_id: "capacity-fixture".to_string(),
+        payload: "bounded inbox fixture".to_string(),
+    };
+
+    let mut accepted = 0usize;
+    while tx.try_send(completion.clone()).is_ok() {
+        accepted += 1;
+        assert!(
+            accepted <= SUBAGENT_COMPLETION_CHANNEL_CAPACITY,
+            "the inbox accepted more than its declared capacity"
+        );
+    }
+
+    assert_eq!(
+        accepted, SUBAGENT_COMPLETION_CHANNEL_CAPACITY,
+        "the completion inbox must be exactly bounded (#6147)"
+    );
+    assert!(
+        matches!(
+            tx.try_send(completion),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ),
+        "an over-capacity completion must be refused, not queued without bound"
+    );
+    assert_eq!(
+        engine.rx_subagent_completion.len(),
+        SUBAGENT_COMPLETION_CHANNEL_CAPACITY
+    );
+}
+
+#[tokio::test]
 async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
@@ -20771,7 +23842,7 @@ async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
         ..Default::default()
     };
     let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
-    let (_newer_tx, newer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_newer_tx, newer_rx) = tokio::sync::mpsc::channel(16);
     engine.mcp_event_generation = 2;
     engine.mcp_boot_generation = Some(2);
     engine.mcp_boot_in_flight = true;
@@ -20798,7 +23869,9 @@ async fn bootstrap_and_retry_mcp_use_the_engine_owned_pool() {
     let config_path = tmp.path().join("mcp.json");
     std::fs::write(
         &config_path,
-        r#"{"servers":{"disabled":{"command":"node","disabled":true},"alpha":{"command":"codewhale-mcp-missing-alpha-9f8e7d6c"},"beta":{"command":"codewhale-mcp-missing-beta-9f8e7d6c"}}}"#,
+        // `required` keeps alpha/beta in the eager boot set under lazy boot
+        // (#6033) so they carry the connection diagnoses this test checks.
+        r#"{"servers":{"disabled":{"command":"node","disabled":true},"alpha":{"command":"codewhale-mcp-missing-alpha-9f8e7d6c","required":true},"beta":{"command":"codewhale-mcp-missing-beta-9f8e7d6c","required":true}}}"#,
     )
     .expect("MCP config");
     let engine_config = EngineConfig {
@@ -20920,13 +23993,13 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
         );
         // The posture actually changed...
         assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
         assert_eq!(
             policy.approval_mode,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             "{provenance:?}"
         );
         // ...so a structured event must exist to explain it.
@@ -20957,7 +24030,7 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     assert!(unchanged.narrowing.is_none());
     assert!(unchanged.status().is_none());
@@ -20975,7 +24048,7 @@ fn ui_status_and_model_metadata_render_the_same_narrowing_sentence() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     let event = policy.narrowing.as_ref().expect("narrowed");
     let ui_status = policy.status().expect("status for a narrowed turn");
@@ -21002,7 +24075,7 @@ fn narrowing_is_not_reported_when_there_was_no_authority_to_lose() {
         true,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert_eq!(policy.mode, AppMode::Agent);
     assert!(policy.narrowing.is_none());
@@ -21044,7 +24117,7 @@ fn turn_metadata_carries_the_narrowing_only_on_a_narrowed_turn() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     let event = policy.narrowing.clone().expect("narrowed");
     engine.last_policy_narrowing = Some(event.clone());
@@ -21187,14 +24260,14 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
 
     // ...and it is model-visible, marked as untrusted tool data.
     let message = crate::runtime_handoff::shell_completion_runtime_message(&first);
-    let crate::models::ContentBlock::Text { text, .. } = &message.content[0] else {
+    let codewhale_models::ContentBlock::Text { text, .. } = &message.content[0] else {
         panic!("expected runtime event text");
     };
     assert!(text.contains("background_shell_completion"), "{text}");
     assert!(text.contains("stdout-end"), "{text}");
     assert!(text.contains(evidence_ref), "{text}");
     assert!(
-        text.contains("the full output is retained and can be reviewed in the tool details view"),
+        text.contains("call retrieve_tool_result") && !text.contains("tool details view"),
         "{text}"
     );
     assert!(
@@ -21297,7 +24370,7 @@ async fn cacheable_prefix_is_byte_stable_across_unchanged_turns() {
 }
 
 #[tokio::test]
-async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active() {
+async fn idle_engine_shell_wake_respects_cancellation_and_preserves_completion() {
     // Morning-report continuation gap: background shell completion is
     // pull-only, so an idle engine with an active goal never learned the job
     // finished and the goal sat inert until the user typed something.
@@ -21357,6 +24430,14 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         "wake input expected without an active goal"
     );
 
+    // Escape wins even after the poll selected a wake. The shell's result
+    // remains available; cancellation must not start another provider turn.
+    engine.cancel_token.cancel();
+    assert!(!engine.idle_shell_wake_armed());
+    engine.handle_idle_shell_completion_wake().await;
+    assert!(engine.finished_background_shell_pending());
+    assert!(!engine.has_scheduled_goal_continuation());
+
     engine
         .config
         .goal_state
@@ -21367,6 +24448,16 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
             None,
             crate::tools::goal::GoalStatus::Active,
         );
+
+    // A durable goal is retained, but its presence cannot bypass Escape.
+    engine.handle_idle_shell_completion_wake().await;
+    assert!(!engine.has_scheduled_goal_continuation());
+    assert!(engine.finished_background_shell_pending());
+
+    // The next explicitly requested turn installs a fresh cancellation
+    // control, restoring ordinary delivery without discarding the receipt.
+    let _turn = engine.begin_turn_control();
+    assert!(engine.idle_shell_wake_armed());
 
     let input = tokio::time::timeout(Duration::from_secs(10), engine.next_run_input(false))
         .await
@@ -21382,6 +24473,47 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         engine.has_scheduled_goal_continuation(),
         "the wake must queue a goal continuation that will claim the evidence"
     );
+}
+
+#[tokio::test]
+async fn interruption_status_only_claims_an_active_goal_when_one_exists() {
+    for status in [None, Some(GoalStatus::Active), Some(GoalStatus::Paused)] {
+        let (mut engine, handle) = Engine::new(
+            EngineConfig {
+                snapshots_enabled: false,
+                terminal_chrome_enabled: false,
+                ..Default::default()
+            },
+            &Config::default(),
+        );
+        if let Some(status) = status {
+            engine
+                .config
+                .goal_state
+                .lock()
+                .unwrap()
+                .sync_from_host_status(Some("Preserve the user's objective"), None, status);
+        }
+        engine
+            .reconcile_non_completed_goal_turn(&SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                error: None,
+            })
+            .await;
+        let mut events = handle.rx_event.write().await;
+        let mut messages = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let Event::Status { message } = event {
+                messages.push(message);
+            }
+        }
+        let expected = if status == Some(GoalStatus::Active) {
+            "Turn interrupted; session goal stays active."
+        } else {
+            "Turn interrupted."
+        };
+        assert_eq!(messages, vec![expected]);
+    }
 }
 
 /// The user's prompt reaches the model **exactly once**, on every request of
@@ -21575,7 +24707,11 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
     let manager = engine.subagent_manager.clone();
     let run = tokio::spawn(engine.run());
 
-    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    let (approval_id, receiver) =
+        manager
+            .write()
+            .await
+            .register_child_approval("agent_child", "bash", "fixture");
     handle
         .approve_tool_call(approval_id.clone())
         .await
@@ -21588,7 +24724,11 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
     assert_eq!(manager.read().await.pending_child_approvals(), 0);
 
     // A denial for a second prompt routes the same way.
-    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    let (approval_id, receiver) =
+        manager
+            .write()
+            .await
+            .register_child_approval("agent_child", "bash", "fixture");
     handle
         .deny_tool_call(approval_id)
         .await
@@ -21606,19 +24746,16 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
 }
 
 // ---------------------------------------------------------------------------
-// R1: finite turn budgets. Each limit must fire, and each must be overridable.
+// Explicit step limits and finite wall-clock/stream budgets remain enforceable.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn engine_config_defaults_carry_finite_turn_budgets() {
+fn engine_config_defaults_keep_wall_clock_and_stream_budgets() {
     use crate::core::engine::turn_budget;
 
     let config = EngineConfig::default();
     assert_eq!(config.max_steps, turn_budget::DEFAULT_MAX_MODEL_STEPS);
-    assert!(
-        config.max_steps < u32::MAX,
-        "the default model-step ceiling must be finite"
-    );
+    assert_eq!(TurnContext::new(config.max_steps).step_limit(), None);
     assert_eq!(
         config.turn_wall_clock,
         std::time::Duration::from_secs(turn_budget::DEFAULT_TURN_WALL_CLOCK_SECS),
@@ -21818,5 +24955,764 @@ fn engine_adopts_host_owned_session_id_from_config() {
         uuid::Uuid::parse_str(engine.session_id()).is_ok(),
         "headless callers keep the generated uuid, got {:?}",
         engine.session_id()
+    );
+}
+
+mod sse_turn_recovery;
+mod tool_cancellation;
+
+#[tokio::test]
+async fn restored_task_binding_is_not_missing_when_its_inventory_is_unavailable()
+-> anyhow::Result<()> {
+    use crate::task_manager::{TaskExecutionResult, TaskManager, TaskManagerConfig};
+    struct Unused;
+    #[async_trait::async_trait]
+    impl crate::task_manager::TaskExecutor for Unused {
+        async fn execute(
+            &self,
+            _: crate::task_manager::ExecutionTask,
+            _: tokio::sync::mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
+            _: tokio_util::sync::CancellationToken,
+        ) -> TaskExecutionResult {
+            panic!("this fixture must never execute a task")
+        }
+    }
+    let (mut engine, _handle, _todos, work, root) = todo_engine();
+    let tasks = TaskManager::start_with_executor(
+        TaskManagerConfig {
+            data_dir: root.path().join("tasks"),
+            worker_count: 1,
+            default_workspace: root.path().into(),
+            default_model: "fixture".into(),
+            default_mode: "plan".into(),
+            allow_shell: false,
+            trust_mode: false,
+            execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+        },
+        Arc::new(Unused),
+    )
+    .await?;
+    engine.config.runtime_services.task_manager = Some(tasks.clone());
+    let session = engine.session.id.clone();
+    let id = work
+        .register_operation(
+            &session,
+            crate::work_graph::OperationIntent::new(
+                "task:task_0123456789abcdef",
+                "restored task",
+                true,
+                "tasks",
+                "fixture",
+            ),
+        )
+        .map_err(anyhow::Error::msg)?;
+    let before = work
+        .capture(Some(&session))
+        .map_err(anyhow::Error::msg)?
+        .unwrap();
+    let queue = tasks.data_dir().join("queue.json");
+    let saved = std::fs::read(&queue)?;
+    std::fs::write(&queue, b"{corrupt")?;
+    engine.reconcile_restored_work_bindings().await;
+    let unavailable = work
+        .capture(Some(&session))
+        .map_err(anyhow::Error::msg)?
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(unavailable.graph.node(&id))?,
+        serde_json::to_value(before.graph.node(&id))?
+    );
+    std::fs::write(&queue, saved)?;
+    engine.reconcile_restored_work_bindings().await;
+    let available = work
+        .capture(Some(&session))
+        .map_err(anyhow::Error::msg)?
+        .unwrap();
+    assert_ne!(
+        serde_json::to_value(available.graph.node(&id))?,
+        serde_json::to_value(before.graph.node(&id))?,
+        "healthy absence must still reconcile OwnerMissing"
+    );
+    tasks.shutdown_and_wait().await?;
+    Ok(())
+}
+
+// GH6015: exact engine trajectories, plus the narrow typed observation rules.
+// These fixtures run no shell, native program or live provider.
+mod fleet_permission_denial_tests {
+    use super::super::dispatch::{FleetDenialAction, FleetDenialBatch, FleetDenialGuard};
+    use super::*;
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::tools::spec::{
+        ToolAuthorityEnvelope, ToolCapability, ToolMutationAuthority, ToolShellAuthority, ToolSpec,
+        ToolTerminalStatus, ToolVerificationAuthority,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DeniedEvidenceTool(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl ToolSpec for DeniedEvidenceTool {
+        fn name(&self) -> &str {
+            "fixture_denied"
+        }
+        fn description(&self) -> &str {
+            "A permission-denied evidence fixture."
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object","properties":{"variant":{"type":"integer"}},"required":["variant"]})
+        }
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![ToolCapability::ReadOnly]
+        }
+        fn supports_parallel(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            input: Value,
+            _context: &ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ToolError::permission_denied(format!(
+                "fixture authority refuses variant {}",
+                input["variant"]
+            )))
+        }
+    }
+
+    struct PrepareCountingReadTool(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl ToolSpec for PrepareCountingReadTool {
+        fn name(&self) -> &str {
+            "read_file"
+        }
+        fn description(&self) -> &str {
+            "Count preparation of a held report-only read."
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![ToolCapability::ReadOnly]
+        }
+        fn prepare(
+            &self,
+            input: Value,
+            context: &ToolContext,
+        ) -> Result<crate::tools::spec::PreparedToolCall, ToolError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            crate::tools::file::ReadFileTool.prepare(input, context)
+        }
+        async fn execute(
+            &self,
+            _input: Value,
+            _context: &ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            panic!("report-only read must never execute")
+        }
+    }
+
+    fn fleet_surface(
+        engine: &Engine,
+        workspace: &Path,
+        executions: Arc<AtomicUsize>,
+        fleet: bool,
+    ) -> ToolSurfacePolicy {
+        let mut context = ToolContext::new(workspace);
+        if fleet {
+            context = context
+                .with_tool_authority(ToolAuthorityEnvelope {
+                    schema_version: 1,
+                    owner: "fixture-worker".to_string(),
+                    authority: ToolMutationAuthority::ReadOnly,
+                    network_access: Some(false),
+                    shell: ToolShellAuthority::None,
+                    verification: ToolVerificationAuthority::None,
+                    writable_roots: Vec::new(),
+                    writable_files: Vec::new(),
+                    coordination_contracts: Vec::new(),
+                })
+                .expect("valid Fleet fixture authority");
+        }
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(Arc::new(DeniedEvidenceTool(executions)));
+        registry.register(Arc::new(crate::tools::file::ReadFileTool));
+        // The read alias is hidden in ordinary discovery but deliberately
+        // explicit on this isolated test surface, as in existing engine tests.
+        let tools = Some(vec![
+            catalog_tool("fixture_denied"),
+            catalog_tool("read_file"),
+        ]);
+        test_tool_surface(engine, registry, tools, AppMode::Agent)
+    }
+
+    fn denied_round(index: usize) -> Vec<StreamEvent> {
+        canned::tool_call_turn(
+            &format!("denial-{index}"),
+            "fixture_denied",
+            &format!(r#"{{"variant":{}}}"#, index % 2),
+        )
+    }
+
+    fn observation(
+        guard: &mut FleetDenialGuard,
+        results: &[(&str, Value, Result<ToolResult, ToolError>)],
+    ) -> FleetDenialAction {
+        let mut batch = FleetDenialBatch::default();
+        for (name, input, result) in results {
+            let status = ToolExecutionOutcome::from_legacy(result.clone()).status;
+            guard.observe(&mut batch, name, input, status, result, None);
+        }
+        guard.finish_batch(batch)
+    }
+
+    #[tokio::test]
+    async fn fleet_denials_switch_once_then_bound_the_report_response() {
+        // A cooperative report, an ignored tool_choice, and an empty final
+        // response all consume exactly one report response. None re-arms work.
+        for final_response in [
+            canned::simple_text_turn(
+                "Partial report: evidence access is blocked; no finding is proved.",
+            ),
+            canned::tool_call_turn(
+                "report-must-not-read",
+                "read_file",
+                r#"{"path":"proof.txt"}"#,
+            ),
+            vec![
+                canned::message_start("empty-report"),
+                canned::message_delta("end_turn", None),
+                canned::message_stop(),
+            ],
+        ] {
+            let workspace = tempdir().unwrap();
+            fs::write(workspace.path().join("proof.txt"), "must remain unread").unwrap();
+            let mut responses = (0..6).map(denied_round).collect::<Vec<_>>();
+            responses.push(final_response);
+            responses.push(canned::simple_text_turn(
+                "This eighth request must never run.",
+            ));
+            let mock = Arc::new(MockLlmClient::new(responses));
+            let (mut engine, handle) = Engine::new_with_model_client(
+                EngineConfig {
+                    strict_tool_mode: true,
+                    ..deterministic_engine_config(workspace.path())
+                },
+                &Config::default(),
+                mock.clone(),
+            );
+            let executions = Arc::new(AtomicUsize::new(0));
+            let mut surface = fleet_surface(&engine, workspace.path(), executions.clone(), true);
+            let preparations = Arc::new(AtomicUsize::new(0));
+            surface
+                .registry
+                .register(Arc::new(PrepareCountingReadTool(preparations.clone())));
+            let mut turn = TurnContext::new(u32::MAX);
+            let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+            assert_eq!(status, TurnOutcomeStatus::Failed);
+            assert!(error.unwrap().contains("repeated permission denials"));
+            assert_eq!(
+                turn.stop_diagnostics.reason,
+                Some(crate::tool_inspection::TurnStopReason::NoProgress)
+            );
+            assert_eq!(turn.stop_diagnostics.permission_strategy_switches, 1);
+            assert!(turn.stop_diagnostics.final_report_requested);
+            assert_eq!(
+                executions.load(Ordering::SeqCst),
+                3,
+                "held repeats must never execute"
+            );
+            assert_eq!(mock.call_count(), 7);
+            assert_eq!(
+                preparations.load(Ordering::SeqCst),
+                0,
+                "report-only calls must not prepare"
+            );
+            assert_eq!(
+                turn.stop_diagnostics
+                    .permission_denial_rounds_without_progress,
+                6
+            );
+            let requests = mock.captured_requests();
+            assert_eq!(
+                requests[6].tool_choice,
+                Some(json!("none")),
+                "report choice beats strict mode"
+            );
+            assert_eq!(
+                serde_json::to_value(&requests[0].tools).unwrap(),
+                serde_json::to_value(&requests[6].tools).unwrap(),
+                "reporting must not rewrite the tool prefix"
+            );
+            let notice_count = engine.session.messages.iter().flat_map(|message| &message.content)
+                .filter(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("Fleet strategy switch required:"))).count();
+            assert_eq!(notice_count, 1);
+            assert!(requests[3].messages.iter().flat_map(|message| &message.content)
+                .any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("Fleet strategy switch required:"))), "feedback must reach the next provider request");
+            let mut calls = Vec::new();
+            let mut results = Vec::new();
+            for block in engine
+                .session
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+            {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => calls.push(id.clone()),
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        is_error,
+                        ..
+                    } => {
+                        assert_eq!(*is_error, Some(true));
+                        results.push(tool_use_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+            calls.sort();
+            results.sort();
+            assert_eq!(
+                calls, results,
+                "every suppressed call retains its matching result"
+            );
+            let mut events = handle.rx_event.write().await;
+            assert!(
+                !std::iter::from_fn(|| events.try_recv().ok())
+                    .any(|event| matches!(event, Event::ApprovalRequired { .. })),
+                "guard must not ask for repeated approval"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_denials_allow_new_evidence_but_unchanged_reads_do_not_rearm_retries() {
+        for changed in [false, true] {
+            let workspace = tempdir().unwrap();
+            let proof = workspace.path().join("proof.txt");
+            fs::write(&proof, "version zero").unwrap();
+            let mock = Arc::new(MockLlmClient::new(Vec::new()));
+            // A read and a denial share each batch: aggregate progress must win
+            // regardless of tool completion order. Only changed bytes count.
+            for index in 0..10 {
+                let proof = proof.clone();
+                mock.push_factory(move |_| {
+                    if changed {
+                        fs::write(&proof, format!("version {index}")).unwrap();
+                    }
+                    tool_batch_turn(&[
+                        (
+                            &format!("denial-{index}"),
+                            "fixture_denied",
+                            r#"{"variant":0}"#,
+                        ),
+                        (
+                            &format!("read-{index}"),
+                            "read_file",
+                            r#"{"path":"proof.txt"}"#,
+                        ),
+                    ])
+                });
+            }
+            mock.push_turn(canned::simple_text_turn(
+                "Review complete with new evidence.",
+            ));
+            let (mut engine, _) = Engine::new_with_model_client(
+                deterministic_engine_config(workspace.path()),
+                &Config::default(),
+                mock.clone(),
+            );
+            let executions = Arc::new(AtomicUsize::new(0));
+            let surface = fleet_surface(&engine, workspace.path(), executions, true);
+            let mut turn = TurnContext::new(u32::MAX);
+            let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+            if changed {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                assert_eq!(mock.call_count(), 11);
+                assert_eq!(turn.stop_diagnostics.permission_strategy_switches, 0);
+            } else {
+                assert_eq!(status, TurnOutcomeStatus::Failed);
+                assert_eq!(
+                    mock.call_count(),
+                    8,
+                    "one first read, six denied rounds, one report response"
+                );
+                assert_eq!(
+                    turn.stop_diagnostics.reason,
+                    Some(crate::tool_inspection::TurnStopReason::NoProgress)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_denial_cooperative_partial_report_is_not_completed() {
+        let workspace = tempdir().unwrap();
+        let mut responses = (0..3).map(denied_round).collect::<Vec<_>>();
+        responses.push(canned::simple_text_turn(
+            "Partial report: the evidence is blocked; the review is unfinished.",
+        ));
+        let mock = Arc::new(MockLlmClient::new(responses));
+        let (mut engine, _) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &Config::default(),
+            mock.clone(),
+        );
+        let surface = fleet_surface(
+            &engine,
+            workspace.path(),
+            Arc::new(AtomicUsize::new(0)),
+            true,
+        );
+        let mut turn = TurnContext::new(u32::MAX);
+        let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+        assert_eq!(status, TurnOutcomeStatus::Failed, "{error:?}");
+        assert_eq!(
+            turn.stop_diagnostics.reason,
+            Some(crate::tool_inspection::TurnStopReason::NoProgress)
+        );
+        assert_eq!(mock.call_count(), 4);
+        assert_eq!(
+            turn.stop_diagnostics
+                .permission_denial_rounds_without_progress,
+            3
+        );
+        assert!(engine.session.messages.iter().any(|message| {
+            message.role == Role::Assistant && message.content.iter().any(|block|
+            matches!(block, ContentBlock::Text { text, .. } if text.starts_with("Partial report:")))
+        }));
+    }
+
+    #[tokio::test]
+    async fn ordinary_engine_denials_do_not_acquire_a_fleet_guard() {
+        let workspace = tempdir().unwrap();
+        let mut responses = (0..8).map(denied_round).collect::<Vec<_>>();
+        responses.push(canned::simple_text_turn(
+            "Root has finished evaluating these failures.",
+        ));
+        let mock = Arc::new(MockLlmClient::new(responses));
+        let (mut engine, _) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &Config::default(),
+            mock.clone(),
+        );
+        let executions = Arc::new(AtomicUsize::new(0));
+        let surface = fleet_surface(&engine, workspace.path(), executions.clone(), false);
+        let mut turn = TurnContext::new(u32::MAX);
+        let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+        assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+        assert_eq!(executions.load(Ordering::SeqCst), 8);
+        assert_eq!(turn.stop_diagnostics.permission_strategy_switches, 0);
+    }
+
+    #[tokio::test]
+    async fn fleet_denial_report_shares_existing_explicit_budget_allowance() {
+        for limit in [3, 6] {
+            let workspace = tempdir().unwrap();
+            let mut responses = (0..limit).map(denied_round).collect::<Vec<_>>();
+            responses.push(canned::simple_text_turn(
+                "Partial report at the explicit limit.",
+            ));
+            responses.push(canned::simple_text_turn("No second report allowance."));
+            let mock = Arc::new(MockLlmClient::new(responses));
+            let (mut engine, _) = Engine::new_with_model_client(
+                deterministic_engine_config(workspace.path()),
+                &Config::default(),
+                mock.clone(),
+            );
+            let surface = fleet_surface(
+                &engine,
+                workspace.path(),
+                Arc::new(AtomicUsize::new(0)),
+                true,
+            );
+            let mut turn = TurnContext::new(limit as u32);
+            let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+            assert_eq!(status, TurnOutcomeStatus::Failed);
+            assert!(error.unwrap().contains("Maximum model steps"));
+            assert_eq!(mock.call_count(), limit + 1);
+            assert_eq!(
+                turn.stop_diagnostics.reason,
+                Some(crate::tool_inspection::TurnStopReason::StepBudgetExhausted)
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_denial_observations_canonicalize_aliases_and_keep_polling_neutral() {
+        let mut guard = FleetDenialGuard::default();
+        for (index, name) in ["bash", "Bash", "exec_shell"].into_iter().enumerate() {
+            let action = observation(
+                &mut guard,
+                &[(
+                    name,
+                    json!({"action":"run","command":format!("variant {index}")}),
+                    Err(ToolError::permission_denied(format!(
+                        "different reason {index}"
+                    ))),
+                )],
+            );
+            assert_eq!(
+                action,
+                if index == 2 {
+                    FleetDenialAction::SwitchStrategy
+                } else {
+                    FleetDenialAction::Continue
+                }
+            );
+        }
+        assert!(
+            guard
+                .admission_error("Bash", &json!({"action":"run","command":"new variant"}))
+                .is_some()
+        );
+        assert!(
+            guard
+                .admission_error("Bash", &json!({"action":"wait","task_id":"live"}))
+                .is_none()
+        );
+        for _ in 0..10 {
+            assert_eq!(
+                observation(
+                    &mut guard,
+                    &[(
+                        "Bash",
+                        json!({"action":"wait","task_id":"live"}),
+                        Ok(ToolResult::success("still running"))
+                    )]
+                ),
+                FleetDenialAction::Continue
+            );
+        }
+        // Alternating other denied families cannot reset a spent strategy
+        // notice or its bounded recovery opportunity.
+        for (index, name) in ["denied-a", "denied-b", "denied-a"].into_iter().enumerate() {
+            let action = observation(
+                &mut guard,
+                &[(name, json!({}), Err(ToolError::permission_denied("held")))],
+            );
+            assert_eq!(
+                action,
+                if index == 2 {
+                    FleetDenialAction::FinalReport
+                } else {
+                    FleetDenialAction::Continue
+                }
+            );
+        }
+        assert!(guard.report_only());
+        guard.reset(); // actual user steer / authority update, not model prose
+        assert!(!guard.report_only());
+        assert!(
+            guard
+                .admission_error("bash", &json!({"action":"run"}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fleet_denial_observations_exclude_cancellation_and_untyped_failures() {
+        let mut guard = FleetDenialGuard::default();
+        for _ in 0..20 {
+            for result in [
+                Err(ToolError::execution_failed("changing failure payload")),
+                Err(ToolError::path_escape(PathBuf::from("../outside"))),
+                Ok(ToolResult::error("returned failure")),
+            ] {
+                assert_eq!(
+                    observation(
+                        &mut guard,
+                        &[("read_file", json!({"path":"proof.txt"}), result)]
+                    ),
+                    FleetDenialAction::Continue
+                );
+            }
+        }
+        let mut batch = FleetDenialBatch::default();
+        guard.observe(
+            &mut batch,
+            "read_file",
+            &json!({"path":"proof.txt"}),
+            ToolTerminalStatus::Cancelled,
+            &Ok(ToolResult::success("not executed")
+                .with_metadata(json!({"executed":false,"cancelled":true}))),
+            None,
+        );
+        assert_eq!(guard.finish_batch(batch), FleetDenialAction::Continue);
+        assert!(!guard.report_only());
+    }
+
+    #[test]
+    fn fleet_denial_spillover_call_paths_do_not_create_new_evidence() {
+        let mut guard = FleetDenialGuard::default();
+        let input = json!({"path":"large-proof.txt"});
+        let original = ToolResult::success("unchanged full bytes".repeat(10_000));
+        let digest = FleetDenialGuard::original_content_digest("read_file", &input, &original);
+        for index in 0..4 {
+            let mut batch = FleetDenialBatch::default();
+            // Both legacy and adaptive spillover add per-call artifact paths;
+            // the observation must use the digest captured before either one.
+            let spilled = Ok(ToolResult::success(format!(
+                "preview... full output: artifacts/art_call-{index}.txt"
+            )));
+            guard.observe(
+                &mut batch,
+                "read_file",
+                &input,
+                ToolTerminalStatus::Succeeded,
+                &spilled,
+                digest,
+            );
+            guard.observe(
+                &mut batch,
+                "bash",
+                &json!({"command":"held"}),
+                ToolTerminalStatus::Denied,
+                &Err(ToolError::permission_denied("held")),
+                None,
+            );
+            assert_eq!(
+                guard.finish_batch(batch),
+                if index == 3 {
+                    FleetDenialAction::SwitchStrategy
+                } else {
+                    FleetDenialAction::Continue
+                }
+            );
+        }
+        assert_eq!(guard.denial_rounds_without_progress(), 3);
+        let changed = ToolResult::success("actually changed bytes");
+        let mut batch = FleetDenialBatch::default();
+        guard.observe(
+            &mut batch,
+            "read_file",
+            &input,
+            ToolTerminalStatus::Succeeded,
+            &Ok(ToolResult::success("same preview, new artifact path")),
+            FleetDenialGuard::original_content_digest("read_file", &input, &changed),
+        );
+        assert_eq!(guard.finish_batch(batch), FleetDenialAction::Continue);
+        assert_eq!(guard.denial_rounds_without_progress(), 0);
+        assert!(!guard.awaiting_strategy_change());
+    }
+
+    #[test]
+    fn fleet_denial_read_keys_ignore_json_order_within_observation_window() {
+        let mut guard = FleetDenialGuard::default();
+        // Equivalent arguments stay neutral within the bounded read window.
+        for index in 0..6 {
+            let input: Value =
+                serde_json::from_str(&format!(r#"{{"path":"proof-{index}.txt","limit":100}}"#))
+                    .unwrap();
+            assert_eq!(
+                observation(
+                    &mut guard,
+                    &[("read_file", input, Ok(ToolResult::success("unchanged")))]
+                ),
+                FleetDenialAction::Continue
+            );
+        }
+        for index in 0..6 {
+            let input: Value =
+                serde_json::from_str(&format!(r#"{{"limit":100,"path":"proof-{index}.txt"}}"#))
+                    .unwrap();
+            let action = observation(
+                &mut guard,
+                &[
+                    ("read_file", input, Ok(ToolResult::success("unchanged"))),
+                    (
+                        "bash",
+                        json!({"command":"held"}),
+                        Err(ToolError::permission_denied("held")),
+                    ),
+                ],
+            );
+            assert_eq!(
+                action,
+                match index {
+                    2 => FleetDenialAction::SwitchStrategy,
+                    5 => FleetDenialAction::FinalReport,
+                    _ => FleetDenialAction::Continue,
+                }
+            );
+        }
+        assert!(guard.report_only());
+        assert_eq!(guard.denial_rounds_without_progress(), 6);
+    }
+}
+
+/// #6187: a supervisor sweep refreshes the engine error map and bumps the
+/// snapshot generation exactly when something changed.
+#[tokio::test]
+async fn supervisor_update_refreshes_error_map_and_generation() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine
+        .apply_mcp_supervisor_update(McpSupervisorUpdate {
+            died: vec![("alpha".to_string(), "connection reset".to_string())],
+            failed: Vec::new(),
+            recovered: Vec::new(),
+            parked: Vec::new(),
+        })
+        .await;
+    assert_eq!(
+        engine
+            .mcp_connection_errors
+            .get("alpha")
+            .map(String::as_str),
+        Some("connection reset")
+    );
+    assert_eq!(engine.mcp_event_generation, 1);
+
+    engine
+        .apply_mcp_supervisor_update(McpSupervisorUpdate {
+            died: Vec::new(),
+            failed: Vec::new(),
+            recovered: vec!["alpha".to_string()],
+            parked: vec!["beta".to_string()],
+        })
+        .await;
+    assert!(!engine.mcp_connection_errors.contains_key("alpha"));
+    assert!(
+        engine.mcp_connection_errors["beta"].contains("/mcp retry beta"),
+        "the park notice names the way out"
+    );
+    assert_eq!(engine.mcp_event_generation, 2);
+
+    engine
+        .apply_mcp_supervisor_update(McpSupervisorUpdate::default())
+        .await;
+    assert_eq!(
+        engine.mcp_event_generation, 2,
+        "an empty sweep emits nothing"
+    );
+}
+
+/// #6540: every summary call billed ~219k input tokens at a 0% cache hit
+/// because the summary request dropped the reasoning tier the parent turn
+/// sends, and reasoning routes render that tier at the head of the prompt.
+/// The compaction envelope must carry the exact tier the turn loop resolves.
+#[test]
+fn compaction_envelope_carries_the_turn_reasoning_tier() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    for effort in [Some("high"), Some("auto"), None] {
+        engine.session.reasoning_effort = effort.map(str::to_string);
+        let turn_effort = super::turn_loop::resolve_auto_effort(
+            effort,
+            engine.api_provider,
+            &engine.api_config.active_route_base_url(),
+            &engine.config.model,
+        );
+        let prepared = engine.prepare_compaction_envelope(CompactionConfig::default());
+        assert_eq!(prepared.reasoning_effort, turn_effort, "{effort:?}");
+    }
+    engine.session.reasoning_effort = Some("high".to_string());
+    assert_eq!(
+        engine
+            .prepare_compaction_envelope(CompactionConfig::default())
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
     );
 }

@@ -11,17 +11,15 @@ use serde_json::{Value, json};
 
 use crate::config::ApiProvider;
 
-use super::{DeepSeekClient, api_url, responses_api_url};
+use super::{CodewhaleClient, api_url, responses_api_url};
 
 mod zai;
 
 mod kimi;
 
-const MAX_NATIVE_ANSWER_CHARS: usize = 4_000;
-
 #[derive(Clone)]
 pub(crate) struct ProviderNativeSearchClient {
-    pub(super) inner: DeepSeekClient,
+    pub(super) inner: CodewhaleClient,
 }
 
 #[derive(Clone)]
@@ -47,7 +45,7 @@ pub(crate) struct ProviderNativeSearchResponse {
 
 impl ProviderNativeSearchClient {
     #[must_use]
-    pub(crate) fn new(inner: DeepSeekClient) -> Option<Self> {
+    pub(crate) fn new(inner: CodewhaleClient) -> Option<Self> {
         matches!(
             inner.api_provider,
             ApiProvider::Openai
@@ -110,7 +108,7 @@ impl ProviderNativeSearchClient {
         request: &ProviderNativeSearchRequest,
     ) -> Result<ProviderNativeSearchResponse> {
         // This adapter performs model-backed inference directly instead of
-        // calling `DeepSeekClient::create_message*`. It must therefore join
+        // calling `CodewhaleClient::create_message*`. It must therefore join
         // the same attached-run ownership boundary explicitly. The guard is
         // retained through response decode so a relay writer cannot start
         // while this result is still able to feed the interactive turn.
@@ -414,7 +412,7 @@ fn parse_responses_search(payload: &Value) -> ProviderNativeSearchResponse {
         }
     }
     ProviderNativeSearchResponse {
-        answer: bounded_answer(answer_parts),
+        answer: joined_answer(answer_parts),
         citations,
     }
 }
@@ -464,7 +462,7 @@ fn parse_anthropic_search(payload: &Value) -> ProviderNativeSearchResponse {
         }
     }
     ProviderNativeSearchResponse {
-        answer: bounded_answer(answer_parts),
+        answer: joined_answer(answer_parts),
         citations,
     }
 }
@@ -506,7 +504,7 @@ fn parse_mimo_search(payload: &Value) -> ProviderNativeSearchResponse {
         }
     }
     ProviderNativeSearchResponse {
-        answer: bounded_answer(answer.into_iter().collect()),
+        answer: joined_answer(answer.into_iter().collect()),
         citations,
     }
 }
@@ -621,21 +619,13 @@ fn fallback_title(url: &str) -> String {
         .unwrap_or_else(|| "Web source".to_string())
 }
 
-fn bounded_answer(parts: Vec<String>) -> Option<String> {
+/// Join the answer parts whole. No per-adapter cap: the provider already
+/// bounded its output tokens, and the tool-result spillover bounds what
+/// reaches the model inline while keeping the rest recoverable (#6508).
+fn joined_answer(parts: Vec<String>) -> Option<String> {
     let joined = parts.join("\n\n");
     let trimmed = joined.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.chars().count() <= MAX_NATIVE_ANSWER_CHARS {
-        return Some(trimmed.to_string());
-    }
-    let mut bounded = trimmed
-        .chars()
-        .take(MAX_NATIVE_ANSWER_CHARS.saturating_sub(1))
-        .collect::<String>();
-    bounded.push('…');
-    Some(bounded)
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -673,7 +663,7 @@ mod tests {
             runtime_thread_inference_unrelated: unrelated,
             ..Config::default()
         };
-        ProviderNativeSearchClient::new(DeepSeekClient::new(&config).expect("test xAI client"))
+        ProviderNativeSearchClient::new(CodewhaleClient::new(&config).expect("test xAI client"))
             .expect("xAI native adapter")
     }
 
@@ -768,6 +758,21 @@ mod tests {
         assert_eq!(parsed.citations.len(), 2);
         assert_eq!(parsed.citations[0].title, "Source A");
         assert_eq!(parsed.citations[1].url, "https://example.org/b");
+    }
+
+    #[test]
+    fn long_native_answers_are_returned_whole() {
+        let long = format!("{} end-of-answer", "grounded sentence. ".repeat(600));
+        assert!(long.chars().count() > 10_000);
+        let payload = json!({
+            "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": long.clone() }]
+            }]
+        });
+        let parsed = parse_responses_search(&payload);
+        assert_eq!(parsed.answer.as_deref(), Some(long.trim()));
+        assert!(parsed.answer.unwrap().ends_with("end-of-answer"));
     }
 
     #[test]
@@ -943,7 +948,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let inner = DeepSeekClient::new(&config).expect("test xAI client");
+        let inner = CodewhaleClient::new(&config).expect("test xAI client");
         let client = ProviderNativeSearchClient::new(inner).expect("xAI native adapter");
         let cache_identity = client.cache_identity();
         assert!(cache_identity.contains("provider-native://xai/"));
@@ -995,7 +1000,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let inner = DeepSeekClient::new(&config).expect("test ModelStudio client");
+        let inner = CodewhaleClient::new(&config).expect("test ModelStudio client");
         let client = ProviderNativeSearchClient::new(inner).expect("Qwen native adapter");
 
         let response = client.search(&request()).await.expect("native search");
@@ -1049,7 +1054,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let inner = DeepSeekClient::new(&config).expect("test DeepSeek client");
+        let inner = CodewhaleClient::new(&config).expect("test DeepSeek client");
         let client = ProviderNativeSearchClient::new(inner).expect("DeepSeek native adapter");
 
         let response = client.search(&request()).await.expect("native search");

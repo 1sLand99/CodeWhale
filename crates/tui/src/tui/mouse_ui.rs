@@ -99,11 +99,8 @@ fn composer_line_bounds(text: &str, pos: usize) -> (usize, usize) {
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
-use crate::localization::MessageId;
-use crate::models::{ContentBlock, Message};
-use crate::tui::app::{App, SidebarRowAction};
+use crate::tui::app::{App, SidebarRowAction, StatusToastLevel};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };
@@ -113,9 +110,12 @@ use crate::tui::scrolling::{ScrollDirection, TranscriptScroll};
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use crate::tui::tideline::InteractionAction;
 use crate::tui::ui_text::{
-    history_cell_to_text, line_to_plain, slice_text, text_display_width, truncate_line_to_width,
+    history_cell_to_clipboard_text, history_cell_to_text, line_to_plain, slice_visible_columns,
+    text_display_width, text_visible_width, truncate_line_to_width,
 };
 use crate::tui::views::{ContextMenuAction, HelpView, ModalKind, ViewEvent};
+use codewhale_localization::MessageId;
+use codewhale_models::{ContentBlock, Message};
 
 // These functions will need to be imported from ui.rs or we can just import crate::tui::ui::*.
 use crate::tui::ui::{
@@ -189,7 +189,9 @@ fn mouse_pos_to_char_index(app: &App, col: u16, row: u16, text_area: Rect) -> Op
     let mut char_offset = 0usize;
     let mut col_used = 0usize;
     for g in line_text.graphemes(true) {
-        let gw = g.width();
+        // Painted cells: ratatui strips control characters, so a tab takes
+        // no column here, matching the wrap and caret math.
+        let gw = crate::tui::widgets::visible_grapheme_width(g);
         if col_used + gw > rel_col {
             break;
         }
@@ -266,16 +268,26 @@ fn move_composer_cursor_by_wrapped_rows(app: &mut App, text_area: Rect, rows: is
     true
 }
 
+/// The WorkflowPanel's clickable affordance: its header row only (#6503).
+/// Hover registration (`frame.rs`) uses the same rect, so every row that
+/// glows acts and phase/child rows are never invisible click targets.
+pub(crate) fn workflow_panel_header_area(app: &App) -> Option<Rect> {
+    app.viewport.last_workflow_panel_area.map(|area| Rect {
+        height: area.height.min(1),
+        ..area
+    })
+}
+
 /// Click the WorkflowPanel header to toggle expand/collapse, or the trailing
 /// cancel affordance while a run is active (#4121).
 fn handle_workflow_panel_mouse(app: &mut App, mouse: MouseEvent) -> bool {
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
         return false;
     }
-    let Some(area) = app.viewport.last_workflow_panel_area else {
+    let Some(header) = workflow_panel_header_area(app) else {
         return false;
     };
-    if !mouse_hits_rect(mouse, Some(area)) {
+    if !mouse_hits_rect(mouse, Some(header)) {
         return false;
     }
     if app.workflow_panel.is_none() {
@@ -286,9 +298,7 @@ fn handle_workflow_panel_mouse(app: &mut App, mouse: MouseEvent) -> bool {
         panel.keyboard_focus = true;
     }
 
-    let on_header_row = mouse.row == area.y;
-    let in_cancel_zone =
-        on_header_row && mouse_hits_rect(mouse, app.viewport.last_workflow_cancel_area);
+    let in_cancel_zone = mouse_hits_rect(mouse, app.viewport.last_workflow_cancel_area);
     let running = app
         .workflow_panel
         .as_ref()
@@ -310,7 +320,7 @@ fn handle_workflow_panel_mouse(app: &mut App, mouse: MouseEvent) -> bool {
         return true;
     }
 
-    // Any other click on the panel toggles expand/collapse.
+    // Any other click on the header toggles expand/collapse.
     app.toggle_workflow_panel();
     true
 }
@@ -323,12 +333,16 @@ fn handle_plugin_cta_mouse(app: &mut App, mouse: MouseEvent) -> Option<Vec<ViewE
         return None;
     }
     if mouse_hits_rect(mouse, app.viewport.last_plugin_cta_dismiss_area) {
+        // "Don't suggest again": the explicit, persisted dismissal.
         let _ = app.dismiss_plugin_cta();
         return Some(Vec::new());
     }
-    // Review button, or the rest of the CTA line, runs the existing review
-    // command. Never auto-installs: the slash command is the human path.
-    if let Some(command) = app.accept_plugin_cta_command() {
+    // Only the labelled button acts, and it opens `/plugin show <name>`;
+    // install, trust, and enable stay the person's own next command. A click
+    // elsewhere on the row is consumed and does nothing.
+    if mouse_hits_rect(mouse, app.viewport.last_plugin_cta_review_area)
+        && let Some(command) = app.accept_plugin_cta_command()
+    {
         return Some(apply_sidebar_row_action(
             app,
             crate::tui::app::SidebarRowAction::Command(command),
@@ -336,9 +350,6 @@ fn handle_plugin_cta_mouse(app: &mut App, mouse: MouseEvent) -> Option<Vec<ViewE
     }
     Some(Vec::new())
 }
-
-/// Handle mouse events within the composer area.
-/// Returns true if the event was consumed.
 
 /// Slash-autocomplete rows painted inside the composer. Click selects
 /// (second click on the same row applies, matching the command palette);
@@ -349,12 +360,13 @@ fn handle_slash_autocomplete_mouse(app: &mut App, mouse: MouseEvent) -> bool {
     if hitboxes.is_empty() {
         return false;
     }
-    let over_row = hitboxes.iter().find_map(|(idx, rect)| {
-        mouse_hits_rect(mouse, Some(*rect)).then_some(*idx)
-    });
+    let over_row = hitboxes
+        .iter()
+        .find_map(|(idx, rect)| mouse_hits_rect(mouse, Some(*rect)).then_some(*idx));
     let over_menu = over_row.is_some()
         || hitboxes.iter().any(|(_, rect)| {
-            mouse.row >= rect.y && mouse.row < rect.y.saturating_add(rect.height)
+            mouse.row >= rect.y
+                && mouse.row < rect.y.saturating_add(rect.height)
                 && mouse.column >= rect.x
                 && mouse.column < rect.x.saturating_add(rect.width)
         });
@@ -405,7 +417,23 @@ fn handle_slash_autocomplete_mouse(app: &mut App, mouse: MouseEvent) -> bool {
     }
 }
 
+/// Handle mouse events within the composer area.
+/// Returns true if the event was consumed.
 pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
+    if !app.view_stack.is_empty() {
+        return false;
+    }
+    // A transcript selection or scrollbar drag that ends over the composer
+    // belongs to the surface that started it: the transcript handler must
+    // still see the release to clear its drag state and publish the text.
+    if matches!(
+        mouse.kind,
+        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+    ) && (app.viewport.transcript_selection.dragging
+        || app.viewport.transcript_scrollbar_dragging)
+    {
+        return false;
+    }
     // Use outer area for hit-testing (includes border).
     let Some(area) = app.viewport.last_composer_area else {
         return false;
@@ -424,7 +452,7 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
     }
     // Resolve the border- and submit-aware input plane through the same
     // persistent prompt geometry used by rendering, cursor placement, and
-    // viewport bookkeeping. The frame records it after reserving `[↑]`.
+    // viewport bookkeeping. The frame records it after reserving `[↵]`.
     let input_plane = app.viewport.last_composer_content.unwrap_or(area);
     let text_area =
         crate::tui::widgets::composer_content_geometry(input_plane, app.is_history_search_active())
@@ -446,6 +474,8 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
             COMPOSER_MOUSE_SCROLL_LINES as isize,
         ),
         MouseEventKind::Down(MouseButton::Left) => {
+            clear_transcript_selection(app);
+            crate::tui::work_surface::release_focus(app);
             if let Some(submit) = crate::tui::widgets::active_composer_submit_rect(app, area)
                 && mouse_hits_rect(mouse, Some(submit))
             {
@@ -503,6 +533,24 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
             }
             true
         }
+        MouseEventKind::Down(MouseButton::Middle) if app.clipboard.uses_primary_selection() => {
+            if let Some(text) = app.clipboard.read_primary_text() {
+                // Flush already-typed bytes at their original caret first.
+                app.insert_paste_text("");
+                let Some(position) =
+                    mouse_pos_to_char_index(app, mouse.column, mouse.row, text_area)
+                else {
+                    return true;
+                };
+                // PRIMARY often contains this very selection. Insert at the
+                // pointer, preserving the selected original rather than cutting it.
+                app.selection_anchor = None;
+                app.cursor_position = position;
+                crate::tui::work_surface::release_focus(app);
+                app.insert_paste_text(&text);
+            }
+            true
+        }
         _ => false,
     }
 }
@@ -517,34 +565,49 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         return app.view_stack.handle_mouse(mouse);
     }
 
-    // The approval prompt is intentionally inline: its card stays focused,
-    // but the wheel reviews the transcript that remains visible above it.
-    // Preserve ownership of visible side surfaces, though: wheeling over the
-    // sidebar or Ocean work surface must not move an unrelated transcript.
-    // Other modals still own their wheel input exclusively (#4371).
-    if app.view_stack.top_kind() == Some(ModalKind::Approval) {
-        let over_approval = mouse_hits_rect(mouse, app.viewport.last_approval_area);
+    // Decision prompts leave transcript evidence visible above them. A question
+    // sheet owns the wheel over its content; approval cards retain their existing
+    // transcript-scroll behavior. Visible side surfaces keep their ownership.
+    // Other modals still own wheel input exclusively (#4371, #6045).
+    if matches!(
+        app.view_stack.top_kind(),
+        Some(ModalKind::Approval | ModalKind::UserInput)
+    ) {
+        let over_prompt = mouse_hits_rect(mouse, app.viewport.last_prompt_area);
         let over_side_surface = mouse_hits_rect(mouse, app.work_surface.last_area);
-        match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                if over_approval || !over_side_surface {
-                    scroll_transcript_with_mouse(app, ScrollDirection::Up);
-                }
-                return Vec::new();
+        let direction = match mouse.kind {
+            MouseEventKind::ScrollUp => Some(ScrollDirection::Up),
+            MouseEventKind::ScrollDown => Some(ScrollDirection::Down),
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            if over_prompt && app.view_stack.top_kind() == Some(ModalKind::UserInput) {
+                app.needs_redraw = true;
+                return app.view_stack.handle_mouse(mouse);
             }
-            MouseEventKind::ScrollDown => {
-                if over_approval || !over_side_surface {
-                    scroll_transcript_with_mouse(app, ScrollDirection::Down);
-                }
-                return Vec::new();
+            if over_prompt || !over_side_surface {
+                scroll_transcript_with_mouse(app, direction);
             }
-            _ => {}
+            return Vec::new();
         }
     }
 
     if !app.view_stack.is_empty() {
         app.needs_redraw = true;
         return app.view_stack.handle_mouse(mouse);
+    }
+
+    // A drag can finish outside the composer/transcript that started it.
+    // Publish once before other visible surfaces consume the release event.
+    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+        && app.clipboard.uses_primary_selection()
+    {
+        let text = if app.viewport.transcript_selection.dragging {
+            selection_to_text(app).unwrap_or_default()
+        } else {
+            app.selected_text()
+        };
+        let _ = app.clipboard.write_primary_text(&text);
     }
 
     // Topbar facts are typed controls, not decorative text. Route this before
@@ -571,6 +634,13 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                 InteractionAction::OpenProviderPicker => {
                     vec![ViewEvent::TopbarRoutePickerRequested]
                 }
+                InteractionAction::OpenAutomations => apply_sidebar_row_action(
+                    app,
+                    SidebarRowAction::Command("/automation".to_string()),
+                ),
+                InteractionAction::OpenModelPicker => {
+                    vec![ViewEvent::TopbarModelPickerRequested]
+                }
                 InteractionAction::ShowDockPanel(_) | InteractionAction::DismissDock => {
                     unreachable!("dock targets defer to the strip")
                 }
@@ -578,51 +648,52 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         }
     }
 
-    // The launch surface owns the whole frame until a session is chosen.
-    // Consume every mouse event here so wheel input cannot leak into the
-    // transcript or composer behind the launch header. Clicks land on the
-    // card's rows or the composer's send glyph; anything else keeps focus
-    // where it already is.
-    if app.launch.visible {
+    // The launch card is content on the ordinary screen, not a surface that
+    // owns the frame. It used to consume every mouse event and return, which
+    // was right when it *was* a separate surface and became a bug the moment
+    // it stopped being one: scrolling, the real composer, the work surface
+    // and every other target were unreachable while it was up, and the
+    // send-glyph branch pointed at a `send_area` the deleted launch composer
+    // used to set. So the card takes its own rows and lets everything else
+    // fall through to the handlers that own it.
+    if app.launch.visible && !app.launch.row_hitboxes.is_empty() {
+        let hit = app
+            .launch
+            .row_hitboxes
+            .iter()
+            .position(|(_, area)| mouse_hits_rect(mouse, Some(*area)));
         match mouse.kind {
             MouseEventKind::Moved => {
-                // Hover paints the shared selected-row treatment through
-                // the same row hitboxes clicks use.
-                let hovered = app
-                    .launch
-                    .row_hitboxes
-                    .iter()
-                    .position(|(_, area)| mouse_hits_rect(mouse, Some(*area)));
-                if hovered != app.launch.hovered_row {
-                    app.launch.hovered_row = hovered;
+                if hit != app.launch.hovered_row {
+                    app.launch.hovered_row = hit;
                     app.needs_redraw = true;
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                let send_hit = app
-                    .launch
-                    .send_area
-                    .is_some_and(|area| mouse_hits_rect(mouse, Some(area)));
-                if send_hit && !app.input.trim().is_empty() {
-                    // Same submit path as the composer's Enter key.
-                    app.pending_launch_action =
-                        Some(crate::tui::underwater::LaunchAction::SendComposer);
-                } else if let Some(id) = app
-                    .launch
-                    .row_hitboxes
-                    .iter()
-                    .find(|(_, area)| mouse_hits_rect(mouse, Some(*area)))
-                    .map(|(id, _)| id.clone())
-                {
-                    // Same actions the keyboard's Enter runs.
-                    app.pending_launch_action =
-                        Some(crate::tui::underwater::launch_row_click_action(&id));
+                if let Some(index) = hit {
+                    let id = app.launch.row_hitboxes[index].0.clone();
+                    match &id {
+                        // Resuming replaces the whole session context —
+                        // founder live-test: "you just click it and boom
+                        // you're there ... you don't realize it's happening".
+                        // It asks first. New session and See all stay one
+                        // click, because neither discards anything.
+                        crate::tui::app::LaunchRowId::Recent(session_id) => {
+                            app.launch.menu_selected = Some(index);
+                            crate::tui::underwater::open_launch_resume_confirm(app, session_id);
+                        }
+                        _ => {
+                            app.launch.status = None;
+                            app.pending_launch_action =
+                                Some(crate::tui::underwater::launch_row_click_action(&id));
+                        }
+                    }
+                    app.needs_redraw = true;
+                    return Vec::new();
                 }
             }
             _ => {}
         }
-        app.needs_redraw = true;
-        return Vec::new();
     }
 
     // Ocean work surface owns its rect, scrolling, focus, and row actions.
@@ -633,6 +704,21 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         return apply_sidebar_row_action(app, action);
     }
     if work_surface.consumed {
+        return Vec::new();
+    }
+    // The posture bar's live counts open the dock view they count. The
+    // strip's own tabs were consumed above; anything left carrying a dock
+    // action is a footer chip.
+    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && let Some(InteractionAction::ShowDockPanel(panel)) = app
+            .viewport
+            .interaction_targets
+            .target_at(mouse.column, mouse.row)
+            .and_then(|target| target.mouse_action)
+    {
+        crate::tui::work_surface::select_dock_panel(app, panel);
+        // Clicking the affordance teaches it just as well as the chord does.
+        app.note_footer_hint_used(crate::tui::footer_hints::DOCK_OPEN);
         return Vec::new();
     }
 
@@ -788,7 +874,7 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         MouseEventKind::Up(MouseButton::Left) if app.viewport.transcript_selection.dragging => {
             app.viewport.transcript_selection.dragging = false;
             app.viewport.selection_autoscroll = None;
-            if selection_has_content(app) {
+            if selection_has_content(app) && !app.clipboard.uses_primary_selection() {
                 copy_active_selection(app);
             }
         }
@@ -1528,7 +1614,11 @@ pub(crate) fn transcript_cell_index_from_mouse(app: &App, mouse: MouseEvent) -> 
         .map(|(cell_index, _)| cell_index)
 }
 
-pub(crate) fn handle_context_menu_action(app: &mut App, action: ContextMenuAction) {
+pub(crate) fn handle_context_menu_action(
+    terminal: &mut ratatui::Terminal<crate::tui::color_compat::ColorCompatBackend<std::io::Stdout>>,
+    app: &mut App,
+    action: ContextMenuAction,
+) {
     match action {
         ContextMenuAction::CopySelection => {
             copy_active_selection(app);
@@ -1566,16 +1656,7 @@ pub(crate) fn handle_context_menu_action(app: &mut App, action: ContextMenuActio
             }
         }
         ContextMenuAction::ToggleWindowPin => {
-            let pinned = crate::tui::window_control::toggle_pin();
-            app.status_message = Some(
-                app.tr(if pinned {
-                    MessageId::WindowPinActive
-                } else {
-                    MessageId::WindowPinReleased
-                })
-                .into_owned(),
-            );
-            app.needs_redraw = true;
+            crate::tui::window_control::toggle_pin(app);
         }
         ContextMenuAction::OpenCommandPalette => {
             codewhale_telemetry::session_counters()
@@ -1614,10 +1695,33 @@ pub(crate) fn handle_context_menu_action(app: &mut App, action: ContextMenuActio
                     }),
                 width,
             );
-            if crate::tui::history::try_open_file_at_line(&text, &app.workspace) {
-                app.status_message = Some("Opened file in editor".to_string());
-            } else {
-                app.status_message = Some("No file:line pattern found in selection".to_string());
+            match crate::tui::history::first_file_line_reference(&text, &app.workspace) {
+                // The editor gets the terminal through the same suspend path
+                // the composer and `/hooks edit` use, one at a time, and we
+                // wait for it. It used to be spawned detached while the TUI
+                // still held raw mode, the alt screen and mouse capture (#6235).
+                Some((path, line)) => {
+                    let outcome = crate::tui::external_editor::spawn_editor_for_path(
+                        terminal,
+                        app.use_alt_screen(),
+                        app.use_mouse_capture,
+                        app.use_bracketed_paste,
+                        &path,
+                        Some(line),
+                    );
+                    app.needs_redraw = true;
+                    app.status_message = Some(match outcome {
+                        Ok(crate::tui::external_editor::EditorOutcome::Cancelled) => {
+                            format!("Editor exited without opening {}", path.display())
+                        }
+                        Ok(_) => format!("Closed editor for {}:{line}", path.display()),
+                        Err(error) => format!("Could not open the editor: {error}"),
+                    });
+                }
+                None => {
+                    app.status_message =
+                        Some("No file:line pattern found in selection".to_string());
+                }
             }
         }
         ContextMenuAction::HideCell { cell_index } => {
@@ -1756,9 +1860,31 @@ pub(crate) fn copy_active_selection(app: &mut App) {
     if !app.viewport.transcript_selection.is_active() {
         return;
     }
-    if let Some(text) = selection_to_text(app).filter(|text| !text.is_empty()) {
+    // Markdown source first (#6156): project every intersected cell through
+    // the canonical clean-copy path. Falls back to rendered text when the
+    // `[tui] selection_copy_markdown` key is off or no cell metadata
+    // intersects the range.
+    let payload = if app.viewport.selection_copy_markdown {
+        selection_to_markdown(app).map(|(text, cells)| (text, Some(cells)))
+    } else {
+        None
+    };
+    let payload = payload.or_else(|| {
+        selection_to_text(app)
+            .filter(|text| !text.is_empty())
+            .map(|text| (text, None))
+    });
+    if let Some((text, markdown_cells)) = payload {
         if app.clipboard.write_text(&text).is_ok() {
-            app.status_message = Some("Selection copied".to_string());
+            match markdown_cells {
+                Some(cells) => {
+                    let toast = app
+                        .tr(MessageId::SelectionCopiedAsMarkdown)
+                        .replace("{count}", &cells.to_string());
+                    app.push_status_toast(toast, StatusToastLevel::Info, None);
+                }
+                None => app.status_message = Some("Selection copied".to_string()),
+            }
         } else {
             app.status_message = Some("Copy failed".to_string());
         }
@@ -1766,6 +1892,149 @@ pub(crate) fn copy_active_selection(app: &mut App) {
         clear_transcript_selection(app);
         app.status_message = Some("No selection to copy".to_string());
     }
+}
+
+/// Whether a drag selection covers every cell it touches end to end (#6228).
+///
+/// Two checks: the edge columns must reach the content edges on the boundary
+/// lines, and the line range must not cut a cell in half at either end.
+/// Middle lines are fully covered by construction, and cells render as
+/// contiguous spans, so the two edge cells decide for the whole range.
+fn selection_covers_cells_fully(
+    app: &App,
+    start: &TranscriptSelectionPoint,
+    end: &TranscriptSelectionPoint,
+    start_index: usize,
+    end_index: usize,
+) -> bool {
+    let (first_head, _) = match content_column_span(app, start_index) {
+        Some(span) => span,
+        None => return false,
+    };
+    if start.column > first_head {
+        return false;
+    }
+    let (_, last_tail) = match content_column_span(app, end_index) {
+        Some(span) => span,
+        None => return false,
+    };
+    if end.column < last_tail {
+        return false;
+    }
+    let line_meta = app.viewport.transcript_cache.line_meta();
+    let mut edge_cells = (start_index..=end_index).filter_map(|line_index| {
+        line_meta
+            .get(line_index)
+            .and_then(|meta| meta.cell_line())
+            .map(|(cell_index, _)| cell_index)
+    });
+    let Some(first_cell) = edge_cells.next() else {
+        return false;
+    };
+    let last_cell = edge_cells.next_back().unwrap_or(first_cell);
+    [first_cell, last_cell].into_iter().all(|cell| {
+        let mut span = line_meta
+            .iter()
+            .enumerate()
+            .filter_map(|(line_index, meta)| {
+                meta.cell_line()
+                    .filter(|(cell_index, _)| *cell_index == cell)
+                    .map(|_| line_index)
+            });
+        match (span.next(), span.next_back()) {
+            (Some(cell_first), Some(cell_last)) => {
+                cell_first >= start_index && cell_last <= end_index
+            }
+            (Some(only), None) => start_index <= only && only <= end_index,
+            (None, _) => false,
+        }
+    })
+}
+
+/// Rendered-column span of selectable content on one transcript cache line.
+///
+/// Mirrors the prefix math in [`selection_to_text`]: rail decorations plus
+/// copy-only prefixes are visual, so content runs from their combined width
+/// to that width plus the content's display width.
+fn content_column_span(app: &App, line_index: usize) -> Option<(usize, usize)> {
+    let cache = &app.viewport.transcript_cache;
+    let full_width = text_visible_width(&line_to_plain(cache.lines().get(line_index)?));
+    let rail_width = cache.rail_prefix_width(line_index).min(full_width);
+    let copy_prefix = cache
+        .line_meta()
+        .get(line_index)
+        .map(|meta| meta.copy_prefix_width())
+        .unwrap_or(0)
+        .min(full_width.saturating_sub(rail_width));
+    let head = rail_width.saturating_add(copy_prefix);
+    let tail = head.saturating_add(
+        full_width
+            .saturating_sub(rail_width)
+            .saturating_sub(copy_prefix),
+    );
+    Some((head, tail))
+}
+
+/// Project a transcript drag selection to Markdown source (#6156).
+///
+/// Collects every history cell intersecting the selection's rendered line
+/// range, in order, and serializes each through
+/// `history_cell_to_clipboard_text` — the same canonical projection Ctrl-Y
+/// and `/copy` use — joined with a blank line. Returns the payload plus the
+/// projected cell count for the toast.
+///
+/// Markdown source is only truthful for whole cells, so a selection that
+/// cuts a cell in half is not projected here at all — it keeps its exact
+/// rendered text through the caller's [`selection_to_text`] fallback (#6228).
+///
+/// Returns `None` when the selection is a fragment, when no cell metadata
+/// intersects the range, or when every projection is blank.
+pub(crate) fn selection_to_markdown(app: &App) -> Option<(String, usize)> {
+    let (start, end) = app.viewport.transcript_selection.ordered_endpoints()?;
+    let lines = app.viewport.transcript_cache.lines();
+    if lines.is_empty() {
+        return None;
+    }
+    let end_index = end.line_index.min(lines.len().saturating_sub(1));
+    let start_index = start.line_index.min(end_index);
+    if !selection_covers_cells_fully(app, &start, &end, start_index, end_index) {
+        return None;
+    }
+    let line_meta = app.viewport.transcript_cache.line_meta();
+    let width = app
+        .viewport
+        .last_transcript_area
+        .map(|area| area.width)
+        .unwrap_or(80);
+    let mut rendered = Vec::new();
+    for line_index in start_index..=end_index {
+        if let Some((cell_index, _)) = line_meta.get(line_index).and_then(|meta| meta.cell_line())
+            && !rendered.contains(&cell_index)
+        {
+            rendered.push(cell_index);
+        }
+    }
+    let mut seen_original = Vec::new();
+    let mut parts = Vec::new();
+    for rendered_index in rendered {
+        let original = app.original_cell_index_for_rendered(rendered_index);
+        if seen_original.contains(&original) {
+            continue;
+        }
+        seen_original.push(original);
+        let Some(cell) = app.cell_at_virtual_index(original) else {
+            continue;
+        };
+        let text = history_cell_to_clipboard_text(cell, width);
+        if !text.trim().is_empty() {
+            parts.push(text);
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let count = parts.len();
+    Some((parts.join("\n\n"), count))
 }
 pub(crate) fn clear_transcript_selection(app: &mut App) {
     app.needs_redraw |= app.viewport.transcript_selection.is_active();
@@ -1796,24 +2065,29 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
         // slice off the rail prefix so subsequent column offsets operate
         // on content-only text.
         let full_text = line_to_plain(&lines[line_index]);
+        // Selection columns are painted terminal cells, where control
+        // characters are invisible (ratatui strips them). Measure and slice
+        // in that space so columns after a tab stay aligned with what the
+        // user dragged over; the fixed-width fallback would shift every
+        // downstream column.
         let line_after_rail = if rail_width > 0 {
-            slice_text(&full_text, rail_width, text_display_width(&full_text))
+            slice_visible_columns(&full_text, rail_width, text_visible_width(&full_text))
         } else {
             full_text
         };
-        let line_after_rail_width = text_display_width(&line_after_rail);
+        let line_after_rail_width = text_visible_width(&line_after_rail);
         let copy_prefix_width = line_meta
             .get(line_index)
             .map(|meta| meta.copy_prefix_width())
             .unwrap_or(0)
             .min(line_after_rail_width);
         let line_text = if copy_prefix_width > 0 {
-            slice_text(&line_after_rail, copy_prefix_width, line_after_rail_width)
+            slice_visible_columns(&line_after_rail, copy_prefix_width, line_after_rail_width)
         } else {
             line_after_rail
         };
-        let line_width = text_display_width(&line_text);
         let visual_prefix_width = rail_width.saturating_add(copy_prefix_width);
+        let line_width = text_visible_width(&line_text);
         // Selection coordinates are recorded in rendered-column space, which
         // includes visual prefixes. Add them back so the column window maps
         // correctly into copy-only text.
@@ -1834,7 +2108,7 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
             .saturating_sub(visual_prefix_width)
             .min(line_width);
 
-        let slice = slice_text(&line_text, col_start, col_end);
+        let slice = slice_visible_columns(&line_text, col_start, col_end);
         selected.push_str(&slice);
         separator_before = line_meta
             .get(line_index)
@@ -1851,8 +2125,6 @@ mod tests {
         handle_mouse_event, sidebar_click_action,
     };
     use crate::config::Config;
-    use crate::models::Role;
-    use crate::models::{ContentBlock, Message};
     use crate::tui::app::{
         App, SidebarHoverRow, SidebarHoverSection, SidebarRowAction, TuiOptions,
     };
@@ -1861,6 +2133,8 @@ mod tests {
         InteractionTarget, InteractionTargetId,
     };
     use crate::tui::views::{ContextMenuAction, ModalKind, ViewEvent};
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, Message};
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -1869,7 +2143,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    fn create_test_app() -> App {
+    pub(super) fn create_test_app() -> App {
         let options = TuiOptions {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
@@ -1877,6 +2151,53 @@ mod tests {
         // Legacy strip geometry (see ui.rs); Bottom default has its own tests.
         app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::Top;
         app
+    }
+
+    /// #6520 review: only the header row — the row that shows the hover
+    /// glow — toggles the workflow card; phase and child rows are not
+    /// invisible click targets.
+    #[test]
+    fn workflow_card_click_target_is_the_header_row_only() {
+        let mut app = create_test_app();
+        app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
+            "workflow_1",
+            "audit",
+            1,
+        ));
+        app.viewport.last_workflow_panel_area = Some(Rect::new(0, 5, 80, 6));
+        let expanded = |app: &App| app.workflow_panel.as_ref().is_some_and(|p| p.expanded);
+        assert!(expanded(&app));
+
+        assert!(!super::handle_workflow_panel_mouse(
+            &mut app,
+            left_click(10, 7)
+        ));
+        assert!(
+            expanded(&app),
+            "a body-row click must not collapse the card"
+        );
+
+        assert!(super::handle_workflow_panel_mouse(
+            &mut app,
+            left_click(10, 5)
+        ));
+        assert!(!expanded(&app), "the header click toggles");
+        assert_eq!(
+            super::workflow_panel_header_area(&app),
+            Some(Rect::new(0, 5, 80, 1))
+        );
+    }
+
+    #[test]
+    fn composer_click_maps_tabs_as_painted() {
+        // A tab paints no cells, so clicking the visible char after one
+        // must resolve past it instead of stopping on the tab itself.
+        let mut app = create_test_app();
+        let area = Rect::new(0, 0, 80, 10);
+        app.input = "a\tb".to_string();
+        assert_eq!(super::mouse_pos_to_char_index(&app, 1, 0, area), Some(2));
+        app.input = "\ta".to_string();
+        assert_eq!(super::mouse_pos_to_char_index(&app, 0, 0, area), Some(1));
     }
 
     fn hover_row(row_y: u16, action: Option<&str>) -> SidebarHoverRow {
@@ -1942,6 +2263,113 @@ mod tests {
     }
 
     #[test]
+    fn the_launch_card_does_not_swallow_the_rest_of_the_screen() {
+        // Founder live-test: "the clickability and the mouse pointing thing
+        // isn't working". While the opening screen was a separate surface it
+        // was right for it to consume every mouse event and return; the
+        // moment it became content on the ordinary screen that gate made
+        // scrolling, the composer and the work surface unreachable. A click
+        // that misses the card's rows must fall through.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::NewSession,
+            Rect::new(2, 5, 30, 1),
+        )];
+        app.viewport.last_transcript_area = Some(Rect::new(0, 0, 80, 20));
+        app.viewport.pending_scroll_delta = 0;
+
+        // A wheel tick on the launch screen still scrolls.
+        handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_ne!(
+            app.viewport.pending_scroll_delta, 0,
+            "the wheel must reach the transcript on the opening screen"
+        );
+
+        // A click away from the card's rows starts no launch action.
+        app.pending_launch_action = None;
+        handle_mouse_event(&mut app, left_click(60, 15));
+        assert_eq!(
+            app.pending_launch_action, None,
+            "a click off the card must not be read as a card action"
+        );
+
+        // A click on a row still runs it.
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action,
+            Some(crate::tui::underwater::LaunchAction::NewSession),
+            "the card's own rows still work"
+        );
+    }
+
+    #[test]
+    fn clicking_a_recent_row_opens_the_resume_confirmation_popup() {
+        // Founder live-test: "you just click it and boom you're there ... you
+        // don't realize it's happening", then, on the first fix: "the
+        // resuming confirmation needs to be a popup not something in the
+        // composer that's even more confusing". Resuming replaces the whole
+        // session context, so the click opens a popup that names the session
+        // and asks; nothing resumes until that is confirmed.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.recent = vec![crate::tui::app::LaunchRecentSession {
+            id: "sess-1".to_string(),
+            title: "refactor the parser".to_string(),
+            updated_at: chrono::Utc::now(),
+            message_count: 12,
+        }];
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::Recent("sess-1".to_string()),
+            Rect::new(2, 5, 30, 1),
+        )];
+        app.pending_launch_action = None;
+
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action, None,
+            "the click must not resume anything on its own"
+        );
+        assert_eq!(
+            app.view_stack.top_kind(),
+            Some(crate::tui::views::ModalKind::LaunchResumeConfirm),
+            "it opens the confirmation popup instead"
+        );
+        assert!(
+            app.launch.status.is_none(),
+            "and nothing is written over the composer dock"
+        );
+    }
+
+    #[test]
+    fn a_new_session_row_still_takes_one_click() {
+        // Only resuming discards context, so New session keeps its single
+        // click; adding a confirm step there would be friction for nothing.
+        let mut app = create_test_app();
+        app.launch.visible = true;
+        app.launch.row_hitboxes = vec![(
+            crate::tui::app::LaunchRowId::NewSession,
+            Rect::new(2, 5, 30, 1),
+        )];
+        app.pending_launch_action = None;
+
+        handle_mouse_event(&mut app, left_click(4, 5));
+        assert_eq!(
+            app.pending_launch_action,
+            Some(crate::tui::underwater::LaunchAction::NewSession),
+            "New session runs on the first click"
+        );
+    }
+
+    #[test]
     fn idle_pointer_enter_and_leave_request_hover_redraws() {
         let _guard = crate::tui::hover_layer::HOVER_TEST_LOCK.lock().unwrap();
         crate::tui::hover_layer::clear_pointer();
@@ -1973,8 +2401,6 @@ mod tests {
         crate::tui::hover_layer::clear_pointer();
     }
 
-
-
     #[test]
     fn slash_autocomplete_click_selects_and_second_click_applies() {
         let mut app = create_test_app();
@@ -1986,18 +2412,22 @@ mod tests {
         app.slash_menu_selected = 0;
         // Simulate two painted rows from ComposerWidget.
         app.viewport.last_composer_area = Some(Rect::new(0, 18, 80, 6));
-        *app.viewport.last_slash_menu_hitboxes.borrow_mut() = vec![
-            (0, Rect::new(1, 20, 78, 1)),
-            (1, Rect::new(1, 21, 78, 1)),
-        ];
+        *app.viewport.last_slash_menu_hitboxes.borrow_mut() =
+            vec![(0, Rect::new(1, 20, 78, 1)), (1, Rect::new(1, 21, 78, 1))];
 
         assert!(
             handle_composer_mouse(&mut app, left_click(5, 21)),
             "slash row click must be consumed by the composer"
         );
-        assert_eq!(app.slash_menu_selected, 1, "click on another row highlights it");
+        assert_eq!(
+            app.slash_menu_selected, 1,
+            "click on another row highlights it"
+        );
         let before = app.input.clone();
-        assert_eq!(before, "/he", "select-only click must not rewrite the composer");
+        assert_eq!(
+            before, "/he",
+            "select-only click must not rewrite the composer"
+        );
 
         assert!(handle_composer_mouse(&mut app, left_click(5, 21)));
         assert_ne!(app.input, before, "click on the highlighted row applies it");
@@ -2018,10 +2448,8 @@ mod tests {
         app.slash_menu_hidden = false;
         app.slash_menu_selected = 0;
         app.viewport.last_composer_area = Some(Rect::new(0, 18, 80, 6));
-        *app.viewport.last_slash_menu_hitboxes.borrow_mut() = vec![
-            (0, Rect::new(1, 20, 78, 1)),
-            (1, Rect::new(1, 21, 78, 1)),
-        ];
+        *app.viewport.last_slash_menu_hitboxes.borrow_mut() =
+            vec![(0, Rect::new(1, 20, 78, 1)), (1, Rect::new(1, 21, 78, 1))];
         let entries = crate::tui::slash_menu::visible_slash_menu_entries(&app, 128);
         assert!(entries.len() >= 2, "prefix must offer multiple entries");
 
@@ -2048,91 +2476,6 @@ mod tests {
         assert_eq!(app.slash_menu_selected, 0);
     }
 
-
-    #[test]
-    fn send_click_matches_the_keyboard_submit_and_focus_never_leaves_the_composer() {
-        let mut app = create_test_app();
-        app.launch.visible = true;
-        let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
-        let startup = crate::tui::underwater::tideline_startup_from_app(&app);
-        let mut hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
-        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage, &startup);
-        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
-        let composer = app.launch.composer_area.expect("composer hitbox");
-        let send = app.launch.send_area.expect("send hitbox");
-        assert!(app.launch.composer_focus, "focused from first paint");
-
-        // Clicking the composer is a no-op: it already holds focus.
-        handle_mouse_event(&mut app, left_click(composer.x + 4, composer.y));
-        assert!(app.launch.composer_focus);
-        assert_eq!(app.pending_launch_action, None);
-
-        // Clicking the send glyph produces the same action the event loop
-        // consumes for the composer's Enter key, from the same input state.
-        app.input = "ship it".to_string();
-        handle_mouse_event(&mut app, left_click(send.x, send.y));
-        assert_eq!(
-            app.pending_launch_action.take(),
-            Some(crate::tui::underwater::LaunchAction::SendComposer)
-        );
-        assert_eq!(app.input, "ship it");
-        assert!(app.launch.composer_focus);
-
-        // Nothing to send: the send glyph does nothing.
-        app.input.clear();
-        handle_mouse_event(&mut app, left_click(send.x, send.y));
-        assert_eq!(app.pending_launch_action, None);
-        assert!(app.launch.composer_focus);
-
-        // Clicking the header, or wheeling, never takes focus away — there
-        // is nowhere else for it to go.
-        handle_mouse_event(&mut app, left_click(3, 2));
-        assert!(app.launch.composer_focus);
-        handle_mouse_event(
-            &mut app,
-            MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: composer.x + 4,
-                row: composer.y,
-                modifiers: KeyModifiers::NONE,
-            },
-        );
-        assert!(app.launch.composer_focus);
-        assert_eq!(app.pending_launch_action, None);
-    }
-
-    #[test]
-    fn launch_row_hover_and_click_run_the_keyboard_actions() {
-        let mut app = create_test_app();
-        app.launch.visible = true;
-        let stage = Rect::new(0, 1, 80, 22); // the frame's stage slot at 80x24
-        let startup = crate::tui::underwater::tideline_startup_from_app(&app);
-        let mut hitboxes = crate::tui::underwater::tideline_startup_hitboxes(stage);
-        hitboxes.rows = crate::tui::underwater::tideline_startup_row_hitboxes(stage, &startup);
-        crate::tui::underwater::apply_launch_hitboxes(&hitboxes, &mut app.launch);
-        assert!(
-            !app.launch.row_hitboxes.is_empty(),
-            "the card always lists a first row"
-        );
-        let (first_id, first_rect) = app.launch.row_hitboxes[0].clone();
-
-        // Hover highlights the row and repaints; moving away clears it.
-        app.needs_redraw = false;
-        handle_mouse_event(&mut app, mouse_move(first_rect.x + 1, first_rect.y));
-        assert_eq!(app.launch.hovered_row, Some(0));
-        assert!(app.needs_redraw, "hovering a row must repaint");
-        handle_mouse_event(&mut app, mouse_move(0, 0));
-        assert_eq!(app.launch.hovered_row, None);
-
-        // Clicking a row queues the same action the keyboard's Enter runs.
-        handle_mouse_event(&mut app, left_click(first_rect.x + 1, first_rect.y));
-        assert_eq!(
-            app.pending_launch_action.take(),
-            Some(crate::tui::underwater::launch_row_click_action(&first_id))
-        );
-        assert!(app.launch.composer_focus);
-    }
-
     #[test]
     fn active_composer_send_click_queues_the_keyboard_submit_chord() {
         let mut app = create_test_app();
@@ -2143,7 +2486,7 @@ mod tests {
         let area = Rect::new(0, 20, 80, 4);
         app.viewport.last_composer_area = Some(area);
         // Match the frame's submit-aware input plane: x=74 stays blank,
-        // then the shared `[↑]` target begins at x=75.
+        // then the shared `[↵]` target begins at x=75.
         app.viewport.last_composer_content = Some(Rect::new(1, 21, 73, 2));
         let submit = crate::tui::widgets::active_composer_submit_rect(&app, area)
             .expect("enclosed composer submit");
@@ -2600,3 +2943,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod primary_tests;

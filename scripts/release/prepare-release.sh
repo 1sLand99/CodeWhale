@@ -9,7 +9,8 @@
 # package and lock, the root npm lock workspace records, the remote-smoke default
 # tag, README*.md install-tag examples when present, the public fact matrix's
 # source-candidate version, Cargo.lock, crates/tui/CHANGELOG.md (via
-# sync-changelog.sh), and web/lib/facts.generated.ts (via derive-facts.mjs).
+# sync-changelog.sh), web/lib/facts.generated.ts (via derive-facts.mjs), and
+# web/lib/changelog.generated.ts (via derive-changelog.mjs).
 #
 # It does NOT write the CHANGELOG entry — add the `## [X.Y.Z] - YYYY-MM-DD`
 # section first (see docs/RELEASE_CHECKLIST.md), then run this script, then
@@ -54,6 +55,7 @@ transaction_paths=(
   README.ko-KR.md
   crates/tui/CHANGELOG.md
   web/lib/facts.generated.ts
+  web/lib/changelog.generated.ts
 )
 for manifest in crates/*/Cargo.toml; do
   transaction_paths+=("${manifest}")
@@ -224,9 +226,25 @@ install_out, pointer_hits = re.subn(
     rf"\g<1>v{new}",
     install_text,
 )
-if pointer_hits:
+# web/lib/public-surface-contract.test.ts asserts docs/INSTALL.md contains
+# `v${FACTS.version} source candidate`, so the phrase has to track the bump or
+# Web Frontend goes red on the next push.
+install_out, candidate_hits = re.subn(
+    rf"\bv{old_re}( source candidate)",
+    rf"v{new}\g<1>",
+    install_out,
+)
+if candidate_hits > 1:
+    sys.exit(
+        "error: docs/INSTALL.md names 'v{0} source candidate' {1} times; "
+        "exactly one occurrence is expected".format(old, candidate_hits)
+    )
+if pointer_hits or candidate_hits:
     install.write_text(install_out)
-    print(f"  docs/INSTALL.md: {pointer_hits} publish-pointer replacement(s)")
+    print(
+        f"  docs/INSTALL.md: {pointer_hits} publish-pointer replacement(s), "
+        f"{candidate_hits} source-candidate replacement(s)"
+    )
 
 # 6) npm lock workspace records. Keep dependency records byte-stable.
 lock = pathlib.Path("package-lock.json")
@@ -319,6 +337,21 @@ facts_out, facts_hits = re.subn(
 )
 if facts_hits != 1:
     sys.exit("error: failed to update sourceCandidate.version exactly once")
+# The trust matrix states the telemetry posture in prose that names the source
+# candidate, and web/lib/public-surface-contract.test.ts asserts the two agree
+# (`Codewhale ${matrix.sourceCandidate.version} counts anonymous usage by
+# default`). Bumping the field without the sentence reddens Web Frontend on the
+# next push, which is how it broke at 0.9.14.
+facts_out, telemetry_hits = re.subn(
+    rf"(Codewhale ){old_re}( counts anonymous usage by default)",
+    rf"\g<1>{new}\g<2>",
+    facts_out,
+)
+if telemetry_hits > 1:
+    sys.exit(
+        "error: the trust.telemetry source-candidate sentence appears {0} times; "
+        "exactly one occurrence is expected".format(telemetry_hits)
+    )
 facts_after = json.loads(facts_out)
 if facts_after.get("latestPublishedRelease") != published_before:
     sys.exit("error: release preparation must not change latestPublishedRelease")
@@ -350,6 +383,13 @@ echo "Regenerating crates/tui/CHANGELOG.md slice..."
 
 echo "Regenerating web/lib/facts.generated.ts..."
 node web/scripts/derive-facts.mjs
+
+# Release prep always edits CHANGELOG.md, and derive-changelog.mjs is the only
+# thing that turns it into the file the /changelog route reads. Leaving this
+# out reddened CI on 2026-09-10 twice, because the drift gate only fires after
+# a push. Keep it beside the other regenerators.
+echo "Regenerating web/lib/changelog.generated.ts..."
+node web/scripts/derive-changelog.mjs
 
 echo "Validating..."
 ./scripts/release/check-versions.sh

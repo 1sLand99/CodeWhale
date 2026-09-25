@@ -1,5 +1,5 @@
-use crate::models::{ContentBlock, Message, Role};
 use chrono::{DateTime, Utc};
+use codewhale_models::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 pub const CURRENT_JOURNAL_SCHEMA_VERSION: u32 = 1;
@@ -48,6 +48,16 @@ impl SessionEntryKind {
             self,
             Self::Message { .. } | Self::User { .. } | Self::Assistant { .. }
         )
+    }
+    /// `self.as_message() == Some(message)` without materializing the
+    /// projection. Every autosave compares the whole active branch with the
+    /// live transcript, so the common `Message` entry must not be deep-cloned
+    /// just to be compared.
+    pub fn projects_to(&self, message: &Message) -> bool {
+        match self {
+            Self::Message { message: own } => own == message,
+            other => other.as_message().as_ref() == Some(message),
+        }
     }
     pub fn as_message(&self) -> Option<Message> {
         match self {
@@ -149,7 +159,15 @@ impl SessionJournal {
         }
     }
     pub fn append(&mut self, kind: SessionEntryKind) -> EntryId {
-        let entry = SessionEntry::new(kind, self.leaf_id.clone(), self.spawn_depth);
+        self.append_stamped(kind, Utc::now())
+    }
+    /// Append an entry carrying the time the underlying event happened, not
+    /// the time the save ran. `created_at` is the journal's timeline; stamping
+    /// it at append is what keeps a rebuilt journal honest — a save must never
+    /// rewrite an entry's time to the moment it was written.
+    pub fn append_stamped(&mut self, kind: SessionEntryKind, created_at: DateTime<Utc>) -> EntryId {
+        let mut entry = SessionEntry::new(kind, self.leaf_id.clone(), self.spawn_depth);
+        entry.created_at = created_at;
         let id = entry.id.clone();
         self.entries.push(entry);
         self.leaf_id = Some(id.clone());
@@ -296,6 +314,22 @@ impl SessionJournal {
         }
         j
     }
+    /// Build the journal honoring a per-message append stamp. `stamps[i]` is
+    /// the time `messages[i]` entered the conversation; a missing stamp falls
+    /// back to now, so a drifted caller degrades to save-time ordering rather
+    /// than dropping the message.
+    pub fn from_messages_stamped(
+        messages: Vec<Message>,
+        stamps: &[DateTime<Utc>],
+        spawn_depth: u32,
+    ) -> Self {
+        let mut j = Self::with_spawn_depth(spawn_depth);
+        for (index, msg) in messages.into_iter().enumerate() {
+            let created_at = stamps.get(index).copied().unwrap_or_else(Utc::now);
+            j.append_stamped(SessionEntryKind::Message { message: msg }, created_at);
+        }
+        j
+    }
     pub fn to_messages(&self) -> Vec<Message> {
         self.active_messages(true)
     }
@@ -305,17 +339,32 @@ impl SessionJournal {
     /// The existing active branch remains as evidence. We reuse its longest
     /// unchanged prefix, then append the repaired suffix as a sibling branch.
     pub fn rebranch_active_messages(&mut self, messages: &[Message]) {
+        self.rebranch_active_messages_stamped(messages, &[]);
+    }
+
+    /// Preserve existing entry identity and timestamps; only append the changed
+    /// suffix, keeping the previous branch reachable.
+    pub fn rebranch_active_messages_stamped(
+        &mut self,
+        messages: &[Message],
+        stamps: &[DateTime<Utc>],
+    ) {
         let active_path = self.root_to_leaf();
         let shared_prefix = active_path
             .iter()
             .zip(messages)
-            .take_while(|(entry, message)| entry.kind.as_message().as_ref() == Some(*message))
+            .take_while(|(entry, message)| entry.kind.projects_to(message))
             .count();
         self.leaf_id = shared_prefix
             .checked_sub(1)
             .map(|index| active_path[index].id.clone());
-        for message in &messages[shared_prefix..] {
-            self.append_message(message.clone());
+        for (index, message) in messages.iter().enumerate().skip(shared_prefix) {
+            self.append_stamped(
+                SessionEntryKind::Message {
+                    message: message.clone(),
+                },
+                stamps.get(index).copied().unwrap_or_else(Utc::now),
+            );
         }
     }
 }
@@ -476,7 +525,7 @@ pub fn render_tree(journal: &SessionJournal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ContentBlock, Message, Role};
+    use codewhale_models::{ContentBlock, Message, Role};
     fn msg(role: &str, text: &str) -> Message {
         Message {
             role: Role::from(role),
@@ -547,6 +596,44 @@ mod tests {
         );
     }
     #[test]
+    fn stamped_rebranch_keeps_prefix_identity_and_suffix_stamps() {
+        let stamp = |secs: i64| DateTime::from_timestamp(secs, 0).expect("stamp");
+        let mut j = SessionJournal::new();
+        j.append_stamped(
+            SessionEntryKind::Message {
+                message: msg("user", "a"),
+            },
+            stamp(100),
+        );
+        j.append_stamped(
+            SessionEntryKind::Message {
+                message: msg("assistant", "b"),
+            },
+            stamp(200),
+        );
+        let a_id = j.entries[0].id.clone();
+        j.rebranch_active_messages_stamped(
+            &[msg("user", "a"), msg("assistant", "b2")],
+            &[stamp(100), stamp(300)],
+        );
+        assert_eq!(j.entries.len(), 3);
+        assert_eq!(j.entries[0].id, a_id, "shared prefix keeps its id");
+        assert_eq!(j.entries[0].created_at, stamp(100));
+        let path = j.root_to_leaf();
+        assert_eq!(path.len(), 2);
+        assert_eq!(
+            path[1].created_at,
+            stamp(300),
+            "suffix keeps the live stamp"
+        );
+        assert!(
+            j.entries
+                .iter()
+                .any(|e| e.kind.as_message().as_ref() == Some(&msg("assistant", "b"))),
+            "replaced suffix survives as a sibling"
+        );
+    }
+    #[test]
     fn compaction_fits() {
         let mut j = SessionJournal::new();
         let id = j.append_compaction("summary".into(), Some(1000), Some(100), None);
@@ -608,5 +695,38 @@ mod tests {
         j.append(SessionEntryKind::User { text: "c".into() });
         let msgs2 = j.active_messages(false);
         assert_eq!(msgs2.len(), 2);
+    }
+
+    #[test]
+    fn projects_to_matches_as_message_equality_for_every_kind() {
+        let kinds = [
+            SessionEntryKind::Message {
+                message: msg("assistant", "hi"),
+            },
+            SessionEntryKind::User {
+                text: "hi".to_string(),
+            },
+            SessionEntryKind::Assistant {
+                text: "hi".to_string(),
+            },
+            SessionEntryKind::System {
+                content: "hi".to_string(),
+            },
+        ];
+        let probes = [
+            msg("assistant", "hi"),
+            msg("user", "hi"),
+            msg("system", "hi"),
+            msg("assistant", "other"),
+        ];
+        for kind in &kinds {
+            for probe in &probes {
+                assert_eq!(
+                    kind.projects_to(probe),
+                    kind.as_message().as_ref() == Some(probe),
+                    "{kind:?} vs {probe:?}"
+                );
+            }
+        }
     }
 }

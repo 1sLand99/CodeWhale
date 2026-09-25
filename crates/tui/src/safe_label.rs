@@ -161,7 +161,7 @@ fn catalog_model_identifier_is_allowlisted(value: &str) -> bool {
     {
         return false;
     }
-    crate::model_catalog::resolved_entry(value)
+    codewhale_models::model_catalog::resolved_entry(value)
         .is_some_and(|entry| entry.id == value || entry.provider_model_id.as_deref() == Some(value))
 }
 
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn generic_identifiers_reject_all_slashes_and_catalog_models_require_exact_ids() {
-        let _catalog_guard = crate::model_catalog::test_catalog_lock();
+        let _catalog_guard = codewhale_models::model_catalog::test_catalog_lock();
         for path in [
             "src/lib.rs",
             "docs/PREVIEW_REQUEST.md",

@@ -108,8 +108,7 @@ pub(crate) fn complete_provider_picker_onboarding(app: &mut App, provider: ApiPr
     // Persist the exact live identity/model before advancing, otherwise a
     // clean first run can finish on Ollama (or another non-DeepSeek route)
     // while the next launch silently reconstructs the old DeepSeek default.
-    // `settings.toml`, rather than a workspace `config.toml`, is the durable
-    // user-global owner for this choice.
+    // The user-global `config.toml` owns this startup choice.
     let provider_action_receipt = app.status_message.take();
     let startup_default_receipt = match app.try_save_live_route_as_startup_default() {
         Ok(receipt) => receipt,
@@ -133,6 +132,9 @@ pub(crate) fn complete_provider_picker_onboarding(app: &mut App, provider: ApiPr
     };
     app.onboarding_provider = provider;
     app.onboarding_needs_api_key = false;
+    // The route now has its key, so a later local-Ollama probe must not treat
+    // this session as still recovering from a missing one.
+    app.onboarding_missing_key_recovery = false;
     app.api_key_env_only = false;
     app.offline_mode = false;
     onboarding::advance_onboarding_after_provider(app);
@@ -384,9 +386,9 @@ pub(crate) fn paste_provider_picker_from_clipboard(app: &mut App) -> bool {
 }
 
 pub(crate) async fn fetch_available_models(config: &Config) -> Result<Vec<String>> {
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
 
-    let client = DeepSeekClient::new(config)?;
+    let client = CodewhaleClient::new(config)?;
     let models = tokio::time::timeout(Duration::from_secs(20), client.list_models()).await??;
     let mut ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
     ids.sort();
@@ -468,6 +470,8 @@ pub(crate) fn rollback_provider_after_auth_failure(
     } = pending;
 
     *config = previous_config;
+
+    app.refresh_notification_settings(config);
     if let Ok(identity) = config.active_provider_identity(previous_provider) {
         app.set_provider_identity_record(identity);
     } else {
@@ -575,16 +579,17 @@ pub(crate) fn reasoning_effort_receipt_for_route(
 }
 
 pub(crate) async fn sync_mode_update(app: &App, engine_handle: &EngineHandle) {
-    let _ = engine_handle
-        .send(Op::ChangeMode {
-            mode: app.mode,
-            allow_shell: app.allow_shell,
-            trust_mode: app.trust_mode,
-            auto_approve: app_auto_approve_enabled(app),
-            approval_mode: app.approval_mode,
-            configured_sandbox_mode: app.configured_sandbox_mode.clone(),
-        })
-        .await;
+    // #6150: non-blocking send on the input path. ChangeMode is safe to drop
+    // on a full channel — `try_send` still publishes the live authority
+    // snapshot, which the drain applies before the next queued op.
+    let _ = engine_handle.try_send(Op::ChangeMode {
+        mode: app.mode,
+        allow_shell: app.allow_shell,
+        trust_mode: app.trust_mode,
+        auto_approve: app_auto_approve_enabled(app),
+        approval_mode: app.approval_mode,
+        configured_sandbox_mode: app.configured_sandbox_mode.clone(),
+    });
 }
 
 /// Apply a `/provider` switch by resolving a complete route candidate before
@@ -645,6 +650,7 @@ pub(crate) async fn switch_provider(
                     })
                 {
                     *config = previous_config;
+                    app.refresh_notification_settings(config);
                     app.view_stack.push(picker);
                     app.status_message = Some(format!(
                         "{} needs a key or local runtime — enter one to switch.",
@@ -655,6 +661,7 @@ pub(crate) async fn switch_provider(
                 }
             }
             *config = previous_config;
+            app.refresh_notification_settings(config);
             app.add_message(HistoryCell::System {
                 content: format!(
                     "Cannot switch to {}: {reason}\nProvider unchanged ({}).",
@@ -673,6 +680,7 @@ pub(crate) async fn switch_provider(
         Err(err) => {
             app.pending_provider_switch = None;
             *config = previous_config;
+            app.refresh_notification_settings(config);
             app.add_message(HistoryCell::System {
                 content: format!(
                     "Failed to switch provider to {}: {err}\nProvider unchanged ({}).",
@@ -689,6 +697,7 @@ pub(crate) async fn switch_provider(
     let context_window_source = validated_route.context_window.source;
     let new_model = validated_route.model.clone();
     *config = *validated_route.config;
+    app.refresh_notification_settings(config);
 
     let new_base_url = resolved_endpoint;
     let new_endpoint = display_base_url_host(&new_base_url);
@@ -708,20 +717,19 @@ pub(crate) async fn switch_provider(
     app.model_ids_passthrough = config.model_ids_pass_through();
     app.set_model_selection(new_model.clone());
     app.apply_provider_switch_reasoning_effort(target, &new_base_url, model_override.as_deref());
-    app.set_active_context_window_override(config.context_window_for_provider_config(target));
+    app.set_active_context_window_override(config, target);
     app.set_active_route_resolution(new_base_url.clone(), route_limits, context_window_source);
     if model_override.is_some() {
         app.provider_models
             .insert(target_identity.clone(), new_model.clone());
-        app.enable_provider_model(&target_identity, &new_model);
     }
+    app.note_route_used(&target_identity, &new_model);
     app.update_model_compaction_budget();
     if cache_scope_changed {
         app.clear_model_scoped_telemetry();
     } else {
         app.session.last_prompt_tokens = None;
         app.session.last_completion_tokens = None;
-        app.session.last_output_throughput = None;
     }
 
     let _ = engine_handle.send(Op::Shutdown).await;
@@ -730,13 +738,13 @@ pub(crate) async fn switch_provider(
     // A successful in-session switch must refresh the same key-scoped live
     // catalog as startup. TelecomJS is currently the only provider using this
     // seam; failures preserve the existing/static rows.
-    crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(config);
+    crate::client::CodewhaleClient::spawn_active_provider_catalog_refresh(config);
 
     if !app.api_messages.is_empty() {
         let _ = engine_handle
             .send(Op::SyncSession {
                 session_id: app.current_session_id.clone(),
-                messages: app.api_messages.clone(),
+                messages: app.api_messages.as_ref().clone(),
                 system_prompt: app.system_prompt.clone(),
                 system_prompt_override: false,
                 model: app.model.clone(),
@@ -848,120 +856,166 @@ pub(crate) fn mcp_reload_summary(snapshot: &crate::mcp::McpManagerSnapshot) -> S
     )
 }
 
+pub(crate) fn mcp_server_diagnosis(app: &App, name: &str) -> String {
+    let Some(server) = app
+        .mcp_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.servers.iter().find(|server| server.name == name))
+    else {
+        return app
+            .tr(MessageId::McpDiagnosisUnobserved)
+            .replace("{server}", name)
+            .replace("{command}", "/mcp");
+    };
+    let state = if !server.enabled {
+        MessageId::McpStateDisabled
+    } else if server.connected {
+        MessageId::ExtensionsStateConnected
+    } else if server.auth_required {
+        MessageId::McpStateAuthorizationRequired
+    } else if server.error.is_some() {
+        MessageId::McpStateFailed
+    } else {
+        MessageId::McpStateDisconnected
+    };
+    let mut receipt = app
+        .tr(MessageId::McpDiagnosisSummary)
+        .replace("{server}", name)
+        .replace("{state}", &app.tr(state))
+        .replace("{transport}", &server.transport)
+        .replace("{tools}", &server.tools.len().to_string())
+        .replace("{resources}", &server.resources.len().to_string())
+        .replace("{prompts}", &server.prompts.len().to_string());
+    if let Some(error) = &server.error {
+        receipt.push(' ');
+        receipt.push_str(&app.tr(MessageId::McpDiagnosisLastError).replace(
+            "{error}",
+            &codewhale_config::persistence::redact_secrets(error),
+        ));
+    }
+    if crate::mcp::mcp_name_is_command_safe(name) {
+        let command = if !server.enabled {
+            format!("/mcp enable {name}")
+        } else if server.auth_required {
+            format!("/mcp login {name}")
+        } else {
+            format!("/mcp retry {name}")
+        };
+        receipt.push(' ');
+        receipt.push_str(
+            &app.tr(MessageId::McpDiagnosisNext)
+                .replace("{command}", &command),
+        );
+    } else {
+        receipt.push(' ');
+        receipt.push_str(
+            &app.tr(MessageId::McpDiagnosisNext)
+                .replace("{command}", "/mcp reload"),
+        );
+    }
+    receipt
+}
+
 pub(crate) fn mcp_ui_action_refreshes_discovery(action: &crate::tui::app::McpUiAction) -> bool {
     matches!(
         action,
         crate::tui::app::McpUiAction::Validate
-            | crate::tui::app::McpUiAction::Login { .. }
             | crate::tui::app::McpUiAction::Logout { .. }
             | crate::tui::app::McpUiAction::ImportList
             | crate::tui::app::McpUiAction::ImportApprove { .. }
     )
 }
 
-pub(crate) fn mcp_import_consent_path() -> PathBuf {
-    codewhale_config::codewhale_home()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("mcp-import-consent.json")
-}
-
-pub(crate) fn mcp_external_import_status_text(workspace: &std::path::Path) -> String {
-    use crate::mcp::external_import::{discover_external_sources, format_candidates_for_display};
-    let home = crate::config::effective_home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let market_path = codewhale_config::codewhale_home()
-        .ok()
-        .map(|h| h.join("mcp-marketplace.json"));
-    let markets: Vec<PathBuf> = market_path.into_iter().collect();
-    let all = discover_external_sources(&home, workspace, &markets);
-    let mut body = format_candidates_for_display(&all);
-    body.push_str("\n\nConfigured managed connectors stay in your mcp.json; external sources never auto-merge.");
-    body
+pub(crate) fn mcp_external_import_status_text(
+    workspace: &std::path::Path,
+    mcp_path: &std::path::Path,
+    plugins: &crate::plugins::PluginRegistry,
+) -> String {
+    use crate::mcp::external_import::{ImportContext, preview_imports};
+    let result = ImportContext::new(workspace, mcp_path, plugins)
+        .and_then(|context| preview_imports(&context));
+    match result {
+        Err(error) => format!("Cannot review MCP imports: {error}"),
+        Ok(preview) => {
+            let mut lines = vec!["Review external connectors. Imports stay OFF; enable and test separately. Credential values and command arguments are hidden.".to_string()];
+            for candidate in preview.candidates {
+                lines.push(format!(
+                    "\n{} — {} · {} arguments · {}\nSource: {}\nContent: {}",
+                    candidate.name,
+                    candidate.destination,
+                    candidate.argument_count,
+                    if candidate.hard_blocked {
+                        "BLOCKED"
+                    } else if candidate.conflict {
+                        "NAME IN USE"
+                    } else {
+                        "Ready for review"
+                    },
+                    candidate.source_path.display(),
+                    candidate.content_hash
+                ));
+                if !candidate.hard_blocked && !candidate.conflict {
+                    lines.push(format!(
+                        "Approve: /mcp import approve {}",
+                        candidate.review_token
+                    ));
+                }
+                lines.push(format!(
+                    "Decline: /mcp import decline {}",
+                    candidate.review_token
+                ));
+            }
+            for problem in preview.problems {
+                lines.push(format!(
+                    "{}: {}",
+                    problem.source_kind.as_str(),
+                    problem.message
+                ));
+            }
+            lines.join("\n")
+        }
+    }
 }
 
 pub(crate) fn mcp_import_apply(
     workspace: &std::path::Path,
     mcp_path: &std::path::Path,
-    name: &str,
+    plugins: &crate::plugins::PluginRegistry,
+    token: &str,
     approve: bool,
 ) -> anyhow::Result<String> {
     use crate::mcp::external_import::{
-        ImportDecision, apply_approved, discover_external_sources, load_consent_store,
-        merge_approved_into_config, record_decisions, save_consent_store,
+        ImportContext, ImportDecision, apply_reviewed_import, parse_review_token,
     };
-    use std::collections::HashMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let home = crate::config::effective_home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let market_path = codewhale_config::codewhale_home()
-        .ok()
-        .map(|h| h.join("mcp-marketplace.json"));
-    let markets: Vec<PathBuf> = market_path.into_iter().collect();
-    let all = discover_external_sources(&home, workspace, &markets);
-    let candidate = all
-        .iter()
-        .find(|c| c.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No external MCP candidate named '{name}'. Run /mcp import to list sources with provenance."
-            )
-        })?;
-
-    if approve && candidate.hard_blocked {
-        anyhow::bail!(
-            "Refusing to import '{}': {} (enabled=false is a hard block)",
-            candidate.name,
-            candidate.block_reason.as_deref().unwrap_or("hard blocked")
-        );
-    }
-
-    let mut decisions = HashMap::new();
-    decisions.insert(
-        candidate.name.clone(),
+    let (id, hash, revision) = parse_review_token(token)?;
+    let context = ImportContext::new(workspace, mcp_path, plugins)?;
+    let receipt = apply_reviewed_import(
+        &context,
+        id,
+        hash,
+        revision,
         if approve {
             ImportDecision::Approve
         } else {
             ImportDecision::Decline
         },
-    );
-
-    let mut store = load_consent_store(&mcp_import_consent_path());
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    record_decisions(&mut store, std::slice::from_ref(candidate), &decisions, now);
-    save_consent_store(&mcp_import_consent_path(), &store)?;
-
-    if !approve {
-        return Ok(format!(
-            "Declined external MCP '{}' from {} (hash {}). Will not re-prompt until the source content changes.",
-            candidate.name,
-            candidate.source_path.display(),
-            &candidate.content_hash[..12.min(candidate.content_hash.len())]
-        ));
+    )?;
+    let mut message = if receipt.imported {
+        format!(
+            "Imported '{}' with the connector OFF. Enable it explicitly, then test its connection.",
+            receipt.name
+        )
+    } else {
+        format!(
+            "Declined '{}'; connector configuration was unchanged.",
+            receipt.name
+        )
+    };
+    if let Some(warning) = receipt.warning {
+        message.push(' ');
+        message.push_str(&warning);
     }
-
-    let approved = apply_approved(std::slice::from_ref(candidate), &decisions);
-    let mut cfg = crate::mcp::load_config(mcp_path)?;
-    let inserted = merge_approved_into_config(&mut cfg, &approved);
-    if inserted.is_empty() {
-        return Ok(format!(
-            "MCP '{}' was already present in {} or could not be merged. Provenance: {} @ {}",
-            candidate.name,
-            mcp_path.display(),
-            candidate.source_kind.as_str(),
-            candidate.source_path.display()
-        ));
-    }
-    crate::mcp::save_config(mcp_path, &cfg)?;
-    Ok(format!(
-        "Imported managed MCP connector '{}' into {} (provenance: {} @ {}, hash {}). Run /mcp reload to connect after review.",
-        candidate.name,
-        mcp_path.display(),
-        candidate.source_kind.as_str(),
-        candidate.source_path.display(),
-        &candidate.content_hash[..12.min(candidate.content_hash.len())]
-    ))
+    Ok(message)
 }
 
 pub(crate) fn clear_active_provider_api_key_from_memory(app: &App, config: &mut Config) {

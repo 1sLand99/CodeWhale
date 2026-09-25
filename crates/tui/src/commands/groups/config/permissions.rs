@@ -1,11 +1,11 @@
 //! Numbered, confirmation-gated editor for the active `permissions.toml`.
 
 use codewhale_config::{PermissionsFileState, PermissionsSnapshot, ToolAskRule};
-use codewhale_execpolicy::PermissionAction;
+use codewhale_execpolicy::{ApprovalMode, PermissionAction};
 
 use crate::commands::CommandResult;
-use crate::localization::{MessageId, tr};
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{MessageId, tr};
 
 pub(super) fn permissions_command(app: &App, arg: Option<&str>) -> CommandResult {
     let raw = arg.map(str::trim).unwrap_or("");
@@ -118,10 +118,10 @@ fn format_posture_explainer(app: &App) -> String {
     text.push_str(&tr(
         app.ui_locale,
         match posture {
-            crate::tui::approval::ApprovalMode::Suggest => MessageId::PermissionsPostureAsk,
-            crate::tui::approval::ApprovalMode::Auto => MessageId::PermissionsPostureAuto,
-            crate::tui::approval::ApprovalMode::Bypass => MessageId::PermissionsPostureBypass,
-            crate::tui::approval::ApprovalMode::Never => MessageId::PermissionsPostureNever,
+            ApprovalMode::Suggest => MessageId::PermissionsPostureAsk,
+            ApprovalMode::Auto => MessageId::PermissionsPostureAuto,
+            ApprovalMode::Bypass => MessageId::PermissionsPostureBypass,
+            ApprovalMode::Never => MessageId::PermissionsPostureNever,
         },
     ));
     text.push('\n');
@@ -253,8 +253,8 @@ fn operation_error(app: &App, error: &anyhow::Error) -> CommandResult {
 mod tests {
     use std::fs;
 
-    use crate::localization::Locale;
     use crate::tui::app::TuiOptions;
+    use codewhale_localization::Locale;
 
     use super::*;
 
@@ -349,7 +349,7 @@ workspace = {other:?}
         let malformed = permissions_command(&app, Some("list"));
         let malformed_message = malformed.message.expect("malformed message");
         assert!(malformed.is_error);
-        assert!(malformed_message.contains("Permission rule operation failed"));
+        assert!(malformed_message.contains("Could not read or change permission rules"));
         assert!(malformed_message.contains(&codewhale_config::quote_os_path(
             &displayed_permissions_path
         )));

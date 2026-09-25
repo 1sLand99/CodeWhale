@@ -1,32 +1,31 @@
 import type { HomeDict } from "../types";
 
 /**
- * English reference home dictionary — the copy contract for the
- * newspaper-ocean landing page. Public-copy and public-surface tests assert
- * against these values, not against raw JSX strings.
+ * English reference home dictionary — the copy contract for the Tidal Folio
+ * landing page. Public-copy and public-surface tests assert against these
+ * values, not against raw JSX strings.
  *
- * The `seal*` values are the paper's section seals. They are glyphs (marks,
- * not prose), so locales share them by default; the keys exist so a locale
- * that needs a different mark can set one without touching the page.
+ * The page leads with what a person gains — their own models, capable
+ * agents, and control on their own machine — and states availability per
+ * surface as it is today. Nothing here claims cloud execution, and the
+ * screenshot is described as the development build it is.
  */
 export const home: HomeDict = {
-  metaTitle: "Codewhale — dives into the deep so you don't have to.",
+  metaTitle: "Codewhale — Build and automate with the models you choose",
   metaDescription:
-    "Codewhale dives into the deep so you don't have to — an open-source terminal coding agent. Bring your own model. Runs on your machine. Rust, MIT.",
+    "Build software, work with your files, and automate everyday tasks using open-source agents and your choice of hosted or local AI models.",
 
-  kicker: "Open source · Bring your own model · Runs in your terminal",
-  heroTitleA: "Codewhale dives into the deep",
-  heroTitleB: "so you don't have to.",
+  heroTitle: "Build and automate with the models you choose",
   heroIntro:
-    "{brand} is an open-source coding agent for your terminal. Give it a model and a task. It reads your code, edits files, runs the checks, and stops when the job is done or it needs you. Use any model, or a different one for each role.",
-  install: "Install",
-  docs: "Docs",
-  copy: "Copy",
-  copied: "Copied ✓",
+    "{brand} is an open-source agent that reads files, edits code, runs commands, and checks its work. Use it in your terminal or local browser with a hosted or local model. You choose the tools and permissions; the session keeps the conversation and tool results.",
+  getCodewhale: "Get Codewhale",
+  heroInstallAria: "Install command",
+  exploreProduct: "Explore the product",
 
-  installEyebrow: "one-line install",
-  installRequirement: "needs Node 18+ — no Rust toolchain",
-  installOtherWays: "other ways →",
+  shotPreview: "Terminal preview",
+  shotBuild: "v{version} development build",
+  screenshotAlt:
+    "Codewhale v{version} development build: whale mark, new session, message composer, Ask permissions, Work mode and model status. Rendered from an isolated terminal capture.",
 
   latestRelease: "Latest release {tag}",
   releaseUnavailable: "Release status unavailable",
@@ -36,71 +35,94 @@ export const home: HomeDict = {
   publishedRelease: "released",
   figcaptionSourceCandidate: "unreleased",
 
-  shotSession: "Session",
-  screenshotAlt:
-    "Codewhale terminal session in Operate mode: the whale, the composer, and the status footer",
-  figcaption: "Codewhale session · Operate mode · permissions: Ask",
+  chapterTerminal: "Your terminal",
+  chapterTerminalTitle: "Start with something you want to make",
 
-  proofHeading: "A coding agent in your terminal. Any model. On your machine.",
-  proofBody:
-    "Use the model you already have — hosted, through a gateway, or local. Pick a mode: Plan, Work, or Operate. Pick how much it does without asking: Ask, Auto-Review, or Full Access.",
-
-  sealDecides: "法",
-  decidesEyebrow: "How it decides",
-  decidesHeading: "The reasoning, in its own words",
-  decidesLede:
-    "Session excerpts. Each shows the project rule the model applied and what it did next.",
-
-  sealWorkflow: "行",
-  workflowHeading: "From task to verified change.",
-  workflow: [
-    ["Inspect", "Read the repository, its instructions, and the task."],
-    ["Act", "Edit files, asking first where you told it to."],
-    ["Verify", "Run the checks and read the result."],
-    ["Report", "Say what changed and what passed."],
+  gainHeading: "What you can do with Codewhale",
+  gainLede:
+    "Ask for a concrete result: fix a bug, understand a project, or turn a repeated task into a workflow. Start with one agent and split larger jobs when useful.",
+  gain: [
+    [
+      "Build and check a project",
+      "Ask the agent to inspect a project, make a change, then run its tests. Follow the file edits and command results as it works."
+    ],
+    [
+      "Reuse work that repeats",
+      "Turn a repeated task into a script or saved workflow. Use codewhale exec in scripts and CI, or give parts of a larger job to several agents."
+    ],
+    [
+      "Stay in control",
+      "Set permissions before work starts, respond to approval requests, and interrupt a running task. Review the conversation and tool results before continuing."
+    ]
   ],
-  receiptAria: "Example run summary",
-  receiptInspect: "repository and instructions",
-  receiptAct: "edit files under the permissions you set",
-  receiptReport: "checks passed · summary saved",
 
-  sealStart: "起",
-  startHeading: "New here? Four steps.",
+  chapterModels: "Your models",
+  modelsHeading: "A choice of models for every task",
+  modelsBody:
+    "Choose the provider and model for each session: connect with an API key, use a supported provider sign-in, or run a local model. Your Codewhale account and your model connection serve different purposes.",
+  modelsFacts: [
+    ["Hosted", "Your own API key, saved with codewhale auth set --provider <id>"],
+    ["Gateway", "One endpoint for many models, provider still chosen by you"],
+    ["Local", "vLLM, SGLang, Ollama on localhost — usually no key"],
+  ],
+  modelsLink: "Explore models and providers",
+
+  startHeading: "Getting started with Codewhale",
   startLede:
-    "Install → first session, no key → connect a provider → set up a fleet.",
-  startGuideLink: "Read the getting-started guide →",
-  startVocabularyLink: "Look up a term →",
+    "Install the published release, connect a model, then try one task in your project folder. A team of agents is optional; start with one and add more when the work can be split.",
+  startGuideLink: "Read the getting-started guide",
+  startVocabularyLink: "Look up a term",
 
-  sealBoundaries: "界",
-  boundariesHeadingA: "Your model.",
-  boundariesHeadingB: "Your boundaries.",
-  boundariesBody:
-    "You choose the model, the mode, and how much it may do without asking. The provider and model never change unless you change them. Preview features are marked preview.",
-  hostedGatewayLocal: "Hosted, gateway, and local models",
-  planActOperateDesc: "From read-only planning to autonomous operation",
-  askAutoReviewDesc: "How much it does before asking you",
-  tuiExecWebDesc: "Interactive or scripted",
-
-  sealSurfaces: "面",
-  surfacesHeading: "Use it where the work happens.",
-  surfaces: [
-    ["TUI", "Interactive terminal work"],
-    ["codewhale exec", "Scripts and CI"],
-    ["Web client", "Browser client, localhost only"],
-    ["Runtime API + MCP", "Local integrations"],
-    ["Fleet", "Several agents on one job"],
+  chapterAccount: "Get Codewhale",
+  availabilityHeading: "Where you can use Codewhale",
+  availabilityLede:
+    "The terminal and local browser client are available now. Desktop and hosted web apps are being developed around the same session model; their availability is listed separately below.",
+  availability: [
+    [
+      "Terminal and local browser",
+      "Released",
+      "Install on Linux, macOS, or Windows. Run codewhale in your terminal, or codewhale web for the local browser client. npm and Cargo are alternatives; Android on Termux is a preview.",
+    ],
+    [
+      "Hosted web app",
+      "Development preview",
+      "Sign in with a Codewhale account and pair a computer in the development preview. Hosted task execution is still being qualified.",
+    ],
+    [
+      "Desktop",
+      "Development build",
+      "The macOS app brings folders, conversations, and model connections into a desktop window. A public download is coming later.",
+    ],
+    [
+      "Cloud computers",
+      "In development",
+      "Hosted computers for running your tasks.",
+    ],
   ],
-  runtimeLink: "Runtime surfaces and what is stable →",
+  availabilityNote:
+    "The terminal and local browser do not require a Codewhale account. An account is used for hosted web and desktop access; it does not replace your model connection. Hosted model usage with your own key is billed by that provider.",
+  accountLink: "Create an account",
 
-  installBandHeading: "Start with one command.",
+  surfacesHeading: "Tools, connected apps, and saved work",
+  surfaces: [
+    ["Files and commands", "Read a project, edit files, run tests, and inspect command output within the permissions you set."],
+    ["Plugins and MCP", "Connect additional tools and services. Review and enable plugins before the agent can use them."],
+    ["Computer Use · source preview", "The current source includes a plugin for seeing and interacting with other applications. Enable it explicitly and grant the required system permissions."],
+    ["Saved sessions", "Keep the conversation and tool results together. The local browser connects to the same Codewhale session on your computer; resume saved work instead of starting over."],
+    ["Fleet", "Assign parts of a task to agents with different models and roles, and follow their progress."],
+  ],
+  runtimeLink: "Explore integrations",
+
+  installBandHeading: "Install Codewhale on macOS or Linux",
+  copy: "Copy",
+  copied: "Copied ✓",
   binaries: "Binaries",
   chinaMirrors: "China mirrors",
-  installGuideLink: "Read the install guide →",
+  installGuideLink: "Read the install guide",
 
-  sealCommunity: "众",
-  communityHeading: "Built in public",
+  communityHeading: "Help make Codewhale better",
   communityBody:
-    "MIT license. Contributors work on the runtime, providers, platforms, docs, and tests.",
+    "Whether you have found a bug, have an idea for a feature, or want to send your first pull request, we would like to hear from you and work together on what comes next.",
   communityLinksAria: "Community links",
-  contribute: "Contribute",
+  contribute: "Send a pull request",
 };

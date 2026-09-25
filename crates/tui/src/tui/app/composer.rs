@@ -478,11 +478,31 @@ const MAX_COMPOSER_DISPLAY_CHARS: usize = 4_000;
 const MAX_DRAFT_HISTORY: usize = 50;
 
 impl ComposerState {
+    /// Re-derive the "this line began as a command" claim from the current
+    /// composer text (#5925).
+    ///
+    /// Called after every composer mutation. A user edit that removes the
+    /// leading `/` releases the claim — removing it was intentional. Bytes
+    /// lost between the terminal and the composer never pass through here,
+    /// which is exactly the difference the submit guard needs: a claim that
+    /// survives to Enter means the line still starts with `/` and must be
+    /// dispatched as a command, never re-read as a prose prompt.
+    pub(crate) fn resync_command_line_claim(&mut self) {
+        self.line_began_with_slash &= self.input.trim_start().starts_with('/');
+    }
+
+    /// Whether this line is claimed as a command: it began with a typed `/`
+    /// and still starts with one.
+    pub(crate) fn command_line_claimed(&self) -> bool {
+        self.line_began_with_slash && looks_like_slash_command_input(&self.input)
+    }
+
     /// When the user starts editing a truncated oversized paste, restore the
     /// full text so they can see and edit the complete content (#3263).
     fn auto_expand_oversized_paste(&mut self) {
         if let Some(full) = self.oversized_paste_full_text.take() {
             self.input = full;
+            self.resync_command_line_claim();
             // Clamp cursor to the new length instead of resetting to 0,
             // so the user's position in the truncated preview is preserved.
             self.cursor_position = self.cursor_position.min(char_count(&self.input));
@@ -490,7 +510,7 @@ impl ComposerState {
     }
 
     pub fn composer_attachment_count(&self) -> usize {
-        crate::tui::file_mention::media_attachment_references(&self.input).len()
+        codewhale_core::media_attachment_references(&self.input).len()
     }
 
     pub fn selected_composer_attachment_index(&self) -> Option<usize> {
@@ -504,6 +524,7 @@ impl ComposerState {
             strip_raw_mouse_report_runs(&self.input, self.cursor_position)
         {
             self.input = input;
+            self.resync_command_line_claim();
             self.cursor_position = cursor_position;
         }
     }
@@ -668,6 +689,7 @@ impl ComposerState {
         };
         self.history_index = Some(new_index);
         self.input = self.input_history[new_index].clone();
+        self.resync_command_line_claim();
         self.cursor_position = char_count(&self.input);
         self.selection_anchor = None;
         self.selected_attachment_index = None;
@@ -686,12 +708,17 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Any edit detaches a recalled history entry (mirrors insert_char):
+        // without this a paste typed while navigating stays on a stale index
+        // and the next Up/Down silently discards the pasted text.
+        self.clear_input_history_navigation();
         self.auto_expand_oversized_paste();
         self.delete_selection();
         self.selected_attachment_index = None;
         let cursor = self.cursor_position.min(char_count(&self.input));
         let byte_index = byte_index_at_char(&self.input, cursor);
         self.input.insert_str(byte_index, text);
+        self.resync_command_line_claim();
         self.cursor_position = cursor + char_count(text);
         self.strip_raw_mouse_reports_from_input();
         self.slash_menu_hidden = false;
@@ -786,7 +813,7 @@ impl App {
     }
 
     pub fn remove_selected_composer_attachment(&mut self) -> bool {
-        let references = crate::tui::file_mention::media_attachment_references(&self.input);
+        let references = codewhale_core::media_attachment_references(&self.input);
         let Some(index) = self
             .selected_composer_attachment_index()
             .filter(|index| *index < references.len())
@@ -834,6 +861,10 @@ impl App {
                 self.insert_char(ch);
                 true
             }
+            FlushResult::SuppressionExpired => {
+                self.needs_redraw = true;
+                true
+            }
             FlushResult::None => false,
         }
     }
@@ -873,7 +904,7 @@ impl App {
             self.status_message = Some(self.tr(MessageId::ClipboardSshPasteHint).into_owned());
             return false;
         }
-        if let Some(content) = self.clipboard.read(self.workspace.as_path()) {
+        if let Some(content) = self.clipboard.read_markdown(self.workspace.as_path()) {
             self.apply_clipboard_content(content);
             return true;
         }
@@ -899,9 +930,18 @@ impl App {
         self.auto_expand_oversized_paste();
         self.delete_selection();
         self.selected_attachment_index = None;
+        // #5925: a line that starts with a typed `/` is a command from its
+        // first byte, and stays one until Enter. Recorded here — the only
+        // place a character reaches the composer by typing — so the submit
+        // guard can tell a lost `/` from a deleted one.
+        let starts_line = self.input.trim().is_empty();
         let cursor = self.cursor_position.min(char_count(&self.input));
         let byte_index = byte_index_at_char(&self.input, cursor);
         self.input.insert(byte_index, c);
+        if starts_line {
+            self.line_began_with_slash = c == '/';
+        }
+        self.resync_command_line_claim();
         self.cursor_position = cursor + 1;
         self.strip_raw_mouse_reports_from_input();
         self.slash_menu_hidden = false;
@@ -926,6 +966,7 @@ impl App {
         let cursor = self.cursor_position.min(char_count(&self.input));
         let target = prev_grapheme_boundary(&self.input, cursor);
         let removed = remove_char_range(&mut self.input, target, cursor);
+        self.resync_command_line_claim();
         if removed {
             self.cursor_position = target;
             self.slash_menu_hidden = false;
@@ -950,6 +991,7 @@ impl App {
         let target = self.cursor_position;
         let end = next_grapheme_boundary(&self.input, target);
         let removed = remove_char_range(&mut self.input, target, end);
+        self.resync_command_line_claim();
         if !removed {
             self.cursor_position = char_count(&self.input);
         }
@@ -995,6 +1037,7 @@ impl App {
 
         if word_start < cursor_byte {
             self.input.replace_range(word_start..cursor_byte, "");
+            self.resync_command_line_claim();
             self.cursor_position = char_count(&self.input[..word_start]);
             self.slash_menu_hidden = false;
             self.mention_menu_hidden = false;
@@ -1023,6 +1066,7 @@ impl App {
 
         if line_start < cursor_byte {
             self.input.replace_range(line_start..cursor_byte, "");
+            self.resync_command_line_claim();
             self.cursor_position = char_count(&self.input[..line_start]);
             self.slash_menu_hidden = false;
             self.mention_menu_hidden = false;
@@ -1066,6 +1110,7 @@ impl App {
 
         if cursor_byte < word_end {
             self.input.replace_range(cursor_byte..word_end, "");
+            self.resync_command_line_claim();
             self.slash_menu_hidden = false;
             self.mention_menu_hidden = false;
             self.mention_menu_selected = 0;
@@ -1117,6 +1162,7 @@ impl App {
 
         self.kill_buffer = removed;
         self.input.replace_range(start_byte..end_byte, "");
+        self.resync_command_line_claim();
         // Cursor stays at the same character index (start of removed range).
         self.cursor_position = cursor;
         self.slash_menu_hidden = false;
@@ -1139,6 +1185,7 @@ impl App {
         let cursor = self.cursor_position.min(char_count(&self.input));
         let byte_index = byte_index_at_char(&self.input, cursor);
         self.input.insert_str(byte_index, &text);
+        self.resync_command_line_claim();
         self.cursor_position = cursor + char_count(&text);
         self.slash_menu_hidden = false;
         self.mention_menu_hidden = false;
@@ -1295,6 +1342,7 @@ impl App {
         let sb = byte_index_at_char(&self.input, start);
         let eb = byte_index_at_char(&self.input, end);
         self.input.replace_range(sb..eb, "");
+        self.resync_command_line_claim();
         self.cursor_position = start;
         self.selection_anchor = None;
         self.clear_input_history_navigation();
@@ -1352,6 +1400,7 @@ impl App {
         // Grapheme-aware: `x` deletes the whole cluster under the cursor.
         let end = next_grapheme_boundary(&self.input, pos);
         remove_char_range(&mut self.input, pos, end);
+        self.resync_command_line_claim();
         // Keep cursor in bounds after deletion.
         let new_total = char_count(&self.input);
         if self.cursor_position > 0 && self.cursor_position >= new_total {
@@ -1383,6 +1432,7 @@ impl App {
         };
 
         self.input.replace_range(remove_start..remove_end, "");
+        self.resync_command_line_claim();
         self.cursor_position = char_count(&self.input[..remove_start]);
         self.needs_redraw = true;
     }
@@ -1475,6 +1525,7 @@ impl App {
     pub fn clear_input(&mut self) {
         self.clear_input_history_navigation();
         self.input.clear();
+        self.resync_command_line_claim();
         self.cursor_position = 0;
         // Prevent stale oversized-paste state from leaking when the user
         // clears the composer or navigates to a different input (#3263).
@@ -1573,6 +1624,7 @@ impl App {
             .cloned()
         {
             self.input = selected;
+            self.resync_command_line_claim();
             self.cursor_position = char_count(&self.input);
             self.history_index = None;
             self.status_message = Some("History match inserted into composer".to_string());
@@ -1591,8 +1643,21 @@ impl App {
             return;
         };
         self.input = search.pre_search_input;
+        self.resync_command_line_claim();
         self.cursor_position = search.pre_search_cursor.min(char_count(&self.input));
         self.status_message = Some("History search canceled".to_string());
+        self.needs_redraw = true;
+    }
+
+    /// Refuse a submit the shell cannot vouch for, leaving the text exactly
+    /// where the user can see it (#5925).
+    ///
+    /// Never destructive: the composer keeps its content and the next Enter
+    /// sends it. The hold exists so a line whose first bytes may be missing
+    /// is read by a human before it is read by a model.
+    fn hold_unproven_submit(&mut self, reason: &str) {
+        self.status_message = Some(reason.to_string());
+        self.push_status_toast(reason, StatusToastLevel::Warning, Some(8_000));
         self.needs_redraw = true;
     }
 
@@ -1601,6 +1666,25 @@ impl App {
             self.paste_burst.clear_after_explicit_paste();
             return None;
         }
+        // #5925: startup consumed bytes it could not replay, so this shell
+        // cannot prove it saw the whole line. Keep the text in the composer
+        // and let the user look at it rather than sending a line that may be
+        // missing its first characters — a truncated `/command` submitted as
+        // prose runs with the session's full authority. Cleared here, so the
+        // deliberate second Enter sends exactly what is on screen.
+        if self.startup_input_unproven {
+            self.startup_input_unproven = false;
+            self.hold_unproven_submit(
+                "Check the line, then press Enter again to send it. \
+                 Startup may have missed some characters.",
+            );
+            return None;
+        }
+        // A line that began with `/` stays a command until Enter. If the
+        // outgoing text is no longer a command — a submit-time rewrite, or
+        // bytes lost after the composer accepted them — never fall through
+        // to the prose-prompt branch; hold it instead.
+        let claimed_command = self.command_line_claimed();
         // Safety net: if any earlier path filled the buffer above the
         // safety cap without going through `insert_paste_text`, fold it
         // into a workspace paste file now (#553). Bracketed pastes hit
@@ -1628,19 +1712,35 @@ impl App {
         } else if let Some(full) = self.oversized_paste_full_text.take() {
             input = full;
         }
-        if !looks_like_slash_command_input(&input) {
-            self.input_history.push(input.clone());
-            if self.max_input_history == 0 {
-                self.input_history.clear();
-            } else if self.input_history.len() > self.max_input_history {
-                let excess = self.input_history.len() - self.max_input_history;
-                self.input_history.drain(0..excess);
-            }
-            // Mirror to the persisted cross-session history (#366) so
-            // arrow-up recall works across restarts. Best-effort write —
-            // see `composer_history::append_history` for failure modes.
-            crate::composer_history::append_history(&input);
+        if claimed_command && !looks_like_slash_command_input(&input) {
+            // The line was a command when the composer accepted it and is
+            // not one now. Something rewrote it between Enter and dispatch;
+            // the one thing that must never happen is sending it to the
+            // model as prose (#5925). Put the text back and say so.
+            tracing::warn!(
+                target: "startup_input",
+                submitted = %input,
+                "a command line stopped looking like a command before dispatch; holding it in the composer"
+            );
+            self.input = input;
+            self.cursor_position = char_count(&self.input);
+            self.line_began_with_slash = false;
+            self.hold_unproven_submit(
+                "That line started as a command but no longer reads as one. \
+                 Check it and press Enter again to send it as shown.",
+            );
+            return None;
         }
+        crate::composer_history::push_history_entry(&mut self.input_history, &input);
+        if self.max_input_history == 0 {
+            self.input_history.clear();
+        } else if self.input_history.len() > self.max_input_history {
+            let excess = self.input_history.len() - self.max_input_history;
+            self.input_history.drain(0..excess);
+        }
+        // Mirror prompts and commands to the persisted cross-session history
+        // so arrow-up recall works across restarts (#366, #6006).
+        crate::composer_history::append_history(&input);
         self.history_index = None;
         self.history_navigation_draft = None;
         self.clear_input();
@@ -1662,12 +1762,28 @@ impl App {
         };
 
         self.input = prompt.to_string();
+        self.resync_command_line_claim();
         self.cursor_position = char_count(&self.input);
         self.history_index = None;
         self.history_navigation_draft = None;
         self.selected_attachment_index = None;
         self.needs_redraw = true;
         true
+    }
+
+    /// Replace the composer buffer with externally edited text. Recalled
+    /// history, selection, and attachment positions belong to the old text:
+    /// a stale `history_index` would let the next Up/Down silently discard
+    /// the edited buffer.
+    pub fn apply_external_edit(&mut self, new: String) {
+        self.input = new;
+        self.resync_command_line_claim();
+        self.cursor_position = char_count(&self.input);
+        self.history_index = None;
+        self.history_navigation_draft = None;
+        self.selection_anchor = None;
+        self.selected_attachment_index = None;
+        self.needs_redraw = true;
     }
 
     /// Restore the last cleared input if the composer is empty.
@@ -1681,6 +1797,7 @@ impl App {
         };
 
         self.input = saved;
+        self.resync_command_line_claim();
         self.cursor_position = char_count(&self.input);
         self.history_index = None;
         self.history_navigation_draft = None;
@@ -1753,6 +1870,21 @@ impl App {
         !self.input.trim().is_empty()
     }
 
+    /// Whether the *draft* is in a submittable state, for display only.
+    ///
+    /// Deliberately time-independent. [`Self::composer_enter_would_submit`]
+    /// additionally consults the paste-burst heuristic, whose suppression
+    /// window is re-extended on every fast keystroke -- correct for deciding
+    /// what a newline does mid-paste, wrong for a persistent affordance.
+    /// Driving the `[↵]` chip from it made the chip strobe `[↵]`/`[·]` for as
+    /// long as the user kept typing, because the window kept reopening
+    /// (#6397). Enter routing, mouse submit and hover registration stay on
+    /// the timing predicate.
+    #[must_use]
+    pub fn composer_draft_is_submittable(&self) -> bool {
+        !self.input.trim().is_empty()
+    }
+
     /// Public wrapper around [`Self::consolidate_large_input`] that no-ops
     /// when the current input fits inside the safety cap. Both the paste-
     /// insert path (visible-before-submit) and the submit-time safety net
@@ -1783,6 +1915,7 @@ impl App {
             // Fallback: keep a truncated version so we don't lose the
             // user's input entirely when the filesystem is unhappy.
             self.input = full_input.chars().take(MAX_SUBMITTED_INPUT_CHARS).collect();
+            self.resync_command_line_claim();
             self.cursor_position = char_count(&self.input);
             self.push_status_toast(
                 format!("Failed to create paste directory: {e}"),
@@ -1795,6 +1928,7 @@ impl App {
         let file_path = self.workspace.join(&rel_path);
         if let Err(e) = std::fs::write(&file_path, &full_input) {
             self.input = full_input.chars().take(MAX_SUBMITTED_INPUT_CHARS).collect();
+            self.resync_command_line_claim();
             self.cursor_position = char_count(&self.input);
             self.push_status_toast(
                 format!("Failed to write paste file: {e}"),
@@ -1816,6 +1950,7 @@ impl App {
             truncated.push_str("\n\n---\n(content truncated for display — start typing to expand; full text sent to model)");
         }
         self.input = truncated;
+        self.resync_command_line_claim();
         self.cursor_position = 0;
         self.push_status_toast(
             "Large paste backed up to file — the model will receive the full content.",
@@ -1834,6 +1969,7 @@ impl App {
                 if i + 1 < self.input_history.len() {
                     self.history_index = Some(i + 1);
                     self.input = self.input_history[i + 1].clone();
+                    self.resync_command_line_claim();
                     self.cursor_position = char_count(&self.input);
                     self.selection_anchor = None;
                     self.selected_attachment_index = None;
@@ -1843,6 +1979,7 @@ impl App {
                     self.history_index = None;
                     if let Some(draft) = self.history_navigation_draft.take() {
                         self.input = draft.input;
+                        self.resync_command_line_claim();
                         self.cursor_position = draft.cursor.min(char_count(&self.input));
                         self.selection_anchor = None;
                         self.selected_attachment_index = None;

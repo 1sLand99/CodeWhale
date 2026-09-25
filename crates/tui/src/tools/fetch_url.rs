@@ -14,7 +14,8 @@ use super::spec::{
 };
 use super::web::extract::{DocumentKind, ExtractedDocument, decode_response_body};
 use super::web::fetch::{
-    DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT, FetchOptions, HARD_MAX_BYTES, HARD_MAX_TIMEOUT, fetch,
+    DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT, FetchAttempt, FetchOptions, HARD_MAX_BYTES,
+    HARD_MAX_TIMEOUT, fetch_readable,
 };
 use super::web::overflow::bound_text as bound_web_text;
 #[cfg(test)]
@@ -73,6 +74,10 @@ struct FetchReceipt {
     cache_hit: bool,
     retries: usize,
     redirects: usize,
+    /// Every request this fetch made, in order: session `cache_hit`, whether
+    /// the attempt bypassed caches, which one produced content, and the
+    /// response headers that explain the cache state (#5904).
+    attempts: Vec<FetchAttempt>,
 }
 
 #[derive(Debug)]
@@ -136,7 +141,9 @@ impl ToolSpec for FetchUrlTool {
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
+        // Read-only HTTP can still disclose local data through a URL or query.
+        // Host allowlisting controls reachability, not approval of this payload.
+        ApprovalRequirement::Required
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
@@ -165,38 +172,56 @@ impl ToolSpec for FetchUrlTool {
         let timeout_ms = optional_u64(&input, "timeout_ms", DEFAULT_TIMEOUT.as_millis() as u64)?
             .clamp(1, HARD_MAX_TIMEOUT.as_millis() as u64);
         let requested_fields = parse_fields(&input)?;
-        let fetched = fetch(
+        // Bound as a reference so the `Fn` extractor can run twice without
+        // moving the field list into its first future.
+        let requested_fields = &requested_fields;
+        // A 2xx that extracts to nothing is re-fetched once past every cache
+        // before it becomes an error; the receipt keeps both attempts (#5904).
+        let readable = fetch_readable(
             &url,
             &FetchOptions::new(Duration::from_millis(timeout_ms), max_bytes, FETCH_ACCEPT),
             context,
             "fetch_url",
+            |fetched: super::web::fetch::FetchedPayload| {
+                Box::pin(async move {
+                    let is_success = (200..300).contains(&fetched.status);
+                    let body_text = if requested_fields.is_empty() {
+                        None
+                    } else {
+                        // JSON is never allowed to discover an encoding from body markup.
+                        Some(decode_response_body(
+                            &fetched.bytes,
+                            Some(&fetched.content_type),
+                            false,
+                        )?)
+                    };
+                    let fields = match body_text.as_deref() {
+                        Some(body) => {
+                            project_json_fields(body, &fetched.content_type, requested_fields)?
+                        }
+                        None => None,
+                    };
+                    let extracted = extract_fetched_document(
+                        format,
+                        &fetched.url,
+                        &fetched.content_type,
+                        &fetched.bytes,
+                        is_success,
+                        body_text.as_deref(),
+                        PdfTextCommand::system(context.cancel_token.as_ref()),
+                    )
+                    .await?;
+                    Ok((extracted, fields))
+                })
+            },
         )
         .await?;
+        let super::web::fetch::ReadableFetch {
+            payload: fetched,
+            document: (extracted, fields),
+            attempts,
+        } = readable;
         let is_success = (200..300).contains(&fetched.status);
-        let body_text = if requested_fields.is_empty() {
-            None
-        } else {
-            // JSON is never allowed to discover an encoding from body markup.
-            Some(decode_response_body(
-                &fetched.bytes,
-                Some(&fetched.content_type),
-                false,
-            )?)
-        };
-        let fields = match body_text.as_deref() {
-            Some(body) => project_json_fields(body, &fetched.content_type, &requested_fields)?,
-            None => None,
-        };
-        let extracted = extract_fetched_document(
-            format,
-            &fetched.url,
-            &fetched.content_type,
-            &fetched.bytes,
-            is_success,
-            body_text.as_deref(),
-            PdfTextCommand::system(context.cancel_token.as_ref()),
-        )
-        .await?;
 
         let citation_title = extracted.title.clone();
         let (processed, artifact_write) = render_extracted(
@@ -229,6 +254,7 @@ impl ToolSpec for FetchUrlTool {
                 cache_hit: fetched.cache_hit,
                 retries: fetched.retries,
                 redirects: fetched.redirects,
+                attempts,
             },
             artifact,
             fields,

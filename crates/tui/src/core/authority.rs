@@ -9,9 +9,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::sandbox::SandboxPolicy;
 use crate::tools::spec::{ApprovalRequirement, normalize_path};
-use crate::tui::app::AppMode;
-use crate::tui::approval::ApprovalMode;
 use crate::worker_profile::ShellPolicy;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 
 use super::ops::UserInputProvenance;
 
@@ -31,7 +31,7 @@ pub(crate) struct ModeSessionPrefs {
 /// The permission policy a given [`AppMode`] resolves to (#3386).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EffectiveModePolicy {
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) mode: AppMode,
     pub(crate) allow_shell: bool,
     pub(crate) trust_mode: bool,
@@ -193,11 +193,7 @@ impl TurnAuthority {
             true,
             false,
             auto_approve,
-            if auto_approve {
-                ApprovalMode::Bypass
-            } else {
-                ApprovalMode::Suggest
-            },
+            posture_from_auto_approve(auto_approve),
         )
     }
 
@@ -220,6 +216,21 @@ impl TurnAuthority {
             workspace,
             network_access,
         )
+    }
+}
+
+/// The posture a legacy `auto_approve` bit stands for: a set bit is Full
+/// Access, a cleared bit is Ask.
+///
+/// Every surface that carries the bit without a session posture folds it here —
+/// the per-tool approval gate, a tool context built with only the bit, a
+/// scheduled automation — so none of them can disagree about what it means.
+#[must_use]
+pub(crate) fn posture_from_auto_approve(auto_approve: bool) -> ApprovalMode {
+    if auto_approve {
+        ApprovalMode::Bypass
+    } else {
+        ApprovalMode::Suggest
     }
 }
 
@@ -650,9 +661,10 @@ pub(crate) enum ApprovalRequestDisposition {
 ///
 /// `session_approved` / `session_denied` are the caller's lookups into the
 /// session approval caches (grouping key or tool name / exact approval key).
-/// The branch order is the legacy handler's order: session denial, then the
-/// full-access forced-hold denial, then auto-approval (full access or a
-/// session grant), then the `Never` denial, and only finally a modal.
+/// The branch order: session denial, then the Auto-Review hold, then the
+/// full-access forced-hold denial, then the `Never` denial — the live posture
+/// wins over any remembered grant (approvals J) — then auto-approval (full
+/// access or a session grant), and only finally a modal.
 #[must_use]
 pub(crate) fn resolve_approval_request_disposition(
     authority: &TurnAuthority,
@@ -673,11 +685,13 @@ pub(crate) fn resolve_approval_request_disposition(
     if approval_force_prompt && posture == ToolPermission::Allow {
         return ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold;
     }
-    if !approval_force_prompt && (posture == ToolPermission::Allow || session_approved) {
-        return ApprovalRequestDisposition::AutoApprove;
-    }
+    // The live posture wins over any remembered grant: a conversation grant
+    // given under Ask never outlives a later switch to Never (approvals J).
     if posture == ToolPermission::Deny {
         return ApprovalRequestDisposition::AutoDenyNeverPosture;
+    }
+    if !approval_force_prompt && (posture == ToolPermission::Allow || session_approved) {
+        return ApprovalRequestDisposition::AutoApprove;
     }
     ApprovalRequestDisposition::Prompt
 }
@@ -957,6 +971,48 @@ mod tests {
     }
 
     #[test]
+    fn outbound_web_payloads_require_a_session_decision_even_for_allowed_hosts() {
+        use crate::tools::{
+            fetch_url::FetchUrlTool, spec::ToolSpec, web_run::WebRunTool,
+            web_search::WebSearchTool, web_tool::WebTool,
+        };
+        let request = serde_json::json!({"action": "fetch", "url": "https://example.com/collect?data=synthetic-secret"});
+        for requirement in [
+            FetchUrlTool.approval_requirement_for(&request),
+            WebTool::new("Web").approval_requirement_for(&request),
+            WebSearchTool.approval_requirement(),
+            WebRunTool.approval_requirement(),
+        ] {
+            for approval in [ApprovalMode::Suggest, ApprovalMode::Auto] {
+                let ask = authority(AppMode::Agent, false, approval);
+                assert_eq!(
+                    resolve_tool_permission(&ask, requirement, false),
+                    ToolPermission::Prompt
+                );
+            }
+            let never = authority(AppMode::Agent, false, ApprovalMode::Never);
+            assert_eq!(
+                resolve_tool_permission(&never, requirement, false),
+                ToolPermission::Deny
+            );
+            let granted = authority(AppMode::Agent, true, ApprovalMode::Bypass);
+            assert_eq!(
+                resolve_tool_permission(&granted, requirement, false),
+                ToolPermission::Allow
+            );
+        }
+        let local_read = crate::tools::file::ReadFileTool.approval_requirement();
+        assert_eq!(
+            resolve_tool_permission(
+                &authority(AppMode::Agent, false, ApprovalMode::Suggest),
+                local_read,
+                false
+            ),
+            ToolPermission::Allow
+        );
+    }
+
+    #[test]
     fn auto_requirement_always_allows() {
         for (mode, auto_approve, approval_mode) in [
             (AppMode::Agent, false, ApprovalMode::Suggest),
@@ -1076,11 +1132,12 @@ mod tests {
             resolve_approval_request_disposition(&ask, true, false, false),
             ApprovalRequestDisposition::AutoApprove
         );
-        // A session grant still auto-approves under Never (legacy order), and
-        // Never denies everything else promptable.
+        // The live Never posture wins over a remembered session grant
+        // (approvals J, CURRENT_DECISIONS §21), and denies everything else
+        // promptable.
         assert_eq!(
             resolve_approval_request_disposition(&never, true, false, false),
-            ApprovalRequestDisposition::AutoApprove
+            ApprovalRequestDisposition::AutoDenyNeverPosture
         );
         assert_eq!(
             resolve_approval_request_disposition(&never, false, false, false),

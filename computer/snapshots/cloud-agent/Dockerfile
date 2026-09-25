@@ -18,13 +18,11 @@
 #   daytona snapshot create codewhale-cloud-agent \
 #     -f Dockerfile --cpu 4 --memory 8 --disk 10   (plan max; resources bind to the snapshot)
 #
-# Current dispatcher boundary: this is an image definition, not a wired cloud
-# execution path. `crates/tui/src/cloud_dispatch.rs` currently creates a
-# Daytona sandbox with a name and labels only; it does not select this snapshot,
-# clone a repository, inject any sandbox environment, or execute `codewhale`.
-# A manual image build or Daytona probe is therefore not Cloud Agent launch
-# evidence. Do not add a create-time provider-key shortcut while that product
-# wiring is built.
+# Dispatcher source selects this snapshot name, sends account identity, and
+# uses the toolbox to clone and execute commands. That wiring does not prove
+# provider-credential resolution or end-to-end Cloud Agent acceptance. See
+# README.md beside this Dockerfile for the source and image evidence limits.
+# Never substitute a create-time provider-key shortcut for that missing bridge.
 
 FROM debian:bookworm-slim
 

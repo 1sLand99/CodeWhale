@@ -95,28 +95,57 @@ pub fn load_catalog_document(
 
 /// What installing a stored candidate would do, resolved once for every
 /// caller. `Supported.spec` is exactly what the reviewed installer accepts.
-pub enum CatalogInstallResolution {
-    Supported { spec: String, source_kind: String },
-    Unsupported { reason: String },
-    HasErrors { diagnostics: String },
+pub enum CatalogInstallResolution<'a> {
+    Supported {
+        spec: String,
+        source_kind: String,
+    },
+    /// A matching name is occupied; catalog metadata does not prove identity.
+    AlreadyPresent {
+        plugin: &'a crate::plugins::types::LoadedPlugin,
+        reason: String,
+    },
+    Unsupported {
+        reason: String,
+    },
+    HasErrors {
+        diagnostics: String,
+    },
 }
 
 /// Resolve a stored catalog candidate to its install spec. Relative local
 /// paths resolve against the catalog document's own directory, not the
 /// caller's working directory.
-pub fn resolve_candidate_install(
+pub fn resolve_candidate_install<'a>(
     entry: &StoredMarketplaceCatalog,
     candidate: &MarketplaceCandidate,
-) -> CatalogInstallResolution {
+    registry: &'a crate::plugins::PluginRegistry,
+) -> CatalogInstallResolution<'a> {
     if candidate.has_errors() {
         return CatalogInstallResolution::HasErrors {
             diagnostics: render_diagnostics_inline(&candidate.diagnostics),
         };
     }
+    if let Some(plugin) = registry.get(&candidate.name) {
+        return CatalogInstallResolution::AlreadyPresent {
+            plugin,
+            reason: format!(
+                "A {} plugin named '{}' already exists. Review the existing bundle with /plugin show {}. Catalog metadata does not establish that it is the same bundle.",
+                plugin.scope.as_str(),
+                plugin.name(),
+                plugin.id.as_str()
+            ),
+        };
+    }
     match &candidate.install_plan {
         MarketplaceInstallPlan::Supported { spec, source_kind } => {
             CatalogInstallResolution::Supported {
-                spec: resolve_spec(&entry.source_path, &candidate.source, spec),
+                spec: resolve_spec(
+                    &entry.source_path,
+                    entry.catalog.format,
+                    &candidate.source,
+                    spec,
+                ),
                 source_kind: source_kind.clone(),
             }
         }
@@ -128,11 +157,25 @@ pub fn resolve_candidate_install(
     }
 }
 
-fn resolve_spec(source_path: &str, source: &MarketplaceSourceSpec, spec: &str) -> String {
+fn resolve_spec(
+    source_path: &str,
+    format: MarketplaceFormat,
+    source: &MarketplaceSourceSpec,
+    spec: &str,
+) -> String {
     if let MarketplaceSourceSpec::LocalPath { path } = source
         && path.is_relative()
         && let Some(dir) = Path::new(source_path).parent()
     {
+        // Claude keeps its catalog in a manifest-only metadata directory;
+        // relative sources are rooted at the marketplace repository.
+        let dir = if format == MarketplaceFormat::Claude
+            && dir.file_name().is_some_and(|name| name == ".claude-plugin")
+        {
+            dir.parent().unwrap_or(dir)
+        } else {
+            dir
+        };
         return format!("path:{}", dir.join(path).display());
     }
     spec.to_string()
@@ -159,20 +202,22 @@ fn canonical_document(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn read_bounded(path: &Path) -> Result<String, String> {
-    let file = std::fs::File::open(path)
+    // Validate the opened handle, not just the path checked before opening.
+    let file = crate::plugins::registry::open_existing_regular_file(path, false)?
+        .ok_or_else(|| format!("Cannot read catalog at {}: file is missing", path.display()))?;
+    let mut text = String::new();
+    let mut limited = file.take(MAX_CATALOG_BYTES + 1);
+    limited
+        .read_to_string(&mut text)
         .map_err(|e| format!("Cannot read catalog at {}: {e}", path.display()))?;
-    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_CATALOG_BYTES {
+    // Check bytes actually read: the file can grow after its metadata is read.
+    if text.len() as u64 > MAX_CATALOG_BYTES {
         return Err(format!(
             "Catalog at {} exceeds the {} byte limit",
             path.display(),
             MAX_CATALOG_BYTES
         ));
     }
-    let mut text = String::new();
-    let mut limited = file.take(MAX_CATALOG_BYTES + 1);
-    limited
-        .read_to_string(&mut text)
-        .map_err(|e| format!("Cannot read catalog at {}: {e}", path.display()))?;
     Ok(text)
 }
 
@@ -209,19 +254,93 @@ mod tests {
     }
 
     #[test]
+    fn catalog_read_enforces_actual_byte_limit() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let body = " ".repeat(MAX_CATALOG_BYTES as usize);
+        std::fs::write(&path, &body).unwrap();
+        assert_eq!(read_bounded(&path).unwrap(), body);
+        let checked = canonical_document(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b" ").unwrap();
+        assert!(read_bounded(&checked).unwrap_err().contains("byte limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_read_refuses_symlink_substituted_after_path_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let other = dir.path().join("other.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::write(&other, "synthetic unrelated content").unwrap();
+        let checked = canonical_document(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("original.json")).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        assert!(read_bounded(&checked).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&other).unwrap(),
+            "synthetic unrelated content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_read_refuses_fifo_without_waiting_for_a_writer() {
+        const CHILD_PATH: &str = "CODEWHALE_TEST_CATALOG_FIFO";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            assert!(read_bounded(Path::new(&path)).is_err());
+            return;
+        }
+        // Isolate a regressed blocking open so the test can stop it safely.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, "{}").unwrap();
+        let checked = canonical_document(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("original.json")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "plugins::marketplace::document::tests::catalog_read_refuses_fifo_without_waiting_for_a_writer"])
+            .env(CHILD_PATH, checked)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("catalog read waited for a FIFO writer");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn load_refuses_symlink_documents() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.json");
         std::fs::write(&real, "{}").unwrap();
         let link = dir.path().join("link.json");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        #[cfg(not(unix))]
-        let link = real.clone();
 
         let error = load_catalog_document("test", dir.path(), link.to_str().unwrap())
             .expect_err("symlink document must be refused");
-        #[cfg(unix)]
         assert!(error.contains("symlink"), "{error}");
     }
 

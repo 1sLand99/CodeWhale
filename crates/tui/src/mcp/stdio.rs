@@ -15,6 +15,8 @@ pub(super) struct StdioTransport {
     pub(super) child: Arc<TokioMutex<Child>>,
     pub(super) stdin: ChildStdin,
     pub(super) reader: tokio::io::BufReader<ChildStdout>,
+    /// Partial frame bytes survive cancellation of the receive future.
+    pub(super) pending_line: Vec<u8>,
     /// Tail of stderr lines from the spawned MCP server. A background task
     /// drains the child's stderr into this buffer so a mid-run crash leaves
     /// some context behind instead of `Stdio::null` swallowing it.
@@ -160,8 +162,13 @@ impl StdioTransport {
             );
         }
 
-        let mut child = cmd.spawn().with_context(|| {
-            if config.reviewed_plugin.is_some() {
+        let mut child = cmd.spawn().map_err(|error| {
+            let message = if error.kind() == std::io::ErrorKind::NotFound
+                && super::is_node_command(command)
+                && launch_cwd.is_none_or(|directory| directory.is_dir())
+            {
+                format!("MCP server {server_name} could not start because Node.js was not found. Install Node.js from https://nodejs.org/ and restart Codewhale with node on PATH. Built-in Computer Use requires Node.js 20 or newer.")
+            } else if config.reviewed_plugin.is_some() {
                 format!(
                     "MCP stdio spawn failed (transport=stdio server={server_name} reviewed-plugin argv_count={} env_count={})",
                     config.args.len(),
@@ -173,7 +180,8 @@ impl StdioTransport {
                     "MCP stdio spawn failed (transport=stdio server={server_name} cmd={command:?} args={:?} env_keys={env_keys:?})",
                     config.args,
                 )
-            }
+            };
+            anyhow::Error::new(error).context(message)
         })?;
 
         let stdin = child.stdin.take().context("Failed to get MCP stdin")?;
@@ -216,6 +224,7 @@ impl StdioTransport {
             child,
             stdin,
             reader: tokio::io::BufReader::new(stdout),
+            pending_line: Vec::new(),
             stderr_tail,
             authority_cancel_watch,
             _reviewed_launch: reviewed_launch,
@@ -303,30 +312,51 @@ impl McpTransport for StdioTransport {
         Ok(())
     }
 
+    /// Non-blocking liveness probe: a reaped child means the transport is
+    /// dead even though the `Ready` flag is still set (#6187). The sync
+    /// trait contract forbids awaiting the lock, so a contended lock reads
+    /// as alive — the read side observes the death on the next call.
+    fn probe_dead(&self) -> bool {
+        match self.child.try_lock() {
+            Ok(mut child) => matches!(child.try_wait(), Ok(Some(_))),
+            Err(_) => false,
+        }
+    }
+
     async fn recv(&mut self) -> Result<Vec<u8>> {
-        let mut line_bytes: Vec<u8> = Vec::new();
         loop {
             // Bounded read: a server emitting a newline-free multi-GB "line"
             // must not OOM us (read_line is unbounded).
-            let bytes =
-                match read_line_capped(&mut self.reader, &mut line_bytes, MAX_MCP_RESPONSE_BYTES)
-                    .await
-                {
-                    Ok(b) => b,
-                    Err(err) => {
-                        if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
-                            anyhow::bail!("Stdio transport read error: {err}\n{stderr}");
-                        }
-                        return Err(err.into());
+            let bytes = match read_line_capped(
+                &mut self.reader,
+                &mut self.pending_line,
+                MAX_MCP_RESPONSE_BYTES,
+            )
+            .await
+            {
+                Ok(b) => b,
+                Err(err) => {
+                    if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
+                        anyhow::bail!("Stdio transport read error: {err}\n{stderr}");
                     }
-                };
-            if bytes == 0 {
-                if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
-                    anyhow::bail!("Stdio transport closed\n{stderr}");
+                    return Err(err.into());
                 }
-                anyhow::bail!("Stdio transport closed");
+            };
+            if bytes == 0 {
+                // Let the stderr drain task catch up before snapshotting, and
+                // name the exit status: a reviewed plugin's stderr is never
+                // retained, so the status is the only reason the operator
+                // gets when the child dies before the handshake (#5916).
+                tokio::task::yield_now().await;
+                let exit = self.child.lock().await.try_wait().ok().flatten();
+                let exit = exit.map_or_else(String::new, |status| format!(" ({status})"));
+                if let Some(stderr) = format_stderr_context(&self.stderr_tail).await {
+                    anyhow::bail!("Stdio transport closed{exit}\n{stderr}");
+                }
+                anyhow::bail!("Stdio transport closed{exit}");
             }
 
+            let line_bytes = std::mem::take(&mut self.pending_line);
             let line = String::from_utf8_lossy(&line_bytes);
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -345,14 +375,24 @@ impl McpTransport for StdioTransport {
     }
 }
 
-/// Drop fallback (#420): if `shutdown` was never called explicitly, still
-/// fire SIGTERM before tokio's `kill_on_drop` sends SIGKILL. The two
-/// signals arrive back-to-back so well-behaved servers at least see the
-/// SIGTERM first; misbehaving ones get SIGKILL'd anyway.
+/// Session changes can drop a pool without explicitly awaiting shutdown.
+/// Keep the owned child alive for the same bounded cleanup as explicit
+/// shutdown, so servers can release input and recording resources. Runtime
+/// teardown still drops the cleanup future and invokes `kill_on_drop`.
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         if let Some(watch) = self.authority_cancel_watch.take() {
             watch.abort();
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let child = Arc::clone(&self.child);
+            let reviewed_launch = self._reviewed_launch.take();
+            runtime.spawn(async move {
+                let _reviewed_launch = reviewed_launch;
+                let mut child = child.lock().await;
+                terminate_child(&mut child).await;
+            });
+            return;
         }
         if let Ok(mut child) = self.child.try_lock()
             && !child.try_wait().is_ok_and(|status| status.is_some())
@@ -362,10 +402,10 @@ impl Drop for StdioTransport {
     }
 }
 
-/// Read one newline-terminated line into `out` (cleared first), aborting if it
-/// exceeds `max` bytes without a newline. Bounds an otherwise-unbounded
-/// `read_line` so a misbehaving MCP server cannot OOM the client. Returns the
-/// number of bytes accumulated; 0 means EOF.
+/// Continue one newline-terminated line in caller-owned `out`, aborting if it
+/// exceeds `max` bytes. Cancellation retains consumed bytes; the caller clears
+/// the buffer only after receiving a complete frame. Returns the total bytes
+/// accumulated; 0 means EOF.
 async fn read_line_capped<R>(
     reader: &mut R,
     out: &mut Vec<u8>,
@@ -375,7 +415,6 @@ where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     use tokio::io::AsyncBufReadExt;
-    out.clear();
     loop {
         let (chunk, consumed, done) = {
             let available = reader.fill_buf().await?;
@@ -391,14 +430,14 @@ where
             reader.consume(consumed);
         }
         out.extend_from_slice(&chunk);
-        if done {
-            break;
-        }
         if out.len() > max {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("MCP stdio line exceeded {max} bytes without a newline"),
+                format!("MCP stdio line exceeded {max} bytes"),
             ));
+        }
+        if done {
+            break;
         }
     }
     Ok(out.len())
@@ -407,6 +446,64 @@ where
 #[cfg(test)]
 mod read_cap_tests {
     use super::read_line_capped;
+
+    #[tokio::test]
+    async fn cancelled_partial_read_preserves_next_frame() {
+        use futures_util::FutureExt;
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let prefix = br#"{"jsonrpc":"2.0","id":"1","result":"#;
+        writer.write_all(prefix).await.unwrap();
+        let mut pending = Vec::new();
+        // Poll through the consumed prefix to Pending, then drop the future.
+        assert!(
+            read_line_capped(&mut reader, &mut pending, 1024)
+                .now_or_never()
+                .is_none()
+        );
+        assert_eq!(pending, prefix);
+        writer.write_all(b"null}\n").await.unwrap();
+        read_line_capped(&mut reader, &mut pending, 1024)
+            .await
+            .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_slice(&std::mem::take(&mut pending)).unwrap();
+        assert_eq!(first["id"], "1");
+        writer
+            .write_all(b"{\"id\":\"2\",\"result\":true}\n")
+            .await
+            .unwrap();
+        read_line_capped(&mut reader, &mut pending, 1024)
+            .await
+            .unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&pending).unwrap();
+        assert_eq!(second["id"], "2");
+        assert_eq!(second["result"], true);
+    }
+
+    #[tokio::test]
+    async fn resumed_frame_still_enforces_cap_at_newline() {
+        use futures_util::FutureExt;
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut pending = Vec::new();
+        writer.write_all(b"1234").await.unwrap();
+        assert!(
+            read_line_capped(&mut reader, &mut pending, 6)
+                .now_or_never()
+                .is_none()
+        );
+        writer.write_all(b"567\n").await.unwrap();
+        assert_eq!(
+            read_line_capped(&mut reader, &mut pending, 6)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
 
     #[tokio::test]
     async fn reads_a_line_and_reports_eof() {
@@ -418,11 +515,13 @@ mod read_cap_tests {
             6
         );
         assert_eq!(out, b"hello\n");
+        out.clear();
         assert_eq!(
             read_line_capped(&mut reader, &mut out, 1024).await.unwrap(),
             6
         );
         assert_eq!(out, b"world\n");
+        out.clear();
         // EOF.
         assert_eq!(
             read_line_capped(&mut reader, &mut out, 1024).await.unwrap(),

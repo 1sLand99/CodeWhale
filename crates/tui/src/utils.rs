@@ -7,8 +7,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::models::{ContentBlock, Message};
-use anyhow::{Context, Result};
+use anyhow::Result;
+use codewhale_models::{ContentBlock, Message};
 use ignore::WalkBuilder;
 use std::io;
 
@@ -344,6 +344,41 @@ fn hard_link_count(_path: &Path) -> Option<u64> {
     None
 }
 
+/// Backoff before re-attempting a Windows atomic publication, or `None` when
+/// `error` must be surfaced to the caller.
+///
+/// Windows can briefly deny the rename that publishes a temporary file while
+/// Defender, the indexer, or a concurrent reader still holds the source or the
+/// destination without delete sharing. `MoveFileExW` then reports a sharing or
+/// lock violation that clears on its own, while a real permission failure
+/// repeats until the attempts run out.
+///
+/// The ordinary and confined Fleet writers share this classification
+/// and schedule, to tolerate brief sharing conflicts without letting
+/// either path invent a broader retry of its own. Only the rename is
+/// re-attempted: callers keep the temporary they already wrote and synced, so a
+/// retry never rewrites bytes or widens the window in which data can be lost.
+///
+/// The classification stays deliberately narrow. `ERROR_ALREADY_EXISTS` in
+/// particular is a real answer for no-clobber publication — Fleet artifact
+/// immutability depends on receiving it — so it is returned unchanged.
+#[cfg(windows)]
+pub(crate) fn windows_publish_retry_delay(
+    error: &std::io::Error,
+    attempt: usize,
+) -> Option<std::time::Duration> {
+    const MAX_PERSIST_ATTEMPTS: usize = 6;
+    // 5 ERROR_ACCESS_DENIED, 32 ERROR_SHARING_VIOLATION, 33 ERROR_LOCK_VIOLATION.
+    let transient = error.kind() == std::io::ErrorKind::PermissionDenied
+        || matches!(error.raw_os_error(), Some(5 | 32 | 33));
+    if !transient || attempt + 1 >= MAX_PERSIST_ATTEMPTS {
+        return None;
+    }
+    Some(std::time::Duration::from_millis(
+        10u64.saturating_mul(1u64 << attempt),
+    ))
+}
+
 fn write_atomic_with_permissions(
     path: &Path,
     contents: &[u8],
@@ -416,25 +451,20 @@ fn write_atomic_with_permissions(
     tmp.as_file().sync_all()?;
     #[cfg(windows)]
     {
-        // Windows can briefly deny replacement while Defender, indexing, or a
-        // concurrent reader still holds the destination without delete sharing.
         // Keep the already-synced tempfile and retry only the transient Win32
         // sharing/lock failures; permanent permission errors still surface.
-        const MAX_PERSIST_ATTEMPTS: usize = 6;
         let mut pending = tmp;
-        for attempt in 0..MAX_PERSIST_ATTEMPTS {
+        let mut attempt = 0;
+        loop {
             match pending.persist(path) {
                 Ok(_) => break,
                 Err(err) => {
-                    let retryable = err.error.kind() == std::io::ErrorKind::PermissionDenied
-                        || matches!(err.error.raw_os_error(), Some(5 | 32 | 33));
-                    if !retryable || attempt + 1 == MAX_PERSIST_ATTEMPTS {
+                    let Some(backoff) = windows_publish_retry_delay(&err.error, attempt) else {
                         return Err(err.error);
-                    }
+                    };
                     pending = err.file;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        10u64.saturating_mul(1u64 << attempt),
-                    ));
+                    std::thread::sleep(backoff);
+                    attempt += 1;
                 }
             }
         }
@@ -631,7 +661,7 @@ fn browser_open_command(url: &str) -> Result<Command> {
 ///
 /// Wraps the future in `AssertUnwindSafe` + `catch_unwind`. On panic:
 /// 1. Logs the panic with the task name and caller location via `tracing::error!`.
-/// 2. Writes a crash dump to `~/.codewhale/crashes/<timestamp>-<name>.log`.
+/// 2. Writes a crash dump to the selected profile's `crashes/` directory.
 ///
 /// The returned `JoinHandle` resolves to `()` — the panic is caught and
 /// handled internally so the parent process stays alive.
@@ -675,7 +705,7 @@ pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 
 /// Record a panic that was caught at a call site (via `catch_unwind`) rather
 /// than by a task supervisor. Logs it on the `panic` target and writes a
-/// best-effort crash dump to `~/.codewhale/crashes/`, so diagnostics land in
+/// best-effort crash dump to the selected profile's `crashes/`, so diagnostics land in
 /// the same place `spawn_supervised` writes them even when the caller recovers
 /// and keeps running.
 #[track_caller]
@@ -697,7 +727,7 @@ pub fn record_caught_panic(name: &'static str, message: &str) {
     });
 }
 
-/// Write a panic dump file to `~/.codewhale/crashes/`.
+/// Write a panic dump file to the selected profile's `crashes/` directory.
 ///
 /// Creates the directory if needed and writes a timestamped log
 /// with the task name, caller location, and panic message.
@@ -707,20 +737,9 @@ fn write_panic_dump(
     location: &std::panic::Location<'_>,
     message: &str,
 ) -> std::io::Result<()> {
-    let home = crate::config::effective_home_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found")
-    })?;
-    // Prefer .codewhale, fall back to .deepseek
-    let crash_dir = home.join(".codewhale").join("crashes");
-    if !crash_dir.exists() {
-        // Try legacy path for reading, but prefer new for writing
-        let _ = std::fs::create_dir_all(&crash_dir);
-    }
-    let crash_dir = if crash_dir.exists() {
-        crash_dir
-    } else {
-        home.join(".deepseek").join("crashes")
-    };
+    let crash_dir = codewhale_config::codewhale_home()
+        .map_err(std::io::Error::other)?
+        .join("crashes");
     write_panic_dump_to(&crash_dir, name, location, message)
 }
 
@@ -748,7 +767,7 @@ fn write_panic_dump_to(
 /// CPU-bound or blocking-I/O task must run off the async runtime and its
 /// completion is *not* awaited — for example a post-turn disk snapshot or a
 /// file-tree build polled later via a shared data structure.  If the closure
-/// panics, a crash dump is written to `~/.codewhale/crashes/` and the panic
+/// panics, a crash dump is written to the selected profile's `crashes/` and the panic
 /// is logged at ERROR level rather than being silently swallowed.
 #[track_caller]
 pub fn spawn_blocking_supervised<F>(name: &'static str, f: F) -> tokio::task::JoinHandle<()>
@@ -767,12 +786,6 @@ where
             let _ = write_panic_dump(name, location, &msg);
         }
     })
-}
-
-#[allow(dead_code)]
-pub fn ensure_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .with_context(|| format!("Failed to create directory: {}", path.display()))
 }
 
 /// Truncate a string to a maximum length, adding an ellipsis if truncated.
@@ -1565,16 +1578,15 @@ mod spawn_supervised_tests {
         );
     }
 
-    /// `write_panic_dump_to` writes a properly-formatted crash log into
-    /// the supplied directory. Tested separately from `spawn_supervised`
-    /// because env-mutation redirection of `crate::config::effective_home_dir()` doesn't
-    /// work on Windows.
+    /// The public writer path keeps the crash log in the selected profile.
     #[test]
     fn write_panic_dump_writes_named_log() {
+        let _lock = crate::test_support::lock_test_env();
         let tmp = tempfile::tempdir().expect("tempdir");
+        let _profile = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
         let crash_dir = tmp.path().join("crashes");
         let location = std::panic::Location::caller();
-        write_panic_dump_to(&crash_dir, "panic-fixture", location, "boom").expect("write dump");
+        write_panic_dump("panic-fixture", location, "boom").expect("write dump");
 
         let entries: Vec<_> = std::fs::read_dir(&crash_dir)
             .expect("crashes dir exists")

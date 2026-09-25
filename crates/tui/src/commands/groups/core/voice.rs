@@ -31,8 +31,8 @@ use regex::Regex;
 use crate::commands::CommandResult;
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::config::Config;
-use crate::localization::{MessageId, tr};
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{MessageId, tr};
 
 /// Transcription model requested from the provider's chat-completions API.
 const ASR_MODEL: &str = "mimo-v2.5-asr";
@@ -108,6 +108,12 @@ struct Recorder {
 }
 
 fn detect_recorder() -> Option<Recorder> {
+    // Operator kill-switch: a headless `serve --http` host has no business
+    // opening a microphone; disabling voice here makes `GET /v1/voice`
+    // report `available: false` and every dictate call fail closed.
+    if std::env::var_os("CODEWHALE_DISABLE_VOICE").is_some() {
+        return None;
+    }
     let candidates: &[Recorder] = if cfg!(target_os = "macos") {
         &[
             Recorder {
@@ -194,7 +200,7 @@ fn encode_wav(samples: &[i16]) -> Vec<u8> {
 // --- Recording -------------------------------------------------------------
 
 /// Maximum recording duration in seconds before auto-stopping.
-const MAX_RECORD_SECS: u64 = 10;
+pub const MAX_RECORD_SECS: u64 = 10;
 /// Minimum segment duration in seconds to consider as valid speech.
 const MIN_SEGMENT_SECS: f64 = 0.3;
 
@@ -285,6 +291,10 @@ fn record_audio() -> Option<(Vec<i16>, Duration)> {
 
 // --- Auto-send suffix ------------------------------------------------------
 
+/// Trailing phrases that mean "submit this" — the human-readable form of
+/// `SEND_SUFFIX_RE`; keep in sync with the regex when either changes.
+pub const SEND_PHRASES: &[&str] = &["send it", "发送", "發送"];
+
 /// Matches an explicit send instruction at the end of transcribed text:
 /// "send it" (any spacing/case) or 发送/發送, with trailing punctuation.
 static SEND_SUFFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -314,8 +324,10 @@ fn chat_completions_url(base_url: &str) -> String {
 async fn post_chat_completions(
     api_key: &str,
     base_url: &str,
-    body: serde_json::Value,
+    mut body: serde_json::Value,
+    openrouter_vendor: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    crate::client::apply_openrouter_vendor(&mut body, openrouter_vendor);
     let _inference = crate::client::acquire_remote_control_inference_participant().await;
     let client = crate::tls::reqwest_client();
     let resp = client
@@ -344,8 +356,16 @@ async fn transcribe(
     api_key: &str,
     base_url: &str,
     audio_samples: &[i16],
+    openrouter_vendor: Option<&str>,
 ) -> Result<String, String> {
-    transcribe_with_model(api_key, base_url, audio_samples, ASR_MODEL).await
+    transcribe_with_model(
+        api_key,
+        base_url,
+        audio_samples,
+        ASR_MODEL,
+        openrouter_vendor,
+    )
+    .await
 }
 
 async fn transcribe_with_model(
@@ -353,6 +373,7 @@ async fn transcribe_with_model(
     base_url: &str,
     audio_samples: &[i16],
     model: &str,
+    openrouter_vendor: Option<&str>,
 ) -> Result<String, String> {
     let wav = encode_wav(audio_samples);
     let data_url = format!("data:audio/wav;base64,{}", base64_encode(&wav));
@@ -377,7 +398,7 @@ async fn transcribe_with_model(
         }
     });
 
-    let data = post_chat_completions(api_key, base_url, body).await?;
+    let data = post_chat_completions(api_key, base_url, body, openrouter_vendor).await?;
     data["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.trim().to_string())
@@ -392,6 +413,7 @@ async fn process_voice_control(
     base_url: &str,
     audio_samples: &[i16],
     current_text: &str,
+    openrouter_vendor: Option<&str>,
 ) -> Result<String, String> {
     let wav = encode_wav(audio_samples);
     let data_url = format!("data:audio/wav;base64,{}", base64_encode(&wav));
@@ -419,7 +441,7 @@ async fn process_voice_control(
         "response_format": { "type": "json_object" }
     });
 
-    let data = post_chat_completions(api_key, base_url, body).await?;
+    let data = post_chat_completions(api_key, base_url, body, openrouter_vendor).await?;
     let content = data["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| "no response content".to_string())?;
@@ -467,10 +489,20 @@ fn detect_free_asr() -> &'static str {
 }
 
 /// Transcribe via local whisper.cpp (free, offline, cross-platform).
+///
+/// The whole body is synchronous — temp-file I/O plus `Command::output()`,
+/// which blocks for the entire subprocess run — so it runs on the blocking
+/// pool rather than a Tokio worker (blocking-call convention, #6149).
 async fn transcribe_local_whisper(audio_samples: &[i16]) -> Result<String, String> {
     let wav = encode_wav(audio_samples);
+    tokio::task::spawn_blocking(move || transcribe_local_whisper_blocking(&wav))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn transcribe_local_whisper_blocking(wav: &[u8]) -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("cw-voice-{}.wav", std::process::id()));
-    std::fs::write(&tmp, &wav).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, wav).map_err(|e| e.to_string())?;
     // Try each local binary until one succeeds; whisper.cpp outputs to stdout or file.
     for bin in LOCAL_WHISPER_BINS {
         let output = Command::new(bin)
@@ -511,7 +543,7 @@ async fn transcribe_local_whisper(audio_samples: &[i16]) -> Result<String, Strin
 async fn transcribe_groq(audio_samples: &[i16]) -> Result<String, String> {
     let api_key = std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set".to_string())?;
     let base_url = "https://api.groq.com/openai/v1";
-    transcribe_with_model(&api_key, base_url, audio_samples, GROQ_ASR_MODEL).await
+    transcribe_with_model(&api_key, base_url, audio_samples, GROQ_ASR_MODEL, None).await
 }
 
 /// Perform a complete record + transcribe cycle with live interim display.
@@ -546,6 +578,19 @@ fn resolve_asr_choice(_config: &Config) -> (String, String) {
     }
 }
 
+/// Status line while recording: the localized recording label, the latest
+/// interim transcript once one exists, and how to stop. The capture is awaited
+/// on the UI loop, so no key can end it — `record_audio` stops after a second
+/// of silence (or `MAX_RECORD_SECS`), and the cue says exactly that.
+fn recording_status(locale: codewhale_localization::Locale, interim: Option<&str>) -> String {
+    let label = tr(locale, MessageId::VoiceRecording);
+    let stop = tr(locale, MessageId::VoiceRecordingStopHint);
+    match interim.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!("{label} \u{2014} \u{201c}{text}\u{201d} \u{00b7} {stop}"),
+        None => format!("{label} \u{00b7} {stop}"),
+    }
+}
+
 pub async fn capture_and_transcribe(
     app: &mut App,
     config: &Config,
@@ -556,14 +601,17 @@ pub async fn capture_and_transcribe(
         return Err(tr(locale, MessageId::VoiceErrNoRecorder).to_string());
     }
     let api_key = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .map_err(|_| tr(locale, MessageId::VoiceErrNoAuth).to_string())?;
-    let base_url = config.deepseek_base_url();
+    let base_url = config.active_route_base_url();
+    let openrouter_vendor = config
+        .openrouter_vendor()
+        .map_err(|error| error.to_string())?;
 
-    // Spark-style: show "● Recording (⌥V to finish)" + live interim in composer.
+    // Show the localized recording status plus the live interim in the composer.
     let original_input = app.composer.input.clone();
     let original_cursor = app.composer.cursor_position;
-    app.status_message = Some("● Recording  (⌥V to finish)  ·  speak naturally".to_string());
+    app.status_message = Some(recording_status(locale, None));
 
     // Streaming interim: poll every 700ms and show partial transcript like Grok Build's
     // VoiceEvent::Interim → VoiceState::Recording{interim}. We re-transcribe the
@@ -621,12 +669,14 @@ pub async fn capture_and_transcribe(
             _ => {
                 // For provider ASR, reuse the same endpoint but don't block on interim if no key.
                 if let Ok(key) = config
-                    .deepseek_api_key()
+                    .active_route_api_key()
                     .map(|k: String| k)
                     .map_err(|_| String::new())
                 {
-                    let url = config.deepseek_base_url();
-                    transcribe(&key, &url, &snapshot).await.unwrap_or_default()
+                    let url = config.active_route_base_url();
+                    transcribe(&key, &url, &snapshot, openrouter_vendor.as_deref())
+                        .await
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 }
@@ -643,8 +693,7 @@ pub async fn capture_and_transcribe(
             };
             app.composer.input = display;
             app.composer.cursor_position = original_cursor;
-            // Also keep status as Spark does
-            app.status_message = Some(format!("● Listening — “{trimmed}”  (⌥V to finish)"));
+            app.status_message = Some(recording_status(locale, Some(trimmed)));
         }
         if ticks > 40 {
             break; // safety: ~28s max interim polling
@@ -665,17 +714,24 @@ pub async fn capture_and_transcribe(
     let text = match asr_kind.as_str() {
         "local-whisper" => match transcribe_local_whisper(&samples).await {
             Ok(v) => Ok(v),
-            Err(_) => transcribe(&api_key, &base_url, &samples).await,
+            Err(_) => transcribe(&api_key, &base_url, &samples, openrouter_vendor.as_deref()).await,
         },
         "groq" => match transcribe_groq(&samples).await {
             Ok(v) => Ok(v),
-            Err(_) => transcribe(&api_key, &base_url, &samples).await,
+            Err(_) => transcribe(&api_key, &base_url, &samples, openrouter_vendor.as_deref()).await,
         },
         _ => {
             if app.voice_control_enabled {
-                process_voice_control(&api_key, &base_url, &samples, &original_input).await
+                process_voice_control(
+                    &api_key,
+                    &base_url,
+                    &samples,
+                    &original_input,
+                    openrouter_vendor.as_deref(),
+                )
+                .await
             } else {
-                transcribe(&api_key, &base_url, &samples).await
+                transcribe(&api_key, &base_url, &samples, openrouter_vendor.as_deref()).await
             }
         }
     }
@@ -705,6 +761,179 @@ pub async fn capture_and_transcribe(
         return Err(tr(locale, MessageId::VoiceErrEmptySend).to_string());
     }
     Ok(VoiceCaptureOutcome::Insert(clean.to_string()))
+}
+
+// --- Headless capture (HTTP/native-client path) ----------------------------
+
+/// What a headless dictation should do with the finished transcript.
+#[derive(Debug, Clone)]
+pub enum DictateMode {
+    /// Transcribe and return the text for insertion into the composer.
+    Insert,
+    /// Transcribe, then apply the "send it" / 发送 suffix contract. The
+    /// outcome's `send` flag tells the client to submit; a bare send
+    /// instruction yields empty `text` so the client submits its own draft.
+    Send,
+    /// AI-assisted dictation that sees the client's composer text — the
+    /// `/voice-control` pipeline. Only provider ASR can see context; free
+    /// ASR kinds degrade to plain transcription with `assisted: false`.
+    Control(String),
+}
+
+/// Machine-readable failure for the headless path so HTTP clients can
+/// localize by `reason` rather than parsing message text.
+#[derive(Debug)]
+pub enum DictateError {
+    /// No supported recorder binary on this host.
+    NoRecorder,
+    /// Recording produced no usable speech segment.
+    NoSpeech,
+    /// The selected/fallback ASR needs a provider key that isn't configured.
+    NoProviderAuth,
+    /// ASR request or transcription failed.
+    Transcription(String),
+}
+
+impl DictateError {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::NoRecorder => "no_recorder",
+            Self::NoSpeech => "no_speech",
+            Self::NoProviderAuth => "no_provider_auth",
+            Self::Transcription(_) => "transcription_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for DictateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRecorder => write!(f, "no supported voice recorder on this host"),
+            Self::NoSpeech => write!(f, "no speech detected"),
+            Self::NoProviderAuth => {
+                write!(f, "provider ASR requires a configured API key")
+            }
+            Self::Transcription(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Result of one headless record→transcribe cycle.
+#[derive(Debug)]
+pub struct DictationOutcome {
+    /// Final transcript (send suffix already stripped for `Send` mode).
+    pub text: String,
+    /// `Send` mode only: the transcript ended with an explicit send phrase.
+    pub send: bool,
+    /// `Control` mode only: the composer context reached the model. False
+    /// when a free ASR kind handled the audio and never saw the context.
+    pub assisted: bool,
+    /// Which ASR backend was selected for this capture.
+    pub asr_kind: String,
+    pub asr_model: String,
+}
+
+/// Detected recorder binary name, if any (`"sox"`, `"arecord"`, `"rec"`).
+pub fn recorder_command() -> Option<&'static str> {
+    detect_recorder().map(|r| r.cmd)
+}
+
+/// Resolved ASR selection (`kind`, `model`) for capability reporting.
+pub fn asr_choice(config: &Config) -> (String, String) {
+    resolve_asr_choice(config)
+}
+
+/// One record→transcribe cycle with no UI surface: the HTTP/native-client
+/// equivalent of [`capture_and_transcribe`]. Recording runs on a blocking
+/// thread; transcription follows the same ASR dispatch as the TUI —
+/// explicit `CODEWHALE_ASR_MODEL` > local whisper > Groq > provider —
+/// but resolves the provider key lazily so free ASR kinds work without
+/// provider auth.
+pub async fn dictate_once(
+    config: &Config,
+    mode: DictateMode,
+) -> Result<DictationOutcome, DictateError> {
+    if !is_available() {
+        return Err(DictateError::NoRecorder);
+    }
+    let (samples, _duration) = tokio::task::spawn_blocking(record_audio)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(DictateError::NoSpeech)?;
+
+    let (asr_kind, asr_model) = resolve_asr_choice(config);
+    let base_url = config.active_route_base_url();
+    let openrouter_vendor = config
+        .openrouter_vendor()
+        .map_err(|e| DictateError::Transcription(e.to_string()))?;
+    let provider_key = || {
+        config
+            .active_route_api_key()
+            .map_err(|_| DictateError::NoProviderAuth)
+    };
+
+    let mut assisted = false;
+    let text = match asr_kind.as_str() {
+        "local-whisper" => match transcribe_local_whisper(&samples).await {
+            Ok(v) => v,
+            Err(_) => transcribe(
+                &provider_key()?,
+                &base_url,
+                &samples,
+                openrouter_vendor.as_deref(),
+            )
+            .await
+            .map_err(DictateError::Transcription)?,
+        },
+        "groq" => match transcribe_groq(&samples).await {
+            Ok(v) => v,
+            Err(_) => transcribe(
+                &provider_key()?,
+                &base_url,
+                &samples,
+                openrouter_vendor.as_deref(),
+            )
+            .await
+            .map_err(DictateError::Transcription)?,
+        },
+        _ => {
+            let api_key = provider_key()?;
+            match &mode {
+                DictateMode::Control(composer) => {
+                    assisted = true;
+                    process_voice_control(
+                        &api_key,
+                        &base_url,
+                        &samples,
+                        composer,
+                        openrouter_vendor.as_deref(),
+                    )
+                    .await
+                    .map_err(DictateError::Transcription)?
+                }
+                _ => transcribe(&api_key, &base_url, &samples, openrouter_vendor.as_deref())
+                    .await
+                    .map_err(DictateError::Transcription)?,
+            }
+        }
+    };
+
+    let clean = text.trim().to_string();
+    let (text, send) = match mode {
+        DictateMode::Send => {
+            let (remainder, wants_send) = split_send_suffix(&clean);
+            (remainder.to_string(), wants_send)
+        }
+        _ => (clean, false),
+    };
+    Ok(DictationOutcome {
+        text,
+        send,
+        assisted,
+        asr_kind,
+        asr_model,
+    })
 }
 
 // --- Command handlers ------------------------------------------------------
@@ -757,6 +986,84 @@ pub fn voice_control(app: &mut App) -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_status_is_localized_and_keeps_the_interim() {
+        use codewhale_localization::Locale;
+
+        for locale in [Locale::En, Locale::De, Locale::Ja] {
+            let label = tr(locale, MessageId::VoiceRecording).to_string();
+            let stop = tr(locale, MessageId::VoiceRecordingStopHint).to_string();
+            let idle = format!("{label} \u{00b7} {stop}");
+            assert_eq!(recording_status(locale, None), idle);
+            assert_eq!(recording_status(locale, Some("   ")), idle);
+
+            let with_interim = recording_status(locale, Some(" hello there "));
+            assert!(with_interim.starts_with(&label), "{with_interim}");
+            assert!(with_interim.contains("\u{201c}hello there\u{201d}"));
+            assert!(
+                with_interim.ends_with(&stop),
+                "the stop cue survives the interim: {with_interim}"
+            );
+            assert!(!with_interim.contains("\u{2325}V"), "no hardcoded key hint");
+            if locale != Locale::En {
+                assert!(!with_interim.contains("to finish"), "no English hint");
+            }
+        }
+        assert_ne!(
+            recording_status(Locale::En, None),
+            recording_status(Locale::De, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_requests_preserve_openrouter_vendor_pin() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "content": "{\"text\":\"hello\"}" } }]
+            })))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let base_url = format!("{}/v1", server.uri());
+        transcribe(
+            "fixture-key",
+            &base_url,
+            &[0; 16],
+            Some("chutes/region-fixture"),
+        )
+        .await
+        .unwrap();
+        process_voice_control(
+            "fixture-key",
+            &base_url,
+            &[0; 16],
+            "existing text",
+            Some("chutes/region-fixture"),
+        )
+        .await
+        .unwrap();
+        transcribe_with_model("fixture-key", &base_url, &[0; 16], GROQ_ASR_MODEL, None)
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[..2] {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(
+                body["provider"],
+                serde_json::json!({"order": ["chutes/region-fixture"], "allow_fallbacks": false})
+            );
+        }
+        let independent: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert!(independent.get("provider").is_none());
+    }
 
     #[test]
     fn wav_encoding_produces_valid_header() {

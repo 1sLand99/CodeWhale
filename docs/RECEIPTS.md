@@ -49,6 +49,10 @@ The current receipt includes:
   review output is structured.
 - `unresolved_risk`: a conservative summary derived from unresolved findings.
 - `review_content_sha256`: SHA-256 of the review text.
+- `coverage` (PR receipts): the exact base/head and complete-diff
+  fingerprint, ordered per-pass diff fingerprints/file counts, and one
+  response-content hash for every completed pass. Manifest-backed PR receipts
+  use schema version 2 so older readers reject rather than misinterpret them.
 
 The receipt deliberately does not include the raw diff body. Re-run
 `codewhale review --write-receipt` after changing the diff; reviewers should
@@ -59,6 +63,17 @@ a model; it compares the current diff fingerprint with a supplied receipt
 (`--receipt-path <path>`) or the latest matching local receipt. The check exits
 nonzero when the diff no longer matches, the receipt schema is unsupported, the
 receipt has unresolved risk, or an attached check did not pass.
+
+By default receipt generation rejects a PR that needs more than one
+`--max-chars` pass before calling a model. An explicit `--max-passes N` admits
+at most N complete ordered PR passes; any missing, malformed, reordered or
+stale pass prevents a receipt. Receipt checking is provider-free and validates
+the exact stored manifest without authorizing another run. Neither mode
+fingerprints a truncated prefix. A receipt for
+`review --base <base-sha> --path <path>` covers only that selected path at the
+checked-out revision; validate it with the same base, path, and input limit.
+It does not cover the rest of a pull request or prove that separately reviewed
+changes work together.
 
 ## Current Data Sources
 

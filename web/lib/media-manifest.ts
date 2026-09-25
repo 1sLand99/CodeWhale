@@ -28,6 +28,16 @@
 
 import type { LocalizedText } from "./content/vocabulary";
 
+/** Captured build identity is independent of the current source/release. */
+export const TERMINAL_SCREENSHOT = {
+  src: "/codewhale-tui-d7a9a1c.png",
+  width: 1132,
+  height: 632,
+  version: "0.10.0",
+  sourceCommit: "d7a9a1c8c15635a84099d5fc2ee965146cf197c7",
+  sha256: "73e56158d6ec6c04933ce787c23c07322ce4d509b54050b54b12d181b09314b8",
+} as const;
+
 /** Published-asset budgets; see the module contract for what tests inspect. */
 export const MEDIA_BUDGETS = {
   poster: { width: 1280, height: 720, maxBytes: 500_000 },

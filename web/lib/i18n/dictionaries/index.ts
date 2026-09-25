@@ -15,6 +15,7 @@
 import type {
   ChangelogDict,
   ChromeDict,
+  ComputerUseDict,
   DocsAuthDict,
   DocsComputersDict,
   DocsConfigurationDict,
@@ -31,7 +32,11 @@ import type {
   DocsTroubleshootingDict,
   DocsTrustDict,
   DocsWebDict,
+  DocsWorkDict,
   HomeDict,
+  DigestDict,
+  LegalPrivacyDict,
+  LegalTermsDict,
   StatesDict,
 } from "./types";
 import { chrome as enChrome } from "./en/chrome";
@@ -62,16 +67,42 @@ import { docsSubagents as enDocsSubagents } from "./en/docs-subagents";
 import { docsSubagents as zhDocsSubagents } from "./zh/docs-subagents";
 import { docsWeb as enDocsWeb } from "./en/docs-web";
 import { docsWeb as zhDocsWeb } from "./zh/docs-web";
+import { docsWork as enDocsWork } from "./en/docs-work";
+import { docsWork as zhDocsWork } from "./zh/docs-work";
 import { docsComputers as enDocsComputers } from "./en/docs-computers";
 import { docsComputers as zhDocsComputers } from "./zh/docs-computers";
 import { docsAuth as enDocsAuth } from "./en/docs-auth";
 import { docsAuth as zhDocsAuth } from "./zh/docs-auth";
 import { docsTrust as enDocsTrust } from "./en/docs-trust";
 import { docsTrust as zhDocsTrust } from "./zh/docs-trust";
+import { computerUse as enComputerUse } from "./en/computer-use";
+import { computerUse as zhComputerUse } from "./zh/computer-use";
+import { computerUse as jaComputerUse } from "./ja/computer-use";
+import { computerUse as viComputerUse } from "./vi/computer-use";
+import { computerUse as koComputerUse } from "./ko/computer-use";
+import { computerUse as ruComputerUse } from "./ru/computer-use";
+import { computerUse as ukComputerUse } from "./uk/computer-use";
+import { computerUse as esComputerUse } from "./es/computer-use";
+import { computerUse as frComputerUse } from "./fr/computer-use";
+import { computerUse as deComputerUse } from "./de/computer-use";
+import { computerUse as caComputerUse } from "./ca/computer-use";
+import { computerUse as hiComputerUse } from "./hi/computer-use";
+import { computerUse as trComputerUse } from "./tr/computer-use";
+import { computerUse as itComputerUse } from "./it/computer-use";
+import { computerUse as plComputerUse } from "./pl/computer-use";
+import { computerUse as arComputerUse } from "./ar/computer-use";
+import { computerUse as ptBrComputerUse } from "./pt-BR/computer-use";
+import { computerUse as idComputerUse } from "./id/computer-use";
 import { states as enStates } from "./en/states";
 import { states as zhStates } from "./zh/states";
 import { changelog as enChangelog } from "./en/changelog";
 import { changelog as zhChangelog } from "./zh/changelog";
+import { legalTerms as enLegalTerms } from "./en/legal-terms";
+import { legalTerms as zhLegalTerms } from "./zh/legal-terms";
+import { legalPrivacy as enLegalPrivacy } from "./en/legal-privacy";
+import { legalPrivacy as zhLegalPrivacy } from "./zh/legal-privacy";
+import { digest as enDigest } from "./en/digest";
+import { digest as zhDigest } from "./zh/digest";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -225,6 +256,10 @@ const DOCS_WEB: Record<string, DocsWebDict> = {
   zh: zhDocsWeb,
 };
 
+const DOCS_WORK: Record<string, DocsWorkDict> = {
+  zh: zhDocsWork,
+};
+
 const DOCS_COMPUTERS: Record<string, DocsComputersDict> = {
   zh: zhDocsComputers,
 };
@@ -233,14 +268,35 @@ const DOCS_AUTH: Record<string, DocsAuthDict> = {
   zh: zhDocsAuth,
 };
 
+const COMPUTER_USE: Record<string, ComputerUseDict> = {
+  zh: zhComputerUse,
+  ja: jaComputerUse,
+  vi: viComputerUse,
+  ko: koComputerUse,
+  ru: ruComputerUse,
+  uk: ukComputerUse,
+  es: esComputerUse,
+  fr: frComputerUse,
+  de: deComputerUse,
+  ca: caComputerUse,
+  hi: hiComputerUse,
+  tr: trComputerUse,
+  it: itComputerUse,
+  pl: plComputerUse,
+  ar: arComputerUse,
+  "pt-BR": ptBrComputerUse,
+  id: idComputerUse,
+};
+
 const DOCS_TRUST: Record<string, DocsTrustDict> = {
   zh: zhDocsTrust,
 };
 
 /**
- * Shared surface states and the changelog page follow the same optional
- * per-locale rule as the docs page dictionaries: English is the reference,
- * every other locale falls back to it at lookup time.
+ * Shared surface states, the changelog page, the two legal pages and the
+ * digest page follow the same optional per-locale rule as the docs page
+ * dictionaries: English is the reference, every other locale falls back to it
+ * at lookup time.
  */
 const STATES: Record<string, StatesDict> = {
   zh: zhStates,
@@ -248,6 +304,18 @@ const STATES: Record<string, StatesDict> = {
 
 const CHANGELOG: Record<string, ChangelogDict> = {
   zh: zhChangelog,
+};
+
+const LEGAL_TERMS: Record<string, LegalTermsDict> = {
+  zh: zhLegalTerms,
+};
+
+const LEGAL_PRIVACY: Record<string, LegalPrivacyDict> = {
+  zh: zhLegalPrivacy,
+};
+
+const DIGEST: Record<string, DigestDict> = {
+  zh: zhDigest,
 };
 
 export function getChrome(locale: string): ChromeDict {
@@ -310,6 +378,10 @@ export function getDocsWeb(locale: string): DocsWebDict {
   return DOCS_WEB[locale] ?? enDocsWeb;
 }
 
+export function getDocsWork(locale: string): DocsWorkDict {
+  return DOCS_WORK[locale] ?? enDocsWork;
+}
+
 export function getDocsComputers(locale: string): DocsComputersDict {
   return DOCS_COMPUTERS[locale] ?? enDocsComputers;
 }
@@ -322,12 +394,28 @@ export function getDocsTrust(locale: string): DocsTrustDict {
   return DOCS_TRUST[locale] ?? enDocsTrust;
 }
 
+export function getComputerUse(locale: string): ComputerUseDict {
+  return COMPUTER_USE[locale] ?? enComputerUse;
+}
+
 export function getStates(locale: string): StatesDict {
   return STATES[locale] ?? enStates;
 }
 
 export function getChangelog(locale: string): ChangelogDict {
   return CHANGELOG[locale] ?? enChangelog;
+}
+
+export function getLegalTerms(locale: string): LegalTermsDict {
+  return LEGAL_TERMS[locale] ?? enLegalTerms;
+}
+
+export function getLegalPrivacy(locale: string): LegalPrivacyDict {
+  return LEGAL_PRIVACY[locale] ?? enLegalPrivacy;
+}
+
+export function getDigest(locale: string): DigestDict {
+  return DIGEST[locale] ?? enDigest;
 }
 
 /**
@@ -338,7 +426,12 @@ export function getChangelog(locale: string): ChangelogDict {
  * stay locale-agnostic.
  */
 export function pickText(pair: { en: string; zh: string }, locale: string): string {
-  return locale === "zh" ? pair.zh : pair.en;
+  return pair[pickTextLocale(locale)];
+}
+
+/** The actual language selected by the legacy two-language content bridge. */
+export function pickTextLocale(locale: string): "en" | "zh" {
+  return locale === "zh" ? "zh" : "en";
 }
 
 /** Reference dictionaries (parity baseline for the locale checks). */
@@ -357,11 +450,16 @@ export const EN_DOCS_RUNTIME_API = enDocsRuntimeApi;
 export const EN_DOCS_SANDBOX = enDocsSandbox;
 export const EN_DOCS_SUBAGENTS = enDocsSubagents;
 export const EN_DOCS_WEB = enDocsWeb;
+export const EN_DOCS_WORK = enDocsWork;
 export const EN_DOCS_COMPUTERS = enDocsComputers;
 export const EN_DOCS_AUTH = enDocsAuth;
 export const EN_DOCS_TRUST = enDocsTrust;
+export const EN_COMPUTER_USE = enComputerUse;
 export const EN_STATES = enStates;
 export const EN_CHANGELOG = enChangelog;
+export const EN_LEGAL_TERMS = enLegalTerms;
+export const EN_LEGAL_PRIVACY = enLegalPrivacy;
+export const EN_DIGEST = enDigest;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */

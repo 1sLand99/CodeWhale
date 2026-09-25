@@ -1,6 +1,6 @@
 //! Bounded provider-native/configured web search with explicit fallback receipts.
 //! Adapters include Firecrawl, Tavily, Bocha, Metaso, SearXNG, Baidu,
-//! Volcengine, and Sofya; browsing remains a separate `web.run` workflow.
+//! Volcengine, Sofya, and Serply; browsing remains a separate `web.run` workflow.
 //! `[search]` example:
 //!   provider = "firecrawl"  # keyless on Firecrawl Cloud; optional api_key
 //!   base_url = `"https://search.example/"`  # DDG-compatible URL or SearXNG instance
@@ -8,7 +8,7 @@
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_u64,
 };
-use crate::config::SearchProvider;
+use crate::config::{SearchProvider, tavily_env_key, tavily_key_from};
 use crate::network_policy::{Decision, NetworkPolicyDecider};
 use async_trait::async_trait;
 use regex::Regex;
@@ -40,10 +40,60 @@ const METASO_ENDPOINT: &str = "https://metaso.cn/api/v1";
 const BAIDU_ENDPOINT: &str = "https://qianfan.baidubce.com/v2/ai_search/web_search";
 const VOLCENGINE_RESPONSES_ENDPOINT: &str = "https://ark.cn-beijing.volces.com/api/v3/responses";
 const SOFYA_ENDPOINT: &str = "https://sofya.co/v1/search";
+const SERPLY_ENDPOINT: &str = "https://api.serply.io/v1/search";
 const ERROR_BODY_PREVIEW_BYTES: usize = 512;
 const PROVIDER_NATIVE_MIN_TIMEOUT_MS: u64 = 45_000;
 const KIMI_K3_FORMULA_MIN_TIMEOUT_MS: u64 = 180_000;
 const VOLCENGINE_MIN_TIMEOUT_MS: u64 = 90_000;
+
+/// The recency and locale knobs an adapter forwards to its backend.
+///
+/// Recency is rounded *up* to the backend's nearest window (day, week, month,
+/// year), so `recency = 10` days asks for the last month: results are never
+/// cut tighter than requested, but may be older than asked. Locale is a BCP 47
+/// style tag (`en`, `en-US`, `de_DE`); each backend takes the part it accepts.
+#[derive(Debug, Clone, Copy, Default)]
+struct QueryFilters<'a> {
+    recency: Option<Recency>,
+    locale: Option<&'a str>,
+}
+
+impl<'a> QueryFilters<'a> {
+    fn of(query: &'a SearchQuery) -> Self {
+        Self {
+            recency: query.recency,
+            locale: query
+                .locale
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        }
+    }
+
+    /// `day` / `week` / `month` / `year`, rounded up from the request.
+    fn window(self) -> Option<&'static str> {
+        self.recency.map(|recency| match recency.days() {
+            0..=1 => "day",
+            2..=7 => "week",
+            8..=31 => "month",
+            _ => "year",
+        })
+    }
+
+    /// Lowercase language subtag (`en` from `en-US`).
+    fn language(self) -> Option<String> {
+        let language = self.locale?.split(['-', '_']).next()?;
+        (matches!(language.len(), 2 | 3) && language.chars().all(|ch| ch.is_ascii_alphabetic()))
+            .then(|| language.to_ascii_lowercase())
+    }
+
+    /// Two-letter region subtag, uppercase (`US` from `en-US`).
+    fn region(self) -> Option<String> {
+        let region = self.locale?.split(['-', '_']).nth(1)?;
+        (region.len() == 2 && region.chars().all(|ch| ch.is_ascii_alphabetic()))
+            .then(|| region.to_ascii_uppercase())
+    }
+}
 
 /// Credential-free endpoint selected for an explicit doctor reachability
 /// probe. The ordinary search request builders remain the source of truth for
@@ -103,6 +153,7 @@ pub(crate) fn search_probe_target(
         SearchProvider::Baidu => (BAIDU_ENDPOINT, false),
         SearchProvider::Volcengine => (VOLCENGINE_RESPONSES_ENDPOINT, false),
         SearchProvider::Sofya => (SOFYA_ENDPOINT, false),
+        SearchProvider::Serply => (SERPLY_ENDPOINT, false),
     };
 
     let mut url = reqwest::Url::parse(raw).map_err(|_| SearchProbeTargetError::Invalid)?;
@@ -178,7 +229,7 @@ impl ToolSpec for WebSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search the web and return ranked results with URLs, snippets, session-scoped ref_ids, and an execution receipt. Open a result ref_id with `web.run` when the short summary is not enough; fetch only the few sources needed. When the exact active route reports a documented first-party server-side search tool, it is tried first; otherwise keyless Firecrawl is the default. Configured API backends visibly degrade through DuckDuckGo then Bing when unavailable, and every hop is recorded. Configuration and network-policy errors fail closed. Explicit Bing and private DuckDuckGo-compatible routes do not cross providers. Set `[search] provider = \"firecrawl\" | \"bing\" | \"tavily\" | \"bocha\" | \"metaso\" | \"searxng\" | \"baidu\" | \"volcengine\" | \"sofya\"` in config.toml. Firecrawl Cloud works keyless with a bounded quota. For a known canonical URL, prefer `fetch_url` directly."
+        "Search the web and return ranked results with URLs, snippets, session-scoped ref_ids, and an execution receipt. Open a result ref_id with `web.run` when the short summary is not enough; fetch only the few sources needed. When the exact active route reports a documented first-party server-side search tool, it is tried first; otherwise keyless Firecrawl is the default. Configured API backends visibly degrade through DuckDuckGo then Bing when unavailable, and every hop is recorded. Configuration and network-policy errors fail closed. Explicit Bing and private DuckDuckGo-compatible routes do not cross providers. Set `[search] provider = \"firecrawl\" | \"bing\" | \"tavily\" | \"bocha\" | \"metaso\" | \"searxng\" | \"baidu\" | \"volcengine\" | \"sofya\" | \"serply\"` in config.toml. Firecrawl Cloud works keyless with a bounded quota. For a known canonical URL, prefer `fetch_url` directly."
     }
 
     fn input_schema(&self) -> Value {
@@ -246,7 +297,9 @@ impl ToolSpec for WebSearchTool {
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
+        // Read-only HTTP can still disclose local data through a URL or query.
+        // Host allowlisting controls reachability, not approval of this payload.
+        ApprovalRequirement::Required
     }
 
     fn supports_parallel(&self) -> bool {
@@ -266,6 +319,7 @@ impl WebSearchTool {
     async fn run_firecrawl_search(
         &self,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         context: &ToolContext,
@@ -274,6 +328,7 @@ impl WebSearchTool {
         self.run_firecrawl_search_at(
             FIRECRAWL_ENDPOINT,
             query,
+            filters,
             max_results,
             timeout_ms,
             context.search_api_key.as_deref().or(env_key.as_deref()),
@@ -285,6 +340,7 @@ impl WebSearchTool {
         &self,
         endpoint: &str,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         api_key: Option<&str>,
@@ -297,11 +353,17 @@ impl WebSearchTool {
                 ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
             })?;
         let api_key = api_key.map(str::trim).filter(|key| !key.is_empty());
-        let payload = json!({
+        let mut payload = json!({
             "query": query,
             "limit": max_results,
             "sources": [{"type": "web"}],
         });
+        if let Some(window) = filters.window() {
+            payload["tbs"] = json!(format!("qdr:{}", &window[..1]));
+        }
+        if let Some(region) = filters.region() {
+            payload["country"] = json!(region);
+        }
         let mut request = client.post(endpoint).json(&payload);
         if let Some(key) = api_key {
             request = request.bearer_auth(key);
@@ -348,11 +410,12 @@ impl WebSearchTool {
     async fn run_searxng_search(
         &self,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         context: &ToolContext,
     ) -> Result<(Vec<WebSearchEntry>, String), ToolError> {
-        let (url, host) = searxng_search_url(context.search_base_url.as_deref(), query)?;
+        let (url, host) = searxng_search_url(context.search_base_url.as_deref(), query, filters)?;
         check_policy(context.network_policy.as_ref(), &host)?;
 
         let client = crate::tls::reqwest_client_builder()
@@ -404,16 +467,28 @@ impl WebSearchTool {
     async fn run_tavily_search(
         &self,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         context: &ToolContext,
     ) -> Result<Vec<WebSearchEntry>, ToolError> {
-        let api_key = context
-            .search_api_key
-            .as_deref()
+        let api_key = tavily_key_from(context.search_api_key.as_deref())
+            .or_else(|| {
+                // An explicit `provider = "tavily"` still accepts any
+                // non-empty generic key, so a non-`tvly-` pin keeps working.
+                // Reaching this hop at all means Tavily was the resolved
+                // provider (pinned, or selected by a `tvly-` signal), so the
+                // generic fallback is never a Firecrawl/sentinel key.
+                context
+                    .search_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
             .ok_or_else(|| {
                 ToolError::execution_failed(
-                    "Tavily search requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml.",
+                    "Tavily search requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml or the `TAVILY_API_KEY` env var.",
                 )
             })?;
 
@@ -424,12 +499,7 @@ impl WebSearchTool {
                 ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
             })?;
 
-        let payload = json!({
-            "api_key": api_key, // noqa: api-key-in-body
-            "query": query,
-            "search_depth": "basic",
-            "max_results": max_results,
-        });
+        let payload = tavily_search_payload(&api_key, query, filters, max_results);
 
         let resp = client
             .post(TAVILY_ENDPOINT)
@@ -521,6 +591,64 @@ impl WebSearchTool {
         })?;
 
         Ok(parse_sofya_results(&parsed, max_results))
+    }
+
+    /// Search Serply (<https://serply.io>); it returns Google organic results and
+    /// accepts `SERPLY_API_KEY`.
+    async fn run_serply_search(
+        &self,
+        query: &str,
+        filters: QueryFilters<'_>,
+        max_results: usize,
+        timeout_ms: u64,
+        context: &ToolContext,
+    ) -> Result<Vec<WebSearchEntry>, ToolError> {
+        let env_key = std::env::var("SERPLY_API_KEY").ok();
+        let api_key = context
+            .search_api_key
+            .as_deref()
+            .or(env_key.as_deref())
+            .ok_or_else(|| {
+                ToolError::invalid_input(
+                    "Serply search requires an API key. Set `[search] api_key` in config.toml or the SERPLY_API_KEY env var.",
+                )
+            })?;
+
+        let client = crate::tls::reqwest_client_builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|e| {
+                ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
+            })?;
+
+        let resp = client
+            .get(serply_search_url(query, filters, max_results)?)
+            .header("X-Api-Key", api_key)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| {
+                ToolError::execution_failed(format!("Serply search request failed: {e}"))
+            })?;
+
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| {
+            ToolError::execution_failed(format!("Failed to read Serply response: {e}"))
+        })?;
+
+        if !status.is_success() {
+            let truncated = truncate_error_body(&body);
+            return Err(ToolError::execution_failed(format!(
+                "Serply search failed: HTTP {}: {truncated}",
+                status.as_u16()
+            )));
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to parse Serply response: {e}"))
+        })?;
+
+        Ok(parse_serply_results(&parsed, max_results))
     }
 
     /// Search via Bocha AI Search API (<https://bochaai.com>).
@@ -1019,8 +1147,8 @@ fn preflight_search_provider(context: &ToolContext) -> Result<(), ToolError> {
     let not_configured = |message: &str| Err(ToolError::invalid_input(message));
 
     match context.search_provider {
-        SearchProvider::Tavily if !configured_key => not_configured(
-            "Tavily search is not configured: it requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml.",
+        SearchProvider::Tavily if !configured_key && tavily_env_key().is_none() => not_configured(
+            "Tavily search is not configured: it requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml or the `TAVILY_API_KEY` env var.",
         ),
         SearchProvider::Bocha if !configured_key => not_configured(
             "Bocha search is not configured: it requires an API key. Set `[search] api_key = \"sk-...\"` in config.toml.",
@@ -1045,6 +1173,9 @@ fn preflight_search_provider(context: &ToolContext) -> Result<(), ToolError> {
         }
         SearchProvider::Sofya if !configured_key && !env_key("SOFYA_API_KEY") => not_configured(
             "Sofya search is not configured: it requires an API key. Set `[search] api_key = \"ay_live_...\"` in config.toml or the SOFYA_API_KEY env var.",
+        ),
+        SearchProvider::Serply if !configured_key && !env_key("SERPLY_API_KEY") => not_configured(
+            "Serply search is not configured: it requires an API key. Set `[search] api_key` in config.toml or the SERPLY_API_KEY env var.",
         ),
         SearchProvider::Searxng
             if configured_search_base_url(context.search_base_url.as_deref()).is_none() =>
@@ -1094,6 +1225,7 @@ const fn default_backend_host(backend: BackendId) -> Option<&'static str> {
         BackendId::Baidu => Some("qianfan.baidubce.com"),
         BackendId::Volcengine => Some("ark.cn-beijing.volces.com"),
         BackendId::Sofya => Some("sofya.co"),
+        BackendId::Serply => Some("api.serply.io"),
     }
 }
 
@@ -1111,7 +1243,10 @@ fn finalize_search_response(
         ..HonoredQueryCapabilities::default()
     };
 
-    if query.recency.is_some() {
+    let adapter_ignored = |raw: &BackendSearch, knob: QueryKnob| {
+        raw.degraded.contains(&DegradedReason::KnobIgnored { knob })
+    };
+    if query.recency.is_some() && !adapter_ignored(&raw, QueryKnob::Recency) {
         if matches!(
             capabilities.recency,
             super::web::contract::CapabilityState::Supported
@@ -1130,7 +1265,7 @@ fn finalize_search_response(
         apply_domain_constraints(&query, capabilities, &mut raw);
         honored.domains = true;
     }
-    if query.locale.is_some() {
+    if query.locale.is_some() && !adapter_ignored(&raw, QueryKnob::Locale) {
         if matches!(
             capabilities.locale,
             super::web::contract::CapabilityState::Supported
@@ -1226,6 +1361,7 @@ pub(crate) async fn run_backend_search(
     )
     .unwrap_or(u64::MAX);
     let max_results = usize::from(query.max_results);
+    let filters = QueryFilters::of(query);
     let tool = WebSearchTool;
     let simple = |backend, entries: Vec<WebSearchEntry>| BackendSearch {
         backend,
@@ -1240,14 +1376,22 @@ pub(crate) async fn run_backend_search(
         SearchProvider::Firecrawl => {
             check_policy(context.network_policy.as_ref(), "api.firecrawl.dev")?;
             let (results, note) = tool
-                .run_firecrawl_search(&query.query, max_results, timeout_ms, context)
+                .run_firecrawl_search(&query.query, filters, max_results, timeout_ms, context)
                 .await?;
+            // Firecrawl targets a country, not a language: a bare `en` has
+            // nothing to send and is reported as ignored.
+            let degraded = (filters.locale.is_some() && filters.region().is_none())
+                .then_some(DegradedReason::KnobIgnored {
+                    knob: QueryKnob::Locale,
+                })
+                .into_iter()
+                .collect();
             Ok(BackendSearch {
                 backend: BackendId::Firecrawl,
                 source: "firecrawl".to_string(),
                 backend_detail: Some("api.firecrawl.dev".to_string()),
                 results: normalize_entries(results),
-                degraded: Vec::new(),
+                degraded,
                 note: Some(note),
             })
         }
@@ -1255,7 +1399,7 @@ pub(crate) async fn run_backend_search(
             check_policy(context.network_policy.as_ref(), "api.tavily.com")?;
             Ok(simple(
                 BackendId::Tavily,
-                tool.run_tavily_search(&query.query, max_results, timeout_ms, context)
+                tool.run_tavily_search(&query.query, filters, max_results, timeout_ms, context)
                     .await?,
             ))
         }
@@ -1277,7 +1421,7 @@ pub(crate) async fn run_backend_search(
         }
         SearchProvider::Searxng => {
             let (entries, host) = tool
-                .run_searxng_search(&query.query, max_results, timeout_ms, context)
+                .run_searxng_search(&query.query, filters, max_results, timeout_ms, context)
                 .await?;
             let note = format!("Backend: searxng at {host}");
             Ok(BackendSearch {
@@ -1312,6 +1456,14 @@ pub(crate) async fn run_backend_search(
             Ok(simple(
                 BackendId::Sofya,
                 tool.run_sofya_search(&query.query, max_results, timeout_ms, context)
+                    .await?,
+            ))
+        }
+        SearchProvider::Serply => {
+            check_policy(context.network_policy.as_ref(), "api.serply.io")?;
+            Ok(simple(
+                BackendId::Serply,
+                tool.run_serply_search(&query.query, filters, max_results, timeout_ms, context)
                     .await?,
             ))
         }
@@ -1721,8 +1873,34 @@ fn parse_baidu_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry
         .collect()
 }
 
+/// Read a SearXNG result `score`.
+///
+/// SearXNG emits a float, but instances and versions vary: a JSON integer, a
+/// numeric string, or no `score` at all are all tolerated. Unusable or
+/// non-finite values (`"not-a-number"`, `"NaN"`, `"inf"`, missing) read as
+/// `0.0`, so such rows keep their input order behind scored rows instead of
+/// being dropped or sorted by NaN.
+fn searxng_score(item: &Value) -> f64 {
+    let raw = item.get("score");
+    let n = raw
+        .and_then(Value::as_f64)
+        .or_else(|| raw.and_then(Value::as_i64).map(|i| i as f64))
+        .or_else(|| {
+            raw.and_then(Value::as_str)
+                .and_then(|s| s.trim().parse().ok())
+        })
+        .unwrap_or(0.0);
+    if n.is_finite() { n } else { 0.0 }
+}
+
+/// Normalize a SearXNG JSON response into the engine-agnostic result shape.
+///
+/// Rows without a non-empty `title` or `url` are skipped. Everything else is
+/// ordered by descending `score` with a stable sort (equal scores keep the
+/// instance's order) and only then capped, so a strong late row is not lost to
+/// an earlier `take` over the raw instance order.
 fn parse_searxng_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry> {
-    parsed
+    let mut scored: Vec<(f64, WebSearchEntry)> = parsed
         .get("results")
         .and_then(|v| v.as_array())
         .into_iter()
@@ -1734,14 +1912,21 @@ fn parse_searxng_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEnt
                 return None;
             }
             let snippet = first_non_empty_string(item, &["content", "snippet"]);
-            Some(WebSearchEntry {
-                title: title.to_string(),
-                url: url.to_string(),
-                snippet,
-            })
+            Some((
+                searxng_score(item),
+                WebSearchEntry {
+                    title: title.to_string(),
+                    url: url.to_string(),
+                    snippet,
+                },
+            ))
         })
-        .take(max_results)
-        .collect()
+        .collect();
+
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.truncate(max_results);
+
+    scored.into_iter().map(|(_, entry)| entry).collect()
 }
 
 fn baidu_error_message(parsed: &Value) -> Option<String> {
@@ -1775,6 +1960,72 @@ fn parse_sofya_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry
             let title = item.get("title")?.as_str()?.to_string();
             let url = item.get("url")?.as_str()?.to_string();
             let snippet = first_non_empty_string(item, &["content", "description"]);
+            Some(WebSearchEntry {
+                title,
+                url,
+                snippet,
+            })
+        })
+        .take(max_results)
+        .collect()
+}
+
+/// Build the Serply `/v1/search` URL; `num` is the number of organic results.
+fn tavily_search_payload(
+    api_key: &str,
+    query: &str,
+    filters: QueryFilters<'_>,
+    max_results: usize,
+) -> Value {
+    let mut payload = json!({
+        "api_key": api_key, // noqa: api-key-in-body
+        "query": query,
+        "search_depth": "basic",
+        "max_results": max_results,
+    });
+    if let Some(window) = filters.window() {
+        payload["time_range"] = json!(window);
+    }
+    payload
+}
+
+/// Serply documents `gl` (country); `hl` is the Google interface-language
+/// parameter it forwards. Recency is not documented, so it is not sent.
+fn serply_search_url(
+    query: &str,
+    filters: QueryFilters<'_>,
+    max_results: usize,
+) -> Result<reqwest::Url, ToolError> {
+    let mut url = reqwest::Url::parse(SERPLY_ENDPOINT)
+        .map_err(|error| ToolError::invalid_input(format!("Invalid Serply endpoint: {error}")))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("q", query)
+            .append_pair("num", &max_results.to_string());
+        if let Some(language) = filters.language() {
+            pairs.append_pair("hl", &language);
+        }
+        if let Some(region) = filters.region() {
+            pairs.append_pair("gl", &region.to_ascii_lowercase());
+        }
+    }
+    Ok(url)
+}
+
+/// Parse Serply `/v1/search` output: `results[]` rows carry `title`, `link`, and
+/// a `description` snippet; ads, knowledge graph, and related questions are
+/// top-level siblings and are ignored.
+fn parse_serply_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry> {
+    parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flat_map(|arr| arr.iter())
+        .filter_map(|item| {
+            let title = item.get("title")?.as_str()?.to_string();
+            let url = item.get("link")?.as_str()?.to_string();
+            let snippet = first_non_empty_string(item, &["description", "snippet"]);
             Some(WebSearchEntry {
                 title,
                 url,
@@ -2118,7 +2369,11 @@ fn duckduckgo_search_url(
     Ok((url.to_string(), host.to_string()))
 }
 
-fn searxng_search_url(base_url: Option<&str>, query: &str) -> Result<(String, String), ToolError> {
+fn searxng_search_url(
+    base_url: Option<&str>,
+    query: &str,
+    filters: QueryFilters<'_>,
+) -> Result<(String, String), ToolError> {
     let raw = configured_search_base_url(base_url).ok_or_else(|| {
         ToolError::invalid_input(
             "SearXNG search requires [search] base_url = \"https://your-searxng.example\"; no public instance is used by default.",
@@ -2138,9 +2393,16 @@ fn searxng_search_url(base_url: Option<&str>, query: &str) -> Result<(String, St
     } else if path != "/search" && !path.ends_with("/search") {
         url.set_path(&format!("{path}/search"));
     }
-    url.query_pairs_mut()
-        .append_pair("q", query)
-        .append_pair("format", "json");
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("q", query).append_pair("format", "json");
+        if let Some(window) = filters.window() {
+            pairs.append_pair("time_range", window);
+        }
+        if let Some(locale) = filters.locale {
+            pairs.append_pair("language", locale);
+        }
+    }
 
     Ok((url.to_string(), host))
 }
@@ -2156,15 +2418,15 @@ fn duckduckgo_allows_bing_fallback(base_url: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ERROR_BODY_PREVIEW_BYTES, KIMI_K3_FORMULA_MIN_TIMEOUT_MS, ScrapeEndpoints,
+        ERROR_BODY_PREVIEW_BYTES, KIMI_K3_FORMULA_MIN_TIMEOUT_MS, QueryFilters, ScrapeEndpoints,
         SearchProbeTargetError, WebSearchTool, acquire_model_backed_search_inference_participant,
         baidu_search_payload, bocha_error_message, domain_matches, duckduckgo_search_url,
         extract_search_query, finalize_search_response, optional_search_max_results,
         parse_baidu_results, parse_bocha_results, parse_metaso_results, parse_searxng_results,
-        parse_sofya_results, parse_tavily_results, parse_volcengine_results,
+        parse_serply_results, parse_sofya_results, parse_tavily_results, parse_volcengine_results,
         register_search_citations, rerank, run_scrape_search_with_endpoints, sanitize_error_body,
-        search_probe_target, search_timeout_budgets, searxng_search_url, truncate_error_body,
-        volcengine_extract_text,
+        search_probe_target, search_timeout_budgets, searxng_score, searxng_search_url,
+        serply_search_url, truncate_error_body, volcengine_extract_text,
     };
     use crate::config::SearchProvider;
     use crate::tools::web::contract::{
@@ -2222,6 +2484,7 @@ mod tests {
                 "https://ark.cn-beijing.volces.com/api/v3/responses",
             ),
             (SearchProvider::Sofya, "https://sofya.co/v1/search"),
+            (SearchProvider::Serply, "https://api.serply.io/v1/search"),
         ];
 
         for (provider, expected) in cases {
@@ -2568,6 +2831,73 @@ mod tests {
     }
 
     #[test]
+    fn serply_search_url_encodes_query_and_result_count() {
+        let url = serply_search_url("rust tui & ratatui", QueryFilters::default(), 7)
+            .expect("serply url");
+
+        assert_eq!(url.host_str(), Some("api.serply.io"));
+        assert_eq!(url.path(), "/v1/search");
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("q".to_string(), "rust tui & ratatui".to_string()),
+                ("num".to_string(), "7".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_serply_results_reads_link_and_description_and_skips_malformed_rows() {
+        let body = json!({
+            "results": [
+                {
+                    "title": "Ratatui",
+                    "link": "https://ratatui.rs/",
+                    "description": "Cook up delicious terminal user interfaces in Rust.",
+                    "position": 1,
+                    "realPosition": 1
+                },
+                {
+                    "title": "No description",
+                    "link": "https://example.com/plain",
+                    "description": ""
+                },
+                {
+                    "title": "Missing link",
+                    "description": "dropped because there is no link"
+                },
+                "not an object",
+                {
+                    "title": "Fourth",
+                    "link": "https://example.com/fourth",
+                    "description": "beyond max_results"
+                }
+            ],
+            "knowledge_graph": {"title": "ignored sidebar"},
+            "related_questions": [{"question": "ignored"}],
+            "ads": [{"title": "ignored ad", "link": "https://ads.example.com"}]
+        });
+
+        let results = parse_serply_results(&body, 2);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Ratatui");
+        assert_eq!(results[0].url, "https://ratatui.rs/");
+        assert_eq!(
+            results[0].snippet.as_deref(),
+            Some("Cook up delicious terminal user interfaces in Rust.")
+        );
+        assert_eq!(results[1].url, "https://example.com/plain");
+        assert_eq!(results[1].snippet, None);
+
+        assert!(parse_serply_results(&json!({"total": 0}), 5).is_empty());
+    }
+
+    #[test]
     fn parse_sofya_results_falls_back_to_description_for_empty_content() {
         let body = json!({
             "results": [
@@ -2678,11 +3008,25 @@ mod tests {
             .await;
         let endpoint = format!("{}/v2/search", server.uri());
         let (entries, mode) = WebSearchTool
-            .run_firecrawl_search_at(&endpoint, "codewhale", 5, 5_000, None)
+            .run_firecrawl_search_at(
+                &endpoint,
+                "codewhale",
+                QueryFilters::default(),
+                5,
+                5_000,
+                None,
+            )
             .await
             .expect("keyless Firecrawl search");
         WebSearchTool
-            .run_firecrawl_search_at(&endpoint, "codewhale", 5, 5_000, Some("fc-secret"))
+            .run_firecrawl_search_at(
+                &endpoint,
+                "codewhale",
+                QueryFilters::default(),
+                5,
+                5_000,
+                Some("fc-secret"),
+            )
             .await
             .expect("authenticated Firecrawl search");
         let requests = server.received_requests().await.expect("recorded requests");
@@ -2717,6 +3061,7 @@ mod tests {
             .run_firecrawl_search_at(
                 &format!("{}/v2/search", server.uri()),
                 "quota",
+                QueryFilters::default(),
                 5,
                 5_000,
                 None,
@@ -2771,8 +3116,8 @@ mod tests {
         use crate::config::SearchProvider;
         use crate::tools::spec::{ToolContext, ToolSpec};
 
-        let prev = std::env::var_os("BAIDU_SEARCH_API_KEY");
-        unsafe { std::env::remove_var("BAIDU_SEARCH_API_KEY") };
+        let _env = crate::test_support::lock_test_env();
+        let _baidu_key = crate::test_support::EnvVarGuard::remove("BAIDU_SEARCH_API_KEY");
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut ctx = ToolContext::new(tmp.path().to_path_buf());
@@ -2783,14 +3128,70 @@ mod tests {
             .await
             .expect_err("missing api_key must surface as ToolError");
 
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Baidu") && msg.contains("API key"),
+            "error must name the provider and missing key; got `{msg}`"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn serply_missing_key_is_fail_closed_inside_the_backend_chain() {
+        use crate::tools::spec::ToolContext;
+
+        let _guard = crate::test_support::lock_test_env();
+        let prev = std::env::var_os("SERPLY_API_KEY");
+        unsafe { std::env::remove_var("SERPLY_API_KEY") };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = ToolContext::new(tmp.path().to_path_buf());
+        ctx.search_api_key = None;
+        let err = WebSearchTool
+            .run_serply_search("anything", QueryFilters::default(), 5, 1_000, &ctx)
+            .await
+            .expect_err("missing api_key must be an error");
+
         match prev {
-            Some(value) => unsafe { std::env::set_var("BAIDU_SEARCH_API_KEY", value) },
-            None => unsafe { std::env::remove_var("BAIDU_SEARCH_API_KEY") },
+            Some(value) => unsafe { std::env::set_var("SERPLY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("SERPLY_API_KEY") },
+        }
+
+        // A configured Serply route that reaches the adapter after a failed
+        // provider-native attempt must stop the chain, not degrade to DuckDuckGo.
+        assert!(
+            matches!(err, crate::tools::spec::ToolError::InvalidInput { .. }),
+            "missing key must be classified fail-closed; got `{err:?}`"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn serply_provider_without_api_key_surfaces_clear_error_not_silent_fallback() {
+        use crate::config::SearchProvider;
+        use crate::tools::spec::{ToolContext, ToolSpec};
+
+        let _guard = crate::test_support::lock_test_env();
+        let prev = std::env::var_os("SERPLY_API_KEY");
+        unsafe { std::env::remove_var("SERPLY_API_KEY") };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = ToolContext::new(tmp.path().to_path_buf());
+        ctx.search_provider = SearchProvider::Serply;
+        ctx.search_api_key = None;
+        let err = WebSearchTool
+            .execute(json!({"query": "anything"}), &ctx)
+            .await
+            .expect_err("missing api_key must surface as ToolError");
+
+        match prev {
+            Some(value) => unsafe { std::env::set_var("SERPLY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("SERPLY_API_KEY") },
         }
 
         let msg = err.to_string();
         assert!(
-            msg.contains("Baidu") && msg.contains("API key"),
+            msg.contains("Serply") && msg.contains("API key"),
             "error must name the provider and missing key; got `{msg}`"
         );
     }
@@ -2935,8 +3336,12 @@ mod tests {
 
     #[test]
     fn searxng_url_uses_search_path_and_json_format() {
-        let (url, host) =
-            searxng_search_url(Some("https://search.example/"), "rust async").expect("searxng url");
+        let (url, host) = searxng_search_url(
+            Some("https://search.example/"),
+            "rust async",
+            QueryFilters::default(),
+        )
+        .expect("searxng url");
         let parsed = reqwest::Url::parse(&url).expect("valid url");
         assert_eq!(host, "search.example");
         assert_eq!(parsed.path(), "/search");
@@ -2956,6 +3361,7 @@ mod tests {
         let (subpath_url, _) = searxng_search_url(
             Some("https://search.example/searxng?language=en"),
             "codewhale",
+            QueryFilters::default(),
         )
         .expect("searxng subpath url");
         let parsed = reqwest::Url::parse(&subpath_url).expect("valid subpath url");
@@ -2969,9 +3375,12 @@ mod tests {
             "en"
         );
 
-        let (search_url, _) =
-            searxng_search_url(Some("https://search.example/searxng/search"), "codewhale")
-                .expect("searxng search endpoint");
+        let (search_url, _) = searxng_search_url(
+            Some("https://search.example/searxng/search"),
+            "codewhale",
+            QueryFilters::default(),
+        )
+        .expect("searxng search endpoint");
         assert_eq!(
             reqwest::Url::parse(&search_url)
                 .expect("valid search url")
@@ -3015,6 +3424,120 @@ mod tests {
         assert_eq!(results[1].snippet.as_deref(), Some("Fallback snippet"));
     }
 
+    #[test]
+    fn searxng_score_reads_floats_integers_strings_and_clamps_junk() {
+        assert_eq!(searxng_score(&json!({"score": 0.75})), 0.75);
+        assert_eq!(searxng_score(&json!({"score": 1})), 1.0);
+        assert_eq!(searxng_score(&json!({"score": " 2.5 "})), 2.5);
+        assert_eq!(searxng_score(&json!({"score": "-1.5"})), -1.5);
+        assert_eq!(searxng_score(&json!({})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": null})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": true})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": ""})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": "not-a-number"})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": {"nested": 1.0}})), 0.0);
+        assert_eq!(
+            searxng_score(&json!({"score": "NaN"})),
+            0.0,
+            "a non-finite score must not reach the sort"
+        );
+        assert_eq!(
+            searxng_score(&json!({"score": "inf"})),
+            0.0,
+            "an infinite score must not outrank every finite row"
+        );
+    }
+
+    #[test]
+    fn searxng_parser_sorts_by_descending_score() {
+        // The strongest row is last in the instance's own order; only the
+        // score sort can promote it.
+        let parsed = json!({
+            "results": [
+                {"title": "Low", "url": "https://example.com/low", "score": 0.25},
+                {"title": "Middle", "url": "https://example.com/mid", "score": 1},
+                {"title": "High", "url": "https://example.com/high", "score": "4.5"},
+                {"title": "Zero", "url": "https://example.com/zero", "score": 0.0}
+            ]
+        });
+
+        let titles: Vec<String> = parse_searxng_results(&parsed, 10)
+            .into_iter()
+            .map(|entry| entry.title)
+            .collect();
+        assert_eq!(titles, ["High", "Middle", "Low", "Zero"]);
+    }
+
+    #[test]
+    fn searxng_parser_keeps_input_order_for_equal_scores() {
+        let parsed = json!({
+            "results": [
+                {"title": "First", "url": "https://example.com/1", "score": 1.5},
+                {"title": "Second", "url": "https://example.com/2", "score": 1.5},
+                {"title": "Third", "url": "https://example.com/3", "score": 1.5},
+                {"title": "Lower", "url": "https://example.com/4", "score": 1.4}
+            ]
+        });
+
+        let titles: Vec<String> = parse_searxng_results(&parsed, 10)
+            .into_iter()
+            .map(|entry| entry.title)
+            .collect();
+        assert_eq!(titles, ["First", "Second", "Third", "Lower"]);
+    }
+
+    #[test]
+    fn searxng_parser_sorts_missing_or_invalid_scores_last() {
+        let parsed = json!({
+            "results": [
+                {"title": "No score", "url": "https://example.com/none"},
+                {
+                    "title": "Garbage",
+                    "url": "https://example.com/garbage",
+                    "score": "not-a-number"
+                },
+                {"title": "NaN string", "url": "https://example.com/nan", "score": "NaN"},
+                {"title": "Infinite string", "url": "https://example.com/inf", "score": "inf"},
+                {"title": "Boolean", "url": "https://example.com/bool", "score": true},
+                {"title": "Scored", "url": "https://example.com/scored", "score": 0.5}
+            ]
+        });
+
+        let results = parse_searxng_results(&parsed, 10);
+        let titles: Vec<&str> = results.iter().map(|entry| entry.title.as_str()).collect();
+        // Every row with a title and a URL survives. Unusable scores read as
+        // 0.0 and keep their input order behind the one scored row.
+        assert_eq!(
+            titles,
+            [
+                "Scored",
+                "No score",
+                "Garbage",
+                "NaN string",
+                "Infinite string",
+                "Boolean"
+            ]
+        );
+    }
+
+    #[test]
+    fn searxng_parser_caps_after_score_sort() {
+        // A `take` before the sort would drop "Strong"; the cap must apply to
+        // the ranked list instead.
+        let parsed = json!({
+            "results": [
+                {"title": "Weak one", "url": "https://example.com/1", "score": 0.1},
+                {"title": "Weak two", "url": "https://example.com/2", "score": 0.2},
+                {"title": "Strong", "url": "https://example.com/3", "score": 9.0}
+            ]
+        });
+
+        let results = parse_searxng_results(&parsed, 2);
+        assert_eq!(results.len(), 2, "max_results caps the ranked list");
+        assert_eq!(results[0].title, "Strong");
+        assert_eq!(results[1].title, "Weak two");
+    }
+
     #[tokio::test]
     async fn searxng_provider_requires_base_url() {
         use crate::config::SearchProvider;
@@ -3043,9 +3566,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn missing_provider_key_fails_closed_as_not_configured() {
         use crate::config::SearchProvider;
         use crate::tools::spec::{ToolContext, ToolError, ToolSpec};
+
+        let _guard = crate::test_support::lock_test_env();
+        let prev_tavily = std::env::var_os("TAVILY_API_KEY");
+        // "both keys empty" must mean *both*: an ambient key from the
+        // operator's shell would otherwise satisfy the Tavily arm.
+        unsafe { std::env::remove_var("TAVILY_API_KEY") };
 
         for provider in [SearchProvider::Tavily, SearchProvider::Bocha] {
             let tmp = tempfile::tempdir().expect("tempdir");
@@ -3064,6 +3594,69 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("is not configured"), "got `{message}`");
             assert!(message.contains("api_key"), "got `{message}`");
+        }
+
+        // Sibling case: only `TAVILY_API_KEY` is set. Explicit Tavily is
+        // configured, and the copy that names both sources is the one the
+        // operator never sees here.
+        unsafe { std::env::set_var("TAVILY_API_KEY", "tvly-test-env-only") };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = ToolContext::new(tmp.path().to_path_buf());
+        ctx.search_provider = SearchProvider::Tavily;
+        ctx.search_api_key = None;
+        let preflight = super::preflight_search_provider(&ctx);
+
+        match prev_tavily {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
+        }
+
+        assert!(
+            preflight.is_ok(),
+            "TAVILY_API_KEY alone must configure explicit Tavily: {preflight:?}"
+        );
+    }
+
+    #[test]
+    fn tavily_key_from_prefers_dedicated_env_and_prefix_gates_only_the_generic_key() {
+        let _guard = crate::test_support::lock_test_env();
+        let prev = std::env::var_os("TAVILY_API_KEY");
+
+        unsafe { std::env::set_var("TAVILY_API_KEY", "tvly-a") };
+        assert_eq!(
+            crate::config::tavily_key_from(Some("tvly-b")).as_deref(),
+            Some("tvly-a"),
+            "the dedicated env wins over the shared generic slot"
+        );
+        assert_eq!(crate::config::tavily_env_key().as_deref(), Some("tvly-a"));
+
+        // A dedicated env key is never prefix-checked.
+        unsafe { std::env::set_var("TAVILY_API_KEY", "not-a-tvly-prefix") };
+        assert_eq!(
+            crate::config::tavily_key_from(None).as_deref(),
+            Some("not-a-tvly-prefix")
+        );
+
+        unsafe { std::env::set_var("TAVILY_API_KEY", "   ") };
+        assert_eq!(crate::config::tavily_env_key(), None);
+
+        unsafe { std::env::remove_var("TAVILY_API_KEY") };
+        assert_eq!(
+            crate::config::tavily_key_from(Some("tvly-b")).as_deref(),
+            Some("tvly-b")
+        );
+        assert_eq!(
+            crate::config::tavily_key_from(Some("doctor-offline-search-sentinel")),
+            None,
+            "a non-`tvly-` generic key must never autodetect Tavily"
+        );
+        assert_eq!(crate::config::tavily_key_from(Some("   ")), None);
+        assert!(crate::config::looks_like_tavily_key(" tvly-x "));
+        assert!(!crate::config::looks_like_tavily_key("fc-live-test"));
+
+        match prev {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
         }
     }
 
@@ -3121,7 +3714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_knobs_are_visible_and_domains_are_post_filtered() {
+    async fn searxng_honors_recency_and_locale_and_post_filters_domains() {
         use crate::config::SearchProvider;
         use crate::tools::spec::{ToolContext, ToolSpec};
         use wiremock::matchers::{method, path, query_param};
@@ -3132,6 +3725,8 @@ mod tests {
             .and(path("/search"))
             .and(query_param("q", "fresh rust"))
             .and(query_param("format", "json"))
+            .and(query_param("time_range", "week"))
+            .and(query_param("language", "en-US"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "results": [
                     {"title": "Keep", "url": "https://docs.example.com/rust", "content": "kept"},
@@ -3164,8 +3759,8 @@ mod tests {
         assert_eq!(value["count"], 1);
         assert_eq!(value["results"][0]["domain"], "docs.example.com");
         assert_eq!(value["receipt"]["honored"]["domains"], true);
-        assert_eq!(value["receipt"]["honored"]["recency"], false);
-        assert_eq!(value["receipt"]["honored"]["locale"], false);
+        assert_eq!(value["receipt"]["honored"]["recency"], true);
+        assert_eq!(value["receipt"]["honored"]["locale"], true);
         let degraded = value["receipt"]["degraded"]
             .as_array()
             .expect("degraded receipt array");
@@ -3175,14 +3770,8 @@ mod tests {
                 .any(|item| { item["kind"] == "post_filtered" && item["knob"] == "domains" })
         );
         assert!(
-            degraded
-                .iter()
-                .any(|item| { item["kind"] == "knob_ignored" && item["knob"] == "recency" })
-        );
-        assert!(
-            degraded
-                .iter()
-                .any(|item| { item["kind"] == "knob_ignored" && item["knob"] == "locale" })
+            !degraded.iter().any(|item| item["kind"] == "knob_ignored"),
+            "SearXNG forwards both knobs: {degraded:?}"
         );
     }
 
@@ -3375,7 +3964,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let (results, host) = WebSearchTool
-            .run_searxng_search("empty", 5, 5_000, &ctx)
+            .run_searxng_search("empty", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect("empty SearXNG adapter response should be successful");
         let expected_host = reqwest::Url::parse(&server.uri())
@@ -3410,7 +3999,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let err = WebSearchTool
-            .run_searxng_search("blocked", 5, 5_000, &ctx)
+            .run_searxng_search("blocked", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect_err("403 should be actionable");
         let msg = err.to_string();
@@ -3444,7 +4033,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let err = WebSearchTool
-            .run_searxng_search("later", 5, 5_000, &ctx)
+            .run_searxng_search("later", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect_err("429 should be actionable");
         let msg = err.to_string();
@@ -3478,7 +4067,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let err = WebSearchTool
-            .run_searxng_search("html", 5, 5_000, &ctx)
+            .run_searxng_search("html", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect_err("invalid JSON should be actionable");
         let msg = err.to_string();
@@ -4118,5 +4707,165 @@ mod tests {
             .expect("degraded receipt must produce a warning");
         assert!(warning.contains("bot challenge"), "{warning}");
         assert!(warning.contains("used bing fallback"), "{warning}");
+    }
+
+    fn filtered_query(recency: Option<Recency>, locale: Option<&str>) -> SearchQuery {
+        SearchQuery::new(
+            "whale song".to_string(),
+            5,
+            recency,
+            Vec::new(),
+            locale.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn query_filters_round_recency_up_and_split_locale() {
+        let query = filtered_query(Some(Recency::Days(10)), Some("pt_BR"));
+        let filters = QueryFilters::of(&query);
+        assert_eq!(filters.window(), Some("month"));
+        assert_eq!(filters.language().as_deref(), Some("pt"));
+        assert_eq!(filters.region().as_deref(), Some("BR"));
+        for (recency, window) in [
+            (Recency::Day, "day"),
+            (Recency::Week, "week"),
+            (Recency::Month, "month"),
+            (Recency::Year, "year"),
+            (Recency::Days(400), "year"),
+        ] {
+            let query = filtered_query(Some(recency), None);
+            assert_eq!(QueryFilters::of(&query).window(), Some(window));
+        }
+        let bare = filtered_query(None, Some("en"));
+        assert_eq!(QueryFilters::of(&bare).region(), None);
+        assert_eq!(QueryFilters::of(&bare).window(), None);
+    }
+
+    #[tokio::test]
+    async fn firecrawl_sends_recency_and_country() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/search"))
+            .and(body_partial_json(json!({"tbs": "qdr:w", "country": "DE"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": {"web": [{"title": "Fresh", "url": "https://example.de/a"}]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let query = filtered_query(Some(Recency::Week), Some("de-DE"));
+        let (entries, _) = WebSearchTool
+            .run_firecrawl_search_at(
+                &format!("{}/v2/search", server.uri()),
+                &query.query,
+                QueryFilters::of(&query),
+                5,
+                5_000,
+                None,
+            )
+            .await
+            .expect("filtered Firecrawl search");
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn searxng_sends_time_range_and_language() {
+        use crate::tools::spec::ToolContext;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .and(query_param("time_range", "day"))
+            .and(query_param("language", "fr-FR"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"title": "Aujourd'hui", "url": "https://example.fr/a", "content": "x"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = ToolContext::new(tmp.path().to_path_buf());
+        ctx.search_provider = SearchProvider::Searxng;
+        ctx.search_base_url = Some(server.uri());
+        let query = filtered_query(Some(Recency::Day), Some("fr-FR"));
+
+        let (results, _) = WebSearchTool
+            .run_searxng_search(&query.query, QueryFilters::of(&query), 5, 5_000, &ctx)
+            .await
+            .expect("filtered SearXNG search");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn tavily_payload_carries_time_range_only_when_requested() {
+        let query = filtered_query(Some(Recency::Year), Some("en-US"));
+        let payload =
+            super::tavily_search_payload("tvly-x", &query.query, QueryFilters::of(&query), 5);
+        assert_eq!(payload["time_range"], "year");
+        assert!(
+            payload.get("country").is_none(),
+            "Tavily takes country names, not tags"
+        );
+        let plain = super::tavily_search_payload("tvly-x", "q", QueryFilters::default(), 5);
+        assert!(plain.get("time_range").is_none());
+    }
+
+    #[test]
+    fn serply_url_carries_language_and_country() {
+        let query = filtered_query(Some(Recency::Day), Some("ja-JP"));
+        let url = serply_search_url(&query.query, QueryFilters::of(&query), 3).expect("serply url");
+        let pairs: std::collections::BTreeMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(pairs.get("hl").map(String::as_str), Some("ja"));
+        assert_eq!(pairs.get("gl").map(String::as_str), Some("jp"));
+        assert!(
+            !pairs.contains_key("tbs"),
+            "Serply documents no recency parameter"
+        );
+    }
+
+    #[test]
+    fn adapter_reported_ignored_locale_is_not_counted_as_honored() {
+        let query = filtered_query(Some(Recency::Week), Some("en"));
+        let raw = BackendSearch {
+            backend: BackendId::Firecrawl,
+            source: "firecrawl".to_string(),
+            backend_detail: None,
+            results: Vec::new(),
+            degraded: vec![DegradedReason::KnobIgnored {
+                knob: QueryKnob::Locale,
+            }],
+            note: None,
+        };
+        let capabilities = QueryCapabilities {
+            recency: CapabilityState::Supported,
+            locale: CapabilityState::Supported,
+            ..QueryCapabilities::count_only()
+        };
+        let response = finalize_search_response(query, capabilities, raw, Instant::now());
+        assert!(response.receipt.honored.recency);
+        assert!(!response.receipt.honored.locale);
+        assert_eq!(
+            response
+                .receipt
+                .degraded
+                .iter()
+                .filter(|reason| matches!(
+                    reason,
+                    DegradedReason::KnobIgnored {
+                        knob: QueryKnob::Locale
+                    }
+                ))
+                .count(),
+            1
+        );
     }
 }

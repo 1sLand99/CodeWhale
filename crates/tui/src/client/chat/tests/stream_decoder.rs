@@ -4,7 +4,8 @@
 //! harness (issue #69 tracks that). For #103 we exercise the chunk decoder
 //! directly to verify each "class of stream failure" the engine relies on.
 use super::*;
-use crate::models::{ContentBlockStart, Delta, StreamEvent};
+use crate::client::wire::{InvalidSseUtf8, SseLineDecoder};
+use codewhale_models::{ContentBlockStart, Delta, StreamEvent};
 
 /// Decode a raw SSE-data JSON chunk into our internal events, mirroring
 /// the per-event call shape used by `handle_chat_completion_stream`.
@@ -60,9 +61,7 @@ fn decode_chunks_with_style(
 
 /// Drive the Chat Completions SSE path with raw byte chunks so tests can
 /// split a multi-byte UTF-8 character across HTTP/2-style DATA boundaries.
-fn decode_sse_byte_chunks(
-    chunks: &[&[u8]],
-) -> Result<Vec<StreamEvent>, super::super::InvalidSseUtf8> {
+fn decode_sse_byte_chunks(chunks: &[&[u8]]) -> Result<Vec<StreamEvent>, InvalidSseUtf8> {
     struct FrameState {
         line_buf: String,
         content_index: u32,
@@ -92,7 +91,7 @@ fn decode_sse_byte_chunks(
             if line.is_empty() {
                 return matches!(self.flush_frame(), SseDataFrame::Done);
             }
-            if let Some(data) = super::super::extract_sse_data_value(line) {
+            if let Some(data) = extract_sse_data_value(line) {
                 if !self.line_buf.is_empty() {
                     self.line_buf.push('\n');
                 }
@@ -125,7 +124,7 @@ fn decode_sse_byte_chunks(
         }
     }
 
-    let mut decoder = super::super::SseLineDecoder::new();
+    let mut decoder = SseLineDecoder::new();
     let mut state = FrameState::new();
     for chunk in chunks {
         for line in decoder.push(chunk)? {
@@ -513,15 +512,15 @@ fn modelstudio_streams_reasoning_content_as_thinking() {
         );
     }
 
-    // A non-reasoning model id on the same route keeps the old
-    // pass-through semantics (no fabricated Thinking surface).
+    // A model id the catalog does not know still routes the reasoning field
+    // to Thinking (#6501); a model that sends no reasoning field gets none.
     let style = reasoning_stream_style_for_route(
         ApiProvider::ModelstudioTokenPlan,
         crate::config::DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL,
         "qwen3.8-max-lite-unknown",
         None,
     );
-    assert_eq!(style, ReasoningStreamStyle::None);
+    assert_eq!(style, ReasoningStreamStyle::SeparateField);
 }
 
 #[test]
@@ -641,7 +640,80 @@ fn exact_kimi_code_k3_streams_reasoning_content_as_thinking() {
         crate::config::KIMI_CODE_K3_MODEL,
         None,
     );
-    assert_eq!(generic_style, ReasoningStreamStyle::None);
+    assert_eq!(generic_style, ReasoningStreamStyle::SeparateField);
+}
+
+/// #6501 regression: the founder's grok-4.7 (xAI) and mimo-v2.6-pro
+/// (Xiaomi MiMo) sessions persisted the reasoning summary glued to the answer
+/// in one Text block ("...I should help them find large f...Sure, I'd be
+/// happy to help"). Decode that stream shape through the real route style.
+#[test]
+fn issue_6501_reasoning_field_never_leaks_into_answer_text_on_unlisted_routes() {
+    for (provider, base_url, model) in [
+        (
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            "grok-4.7",
+        ),
+        (
+            ApiProvider::XiaomiMimo,
+            "https://token-plan-sgp.xiaomimimo.com/v1",
+            "mimo-v2.7-pro-unreleased",
+        ),
+        (
+            ApiProvider::Openai,
+            "https://gateway.example.test/v1",
+            "some-new-reasoner",
+        ),
+    ] {
+        let style = reasoning_stream_style_for_route(provider, base_url, model, None);
+        assert_eq!(style, ReasoningStreamStyle::SeparateField, "{provider:?}");
+        let events = decode_chunks_with_style(
+            &[
+                r#"{"choices":[{"delta":{"role":"assistant","reasoning_content":"The user wants help finding large files"}}]}"#,
+                r#"{"choices":[{"delta":{"reasoning_content":"..."}}]}"#,
+                r#"{"choices":[{"delta":{"content":"Sure, I'd be happy to help."}}]}"#,
+                r#"{"choices":[{"delta":{"reasoning":"then a tool"}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_shell","arguments":"{}"}}]}}]}"#,
+                r#"{"choices":[{"finish_reason":"tool_calls"}]}"#,
+            ],
+            style,
+        );
+        assert_eq!(
+            thinking_delta_text(&events),
+            "The user wants help finding large files...then a tool",
+            "{provider:?}"
+        );
+        assert_eq!(
+            text_delta_text(&events),
+            "Sure, I'd be happy to help.",
+            "{provider:?}: reasoning must not reach answer text"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ContentBlockStart {
+                    content_block: ContentBlockStart::ToolUse { .. },
+                    ..
+                }
+            )),
+            "{provider:?}: reasoning -> tool call transition must keep the tool call"
+        );
+    }
+
+    // The explicit opt-out keeps the legacy pass-through for gateways that
+    // really stream their answer in `reasoning_content`.
+    let passthrough = decode_chunks_with_style(
+        &[r#"{"choices":[{"delta":{"reasoning_content":"answer via reasoning field"}}]}"#],
+        reasoning_stream_style_for_route(
+            ApiProvider::Openai,
+            "https://gateway.example.test/v1",
+            "some-new-reasoner",
+            Some("none"),
+        ),
+    );
+    assert_eq!(thinking_delta_text(&passthrough), "");
+    assert_eq!(text_delta_text(&passthrough), "answer via reasoning field");
 }
 
 #[test]
@@ -705,7 +777,7 @@ fn reasoning_style_none_keeps_inline_tags_visible_text() {
 fn configured_reasoning_style_overrides_route_default() {
     assert_eq!(
         reasoning_stream_style_for_stream(ApiProvider::Openai, "custom-minimax", None),
-        ReasoningStreamStyle::None
+        ReasoningStreamStyle::SeparateField
     );
     assert_eq!(
         reasoning_stream_style_for_stream(
@@ -1496,4 +1568,45 @@ fn mistral_stream_blocks_are_decoded_only_by_the_mistral_style() {
             ..
         }
     )));
+}
+
+#[test]
+fn deepseek_flash_v41_classifies_reasoning_through_the_catalog() {
+    // #6044: V4.1's official id dropped the version number, so the literal
+    // `deepseek-v4` arms cannot see it. The catalog owns the capability and
+    // every classifier — stream style, wire replay, prompt inspection — must
+    // read it there instead of relying on another classifier's fallback.
+    let base_url = "https://api.deepseek.com";
+    assert!(
+        requires_reasoning_content("deepseek-flash"),
+        "the name gate must recognize the official V4.1 id through the catalog"
+    );
+    assert!(
+        should_replay_reasoning_content("deepseek-flash", None),
+        "prompt inspection must agree with the wire request"
+    );
+    assert!(should_replay_reasoning_content_for_provider_on_route(
+        ApiProvider::Deepseek,
+        base_url,
+        "deepseek-flash",
+        None,
+    ));
+
+    let style =
+        reasoning_stream_style_for_route(ApiProvider::Deepseek, base_url, "deepseek-flash", None);
+    assert_eq!(style, ReasoningStreamStyle::SeparateField);
+    let events = decode_chunks_with_style(
+        &[r#"{"choices":[{"delta":{"reasoning_content":"private flash plan"}}]}"#],
+        style,
+    );
+    assert_eq!(thinking_delta_text(&events), "private flash plan");
+    assert_eq!(
+        text_delta_text(&events),
+        "",
+        "reasoning must never leak into visible prose"
+    );
+
+    // A non-reasoning DeepSeek name stays literal: the prefix alone is not
+    // evidence, the catalog entry is.
+    assert!(!requires_reasoning_content("deepseek-coder"));
 }

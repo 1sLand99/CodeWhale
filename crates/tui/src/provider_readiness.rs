@@ -67,7 +67,7 @@ pub(crate) fn route_identity_for_model(
         provider.as_str()
     };
     let endpoint = if provider == config.api_provider() {
-        config.deepseek_base_url()
+        config.active_route_base_url()
     } else {
         configured
             .and_then(|entry| entry.base_url.as_deref())
@@ -124,7 +124,7 @@ pub(crate) fn auth_class_for_provider(
         && official_endpoint
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
     {
         return ProviderAuthClass::OAuth;
     }
@@ -156,7 +156,7 @@ pub(crate) fn credential_state_for_provider(
     // provider enum.
     if provider == config.api_provider()
         && !official_endpoint
-        && crate::config::base_url_uses_local_host(&config.deepseek_base_url())
+        && crate::config::base_url_uses_local_host(&config.active_route_base_url())
     {
         return if api_key_required {
             if crate::config::has_api_key_for(config, provider) {
@@ -179,7 +179,12 @@ pub(crate) fn credential_state_for_provider(
             CredentialState::MissingKey
         };
     }
-    if provider.kind().is_none() {
+    // The retired Antigravity identity keeps a `ProviderKind` only so legacy
+    // `[providers.antigravity]` tables deserialize and can be cleared. A
+    // leftover `api_key` in that table must never read as `Saved`: the route
+    // is a non-runnable tombstone, so `/model`, setup, and readiness treat it
+    // as legacy regardless of what the table contains.
+    if provider == ApiProvider::Antigravity || provider.kind().is_none() {
         return CredentialState::Legacy;
     }
     if provider == ApiProvider::Custom {
@@ -272,12 +277,12 @@ pub(crate) fn credential_state_for_provider(
         && official_endpoint
         && auth_mode
             .as_deref()
-            .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth);
+            .is_some_and(crate::oauth::auth_mode_uses_xai_oauth);
     if xai_oauth_selected {
         // #5772: `Saved` means a credential was actually found. A surviving
         // consent record whose file is gone or expired resolves below as
         // `ExternalConsent` (dormant) or `MissingLogin`, never as `Saved`.
-        return if crate::xai_oauth::credentials_valid(config)
+        return if crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Xai, config)
             || explicit_provider_credential_present(config, provider)
         {
             CredentialState::Saved
@@ -296,21 +301,6 @@ pub(crate) fn credential_state_for_provider(
         return CredentialState::Saved;
     }
     if provider == ApiProvider::Xai {
-        return CredentialState::MissingKey;
-    }
-
-    if provider == ApiProvider::Antigravity {
-        if crate::config::has_api_key_for(config, provider) {
-            return CredentialState::Saved;
-        }
-        if provider != config.api_provider()
-            && config.external_credential_read_consent_configured(
-                provider,
-                codewhale_config::ExternalCredentialSource::AgyCli,
-            )
-        {
-            return CredentialState::ExternalConsent;
-        }
         return CredentialState::MissingKey;
     }
 
@@ -391,7 +381,7 @@ pub(crate) fn route_is_valid_for_model(
         model_selector: configured_model.or(active_model).map(LogicalModelRef::from),
         saved_provider_model: None,
         base_url_override: if provider == config.api_provider() {
-            Some(config.deepseek_base_url())
+            Some(config.active_route_base_url())
         } else if provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route() {
             config
                 .base_url
@@ -1527,7 +1517,7 @@ mod tests {
             credential_state_for_provider(&missing, ApiProvider::Vllm),
             CredentialState::MissingKey
         );
-        assert!(missing.deepseek_api_key().is_err());
+        assert!(missing.active_route_api_key().is_err());
 
         let mut configured = missing.clone();
         configured
@@ -1541,7 +1531,7 @@ mod tests {
             CredentialState::Saved
         );
         assert_eq!(
-            configured.deepseek_api_key().expect("configured key"),
+            configured.active_route_api_key().expect("configured key"),
             "protected-local-key"
         );
 
@@ -1566,7 +1556,7 @@ mod tests {
             credential_state_for_provider(&named_custom, ApiProvider::Custom),
             CredentialState::MissingKey
         );
-        assert!(named_custom.deepseek_api_key().is_err());
+        assert!(named_custom.active_route_api_key().is_err());
     }
 
     #[test]
@@ -1781,7 +1771,7 @@ default_text_model = "deepseek-chat"
         let config = crate::config::Config::load(Some(config_path), None).expect("load config");
         assert_eq!(config.default_model(), "anthropic/private-model");
         assert_eq!(
-            config.deepseek_api_key().expect("explicit CLI key"),
+            config.active_route_api_key().expect("explicit CLI key"),
             "explicit-cli-key"
         );
         assert!(route_is_valid_for_model(

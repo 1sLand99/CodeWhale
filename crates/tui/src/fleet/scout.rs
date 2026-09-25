@@ -132,6 +132,7 @@ mod tests {
         pin.map(|(provider, model)| FleetMember {
             id: "scout".to_string(),
             display_name: None,
+            shortlist: false,
             role: "scout".to_string(),
             provider: Some(provider.to_string()),
             model: Some(model.to_string()),

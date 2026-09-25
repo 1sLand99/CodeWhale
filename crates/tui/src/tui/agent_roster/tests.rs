@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::agent_roster::{RosterState, build_agent_roster};
 use crate::tools::subagent::{
     AgentRunUsage, AgentWorkerEvent, AgentWorkerRecord, AgentWorkerSpec, AgentWorkerStatus,
     AgentWorkerToolProfile, FleetRole,
@@ -13,10 +14,6 @@ fn usage_none() -> AgentRunUsage {
         output_tokens: None,
         total_tokens: None,
         cost_microusd: None,
-        token_budget: None,
-        budget_spent_tokens: None,
-        budget_remaining_tokens: None,
-        budget_scope: None,
         note: "no route audit for this worker".to_string(),
     }
 }
@@ -415,4 +412,83 @@ fn rendered_roster_shape() {
     assert!(text.contains("1/2 agents done"), "{text}");
     assert!(text.contains("step 7 · apply_patch"), "{text}");
     assert!(text.contains("↓ 306.7k"), "{text}");
+}
+
+// === #5906: a parked husk is not an agent waiting for input ===
+
+/// A child parked at the parent's turn end settles as `WaitingForUser` like a
+/// child that really asked a question. Only `parked_at_turn_end` separates
+/// them, and the rail has to read it or it prints the same row for both.
+#[test]
+fn a_parked_record_is_its_own_roster_state_not_waiting() {
+    let mut parked = record("parked_child", 1_000);
+    parked.status = AgentWorkerStatus::WaitingForUser;
+    parked.parked_at_turn_end = true;
+
+    let mut asked = record("asking_child", 2_000);
+    asked.status = AgentWorkerStatus::WaitingForUser;
+
+    let rows = build_agent_roster(&[parked, asked], 5_000);
+    let parked_row = rows
+        .iter()
+        .find(|row| row.worker_id == "parked_child")
+        .expect("parked row");
+    let asked_row = rows
+        .iter()
+        .find(|row| row.worker_id == "asking_child")
+        .expect("asking row");
+
+    assert_eq!(parked_row.state, RosterState::Parked);
+    assert_eq!(
+        asked_row.state,
+        RosterState::Waiting,
+        "a child that genuinely asked must keep the answerable state"
+    );
+    assert_ne!(parked_row.state.glyph(), asked_row.state.glyph());
+    assert!(
+        !parked_row.state.is_terminal(),
+        "parked work is unfinished, not settled-done"
+    );
+}
+
+/// The rail is otherwise oldest-first, but a parked husk is exactly the row an
+/// operator must not have to scan past to find live work.
+#[test]
+fn parked_husks_sort_below_live_and_waiting_agents() {
+    let mut parked = record("aaa_parked", 1_000);
+    parked.status = AgentWorkerStatus::WaitingForUser;
+    parked.parked_at_turn_end = true;
+
+    let running = record("bbb_running", 2_000);
+
+    let mut waiting = record("ccc_waiting", 3_000);
+    waiting.status = AgentWorkerStatus::WaitingForUser;
+
+    let rows = build_agent_roster(&[parked, running, waiting], 9_000);
+    let order: Vec<&str> = rows.iter().map(|row| row.worker_id.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["bbb_running", "ccc_waiting", "aaa_parked"],
+        "the parked husk sinks below live and answerable rows despite being oldest"
+    );
+}
+
+/// Re-dispatch clears the flag on the record (#5921); the rail must follow it
+/// back rather than latching a row as parked forever.
+#[test]
+fn a_re_dispatched_record_stops_reading_as_parked() {
+    let mut rec = record("resumed", 1_000);
+    rec.status = AgentWorkerStatus::WaitingForUser;
+    rec.parked_at_turn_end = true;
+    assert_eq!(
+        build_agent_roster(&[rec.clone()], 5_000)[0].state,
+        RosterState::Parked
+    );
+
+    rec.parked_at_turn_end = false;
+    rec.status = AgentWorkerStatus::RunningTool;
+    assert_eq!(
+        build_agent_roster(&[rec], 5_000)[0].state,
+        RosterState::Running
+    );
 }

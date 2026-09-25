@@ -1,33 +1,27 @@
 import type { HomeDict } from "../types";
 
 /**
- * Simplified Chinese home copy — a native rewrite mirroring the current
- * English direction (the brand dives so you don't have to; bring your own
- * model; runs on your machine), not a translation of it. The hero leans on
- * the classical 「一入侯门深似海」 allusion per community feedback — clever
- * in a way machine translation never is. The seal* glyphs are shared
- * editorial marks; the keys exist so a locale can override them without
- * touching the page.
+ * Simplified Chinese home dictionary — native copy for the Tidal Folio landing page,
+ * in the current direction: your models, more capable together; agents
+ * and control on your own machine; availability stated per surface as it
+ * is today. Product vocabulary stays literal (Plan / Work / Operate, Ask /
+ * Auto-Review / Full Access, Codewhale, TUI, codewhale exec, Fleet).
  */
+
 export const home: HomeDict = {
-  metaTitle: "Codewhale — 一入码门深似海，它替你潜。",
+  metaTitle: "Codewhale — 用你选择的模型，完成开发和自动化任务",
   metaDescription:
-    "Codewhale 潜入深海，你不必亲自下潜——开源的终端编程智能体。模型自带，跑在你自己的机器上。Rust 编写，MIT 许可。",
-
-  kicker: "开源 · 自带模型 · 运行在你的终端",
-  heroTitleA: "一入码门深似海，",
-  heroTitleB: "Codewhale 替你潜。",
+    "借助开源智能体和你选择的云端或本地 AI 模型，开发软件、处理文件，并自动完成日常任务。",
+  heroTitle: "用你选择的模型，完成开发和自动化任务",
   heroIntro:
-    "{brand} 是一个跑在终端里的开源编程智能体。给它一个模型和一个任务。它会读你的代码、改文件、跑检查，活干完了或需要你拿主意时就停下来。模型随便用，也可以给每个角色各配一个。",
-  install: "安装",
-  docs: "文档",
-  copy: "复制",
-  copied: "已复制 ✓",
-
-  installEyebrow: "一行安装",
-  installRequirement: "需要 Node 18+，无需 Rust 工具链",
-  installOtherWays: "其他方式 →",
-
+    "{brand} 是一个开源智能体，能够读取文件、编辑代码、运行命令并检查结果。在终端或本地浏览器中使用它，连接你选择的云端或本地模型。工具和权限由你决定；对话与工具执行结果保存在会话中。",
+  getCodewhale: "获取 Codewhale",
+  heroInstallAria: "安装命令",
+  exploreProduct: "了解产品",
+  shotPreview: "终端预览",
+  shotBuild: "v{version} 开发版本",
+  screenshotAlt:
+    "Codewhale v{version} 开发版本：鲸鱼标志、新会话、消息输入区、Ask 权限、Work 模式和模型状态。由隔离终端会话的实际画面渲染。",
   latestRelease: "最新发布 {tag}",
   releaseUnavailable: "发布状态暂不可用",
   currentSource: "源码",
@@ -35,71 +29,82 @@ export const home: HomeDict = {
   providerRoutes: "{count} 个提供商",
   publishedRelease: "已发布",
   figcaptionSourceCandidate: "未发布",
-
-  shotSession: "会话",
-  screenshotAlt: "Codewhale 终端会话，Operate 模式：鲸鱼、输入区与状态栏",
-  figcaption: "Codewhale 会话 · Operate 模式 · 权限：Ask",
-
-  proofHeading: "终端里的编程智能体。任意模型。本机运行。",
-  proofBody:
-    "用你手头已有的模型——托管、网关或本地都行。选一个模式：Plan、Work 或 Operate。再选它不问你就能做多少：Ask、Auto-Review 或 Full Access。",
-
-  sealDecides: "法",
-  decidesEyebrow: "它如何决策",
-  decidesHeading: "推理过程，原话呈现",
-  decidesLede:
-    "会话摘录。每一段都写明模型依据了哪条项目规则，以及接着做了什么。",
-
-  sealWorkflow: "行",
-  workflowHeading: "从任务到验证过的改动。",
-  workflow: [
-    ["检查", "读取仓库、项目说明与任务。"],
-    ["执行", "修改文件，你要求先问的地方会先问。"],
-    ["验证", "运行检查，核对结果。"],
-    ["报告", "说明改了什么、通过了什么。"],
+  chapterTerminal: "你的终端",
+  chapterTerminalTitle: "从你想做的项目开始",
+  gainHeading: "你可以用 Codewhale 做什么",
+  gainLede: "从具体目标开始：修复错误、理解项目，或把重复任务变成工作流程。先用一个智能体，需要时再拆分大型任务。",
+  gain: [
+    [
+      "开发项目并验证结果",
+      "让智能体查看项目、完成修改，再运行测试。你可以在工作过程中查看文件变更和命令结果。"
+    ],
+    [
+      "复用重复的工作",
+      "把重复任务变成脚本或保存的工作流程。在脚本和 CI 中使用 codewhale exec，也可以让多个智能体分担大型任务。"
+    ],
+    [
+      "掌握执行过程",
+      "开始前设定权限，处理审批请求，随时中断正在运行的任务。查看对话与工具结果，再决定如何继续。"
+    ]
   ],
-  receiptAria: "运行摘要示例",
-  receiptInspect: "仓库与项目说明",
-  receiptAct: "在你设定的权限内修改文件",
-  receiptReport: "检查通过 · 摘要已保存",
-
-  sealStart: "起",
-  startHeading: "第一次用？四步。",
-  startLede:
-    "安装 → 首次会话，无需密钥 → 接入提供商 → 配置 fleet。",
-  startGuideLink: "阅读新手指引 →",
-  startVocabularyLink: "查名词 →",
-
-  sealBoundaries: "界",
-  boundariesHeadingA: "你的模型。",
-  boundariesHeadingB: "你的边界。",
-  boundariesBody:
-    "模型、模式、以及它不问你能做多少，都由你来选。你不改，提供商和模型就不会变。预览功能会标注预览。",
-  hostedGatewayLocal: "托管、网关与本地模型",
-  planActOperateDesc: "从只读规划到自主执行",
-  askAutoReviewDesc: "它在问你之前能做多少",
-  tuiExecWebDesc: "交互式或脚本化",
-
-  sealSurfaces: "面",
-  surfacesHeading: "活在哪里干，就在哪里用。",
+  chapterModels: "你的模型",
+  modelsHeading: "为每项任务选择合适的模型",
+  modelsBody:
+    "为每个会话选择提供商和模型：使用 API 密钥、受支持的提供商登录方式，或本地模型。Codewhale 账户与模型连接各有用途。",
+  modelsFacts: [
+    ["托管", "你自己的 API 密钥，用 codewhale auth set --provider <id> 保存"],
+    ["网关", "一个端点接多个模型，提供商仍由你选"],
+    ["本地", "localhost 上的 vLLM、SGLang、Ollama——通常无需密钥"],
+  ],
+  modelsLink: "了解模型与提供商",
+  startHeading: "开始使用 Codewhale",
+  startLede: "安装已发布版本，连接模型，然后在项目文件夹中尝试一项任务。智能体团队是可选的；先用一个智能体，等任务适合拆分时再增加。",
+  startGuideLink: "阅读新手指引",
+  startVocabularyLink: "查名词",
+  chapterAccount: "获取 Codewhale",
+  availabilityHeading: "你可以在哪里使用 Codewhale",
+  availabilityLede: "终端与本地浏览器客户端现已可用。桌面和托管网页应用正基于同一会话模型开发；各端的开放状态分别列在下方。",
+  availability: [
+    [
+      "终端与本地浏览器",
+      "已发布",
+      "支持 Linux、macOS 和 Windows。运行 codewhale 使用终端，或运行 codewhale web 打开本地浏览器客户端。也可通过 npm 或 Cargo 安装；Android 上的 Termux 版本为预览版。"
+    ],
+    [
+      "托管网页应用",
+      "开发预览",
+      "开发预览版支持使用 Codewhale 账户登录并配对计算机。托管任务执行仍在验证中。"
+    ],
+    [
+      "桌面端",
+      "开发版本",
+      "macOS 应用将文件夹、对话和模型连接整合在桌面窗口中，稍后将提供公开下载。"
+    ],
+    [
+      "云端计算机",
+      "开发中",
+      "用于运行任务的托管计算机。"
+    ]
+  ],
+  availabilityNote: "终端和本地浏览器不需要 Codewhale 账户。账户用于托管网页和桌面端访问，不能代替模型连接。使用自己的密钥调用云端模型时，费用由该提供商收取。",
+  accountLink: "创建账户",
+  surfacesHeading: "工具、应用连接与保存的工作",
   surfaces: [
-    ["TUI", "交互式终端工作"],
-    ["codewhale exec", "脚本与 CI"],
-    ["Web 客户端", "浏览器客户端，仅限本机"],
-    ["运行时 API + MCP", "本地集成"],
-    ["fleet", "多个智能体协作一件事"],
+    ["文件与命令", "在你设定的权限内读取项目、编辑文件、运行测试并查看命令输出。"],
+    ["插件与 MCP", "连接更多工具和服务。智能体使用插件前，需由你审核并启用。"],
+    ["Computer Use · 源码预览", "当前源码包含用于查看和操作其他应用的插件，需主动启用并授予必要的系统权限。"],
+    ["保存的会话", "将对话和工具结果保存在一起。本地浏览器连接到你电脑上的同一个 Codewhale 会话；继续保存的工作，无需从头开始。"],
+    ["Fleet", "把任务分配给不同模型和角色的智能体，并跟踪它们的进度。"],
   ],
-  runtimeLink: "运行时界面与稳定程度 →",
-
-  installBandHeading: "从一条命令开始。",
+  runtimeLink: "了解集成",
+  installBandHeading: "在 macOS 或 Linux 上安装 Codewhale",
+  copy: "复制",
+  copied: "已复制 ✓",
   binaries: "预编译包",
   chinaMirrors: "中国镜像",
-  installGuideLink: "阅读安装指南 →",
-
-  sealCommunity: "众",
-  communityHeading: "公开构建",
-  communityBody:
-    "MIT 许可。贡献者的工作覆盖运行时、提供商、平台、文档与测试。",
+  installGuideLink: "阅读安装指南",
+  communityHeading: "一起让 Codewhale 变得更好",
+  communityBody: "无论你是发现了错误、有功能方面的想法，还是准备提交第一个 pull request，我们都希望听到你的意见，与你一起推进接下来的工作。",
   communityLinksAria: "社区链接",
-  contribute: "参与贡献",
+  contribute: "提交 pull request",
 };

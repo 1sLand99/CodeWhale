@@ -22,6 +22,77 @@ fn env_lock() -> &'static Mutex<()> {
 const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
 
 #[test]
+fn shell_catalog_guidance_matches_execution() {
+    let tool = LowercaseBashTool;
+    let schema = tool.input_schema();
+    let command = schema["properties"]["command"]["description"]
+        .as_str()
+        .unwrap();
+    let dispatcher = crate::shell_dispatcher::global_dispatcher();
+    assert!(command.contains(dispatcher.kind().binary()));
+    assert!(
+        !tool.description().contains(command),
+        "the command's interpreter guidance must appear once in each request"
+    );
+    assert_eq!(tool.name(), "bash");
+    assert!(tool.model_visible());
+    assert!(!command.contains("action=run"));
+    assert!(!tool.description().contains("background=true"));
+    assert!(
+        tool.description().contains(
+            "In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
+        ),
+        "foreground guidance must preserve the sandbox retry and approval contract"
+    );
+    let legacy = BashTool::new("Bash");
+    assert!(!legacy.model_visible());
+    assert!(legacy.description().contains(command));
+    assert!(legacy.description().contains("background=true"));
+    assert!(legacy.description().contains("wait=false"));
+    let readonly = BashTool::read_only("Bash");
+    assert!(readonly.description().contains("never through a shell"));
+    assert!(
+        !readonly
+            .input_schema()
+            .to_string()
+            .contains("Actual execution shell")
+    );
+    let alias = BashTool::alias("exec_shell", "run");
+    assert_eq!(alias.description(), legacy.description());
+    let workspace = tempdir().unwrap();
+    let mut registry = crate::tools::ToolRegistry::new(ToolContext::new(workspace.path()));
+    registry.register(std::sync::Arc::new(BashTool::new("Bash")));
+    registry.register(std::sync::Arc::new(LowercaseBashTool));
+    let catalog = registry.to_api_tools();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].name, "bash");
+    assert_eq!(catalog[0].description, tool.description());
+    assert_eq!(
+        catalog[0].input_schema["properties"]["command"]["description"],
+        command
+    );
+}
+
+#[test]
+#[ignore = "Exports model-visible shell fixtures for opt-in live model evaluation"]
+fn export_shell_guidance_eval_fixture() {
+    let path = std::env::var_os("SHELL_GUIDANCE_FIXTURE").expect("SHELL_GUIDANCE_FIXTURE");
+    let workspace = tempdir().unwrap();
+    let mut registry = crate::tools::ToolRegistry::new(ToolContext::new(workspace.path()));
+    registry.register(std::sync::Arc::new(BashTool::new("Bash")));
+    registry.register(std::sync::Arc::new(LowercaseBashTool));
+    let catalog = registry.to_api_tools();
+    let tool = catalog.iter().find(|tool| tool.name == "bash").unwrap();
+    let fixture = json!({
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.input_schema,
+        "shell": crate::shell_dispatcher::global_dispatcher().kind().binary(),
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+}
+
+#[test]
 fn lowercase_bash_schema_is_small_contract() {
     let schema = LowercaseBashTool.input_schema();
     assert_eq!(schema["required"], json!(["command"]));
@@ -33,10 +104,16 @@ fn lowercase_bash_schema_is_small_contract() {
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>(),
-        ["command", "justification", "sandbox_permissions", "timeout"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        [
+            "command",
+            "justification",
+            "read_only",
+            "sandbox_permissions",
+            "timeout"
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     );
     assert!(!BashTool::new("Bash").model_visible());
 }
@@ -658,8 +735,7 @@ fn shell_owner_registers_before_spawn_and_silent_work_stays_live() {
             Some(lifecycle.clone()),
             "shell_spawn_failure",
             "missing-program",
-        )
-        .expect("register spawn intent");
+        );
     }
     lifecycle
         .register("shell_silent", "sleep 30")
@@ -803,6 +879,9 @@ async fn readonly_shell_refuses_raw_string_external_backend() {
     struct Backend(std::sync::atomic::AtomicBool);
     #[async_trait::async_trait]
     impl crate::sandbox::backend::SandboxBackend for Backend {
+        fn kind(&self) -> crate::sandbox::backend::SandboxKind {
+            crate::sandbox::backend::SandboxKind::OpenSandbox
+        }
         async fn exec(
             &self,
             _cmd: &str,
@@ -836,6 +915,9 @@ async fn lowercase_bash_refuses_non_streaming_external_backend() {
     struct Backend(std::sync::atomic::AtomicBool);
     #[async_trait::async_trait]
     impl crate::sandbox::backend::SandboxBackend for Backend {
+        fn kind(&self) -> crate::sandbox::backend::SandboxKind {
+            crate::sandbox::backend::SandboxKind::OpenSandbox
+        }
         async fn exec(
             &self,
             _cmd: &str,
@@ -1145,6 +1227,44 @@ async fn read_only_shell_policy_blocks_non_readonly_commands() {
             "{command}"
         );
     }
+}
+
+#[tokio::test]
+async fn read_only_refusal_names_child_alternatives_instead_of_mode_switch() {
+    // #6298: a child has no `/mode` to switch to — a refusal that tells it to
+    // switch modes is a dead end beside an available absurd path. The child
+    // branch must name the child's own alternatives and the escalation path.
+    let tmp = tempdir().expect("tempdir");
+    let child_ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly)
+        .with_owner_agent("agent_child", "child");
+    let tool = BashTool::new("Bash");
+    let result = tool
+        .execute(json!({"command": "cargo build"}), &child_ctx)
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("read-only shell policy"));
+    assert!(result.content.contains("read_file"));
+    assert!(
+        result
+            .content
+            .contains("report the blocked probe to the parent")
+    );
+    assert!(
+        !result.content.contains("/mode work"),
+        "child must never be told to switch modes: {}",
+        result.content
+    );
+
+    let parent_ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let result = tool
+        .execute(json!({"command": "cargo build"}), &parent_ctx)
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("/mode work"));
 }
 
 #[cfg(unix)]
@@ -1568,9 +1688,12 @@ async fn background_start_advertises_task_status_completion() {
 }
 
 #[tokio::test]
-async fn background_shell_job_carries_subagent_owner() {
+async fn background_shell_job_preserves_origin_identity() {
     let tmp = tempdir().expect("tempdir");
-    let ctx = ToolContext::new(tmp.path()).with_owner_agent("agent_owner", "verifier");
+    let ctx = ToolContext::new(tmp.path())
+        .with_origin_turn_id("turn-origin")
+        .with_origin_tool_call_id("tool-origin")
+        .with_owner_agent("agent_owner", "verifier");
     let result = BashTool::new("Bash")
         .execute(
             json!({"command": sleep_command(2), "background": true}),
@@ -1621,6 +1744,16 @@ async fn background_shell_job_carries_subagent_owner() {
             .expect("owned shell job snapshot");
         assert_eq!(snapshot.owner_agent_id.as_deref(), Some("agent_owner"));
         assert_eq!(snapshot.owner_agent_name.as_deref(), Some("verifier"));
+        assert_eq!(snapshot.origin_tool_call_id.as_deref(), Some("tool-origin"));
+        assert_eq!(snapshot.origin_turn_id.as_deref(), Some("turn-origin"));
+        let mut legacy_json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let legacy_object = legacy_json.as_object_mut().expect("snapshot object");
+        legacy_object.remove("origin_tool_call_id");
+        legacy_object.remove("origin_turn_id");
+        let legacy_snapshot: ShellJobSnapshot =
+            serde_json::from_value(legacy_json).expect("deserialize legacy snapshot");
+        assert_eq!(legacy_snapshot.origin_tool_call_id, None);
+        assert_eq!(legacy_snapshot.origin_turn_id, None);
         let owners = manager.running_owner_agent_ids();
         assert_eq!(owners, vec!["agent_owner".to_string()]);
     }
@@ -1634,7 +1767,9 @@ async fn background_shell_job_carries_subagent_owner() {
 #[tokio::test]
 async fn drain_finished_jobs_reports_once() {
     let tmp = tempdir().expect("tempdir");
-    let ctx = ToolContext::new(tmp.path());
+    let ctx = ToolContext::new(tmp.path())
+        .with_origin_turn_id("turn-origin")
+        .with_origin_tool_call_id("tool-origin");
     let result = BashTool::new("Bash")
         .execute(
             json!({"command": echo_command("drain-finished-once"), "background": true}),
@@ -1669,6 +1804,16 @@ async fn drain_finished_jobs_reports_once() {
     assert_eq!(first[0].task_id, task_id);
     assert_eq!(first[0].status, ShellStatus::Completed);
     assert!(first[0].stdout_tail.contains("drain-finished-once"));
+    assert_eq!(first[0].origin_tool_call_id.as_deref(), Some("tool-origin"));
+    assert_eq!(first[0].origin_turn_id.as_deref(), Some("turn-origin"));
+    let mut legacy_json = serde_json::to_value(&first[0]).expect("serialize completion");
+    let legacy_object = legacy_json.as_object_mut().expect("completion object");
+    legacy_object.remove("origin_tool_call_id");
+    legacy_object.remove("origin_turn_id");
+    let legacy_completion: ShellCompletionEvent =
+        serde_json::from_value(legacy_json).expect("deserialize legacy completion");
+    assert_eq!(legacy_completion.origin_tool_call_id, None);
+    assert_eq!(legacy_completion.origin_turn_id, None);
 
     let second = manager.drain_finished_jobs_with_evidence();
     assert!(second.is_empty(), "completion should be reported only once");
@@ -1757,6 +1902,8 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: Some("tool-origin".to_string()),
+            origin_turn_id: Some("turn-origin".to_string()),
             owner_session_id: "session-test".to_string(),
         },
         stdout: stdout.clone(),
@@ -1769,6 +1916,8 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
         serde_json::from_slice(&evidence.artifact_bytes()).expect("evidence JSON");
     assert_eq!(payload["stdout"]["encoding"], "base64");
     assert_eq!(payload["stderr"]["encoding"], "base64");
+    assert_eq!(payload["origin_tool_call_id"], "tool-origin");
+    assert_eq!(payload["origin_turn_id"], "turn-origin");
     let decoded_stdout = base64::engine::general_purpose::STANDARD
         .decode(payload["stdout"]["content"].as_str().expect("stdout data"))
         .expect("decode stdout");
@@ -2817,6 +2966,61 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     assert_eq!(killed.status, ShellStatus::Killed);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropped_foreground_wait_kills_descendants_and_retains_unreceived_output() {
+    let tmp = tempdir().unwrap();
+    let pid_file = tmp.path().join("descendant.pid");
+    let command = format!(
+        "printf 'retained-before-drop\\n'; printf '%{}s\\n' x; \
+         CODEWHALE_SHELL_DESCENDANT_HELPER=1 \
+         CODEWHALE_SHELL_DESCENDANT_PID_FILE={} {} --exact \
+         tools::shell::tests::shell_descendant_helper_process --nocapture",
+        RAW_STREAM_SETTLED_TAIL_BYTES + 1024,
+        shell_words::quote(&pid_file.display().to_string()),
+        shell_words::quote(&std::env::current_exe().unwrap().display().to_string()),
+    );
+    let ctx = ToolContext::new(tmp.path()).with_state_namespace("foreground-drop".to_string());
+    let manager = ctx.shell_manager.clone();
+    let task_ctx = ctx.clone();
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+    });
+    let descendant = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = raw.trim().parse::<libc::pid_t>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("descendant must start");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        wait_for_shell_pid_exit(descendant),
+        "dropping the wait must stop its descendant"
+    );
+    let mut manager = manager.lock().unwrap();
+    let jobs = manager.list_jobs_for_session("foreground-drop");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, ShellStatus::Killed);
+    let detail = manager
+        .inspect_job(&jobs[0].id)
+        .expect("inspect cancelled job");
+    assert!(detail.stdout.contains("retained-before-drop"));
+    assert!(detail.stdout.len() > RAW_STREAM_SETTLED_TAIL_BYTES);
+    assert!(!manager.has_finished_unreported_jobs_for_session("foreground-drop"));
+}
+
 #[tokio::test]
 async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
     let tmp = tempdir().expect("tempdir");
@@ -3352,6 +3556,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         ownership: ShellOwnership::Managed,
         linked_task_id: None,
         owner_agent: None,
+        origin_tool_call_id: None,
+        origin_turn_id: None,
         stdout_buffer: super::new_shared_raw_output(),
         stderr_buffer: None,
         heavy_permit: None,
@@ -3360,6 +3566,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         completion_reported: false,
         bounded_output: None,
         stdin: None,
+        pty_master: None,
+        terminal_size: None,
         child: None,
         windows_job: None,
         stdout_thread: Some(stdout_thread),
@@ -3677,6 +3885,54 @@ async fn unknown_bash_action_is_refused_instead_of_running_the_command() {
         "must name the actions that dispatch: {message}"
     );
     assert!(!marker.exists(), "the command must not have run");
+}
+
+/// A NUL byte cannot cross the `exec` boundary: `Command` panics on it.
+/// Refuse with the byte offset before anything spawns (#5529).
+#[tokio::test]
+async fn nul_byte_in_shell_command_is_refused_before_spawn() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let marker = workspace.path().join("should-not-exist");
+
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({
+                "command": format!("echo hi\0; touch {}", marker.display()),
+            }),
+            &context,
+        )
+        .await
+        .expect_err("NUL byte must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("NUL byte"), "{message}");
+    assert!(message.contains("byte offset 7"), "{message}");
+    assert!(!marker.exists(), "the command must not have run");
+}
+
+/// `cwd` crosses the same boundary via `current_dir`, so the guard covers it
+/// too (#5529).
+#[tokio::test]
+async fn nul_byte_in_shell_cwd_is_refused_before_spawn() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({
+                "command": "echo hi",
+                "cwd": "sub\0dir",
+            }),
+            &context,
+        )
+        .await
+        .expect_err("NUL byte must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("NUL byte"), "{message}");
+    assert!(message.contains("cwd"), "{message}");
+    assert!(message.contains("byte offset 3"), "{message}");
 }
 
 /// The same hole one type down. `and_then(as_str).unwrap_or("run")` read a
@@ -4297,4 +4553,402 @@ fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
         second < 10_000,
         "the frozen value must be the real duration, not the timeout: {second}ms"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_pipeline_preserves_arguments_and_disables_git_helpers() {
+    const PROBE: &str = "CODEWHALE_TEST_READONLY_PIPELINE_SHELL";
+    if std::env::var_os(PROBE).is_none() {
+        // The dispatcher is process-pinned. Exercise both the supported shell
+        // and the fail-closed POSIX fallback without inheriting the CI shell.
+        for shell in ["/bin/bash", "/bin/sh"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::shell::tests::readonly_pipeline_preserves_arguments_and_disables_git_helpers",
+                    "--test-threads=1",
+                ])
+                .env(PROBE, shell)
+                .env("SHELL", shell)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "read-only pipeline probe failed ({shell})\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let sentinel = outside.path().join("secret");
+    std::fs::write(&sentinel, "private-marker\n").unwrap();
+    std::os::unix::fs::symlink(&sentinel, workspace.path().join("linked-secret")).unwrap();
+    std::fs::write(workspace.path().join("input.txt"), "hello\n").unwrap();
+    for name in ["-i", "-e", "-f", "--output=changed", "-o"] {
+        std::fs::write(workspace.path().join(name), "option-shaped filename\n").unwrap();
+    }
+    let ctx = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let tool = BashTool::new("Bash");
+    for command in ["sort * | cat", "sed -n 1p * | cat", "cat * | cat"] {
+        let result = tool
+            .execute(json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            !result.success,
+            "literal wildcard has no matching operand: {command}"
+        );
+        assert!(!result.content.contains("private-marker"));
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "private-marker\n"
+        );
+        assert!(!workspace.path().join("changed").exists());
+    }
+    let ordinary = tool
+        .execute(json!({"command": "cat input.txt | wc -l"}), &ctx)
+        .await
+        .unwrap();
+    if std::env::var(PROBE).as_deref() == Ok("/bin/sh") {
+        assert!(!ordinary.success);
+        assert!(
+            ordinary
+                .content
+                .contains("read-only pipelines require bash or zsh")
+        );
+        return;
+    }
+    assert!(ordinary.success, "{}", ordinary.content);
+    assert!(
+        tool.execute(json!({"command": "cat linked-secret | cat"}), &ctx)
+            .await
+            .is_err()
+    );
+    let pipeline = hardened_readonly_pipeline("git show HEAD | cat", workspace.path()).unwrap();
+    assert!(pipeline.contains("--no-ext-diff"));
+    assert!(pipeline.contains("--no-textconv"));
+    assert!(pipeline.contains("--no-show-signature"));
+}
+
+#[tokio::test]
+async fn readonly_sed_extra_options_never_mutate_files() {
+    let workspace = tempdir().unwrap();
+    let source = workspace.path().join("input.txt");
+    std::fs::write(&source, "first\nsecond\n").unwrap();
+    let ctx = ToolContext::new(workspace.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    for command in [
+        "sed -n 1p input.txt -i",
+        "sed -n 1p -i.bak input.txt",
+        "sed -n 1p -e 1e input.txt",
+        "sed -n 1p -f script input.txt",
+    ] {
+        let result = BashTool::new("Bash")
+            .execute(json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.success, "{command}");
+        assert!(result.content.contains("read-only shell policy"));
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "first\nsecond\n");
+    }
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": "sed -n 1p input.txt"}), &ctx)
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.content);
+}
+
+/// A transiently busy Work-graph must not veto the command.
+///
+/// `register_operation` acquires the To-do/Plan locks with a short try-lock
+/// spin. Before this guard existed, a shell call landing in that window failed
+/// outright with "To-do state is busy; operation was not registered" — observed
+/// twice in one live session, each time right after another tool call. The
+/// registration is the same bookkeeping whose `observe` half is already
+/// best-effort, so a busy state now degrades to an unbound run.
+#[tokio::test]
+async fn busy_work_graph_degrades_the_spawn_intent_instead_of_failing_it() {
+    use crate::tools::plan::new_shared_plan_state;
+    use crate::tools::todo::new_shared_todo_list;
+    use crate::work_graph::new_shared_work_runtime;
+
+    let todos = new_shared_todo_list();
+    let plan = new_shared_plan_state();
+    let lifecycle = || ShellWorkLifecycle {
+        work: new_shared_work_runtime(todos.clone(), plan.clone()),
+        session_id: "session-test".to_string(),
+    };
+
+    // Control: with the graph free, the intent binds.
+    let bound = ShellSpawnIntentGuard::new(Some(lifecycle()), "shell_free", "echo hi");
+    assert!(
+        bound.lifecycle.is_some(),
+        "a free work-graph must bind the spawn intent"
+    );
+
+    // Busy: hold the To-do lock so the try-lock spin cannot win.
+    let _held = todos.lock().await;
+    // The raw register call still reports the busy state — this is exactly what
+    // used to propagate out of the spawn path and fail the command.
+    assert!(
+        lifecycle()
+            .register("shell_busy_direct", "echo hi")
+            .is_err(),
+        "the raw register call must observe the held lock as busy"
+    );
+    let busy = ShellSpawnIntentGuard::new(Some(lifecycle()), "shell_busy", "echo hi");
+    assert!(
+        busy.lifecycle.is_none(),
+        "a busy work-graph must degrade to an unbound guard, not fail the spawn"
+    );
+}
+
+/// #6435: the guard went unbound, but its sibling handle still published the
+/// spawn to the unregistered operation, killed the child and reported
+/// "operation binding shell:<id> is not registered". A busy Work-graph must
+/// let the command run end to end.
+#[cfg(unix)]
+#[tokio::test]
+async fn busy_work_graph_still_runs_the_command() {
+    use crate::tools::plan::new_shared_plan_state;
+    use crate::tools::todo::new_shared_todo_list;
+    use crate::work_graph::new_shared_work_runtime;
+
+    let workspace = tempdir().expect("workspace");
+    let todos = new_shared_todo_list();
+    let plan = new_shared_plan_state();
+    let lifecycle = ShellWorkLifecycle {
+        work: new_shared_work_runtime(todos.clone(), plan.clone()),
+        session_id: "session-test".to_string(),
+    };
+    let _held = todos.lock().await;
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+    for background in [false, true] {
+        let marker = format!("ran-{background}.txt");
+        let result = manager
+            .execute_with_options_env_for_owner_and_work(
+                &format!("echo ran > {marker}"),
+                None,
+                10_000,
+                background,
+                None,
+                false,
+                None,
+                HashMap::new(),
+                None,
+                "session-test".to_string(),
+                None,
+                None,
+                Some(lifecycle.clone()),
+                None,
+                false,
+                (1_000, 60_000),
+            )
+            .unwrap_or_else(|err| panic!("background={background}: {err:#}"));
+        if background {
+            let task_id = result.task_id.expect("background task id");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !workspace.path().join(&marker).exists() {
+                assert!(std::time::Instant::now() < deadline, "{task_id} never ran");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        assert!(
+            workspace.path().join(&marker).exists(),
+            "background={background}: the command ran"
+        );
+    }
+}
+
+#[test]
+fn pty_dimensions_reject_zero_and_unbounded_grid() {
+    assert_eq!(
+        PtyDimensions::default(),
+        PtyDimensions { rows: 24, cols: 80 }
+    );
+    for size in [
+        PtyDimensions { rows: 0, cols: 80 },
+        PtyDimensions { rows: 24, cols: 0 },
+        PtyDimensions {
+            rows: 1001,
+            cols: 80,
+        },
+        PtyDimensions {
+            rows: 24,
+            cols: u16::MAX,
+        },
+    ] {
+        assert!(size.validate().is_err());
+    }
+    assert!(
+        PtyDimensions {
+            rows: 1000,
+            cols: 1000
+        }
+        .validate()
+        .is_ok()
+    );
+}
+
+#[test]
+#[cfg(not(target_env = "ohos"))]
+fn pty_stdin_preserves_bytes_and_reports_flush_failure() {
+    struct FlushFailure(Arc<Mutex<Vec<u8>>>);
+    impl Write for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "fixture flush failure",
+            ))
+        }
+    }
+    let tmp = tempdir().unwrap();
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_finished_record_for_test("input-fixture", Duration::ZERO);
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    manager.processes.get_mut("input-fixture").unwrap().stdin =
+        Some(StdinWriter::Pty(Box::new(FlushFailure(bytes.clone()))));
+    let input = b"\0\xff\x1b[A\x03";
+    let error = manager
+        .write_stdin_bytes("input-fixture", input, false)
+        .unwrap_err();
+    assert!(error.to_string().contains("flush"));
+    assert_eq!(bytes.lock().unwrap().as_slice(), input);
+}
+
+#[test]
+#[cfg(all(unix, not(target_env = "ohos")))]
+fn pty_resize_updates_live_terminal_and_rejects_finished_or_pipe_jobs() {
+    let tmp = tempdir().unwrap();
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let launched = manager
+        .execute_with_options_env(
+            "stty -echo; printf ready; while IFS= read -r line; do stty size; done",
+            None,
+            5000,
+            true,
+            None,
+            true,
+            Some(ExecutionSandboxPolicy::DangerFullAccess),
+            HashMap::new(),
+        )
+        .unwrap();
+    let id = launched.task_id.unwrap();
+    assert_eq!(
+        manager.job_terminal_size(&id),
+        Some(PtyDimensions::default())
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let chunk = manager
+            .read_output_chunk(&id, ShellOutputStream::Stdout, 0, 4096, 50)
+            .unwrap();
+        if chunk.bytes.windows(5).any(|bytes| bytes == b"ready") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "PTY did not become ready");
+    }
+    let size = PtyDimensions {
+        rows: 37,
+        cols: 111,
+    };
+    manager.resize_pty(&id, size).unwrap();
+    assert_eq!(manager.job_terminal_size(&id), Some(size));
+    assert!(
+        manager
+            .resize_pty(&id, PtyDimensions { rows: 0, cols: 1 })
+            .is_err()
+    );
+    assert_eq!(manager.job_terminal_size(&id), Some(size));
+    manager.write_stdin_bytes(&id, b"size\n", false).unwrap();
+    loop {
+        let chunk = manager
+            .read_output_chunk(&id, ShellOutputStream::Stdout, 0, 4096, 0)
+            .unwrap();
+        if String::from_utf8_lossy(&chunk.bytes).contains("37 111") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual terminal size did not change"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    manager.kill(&id).unwrap();
+    assert!(manager.resize_pty(&id, size).is_err());
+    assert!(manager.processes[&id].pty_master.is_none());
+    let pipe = manager
+        .execute_with_options_env(
+            "cat",
+            None,
+            5000,
+            true,
+            None,
+            false,
+            Some(ExecutionSandboxPolicy::DangerFullAccess),
+            HashMap::new(),
+        )
+        .unwrap()
+        .task_id
+        .unwrap();
+    assert!(manager.resize_pty(&pipe, size).is_err());
+    manager.kill(&pipe).unwrap();
+}
+
+#[test]
+#[cfg(all(unix, not(target_env = "ohos")))]
+fn pty_raw_stdin_roundtrips_nul_and_non_utf8_bytes() {
+    let tmp = tempdir().unwrap();
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let input = b"\0\xff\x1b[A\x03\n";
+    let command = format!(
+        "stty raw -echo; printf ready; dd bs=1 count={} 2>/dev/null",
+        input.len()
+    );
+    let launched = manager
+        .execute_with_options_env(
+            &command,
+            None,
+            5000,
+            true,
+            None,
+            true,
+            Some(ExecutionSandboxPolicy::DangerFullAccess),
+            HashMap::new(),
+        )
+        .unwrap();
+    let id = launched.task_id.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let chunk = manager
+            .read_output_chunk(&id, ShellOutputStream::Stdout, 0, 4096, 0)
+            .unwrap();
+        if chunk.bytes == b"ready" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "raw PTY did not become ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    manager.write_stdin_bytes(&id, input, false).unwrap();
+    loop {
+        let chunk = manager
+            .read_output_chunk(&id, ShellOutputStream::Stdout, 5, 4096, 0)
+            .unwrap();
+        if chunk.status != ShellStatus::Running {
+            assert_eq!(chunk.bytes, input);
+            assert_eq!(chunk.next_offset, 5 + input.len());
+            break;
+        }
+        assert!(Instant::now() < deadline, "raw PTY did not finish");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

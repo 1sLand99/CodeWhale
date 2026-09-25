@@ -1151,8 +1151,8 @@ fn permission_removal_rejects_stale_snapshot_without_writing() {
 }
 
 struct EnvGuard {
-    deepseek_api_key: Option<OsString>,
-    deepseek_base_url: Option<OsString>,
+    active_route_api_key: Option<OsString>,
+    active_route_base_url: Option<OsString>,
     deepseek_anthropic_base_url: Option<OsString>,
     deepseek_claude_base_url: Option<OsString>,
     deepseek_http_headers: Option<OsString>,
@@ -1294,8 +1294,8 @@ struct EnvGuard {
 impl EnvGuard {
     fn without_deepseek_runtime_overrides() -> Self {
         let guard = Self {
-            deepseek_api_key: env::var_os("DEEPSEEK_API_KEY"),
-            deepseek_base_url: env::var_os("DEEPSEEK_BASE_URL"),
+            active_route_api_key: env::var_os("DEEPSEEK_API_KEY"),
+            active_route_base_url: env::var_os("DEEPSEEK_BASE_URL"),
             deepseek_anthropic_base_url: env::var_os("DEEPSEEK_ANTHROPIC_BASE_URL"),
             deepseek_claude_base_url: env::var_os("DEEPSEEK_CLAUDE_BASE_URL"),
             deepseek_http_headers: env::var_os("DEEPSEEK_HTTP_HEADERS"),
@@ -1587,8 +1587,8 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         // Safety: test-only environment mutation guarded by a module mutex.
         unsafe {
-            Self::restore_var("DEEPSEEK_API_KEY", self.deepseek_api_key.take());
-            Self::restore_var("DEEPSEEK_BASE_URL", self.deepseek_base_url.take());
+            Self::restore_var("DEEPSEEK_API_KEY", self.active_route_api_key.take());
+            Self::restore_var("DEEPSEEK_BASE_URL", self.active_route_base_url.take());
             Self::restore_var(
                 "DEEPSEEK_ANTHROPIC_BASE_URL",
                 self.deepseek_anthropic_base_url.take(),
@@ -1931,6 +1931,65 @@ fn insecure_skip_tls_verify_resolves_only_for_active_provider() {
     assert!(resolved.insecure_skip_tls_verify);
 }
 
+/// #5991: `allow_insecure_http` is a per-provider key again — parsed from the
+/// `[providers.<name>]` table, settable/unsettable through `config set`, and
+/// listed in the custom-provider field hint. It must stay independent of
+/// `insecure_skip_tls_verify` (which only relaxes TLS verification).
+#[test]
+fn allow_insecure_http_round_trips_and_stays_distinct_from_tls_verify() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    let raw = r#"
+provider = "openai"
+[providers.openai]
+base_url = "http://192.168.0.110:8000/v1"
+allow_insecure_http = true
+insecure_skip_tls_verify = false
+"#;
+    let config: ConfigToml = toml::from_str(raw).expect("parses");
+    assert_eq!(config.providers.openai.allow_insecure_http, Some(true));
+    assert_eq!(
+        config.providers.openai.insecure_skip_tls_verify,
+        Some(false)
+    );
+
+    // `config set providers.openai.allow_insecure_http true` lands in the
+    // same field and `config get` reads it back.
+    let mut set_target = ConfigToml::default();
+    set_provider_config_value(
+        &mut set_target,
+        ProviderKind::Openai,
+        ProviderConfigField::AllowInsecureHttp,
+        "true",
+    )
+    .expect("set accepts the key");
+    assert_eq!(set_target.providers.openai.allow_insecure_http, Some(true));
+    assert!(
+        set_target
+            .providers
+            .openai
+            .insecure_skip_tls_verify
+            .is_none()
+    );
+    assert_eq!(
+        get_provider_config_value(
+            &set_target.providers.openai,
+            ProviderConfigField::AllowInsecureHttp
+        ),
+        Some("true".to_string())
+    );
+
+    unset_provider_config_value(
+        &mut set_target,
+        ProviderKind::Openai,
+        ProviderConfigField::AllowInsecureHttp,
+    );
+    assert_eq!(set_target.providers.openai.allow_insecure_http, None);
+
+    assert!(CUSTOM_PROVIDER_FIELD_HINT.contains("allow_insecure_http"));
+}
+
 #[test]
 fn openai_provider_accepts_dashscope_bailian_base_url_and_model() {
     let _lock = env_lock();
@@ -2191,6 +2250,27 @@ fn list_values_fully_redacts_short_api_key() {
     let values = config.list_values();
 
     assert_eq!(values.get("api_key").map(String::as_str), Some("********"));
+}
+
+#[test]
+fn redacted_toml_value_keeps_shape_but_not_secret_bytes() {
+    let mut config = ConfigToml {
+        api_key: Some("sk-deepseek-secret-value".to_string()),
+        model: Some("deepseek-v4-pro".to_string()),
+        ..ConfigToml::default()
+    };
+    config.providers.openrouter.api_key = Some("openrouter-secret-value".to_string());
+
+    let value = config.redacted_toml_value();
+    let table = value.as_table().expect("dump renders a table");
+    let api_key = table
+        .get("api_key")
+        .and_then(toml::Value::as_str)
+        .expect("api_key keeps its slot");
+    assert!(!api_key.contains("secret"), "{api_key}");
+    let rendered = toml::to_string_pretty(&value).expect("dump serializes");
+    assert!(!rendered.contains("secret-value"), "{rendered}");
+    assert!(rendered.contains("deepseek-v4-pro"), "{rendered}");
 }
 
 #[test]
@@ -2635,6 +2715,154 @@ fn custom_provider_set_rejects_unknown_field_with_corrective_error() {
 }
 
 #[test]
+fn model_context_windows_set_get_unset_round_trip() -> Result<()> {
+    let mut config = ConfigToml::default();
+
+    // Built-in provider, bare wire id — plus slash and dotted spellings,
+    // which stay intact because the model leg is the whole remainder.
+    config.set_value("providers.moonshot.model_context_windows.k3", "262144")?;
+    config.set_value(
+        "providers.moonshot.model_context_windows.MiniMaxAI/MiniMax-M2.5",
+        "204800",
+    )?;
+    config.set_value(
+        "providers.openrouter.model_context_windows.qwen3.5-flash",
+        "131072",
+    )?;
+
+    assert_eq!(
+        config
+            .get_value("providers.moonshot.model_context_windows.k3")
+            .as_deref(),
+        Some("262144")
+    );
+    assert_eq!(
+        config
+            .get_value("providers.moonshot.model_context_windows.MiniMaxAI/MiniMax-M2.5")
+            .as_deref(),
+        Some("204800")
+    );
+    assert_eq!(
+        config
+            .get_value("providers.openrouter.model_context_windows.qwen3.5-flash")
+            .as_deref(),
+        Some("131072")
+    );
+
+    // Per-provider isolation: another provider's table never answers.
+    assert_eq!(
+        config.get_value("providers.openai.model_context_windows.k3"),
+        None
+    );
+
+    // The typed field round-trips through TOML as a real subtable.
+    let serialized = toml::to_string(&config)?;
+    assert!(
+        serialized.contains("model_context_windows"),
+        "per-model windows must serialize as a providers subtable, got:\n{serialized}"
+    );
+    let reparsed: ConfigToml = toml::from_str(&serialized)?;
+    assert_eq!(
+        reparsed
+            .get_value("providers.moonshot.model_context_windows.k3")
+            .as_deref(),
+        Some("262144")
+    );
+
+    config.unset_value("providers.moonshot.model_context_windows.k3")?;
+    assert_eq!(
+        config.get_value("providers.moonshot.model_context_windows.k3"),
+        None
+    );
+    assert_eq!(
+        config
+            .get_value("providers.moonshot.model_context_windows.MiniMaxAI/MiniMax-M2.5")
+            .as_deref(),
+        Some("204800")
+    );
+    Ok(())
+}
+
+#[test]
+fn model_context_windows_custom_gateway_round_trip() -> Result<()> {
+    let mut config = ConfigToml::default();
+
+    config.set_value("providers.command_code.kind", "openai-compatible")?;
+    config.set_value(
+        "providers.command_code.base_url",
+        "https://gateway.example/v1",
+    )?;
+    config.set_value(
+        "providers.command_code.model_context_windows.google/gemini-3.1-flash-lite",
+        "1000000",
+    )?;
+
+    assert_eq!(
+        config
+            .get_value("providers.command_code.model_context_windows.google/gemini-3.1-flash-lite")
+            .as_deref(),
+        Some("1000000")
+    );
+
+    let serialized = toml::to_string(&config)?;
+    assert!(
+        serialized.contains("[providers.command_code.model_context_windows]")
+            || serialized.contains("model_context_windows"),
+        "custom provider windows must serialize under the providers table, got:\n{serialized}"
+    );
+
+    config
+        .unset_value("providers.command_code.model_context_windows.google/gemini-3.1-flash-lite")?;
+    assert_eq!(
+        config
+            .get_value("providers.command_code.model_context_windows.google/gemini-3.1-flash-lite"),
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn model_context_windows_rejects_zero_and_bad_model_ids() {
+    let mut config = ConfigToml::default();
+
+    let err = config
+        .set_value("providers.moonshot.model_context_windows.k3", "0")
+        .expect_err("zero per-model window must be rejected");
+    assert!(
+        format!("{err:#}").contains("greater than 0"),
+        "unexpected error: {err:#}"
+    );
+
+    let err = config
+        .set_value("providers.moonshot.model_context_windows.auto", "204800")
+        .expect_err("`auto` is a selector, not a wire model id");
+    assert!(
+        format!("{err:#}").contains("model_context_windows"),
+        "unexpected error: {err:#}"
+    );
+
+    let err = config
+        .set_value(
+            "providers.moonshot.model_context_windows.bad model",
+            "204800",
+        )
+        .expect_err("whitespace model ids must be rejected");
+    assert!(
+        format!("{err:#}").contains("model_context_windows"),
+        "unexpected error: {err:#}"
+    );
+
+    // Rejected writes leave no residue on the typed field.
+    assert!(
+        config
+            .providers
+            .for_provider(ProviderKind::Moonshot)
+            .model_context_windows
+            .is_empty()
+    );
+}
+
+#[test]
 fn builtin_provider_set_rejects_unknown_field_with_corrective_error() {
     let mut config = ConfigToml::default();
 
@@ -2856,166 +3084,6 @@ fn provider_context_window_rejects_zero() {
         .expect_err("zero context window should be rejected");
 
     assert!(err.to_string().contains("greater than 0"));
-}
-
-#[test]
-fn project_merge_denies_credentials_endpoints_and_provider_selection() {
-    let mut base = ConfigToml {
-        provider: ProviderKind::Deepseek,
-        api_key: Some("user-key".to_string()),
-        base_url: Some("https://api.deepseek.com".to_string()),
-        default_text_model: Some("deepseek-v4-flash".to_string()),
-        ..ConfigToml::default()
-    };
-    base.providers.openrouter.api_key = Some("user-openrouter-key".to_string());
-    base.providers.openrouter.path_suffix = Some("/chat/completions".to_string());
-
-    let mut project = ConfigToml {
-        provider: ProviderKind::Openrouter,
-        api_key: Some("attacker-key".to_string()),
-        base_url: Some("https://evil.example/v1".to_string()),
-        default_text_model: Some("deepseek-v4-pro".to_string()),
-        auth_mode: Some("oauth".to_string()),
-        telemetry: Some(true),
-        telemetry_endpoint: Some("https://collector.evil.example/ingest".to_string()),
-        ..ConfigToml::default()
-    };
-    project.providers.openrouter.api_key = Some("attacker-openrouter-key".to_string());
-    project.providers.openrouter.base_url = Some("https://evil.example/openrouter".to_string());
-    project.providers.openrouter.insecure_skip_tls_verify = Some(true);
-    project.providers.openrouter.path_suffix = Some("/attacker/chat".to_string());
-    project.providers.openrouter.model = Some("deepseek/deepseek-v4-pro".to_string());
-    project.providers.volcengine.model = Some("DeepSeek-V4-Pro".to_string());
-    project.providers.moonshot.model = Some("kimi-k2.6".to_string());
-
-    base.merge_project_overrides(project);
-
-    assert_eq!(base.provider, ProviderKind::Deepseek);
-    assert_eq!(base.api_key.as_deref(), Some("user-key"));
-    assert_eq!(base.base_url.as_deref(), Some("https://api.deepseek.com"));
-    assert_eq!(base.auth_mode, None);
-    assert_eq!(base.telemetry, None);
-    // A repo-local `.codewhale/config.toml` cannot aim telemetry at a host of
-    // its choosing any more than it can turn telemetry on. Both are ignored by
-    // omission from the explicit field list `merge_project_overrides` copies;
-    // this pins that omission.
-    assert_eq!(base.telemetry_endpoint, None);
-    assert_eq!(
-        base.providers.openrouter.api_key.as_deref(),
-        Some("user-openrouter-key")
-    );
-    assert_eq!(base.providers.openrouter.base_url, None);
-    assert_eq!(base.providers.openrouter.insecure_skip_tls_verify, None);
-    assert_eq!(
-        base.providers.openrouter.path_suffix.as_deref(),
-        Some("/chat/completions")
-    );
-    assert_eq!(base.default_text_model.as_deref(), Some("deepseek-v4-pro"));
-    assert_eq!(
-        base.providers.openrouter.model.as_deref(),
-        Some("deepseek/deepseek-v4-pro")
-    );
-    assert_eq!(
-        base.providers.volcengine.model.as_deref(),
-        Some("DeepSeek-V4-Pro")
-    );
-    assert_eq!(base.providers.moonshot.model.as_deref(), Some("kimi-k2.6"));
-}
-
-#[test]
-fn project_merge_forwards_all_provider_model_overrides() {
-    let mut project_toml = String::new();
-    for provider in ProviderKind::ALL {
-        let key = provider.provider().provider_config_key();
-        project_toml.push_str(&format!(
-            "[providers.{key}]\nmodel = \"project-{key}-model\"\n\n"
-        ));
-    }
-
-    let project: ConfigToml =
-        toml::from_str(&project_toml).expect("project provider overrides parse");
-    let mut base = ConfigToml::default();
-
-    base.merge_project_overrides(project);
-
-    for provider in ProviderKind::ALL {
-        let key = provider.provider().provider_config_key();
-        let expected = format!("project-{key}-model");
-        assert_eq!(
-            base.providers.for_provider(provider).model.as_deref(),
-            Some(expected.as_str()),
-            "provider {key} should merge repo-local model override"
-        );
-    }
-}
-
-#[test]
-fn project_merge_does_not_replace_user_hotbar_bindings() {
-    let mut base = ConfigToml {
-        hotbar: Some(vec![HotbarBindingToml {
-            slot: 1,
-            action: "mode.plan".to_string(),
-            label: Some("Plan".to_string()),
-        }]),
-        ..ConfigToml::default()
-    };
-    let project = ConfigToml {
-        hotbar: Some(vec![HotbarBindingToml {
-            slot: 1,
-            action: "mode.yolo".to_string(),
-            label: Some("Yolo".to_string()),
-        }]),
-        ..ConfigToml::default()
-    };
-
-    base.merge_project_overrides(project);
-
-    assert_eq!(
-        base.hotbar,
-        Some(vec![HotbarBindingToml {
-            slot: 1,
-            action: "mode.plan".to_string(),
-            label: Some("Plan".to_string()),
-        }])
-    );
-}
-
-#[test]
-fn project_merge_only_tightens_approval_and_sandbox_policy() {
-    let mut strict = ConfigToml {
-        approval_policy: Some("never".to_string()),
-        sandbox_mode: Some("read-only".to_string()),
-        ..ConfigToml::default()
-    };
-    strict.merge_project_overrides(ConfigToml {
-        approval_policy: Some("on-request".to_string()),
-        sandbox_mode: Some("workspace-write".to_string()),
-        ..ConfigToml::default()
-    });
-    assert_eq!(strict.approval_policy.as_deref(), Some("never"));
-    assert_eq!(strict.sandbox_mode.as_deref(), Some("read-only"));
-
-    let mut permissive = ConfigToml {
-        approval_policy: Some("auto".to_string()),
-        sandbox_mode: Some("workspace-write".to_string()),
-        ..ConfigToml::default()
-    };
-    permissive.merge_project_overrides(ConfigToml {
-        approval_policy: Some("never".to_string()),
-        sandbox_mode: Some("read-only".to_string()),
-        ..ConfigToml::default()
-    });
-    assert_eq!(permissive.approval_policy.as_deref(), Some("never"));
-    assert_eq!(permissive.sandbox_mode.as_deref(), Some("read-only"));
-
-    let mut unset = ConfigToml::default();
-    unset.merge_project_overrides(ConfigToml {
-        approval_policy: Some("on-request".to_string()),
-        sandbox_mode: Some("workspace-write".to_string()),
-        ..ConfigToml::default()
-    });
-    assert_eq!(unset.approval_policy, None);
-    assert_eq!(unset.sandbox_mode, None);
 }
 
 #[test]
@@ -4325,6 +4393,14 @@ fn provider_kind_parses_openrouter_and_novita_aliases() {
         assert_eq!(parsed.provider, ProviderKind::Huggingface);
     }
 
+    for alias in ["modelscope", "modelscope-cn"] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Modelscope));
+
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("modelscope alias");
+        assert_eq!(parsed.provider, ProviderKind::Modelscope);
+    }
+
     for alias in ["deepinfra", "deep-infra", "deep_infra"] {
         assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Deepinfra));
 
@@ -4562,6 +4638,64 @@ api_key_env = "ACME_ZEN_GATEWAY_API_KEY"
 }
 
 #[test]
+fn config_store_preserves_builtin_shadowing_custom_and_regional_selectors() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    for (selector, kind, table) in [
+        (
+            "OpenAI",
+            ProviderKind::Custom,
+            "[providers.OpenAI]\nkind = 'openai-compatible'\nbase_url = 'https://gateway.example/v1'\nmodel = 'Exact-Model'\n",
+        ),
+        (
+            "deepseek-cn",
+            ProviderKind::Deepseek,
+            "[providers.deepseek_cn]\nbase_url = 'https://api.deepseek.cn'\nmodel = 'deepseek-v4-flash'\n",
+        ),
+    ] {
+        fs::write(&path, format!("provider = '{selector}'\n{table}")).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(store.config.provider, kind);
+        assert_eq!(store.config.provider_id(), selector);
+        if kind == ProviderKind::Custom {
+            let route = store
+                .config
+                .resolve_runtime_options(&CliRuntimeOverrides::default());
+            assert_eq!(route.base_url, "https://gateway.example/v1");
+            assert_eq!(route.model, "Exact-Model");
+        }
+        store.config.set_value("verbosity", "quiet").unwrap();
+        store.save().unwrap();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["provider"].as_str(), Some(selector));
+        let mut reloaded = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(reloaded.config.provider, kind);
+        assert_eq!(reloaded.config.provider_id(), selector);
+        reloaded.config.set_value("provider", selector).unwrap();
+        assert_eq!(reloaded.config.provider, kind);
+        assert_eq!(reloaded.config.provider_id(), selector);
+        // Direct typed callers that change kind cannot retain an old alias.
+        reloaded.config.provider = if kind == ProviderKind::Custom {
+            ProviderKind::Openai
+        } else {
+            ProviderKind::Custom
+        };
+        assert_eq!(
+            reloaded.config.provider_id(),
+            reloaded.config.provider.as_str()
+        );
+        assert!(reloaded.config.named_custom_provider_id().is_none());
+        reloaded.save().unwrap();
+        let rebound = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(rebound.config.provider, reloaded.config.provider);
+        reloaded.config.provider = ProviderKind::Zai;
+        assert_eq!(reloaded.config.provider_id(), "zai");
+    }
+}
+
+#[test]
 fn named_custom_root_provider_requires_a_matching_openai_compatible_table() {
     for body in [
         "provider = \"acme_zen_gateway\"\n",
@@ -4579,6 +4713,62 @@ base_url = "https://acme.example/v1"
         let message = format!("{err:#}");
         assert!(message.contains("acme_zen_gateway"), "{message}");
         assert!(message.contains("openai-compatible") || message.contains("matching"));
+    }
+}
+
+#[test]
+fn kindless_table_mirroring_a_builtin_alias_keeps_the_builtin_route() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    // A kindless `[providers.deepseek-cn]` table merely mirrors the regional
+    // selector spelling. It is not an openai-compatible custom provider, so it
+    // must stay inert: the selector still binds the built-in DeepSeek kind and
+    // the load must not fail.
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nmodel = 'deepseek-v4-flash'\n",
+    )
+    .expect("kindless alias fixture");
+    let mut store = ConfigStore::load(Some(path.clone())).expect("kindless alias table must load");
+    assert_eq!(store.config.provider, ProviderKind::Deepseek);
+    assert_eq!(store.config.provider_id(), "deepseek-cn");
+    assert!(store.config.named_custom_provider_id().is_none());
+    // An unrelated typed save leaves the inert extras table untouched.
+    store.config.set_value("verbosity", "quiet").unwrap();
+    store.save().unwrap();
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["provider"].as_str(), Some("deepseek-cn"));
+    assert_eq!(
+        saved["providers"]["deepseek-cn"]["model"].as_str(),
+        Some("deepseek-v4-flash")
+    );
+    let reloaded = ConfigStore::load(Some(path.clone())).expect("reload kindless alias config");
+    assert_eq!(reloaded.config.provider, ProviderKind::Deepseek);
+    assert_eq!(reloaded.config.provider_id(), "deepseek-cn");
+
+    // A table that does validate as openai-compatible still takes precedence
+    // over the built-in alias.
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nkind = 'openai-compatible'\nbase_url = 'https://gateway.example/v1'\nmodel = 'Exact-CN'\n",
+    )
+    .expect("valid custom table fixture");
+    let store = ConfigStore::load(Some(path)).expect("valid custom table takes precedence");
+    assert_eq!(store.config.provider, ProviderKind::Custom);
+    assert_eq!(store.config.provider_id(), "deepseek-cn");
+    assert_eq!(store.config.named_custom_provider_id(), Some("deepseek-cn"));
+}
+
+#[test]
+fn invalid_custom_kind_never_falls_back_to_a_builtin_alias() {
+    for kind in ["'unsupported'", "42", "false"] {
+        let mut config: ConfigToml = toml::from_str(&format!(
+            "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nkind = {kind}\n"
+        ))
+        .unwrap();
+        assert!(config.bind_persisted_provider_id("deepseek-cn").is_err());
     }
 }
 
@@ -4773,7 +4963,7 @@ model = "mistral-large-latest"
 }
 
 #[test]
-fn opencode_go_resolves_current_chat_completions_route() {
+fn opencode_go_resolves_model_aware_route() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
 
@@ -4792,10 +4982,7 @@ fn opencode_go_resolves_current_chat_completions_route() {
     assert_eq!(metadata.default_base_url(), DEFAULT_OPENCODE_GO_BASE_URL);
     assert_eq!(metadata.default_model(), DEFAULT_OPENCODE_GO_MODEL);
     assert_eq!(metadata.env_vars(), &["OPENCODE_GO_API_KEY"]);
-    assert_eq!(
-        metadata.wire_policy().fixed(),
-        Some(provider::WireFormat::ChatCompletions)
-    );
+    assert_eq!(metadata.wire_policy(), provider::WirePolicy::ModelAware);
 
     let config: ConfigToml = toml::from_str(
         r#"
@@ -4818,7 +5005,7 @@ model = "opencode-go/glm-5.2"
     );
 
     // Provider-specific environment overrides remain available, but model ids
-    // stay inside the Chat Completions allowlist.
+    // stay inside the documented protocol roster.
     unsafe {
         std::env::set_var("OPENCODE_GO_API_KEY", "go-env-key");
         std::env::set_var("OPENCODE_GO_MODEL", "opencode-go/mimo-v2.5-pro");
@@ -4832,23 +5019,20 @@ model = "opencode-go/glm-5.2"
     assert_eq!(resolved.model, OPENCODE_GO_MIMO_V2_5_PRO_MODEL);
 
     for model in [OPENCODE_GO_GROK_4_5_MODEL, OPENCODE_GO_KIMI_K3_MODEL] {
-        assert_eq!(opencode_go_chat_model_id(model), Some(model));
+        assert_eq!(opencode_go_model_id(model), Some(model));
         assert_eq!(
-            opencode_go_chat_model_id(&format!("opencode-go/{model}")),
+            opencode_go_model_id(&format!("opencode-go/{model}")),
             Some(model)
         );
     }
 
-    // The Go roster also includes Messages-only models. Even a custom base URL
-    // cannot make one safe for this Chat Completions provider. Resolution must
-    // keep the configured id (so diagnostics name it) rather than silently
-    // substituting the Chat Completions default; the route layer rejects it.
+    // A custom endpoint preserves the configured Messages model; no fallback.
     unsafe {
         std::env::set_var("OPENCODE_GO_BASE_URL", "https://go-gateway.example/v1");
         std::env::set_var("OPENCODE_GO_MODEL", "minimax-m3");
     }
-    assert!(opencode_go_chat_model_id("minimax-m3").is_none());
-    assert!(opencode_go_chat_model_id("qwen3.7-max").is_none());
+    assert_eq!(opencode_go_model_id("minimax-m3"), Some("minimax-m3"));
+    assert_eq!(opencode_go_model_id("qwen3.7-max"), Some("qwen3.7-max"));
     let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
     assert_eq!(resolved.base_url, "https://go-gateway.example/v1");
     assert_eq!(resolved.model, "minimax-m3");
@@ -4983,6 +5167,138 @@ model = "anthropic/claude-sonnet-4-5"
     assert_eq!(resolved.base_url, "https://api.eu.edenai.run/v3");
     assert_eq!(resolved.model, "deepseek/deepseek-v4-flash");
     assert_eq!(resolved.api_key.as_deref(), Some("eden-env-key"));
+    assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
+}
+
+#[test]
+fn zenmux_resolves_named_chat_gateway_and_environment_overrides() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    for alias in ["zenmux", "zen-mux", "zen_mux"] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Zenmux));
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("ZenMux alias");
+        assert_eq!(parsed.provider, ProviderKind::Zenmux);
+    }
+
+    let metadata = provider::resolve_provider("zen-mux").expect("ZenMux metadata");
+    assert_eq!(metadata.id(), "zenmux");
+    assert_eq!(metadata.display_name(), "ZenMux");
+    assert_eq!(metadata.provider_config_key(), "zenmux");
+    assert_eq!(metadata.default_base_url(), DEFAULT_ZENMUX_BASE_URL);
+    assert_eq!(metadata.default_model(), DEFAULT_ZENMUX_MODEL);
+    assert_eq!(metadata.env_vars(), &["ZENMUX_API_KEY"]);
+    assert_eq!(
+        metadata.wire_policy(),
+        provider::WirePolicy::Fixed(provider::WireFormat::ChatCompletions)
+    );
+
+    let config: ConfigToml = toml::from_str(
+        r#"
+provider = "zenmux"
+
+[providers.zenmux]
+api_key = "zen-config-key"
+model = "z-ai/glm-5.3"
+"#,
+    )
+    .expect("ZenMux provider table");
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.provider, ProviderKind::Zenmux);
+    assert_eq!(resolved.base_url, DEFAULT_ZENMUX_BASE_URL);
+    assert_eq!(resolved.model, "z-ai/glm-5.3");
+    assert_eq!(resolved.api_key.as_deref(), Some("zen-config-key"));
+    assert_eq!(
+        resolved.api_key_source,
+        Some(RuntimeApiKeySource::ConfigFile)
+    );
+
+    unsafe {
+        std::env::set_var("ZENMUX_API_KEY", "zen-env-key");
+        std::env::set_var("ZENMUX_BASE_URL", "https://zenmux.ai/api/v1");
+        std::env::set_var("ZENMUX_MODEL", "deepseek/deepseek-v4.1-flash");
+    }
+    let env_config = ConfigToml {
+        provider: ProviderKind::Zenmux,
+        ..ConfigToml::default()
+    };
+    let resolved = env_config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.base_url, "https://zenmux.ai/api/v1");
+    assert_eq!(resolved.model, "deepseek/deepseek-v4.1-flash");
+    assert_eq!(resolved.api_key.as_deref(), Some("zen-env-key"));
+    assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
+}
+
+/// CSDN 星图 (Starmap) is an OpenAI-compatible hosted platform whose default
+/// route is the Coding Plan model `glm_for_coding`: aliases collapse onto one
+/// catalog identity, the metadata names the official base URL and a distinct
+/// `CSDN_API_KEY` slot, the wire policy is fixed on Chat Completions, and
+/// env/config overrides resolve exactly like every other provider table.
+#[test]
+fn csdn_resolves_named_chat_provider_and_environment_overrides() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    for alias in [
+        "csdn",
+        "csdn-ai",
+        "csdn_ai",
+        "csdn-coding-plan",
+        "csdn_coding_plan",
+        "starmap",
+    ] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Csdn));
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("CSDN alias");
+        assert_eq!(parsed.provider, ProviderKind::Csdn);
+    }
+
+    let metadata = provider::resolve_provider("starmap").expect("CSDN metadata");
+    assert_eq!(metadata.id(), "csdn");
+    assert_eq!(metadata.display_name(), "CSDN");
+    assert_eq!(metadata.provider_config_key(), "csdn");
+    assert_eq!(metadata.default_base_url(), DEFAULT_CSDN_BASE_URL);
+    assert_eq!(metadata.default_model(), DEFAULT_CSDN_MODEL);
+    assert_eq!(metadata.env_vars(), &["CSDN_API_KEY"]);
+    assert_eq!(
+        metadata.wire_policy(),
+        provider::WirePolicy::Fixed(provider::WireFormat::ChatCompletions)
+    );
+
+    let config: ConfigToml = toml::from_str(
+        r#"
+provider = "csdn"
+
+[providers.csdn]
+api_key = "csdn-config-key"
+model = "glm_for_coding"
+"#,
+    )
+    .expect("CSDN provider table");
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.provider, ProviderKind::Csdn);
+    assert_eq!(resolved.base_url, DEFAULT_CSDN_BASE_URL);
+    assert_eq!(resolved.model, "glm_for_coding");
+    assert_eq!(resolved.api_key.as_deref(), Some("csdn-config-key"));
+    assert_eq!(
+        resolved.api_key_source,
+        Some(RuntimeApiKeySource::ConfigFile)
+    );
+
+    unsafe {
+        std::env::set_var("CSDN_API_KEY", "csdn-env-key");
+        std::env::set_var("CSDN_BASE_URL", "https://ai.csdn.net/api/model/v1");
+        std::env::set_var("CSDN_MODEL", "deepseek-v3.2");
+    }
+    let env_config = ConfigToml {
+        provider: ProviderKind::Csdn,
+        ..ConfigToml::default()
+    };
+    let resolved = env_config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.base_url, "https://ai.csdn.net/api/model/v1");
+    assert_eq!(resolved.model, "deepseek-v3.2");
+    assert_eq!(resolved.api_key.as_deref(), Some("csdn-env-key"));
     assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
 }
 
@@ -5226,9 +5542,16 @@ fn meta_model_api_scopes_both_documented_key_names_to_official_endpoint() {
 fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
     // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
-    assert_eq!(providers.len(), 48);
-    // Catalog surface is one identity per vendor (no dual-wire / plan rows).
-    assert_eq!(ProviderKind::ALL.len(), 43);
+    assert_eq!(providers.len(), 52);
+    // Catalog surface is one identity per vendor (no dual-wire / plan rows),
+    // and never a retired tombstone: Antigravity stays in the full registry
+    // so old config parses and can be cleared, but it left `ALL` when it
+    // stopped being selectable (PRD §4.4 PROD-002).
+    assert_eq!(ProviderKind::ALL.len(), 46);
+    assert!(
+        !ProviderKind::ALL.contains(&ProviderKind::Antigravity),
+        "a tombstone must never be offered as a selectable provider"
+    );
     assert!(ProviderKind::ALL.len() < providers.len());
 
     let mut ids = std::collections::BTreeSet::new();
@@ -5329,12 +5652,16 @@ fn provider_metadata_defaults_match_runtime_helpers() {
         if kind != ProviderKind::Custom {
             assert!(!provider.env_vars().is_empty());
         }
-        // OpenAI Codex (ChatGPT) speaks the Responses API; DeepSeek and
-        // OpenCode Zen select a protocol per exact model offering; Anthropic
+        // OpenAI Codex (ChatGPT) speaks the Responses API; DeepSeek,
+        // OpenCode Zen, OpenCode Go, and the Codewhale API select a protocol per exact
+        // model offering; Anthropic
         // and the Anthropic-compatible routes speak native Messages; every
         // other built-in provider is OpenAI-compatible Chat Completions.
         let expected_wire = match kind {
-            ProviderKind::Deepseek | ProviderKind::OpencodeZen => None,
+            ProviderKind::Deepseek
+            | ProviderKind::OpencodeZen
+            | ProviderKind::OpencodeGo
+            | ProviderKind::Codewhale => None,
             ProviderKind::OpenaiCodex | ProviderKind::Concentrate => {
                 Some(provider::WireFormat::Responses)
             }
@@ -5629,6 +5956,38 @@ fn zhipu_aliases_fold_into_zai_provider() {
         normalize_model_for_provider(ProviderKind::Zai, "glm-5-2"),
         ZAI_GLM_5_2_MODEL
     );
+}
+
+#[test]
+fn stepfun_step_plan_hosts_are_official_so_the_catalog_is_not_withheld() {
+    // A Step Plan subscriber's base URL is StepFun's own documented host.
+    // Treating it as custom made `catalog_models_for_route` return nothing,
+    // which the picker showed as `0 bundled`: no model list, and a guessed
+    // context window instead of the 1M `step-5-preview` actually has.
+    for official in [
+        "https://api.stepfun.ai/v1",
+        "https://api.stepfun.ai/step_plan/v1",
+        "https://api.stepfun.com/v1",
+        "https://api.stepfun.com/step_plan/v1",
+        "https://api.stepfun.ai/step_plan/v1/",
+    ] {
+        assert!(
+            provider_base_url_is_official(ProviderKind::Stepfun, official),
+            "{official} is a StepFun-owned endpoint"
+        );
+    }
+    // A host StepFun does not own stays custom: this predicate also scopes
+    // credentials, so it must not widen to arbitrary look-alikes.
+    for foreign in [
+        "https://api.stepfun.evil.com/v1",
+        "https://api.deepseek.com",
+        "https://stepfun.ai.attacker.test/step_plan/v1",
+    ] {
+        assert!(
+            !provider_base_url_is_official(ProviderKind::Stepfun, foreign),
+            "{foreign} must stay custom and keyless"
+        );
+    }
 }
 
 #[test]
@@ -7901,14 +8260,12 @@ fn workflow_config_defaults_match_product_surface() {
     assert!(defaults.automatic);
     assert!(defaults.auto_start_read_only);
     assert!(defaults.require_approval_for_writes);
-    assert_eq!(defaults.auto_start_child_limit, 16);
     assert_eq!(defaults.max_children, 1000);
     assert_eq!(defaults.max_concurrent, 16);
     assert_eq!(defaults.max_depth, 5);
-    assert_eq!(defaults.default_token_budget, 120_000);
-    assert_eq!(defaults.max_parallel_writes_without_worktree, 0);
-    assert!(defaults.persist_completed_activity);
-    assert!(defaults.persist_completed_across_restarts);
+    // 0 = no shared cap; budgets are opt-in, matching the parent turn loop's
+    // advisory policy (#6189).
+    assert_eq!(defaults.default_token_budget, 0);
 }
 
 #[test]
@@ -7947,12 +8304,8 @@ default_token_budget = 50000
     // Unset keys keep product defaults.
     assert!(workflow.auto_start_read_only);
     assert!(workflow.require_approval_for_writes);
-    assert_eq!(workflow.auto_start_child_limit, 16);
     assert_eq!(workflow.max_concurrent, 16);
     assert_eq!(workflow.max_depth, 5);
-    assert_eq!(workflow.max_parallel_writes_without_worktree, 0);
-    assert!(workflow.persist_completed_activity);
-    assert!(workflow.persist_completed_across_restarts);
 
     let serialized = toml::to_string_pretty(&workflow).expect("workflow serializes");
     let round_tripped: WorkflowConfigToml =
@@ -7989,6 +8342,31 @@ max_spawn_depth = 2
     .expect("fleet exec config should parse");
 
     assert_eq!(config.fleet.expect("fleet config").exec.max_spawn_depth, 2);
+}
+
+/// Retired tables/keys are ignored, never a parse failure: a pre-0.9.14
+/// config with inline `[fleets.*]`, legacy trust keys, or dead workflow
+/// knobs must still load (named fleets live in `fleets/*.toml` files).
+#[test]
+fn retired_inline_fleet_and_workflow_keys_are_ignored_not_rejected() {
+    let config: ConfigToml = toml::from_str(
+        r#"
+[fleet]
+default_trust_level = "local"
+
+[fleets.alice-team]
+operator = "alice"
+default_trust_level = "local"
+
+[workflow]
+auto_start_child_limit = 4
+max_parallel_writes_without_worktree = 1
+persist_completed_activity = false
+"#,
+    )
+    .expect("retired keys must still parse");
+    assert!(config.fleet.is_some());
+    assert!(config.workflow.is_some());
 }
 
 #[test]
@@ -8143,354 +8521,6 @@ fn test_verbosity_resolution() {
     unsafe {
         std::env::remove_var("DEEPSEEK_VERBOSITY");
     }
-}
-
-// ─── Named operator-scoped Fleet configurations (#5039) ──────────────────────
-
-#[test]
-fn named_fleet_legacy_only_config_loads_unchanged() {
-    // A config with only the legacy [fleet] table and no [fleets.*] tables.
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleet.exec]
-max_spawn_depth = 2
-"#,
-    )
-    .expect("legacy fleet config should parse");
-
-    assert_eq!(config.fleet.expect("legacy fleet").exec.max_spawn_depth, 2);
-    assert!(
-        config.fleets.is_empty(),
-        "no named fleets should be present"
-    );
-}
-
-#[test]
-fn named_fleet_parses_legacy_authority_keys_for_migration() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.alice-team]
-operator = "alice"
-default_trust_level = "local"
-max_trust_level = "operator"
-"#,
-    )
-    .expect("named fleet config should parse");
-
-    let fleet = config.fleets.get("alice-team").expect("alice-team fleet");
-    assert_eq!(fleet.operator, "alice");
-    assert_eq!(fleet.default_trust_level, "local");
-    assert_eq!(fleet.max_trust_level, "operator");
-}
-
-#[test]
-fn named_fleet_has_no_authority_defaults_when_legacy_fields_are_absent() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.minimal]
-operator = "bob"
-"#,
-    )
-    .expect("minimal named fleet should parse");
-
-    let fleet = config.fleets.get("minimal").expect("minimal fleet");
-    assert_eq!(fleet.operator, "bob");
-    assert!(fleet.default_trust_level.is_empty());
-    assert!(!fleet.require_identity_verification);
-    assert!(fleet.max_trust_level.is_empty());
-    assert!(fleet.roles.is_empty());
-    assert!(fleet.profiles.is_empty());
-}
-
-#[test]
-fn named_fleet_mixed_legacy_and_named_both_load() {
-    // Users may have the global [fleet] default AND named [fleets.*] tables.
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleet]
-default_trust_level = "sandbox"
-
-[fleets.team-a]
-operator = "alice"
-default_trust_level = "local"
-
-[fleets.team-b]
-operator = "bob"
-default_trust_level = "remote-verified"
-"#,
-    )
-    .expect("mixed fleet config should parse");
-
-    assert_eq!(
-        config
-            .fleet
-            .as_ref()
-            .expect("legacy fleet")
-            .default_trust_level,
-        "sandbox"
-    );
-    assert_eq!(config.fleets.len(), 2);
-    assert_eq!(config.fleets["team-a"].default_trust_level, "local");
-    assert_eq!(
-        config.fleets["team-b"].default_trust_level,
-        "remote-verified"
-    );
-}
-
-#[test]
-fn named_fleet_multiple_configs_independent_profiles() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.fleet-one]
-operator = "alice"
-
-[fleets.fleet-one.profiles.fast-verifier]
-slot = "verifier"
-loadout = "fast"
-
-[fleets.fleet-two]
-operator = "bob"
-
-[fleets.fleet-two.profiles.slow-reviewer]
-slot = "reviewer"
-loadout = "inherit"
-"#,
-    )
-    .expect("multiple named fleets with profiles should parse");
-
-    let fleet_one = config.fleets.get("fleet-one").expect("fleet-one");
-    assert_eq!(fleet_one.operator, "alice");
-    assert_eq!(
-        fleet_one
-            .profiles
-            .get("fast-verifier")
-            .expect("fast-verifier profile")
-            .slot,
-        FleetSlot::Verifier
-    );
-
-    let fleet_two = config.fleets.get("fleet-two").expect("fleet-two");
-    assert_eq!(fleet_two.operator, "bob");
-    assert_eq!(
-        fleet_two
-            .profiles
-            .get("slow-reviewer")
-            .expect("slow-reviewer profile")
-            .slot,
-        FleetSlot::Reviewer
-    );
-}
-
-#[test]
-fn resolve_fleet_returns_named_fleet() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.my-fleet]
-operator = "alice"
-default_trust_level = "local"
-"#,
-    )
-    .expect("fleet config");
-
-    let fleet = config.resolve_fleet("my-fleet").expect("resolve my-fleet");
-    assert_eq!(fleet.operator, "alice");
-    assert_eq!(fleet.default_trust_level, "local");
-}
-
-#[test]
-fn resolve_fleet_unknown_name_gives_actionable_error() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.real-fleet]
-operator = "alice"
-"#,
-    )
-    .expect("fleet config");
-
-    let err = config
-        .resolve_fleet("ghost-fleet")
-        .expect_err("unknown fleet");
-    match err {
-        FleetResolutionError::UnknownFleet { name, available } => {
-            assert_eq!(name, "ghost-fleet");
-            assert_eq!(available, vec!["real-fleet".to_string()]);
-        }
-        other => panic!("expected UnknownFleet, got {other}"),
-    }
-}
-
-#[test]
-fn resolve_fleet_unknown_with_no_fleets_configured() {
-    let config: ConfigToml = ConfigToml::default();
-
-    let err = config.resolve_fleet("anything").expect_err("no fleets");
-    match err {
-        FleetResolutionError::UnknownFleet { name, available } => {
-            assert_eq!(name, "anything");
-            assert!(available.is_empty());
-        }
-        other => panic!("expected UnknownFleet, got {other}"),
-    }
-}
-
-#[test]
-fn resolve_fleet_for_operator_returns_single_match() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.alice-team]
-operator = "alice"
-default_trust_level = "local"
-"#,
-    )
-    .expect("fleet config");
-
-    let (name, fleet) = config
-        .resolve_fleet_for_operator("alice")
-        .expect("resolve alice");
-    assert_eq!(name, "alice-team");
-    assert_eq!(fleet.operator, "alice");
-}
-
-#[test]
-fn resolve_fleet_for_operator_unknown_gives_actionable_error() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.alice-team]
-operator = "alice"
-"#,
-    )
-    .expect("fleet config");
-
-    let err = config
-        .resolve_fleet_for_operator("charlie")
-        .expect_err("unknown operator");
-    match err {
-        FleetResolutionError::UnknownOperator {
-            operator,
-            available,
-        } => {
-            assert_eq!(operator, "charlie");
-            assert_eq!(available, vec!["alice".to_string()]);
-        }
-        other => panic!("expected UnknownOperator, got {other}"),
-    }
-}
-
-#[test]
-fn resolve_fleet_for_operator_ambiguous_gives_actionable_error() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.fleet-a]
-operator = "alice"
-
-[fleets.fleet-b]
-operator = "alice"
-"#,
-    )
-    .expect("fleet config");
-
-    let err = config
-        .resolve_fleet_for_operator("alice")
-        .expect_err("ambiguous operator");
-    match err {
-        FleetResolutionError::AmbiguousOperator {
-            operator,
-            mut fleet_names,
-        } => {
-            assert_eq!(operator, "alice");
-            fleet_names.sort();
-            assert_eq!(fleet_names, vec!["fleet-a", "fleet-b"]);
-        }
-        other => panic!("expected AmbiguousOperator, got {other}"),
-    }
-}
-
-#[test]
-fn named_fleet_error_messages_are_actionable() {
-    // Verify Display output is human-readable and contains key hints.
-    let no_fleets_err = FleetResolutionError::UnknownFleet {
-        name: "x".to_string(),
-        available: vec![],
-    };
-    let msg = no_fleets_err.to_string();
-    assert!(msg.contains("x"), "should contain fleet name");
-    assert!(msg.contains("config.toml"), "should mention config.toml");
-
-    let with_candidates_err = FleetResolutionError::UnknownFleet {
-        name: "x".to_string(),
-        available: vec!["fleet-one".to_string(), "fleet-two".to_string()],
-    };
-    let msg = with_candidates_err.to_string();
-    assert!(msg.contains("fleet-one"), "should list available fleets");
-    assert!(msg.contains("fleet-two"), "should list available fleets");
-
-    let unknown_op_err = FleetResolutionError::UnknownOperator {
-        operator: "nobody".to_string(),
-        available: vec!["alice".to_string()],
-    };
-    let msg = unknown_op_err.to_string();
-    assert!(msg.contains("nobody"), "should contain operator name");
-    assert!(msg.contains("alice"), "should list known operators");
-
-    let ambiguous_err = FleetResolutionError::AmbiguousOperator {
-        operator: "alice".to_string(),
-        fleet_names: vec!["fleet-a".to_string(), "fleet-b".to_string()],
-    };
-    let msg = ambiguous_err.to_string();
-    assert!(msg.contains("alice"), "should contain operator");
-    assert!(msg.contains("fleet-a"), "should list fleet names");
-    assert!(msg.contains("fleet-b"), "should list fleet names");
-    assert!(
-        msg.contains("explicitly"),
-        "should prompt user to be explicit"
-    );
-}
-
-#[test]
-fn named_fleet_view_preserves_legacy_input_without_making_it_policy() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.team]
-operator = "alice"
-default_trust_level = "local"
-max_trust_level = "operator"
-require_identity_verification = false
-
-[fleets.team.exec]
-max_turns = 100
-"#,
-    )
-    .expect("fleet config");
-
-    let named = config.fleets.get("team").expect("team fleet");
-    let view = named.as_fleet_config();
-    assert_eq!(view.default_trust_level, "local");
-    assert_eq!(view.max_trust_level, "operator");
-    assert!(!view.require_identity_verification);
-    assert_eq!(view.exec.max_turns, 100);
-}
-
-#[test]
-fn named_fleet_serialization_drops_legacy_authority_keys() {
-    let config: ConfigToml = toml::from_str(
-        r#"
-[fleets.my-fleet]
-operator = "alice"
-default_trust_level = "local"
-
-[fleets.my-fleet.exec]
-max_spawn_depth = 1
-"#,
-    )
-    .expect("fleet config");
-
-    let fleet = config.fleets.get("my-fleet").expect("my-fleet");
-    let serialized = toml::to_string_pretty(fleet).expect("serializes");
-    assert!(!serialized.contains("default_trust_level"));
-    let round_tripped: NamedFleetConfigToml = toml::from_str(&serialized).expect("round trips");
-    assert_eq!(round_tripped.operator, "alice");
-    assert!(round_tripped.default_trust_level.is_empty());
-    assert_eq!(round_tripped.exec.max_spawn_depth, 1);
 }
 
 /// Save and restore the telemetry env vars around a test that mutates them.
@@ -8939,8 +8969,7 @@ fn an_unconfigured_endpoint_resolves_to_the_shipped_default() {
         "an unconfigured endpoint must resolve to the shipped default"
     );
 
-    // …and the product default is anonymous usage counting on unless one of
-    // the documented kill switches says otherwise.
+    // The shipped usage preference is on without an acceptance prerequisite.
     assert!(resolved.telemetry);
     assert!(!resolved.telemetry_explicit_off);
 }
@@ -9211,4 +9240,360 @@ fn telemetry_notice_fields_round_trip_and_stay_absent_when_unanswered() {
         serde_json::from_str(r#"{"schema_version":1}"#).expect("legacy record loads");
     assert_eq!(legacy.telemetry_notice_decided_for, None);
     assert!(!legacy.telemetry_opt_in);
+}
+
+#[test]
+fn telemetry_disclosure_records_presentation_without_acceptance_or_erasing_old_declines() {
+    for version in [None, Some("1"), Some("4")] {
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("setup_state.json");
+            let mut state = SetupState {
+                constitution_preview_version: 12,
+                ..Default::default()
+            };
+            if let Some(version) = version {
+                state.record_telemetry_notice(version, enabled);
+            }
+            state.save_to(&path).unwrap();
+            SetupState::update_telemetry_at(&path, |latest| {
+                latest.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+            })
+            .unwrap();
+            let shown = SetupState::load_from(&path).unwrap();
+            assert!(!shown.needs_telemetry_notice(TELEMETRY_NOTICE_VERSION));
+            assert!(!shown.telemetry_accepted(TELEMETRY_NOTICE_VERSION));
+            assert!(!shown.telemetry_declined(TELEMETRY_NOTICE_VERSION));
+            assert_eq!(shown.telemetry_opted_out(), version.is_some() && !enabled);
+            assert_eq!(
+                shown.telemetry_notice_decided_for,
+                state.telemetry_notice_decided_for
+            );
+            assert_eq!(shown.telemetry_opt_in, state.telemetry_opt_in);
+            assert_eq!(shown.constitution_preview_version, 12);
+        }
+    }
+}
+
+#[test]
+fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved_decline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("setup_state.json");
+    std::fs::write(&path, "not-json").unwrap();
+    assert!(SetupState::update_telemetry_at(&path, |_| {}).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-json");
+    SetupState::default().save_to(&path).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.with_extension("telemetry.lock"))
+        .unwrap();
+    let mut lock = fd_lock::RwLock::new(file);
+    let guard = lock.write().unwrap();
+    assert!(
+        SetupState::update_telemetry_at(&path, |state| {
+            state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+        })
+        .is_err(),
+        "display bookkeeping must never block startup"
+    );
+    drop(guard);
+    SetupState::update_telemetry_at(&path, |state| {
+        state.record_telemetry_notice("4", false);
+    })
+    .unwrap();
+    SetupState::update_telemetry_at(&path, |state| {
+        state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
+    })
+    .unwrap();
+    assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
+}
+
+#[test]
+fn openrouter_vendor_config_round_trip_and_trust_boundary() -> Result<()> {
+    let key = "providers.openrouter.vendor";
+    let mut config = ConfigToml::default();
+    config.set_value(key, "deepinfra/turbo")?;
+    let serialized = toml::to_string(&config)?;
+    let mut reloaded: ConfigToml = toml::from_str(&serialized)?;
+    assert_eq!(reloaded.get_value(key).as_deref(), Some("deepinfra/turbo"));
+    assert_eq!(
+        reloaded.list_values().get(key).map(String::as_str),
+        Some("deepinfra/turbo")
+    );
+    assert_eq!(reloaded.get_value(key).as_deref(), Some("deepinfra/turbo"));
+    for invalid in ["deep infra", "deepinfra\n/turbo", " deepinfra"] {
+        assert!(reloaded.set_value(key, invalid).is_err());
+    }
+    assert!(
+        reloaded
+            .set_value("providers.openai.vendor", "deepinfra")
+            .is_err()
+    );
+    assert!(
+        reloaded
+            .set_value("providers.my-gateway.vendor", "deepinfra")
+            .is_err()
+    );
+    reloaded.set_value(key, "")?;
+    let cleared: ConfigToml = toml::from_str(&toml::to_string(&reloaded)?)?;
+    assert_eq!(cleared.get_value(key).as_deref(), Some(""));
+    reloaded.unset_value(key)?;
+    assert_eq!(reloaded.get_value(key), None);
+    Ok(())
+}
+
+#[test]
+fn notifications_nested_edits_keep_toml_types_siblings_and_future_fields() {
+    let mut config: ConfigToml = toml::from_str(
+        r#"
+[notifications]
+quiet = false
+future_delivery = "keep"
+[notifications.events]
+input-needed = false
+"#,
+    )
+    .unwrap();
+    config.set_value("notifications.quiet", "true").unwrap();
+    config
+        .set_value("notifications.threshold_secs", "42")
+        .unwrap();
+    config
+        .set_value("notifications.events.approval-needed", "false")
+        .unwrap();
+    config
+        .set_value(
+            "notifications.event_sound.events",
+            r#"["input-needed", "model-notify"]"#,
+        )
+        .unwrap();
+    config.set_value("notifications.sound", "whale").unwrap();
+    let encoded = toml::to_string(&config).unwrap();
+    let raw: toml::Value = toml::from_str(&encoded).unwrap();
+    let notifications = &raw["notifications"];
+    assert_eq!(notifications["quiet"].as_bool(), Some(true));
+    assert_eq!(notifications["threshold_secs"].as_integer(), Some(42));
+    assert_eq!(
+        notifications["events"]["approval-needed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        notifications["events"]["input-needed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(notifications["future_delivery"].as_str(), Some("keep"));
+    assert_eq!(
+        notifications["event_sound"]["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!raw.as_table().unwrap().contains_key("notifications.quiet"));
+    assert_eq!(
+        config.get_display_value("notifications.sound").as_deref(),
+        Some("whale")
+    );
+}
+
+#[test]
+fn notifications_invalid_edits_are_atomic_even_with_public_update_values() {
+    use notifications::{NotificationConfigUpdate as Update, NotificationSetting as Key};
+    let mut config = ConfigToml::default();
+    config.set_value("notifications.quiet", "true").unwrap();
+    let before = toml::to_string(&config).unwrap();
+    for (key, value) in [
+        ("notifications", "false"),
+        ("notifications.quiet", "maybe"),
+        ("notifications.threshold_secs", "18446744073709551615"),
+        ("notifications.event_sound.events", r#"["bogus"]"#),
+        ("notifications.events.unknown", "true"),
+        ("notifications.sound_file", ""),
+    ] {
+        assert!(config.set_value(key, value).is_err(), "{key}");
+        assert_eq!(toml::to_string(&config).unwrap(), before);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, &before).unwrap();
+    for update in [
+        Update::ThresholdSecs(u64::MAX),
+        Update::SoundFile(PathBuf::new()),
+        Update::EventSoundEvents(vec!["bogus".into()]),
+    ] {
+        let mut live = notifications::NotificationsConfig::default();
+        let prior = live.clone();
+        assert!(update.persist(&path).is_err());
+        assert!(live.apply_update(update).is_err());
+        assert_eq!(live, prior);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+    assert!(
+        notifications::edit_extras(
+            &mut config.extras,
+            Key::Quiet,
+            Some(toml::Value::String("true".into()))
+        )
+        .is_err()
+    );
+    assert_eq!(toml::to_string(&config).unwrap(), before);
+}
+
+#[test]
+fn notifications_targeted_persistence_preserves_comments_and_leaf_unset() {
+    use notifications::{NotificationConfigUpdate as Update, NotificationSetting as Key};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "# operator note\n\"notifications.quiet\" = \"false\"\n[notifications]\nquiet = false # retained\nfuture = 7\n[notifications.events]\ninput-needed = false\n").unwrap();
+    Update::parse(Key::Quiet, "true")
+        .unwrap()
+        .persist(&path)
+        .unwrap();
+    Update::parse(Key::Sound, "whale")
+        .unwrap()
+        .persist(&path)
+        .unwrap();
+    Key::Quiet.unset(&path).unwrap();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("# operator note"));
+    let raw: toml::Value = toml::from_str(&saved).unwrap();
+    assert!(!raw.as_table().unwrap().contains_key("notifications.quiet"));
+    assert!(raw["notifications"].get("quiet").is_none());
+    assert_eq!(raw["notifications"]["sound"].as_str(), Some("whale"));
+    assert_eq!(raw["notifications"]["future"].as_integer(), Some(7));
+    assert_eq!(
+        raw["notifications"]["events"]["input-needed"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn notifications_legacy_condition_is_fallback_and_explicit_sound_off_wins() {
+    let mut config: ConfigToml = toml::from_str(
+        "[tui]\nnotification_condition = \"never\"\n[notifications]\ncompletion_sound = \"bell\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("never")
+    );
+    assert_eq!(
+        config.get_value("notifications.sound").as_deref(),
+        Some("legacy")
+    );
+    config
+        .set_value("notifications.condition", "always")
+        .unwrap();
+    config.set_value("notifications.sound", "off").unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("always")
+    );
+    config.unset_value("notifications.condition").unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("never")
+    );
+    assert_eq!(
+        config.get_value("notifications.sound").as_deref(),
+        Some("off")
+    );
+}
+
+#[test]
+fn notifications_path_whitespace_and_quotes_round_trip_without_reparsing() {
+    let mut config = ConfigToml::default();
+    for path in [
+        " sound with spaces.wav ",
+        "\"quoted-name.wav",
+        "folder/normal.wav",
+    ] {
+        let raw = toml::Value::String(path.into()).to_string();
+        config.set_value("notifications.sound_file", &raw).unwrap();
+        assert_eq!(
+            config.get_value("notifications.sound_file").as_deref(),
+            Some(path)
+        );
+    }
+}
+
+#[test]
+fn notifications_malformed_parent_and_unknown_root_cannot_erase_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let original = "[notifications]\nevents = false\nquiet = true\n";
+    std::fs::write(&path, original).unwrap();
+    let update = notifications::NotificationConfigUpdate::parse(
+        notifications::NotificationSetting::Event(notifications::NotificationEvent::InputNeeded),
+        "false",
+    )
+    .unwrap();
+    assert!(update.persist(&path).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    let mut config: ConfigToml = toml::from_str(original).unwrap();
+    assert!(config.unset_value("notifications").is_err());
+    let before = toml::to_string(&config).unwrap();
+    assert!(
+        config
+            .set_value("notifications.events.input-needed", "false")
+            .is_err()
+    );
+    assert_eq!(toml::to_string(&config).unwrap(), before);
+}
+
+#[test]
+fn config_table_and_nested_reads_share_redacted_document() {
+    let config: ConfigToml = toml::from_str(
+        r#"
+[tools]
+user_input_timeout_seconds = 7
+[hooks]
+enabled = true
+[credentials.service]
+value = "fixture-secret-never-display"
+[providers.openai]
+api_key = "fixture-provider-secret"
+"#,
+    )
+    .unwrap();
+    assert!(
+        config
+            .get_value("tools")
+            .unwrap()
+            .contains("user_input_timeout_seconds = 7")
+    );
+    assert_eq!(
+        config
+            .get_value("tools.user_input_timeout_seconds")
+            .as_deref(),
+        Some("7")
+    );
+    assert_eq!(
+        config.get_display_value("hooks.enabled").as_deref(),
+        Some("true")
+    );
+    for key in [
+        "credentials",
+        "credentials.service",
+        "credentials.service.value",
+        "providers",
+    ] {
+        let shown = config.get_display_value(key).expect(key);
+        assert!(!shown.contains("fixture-secret-never-display"), "{key}");
+        assert!(!shown.contains("fixture-provider-secret"), "{key}");
+    }
+}
+
+#[test]
+fn unsupported_nested_config_write_fails_without_mutation() {
+    let mut config: ConfigToml =
+        toml::from_str("[tools]\nuser_input_timeout_seconds = 7\n").unwrap();
+    let before = toml::to_string(&config).unwrap();
+    let err = config
+        .set_value("tools.user_input_timeout_seconds", "0")
+        .unwrap_err();
+    assert!(err.to_string().contains("[tools]"));
+    assert!(err.to_string().contains("user_input_timeout_seconds"));
+    assert_eq!(toml::to_string(&config).unwrap(), before);
 }

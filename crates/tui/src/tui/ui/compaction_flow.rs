@@ -225,13 +225,10 @@ pub(crate) fn apply_compaction_started(app: &mut App, id: String, auto: bool) {
     }
     app.active_compaction = Some(ActiveCompaction { id, auto });
     app.is_compacting = true;
-    let message_id = if auto {
-        MessageId::ContextAutoCompacting
-    } else {
-        MessageId::ContextManualCompacting
-    };
-    let text = app.tr(message_id).into_owned();
-    set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
+    if !auto {
+        let text = app.tr(MessageId::ContextManualCompacting).into_owned();
+        set_explicit_compaction_status(app, text, StatusToastLevel::Info, false);
+    }
 }
 
 /// Clear the compaction-in-flight state for a terminal lifecycle event.
@@ -316,19 +313,42 @@ pub(crate) fn apply_compaction_completed(
                 anchors_chars: crate::compaction::pinned_anchors_text(Some(&app.workspace))
                     .map(|text| text.chars().count())
                     .unwrap_or(0),
+                // Only the summary path builds a replacement history, so only
+                // it spent a verbatim budget (#5956).
+                retained_user_message_tokens: match path {
+                    crate::compaction::CompactionPath::Summary => {
+                        app.compaction_retained_user_message_tokens
+                    }
+                    crate::compaction::CompactionPath::PruneOnly => 0,
+                },
+                operator_instructions_applied: matches!(
+                    path,
+                    crate::compaction::CompactionPath::Summary
+                ) && app.compaction_summary_instructions.is_some(),
             },
             messages_before: before,
             messages_after: after,
         });
-        add_compaction_receipt(app, &message);
-        set_explicit_compaction_status(app, message, StatusToastLevel::Success, false);
+        // Automatic maintenance stays in the context inspector and event
+        // receipts; it does not insert a ceremony into the user's task.
+        if !auto {
+            add_compaction_receipt(app, &message);
+            set_explicit_compaction_status(app, message, StatusToastLevel::Success, false);
+        }
     }
 }
 
 pub(crate) fn apply_compaction_failed(app: &mut App, id: &str, auto: bool, message: String) {
     if settle_compaction(app, id, auto) {
         add_compaction_receipt(app, &message);
-        set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
+        // A pass the user asked for keeps its sticky footer error. An
+        // automatic pass is the engine's own recovery: the transcript receipt
+        // records it, and when the turn then fails its error line is the
+        // headline. Echoing the same failure in the footer made one failure
+        // read as three (experience mark 2).
+        if !auto {
+            set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
+        }
     }
 }
 
@@ -337,6 +357,15 @@ pub(crate) fn apply_compaction_cancelled(app: &mut App, id: &str, auto: bool, me
         add_compaction_receipt(app, &message);
         set_explicit_compaction_status(app, message, StatusToastLevel::Info, false);
     }
+}
+
+/// Esc/Ctrl+C during a compact that is serving an in-flight turn must stop
+/// the turn. Compact-only (manual `/compact` with no model request) still
+/// cancels just the pass.
+#[must_use]
+pub(crate) fn compact_interrupt_should_stop_turn(app: &App) -> bool {
+    (app.is_compacting || app.manual_compaction_queued)
+        && (app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")))
 }
 
 /// Cancel the exact queued or running pass without cancelling an unrelated
@@ -351,7 +380,7 @@ pub(crate) fn try_cancel_compaction(app: &mut App, engine_handle: &EngineHandle)
     if !app.is_compacting && app.deferred_manual_compaction.take().is_some() {
         app.manual_compaction_queued = false;
         app.manual_compaction_id = None;
-        let message = "Context compaction canceled before it started".to_string();
+        let message = "Making room stopped before it started".to_string();
         add_compaction_receipt(app, &message);
         set_explicit_compaction_status(app, message, StatusToastLevel::Info, false);
         return true;
@@ -370,13 +399,13 @@ pub(crate) fn try_cancel_compaction(app: &mut App, engine_handle: &EngineHandle)
         Ok(()) => {
             set_explicit_compaction_status(
                 app,
-                "Canceling context compaction…".to_string(),
+                "Stopping making room…".to_string(),
                 StatusToastLevel::Info,
                 false,
             );
         }
         Err(error) => {
-            let message = format!("Could not cancel context compaction: {error}");
+            let message = format!("Could not stop making room: {error}");
             add_compaction_receipt(app, &message);
             set_explicit_compaction_status(app, message, StatusToastLevel::Error, true);
         }
@@ -394,6 +423,11 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
     app: &mut App,
     config: &crate::compaction::CompactionConfig,
 ) {
+    if config.enabled {
+        app.dismiss_context_pressure_warning();
+        app.context_pressure_warning_dismissed = None;
+        return;
+    }
     let max = config.effective_context_window.unwrap_or_else(|| {
         crate::route_budget::route_context_window_tokens(
             app.api_provider,
@@ -407,8 +441,7 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
 
     let configured_threshold = app.auto_compact_threshold_percent.clamp(10.0, 100.0);
     let warning_threshold = CONTEXT_SUGGEST_COMPACT_THRESHOLD_PERCENT.min(configured_threshold);
-    let will_auto_compact = config.enabled && used.max(0) as usize >= config.token_threshold;
-    if percent < warning_threshold && !will_auto_compact {
+    if percent < warning_threshold {
         app.context_pressure_warning_dismissed = None;
         if app.sticky_status.as_ref().is_some_and(|status| {
             matches!(
@@ -443,13 +476,7 @@ pub(crate) fn maybe_warn_context_pressure_for_config(
         ", unverified window"
     };
 
-    let recommendation = if !config.enabled {
-        "Consider enabling auto_compact or use /compact."
-    } else if will_auto_compact {
-        "Auto-compaction will run before the next send."
-    } else {
-        "Auto-compaction is enabled."
-    };
+    let recommendation = "Making room automatically is off. Turn on auto_compact or use /compact.";
 
     if percent >= CONTEXT_CRITICAL_THRESHOLD_PERCENT {
         set_context_pressure_status(
@@ -502,35 +529,6 @@ fn set_context_pressure_status(
 }
 
 #[cfg(test)]
-pub(crate) fn should_auto_compact_before_send(app: &App) -> bool {
-    let config = app.compaction_config();
-    should_auto_compact_before_send_with_config(app, &config)
-}
-
-#[cfg(test)]
-pub(crate) fn should_auto_compact_before_send_with_config(
-    app: &App,
-    config: &crate::compaction::CompactionConfig,
-) -> bool {
-    if !config.enabled {
-        return false;
-    }
-    // Use the same ceiling-anchored token threshold as the engine. Comparing
-    // against a raw percentage of the input-plus-output window can delay this
-    // gate until after the spendable input budget has already been exhausted.
-    let max = config.effective_context_window.unwrap_or_else(|| {
-        crate::route_budget::route_context_window_tokens(
-            app.api_provider,
-            app.effective_model_for_budget(),
-            app.active_route_limits,
-        )
-    });
-    context_usage_snapshot_for_window(app, max)
-        .map(|(used, _, _)| used.max(0) as usize >= config.token_threshold)
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
 mod config_update_tests {
     use super::*;
     use crate::core::engine::mock_engine_handle;
@@ -549,6 +547,9 @@ mod config_update_tests {
             runtime_cost_owner: None,
             workspace: None,
             image_input: crate::model_profile::SupportState::Unknown,
+            summary_instructions: None,
+            retained_user_message_tokens:
+                crate::config::DEFAULT_COMPACTION_RETAINED_USER_MESSAGE_TOKENS,
         };
 
         assert!(try_apply_model_and_compaction_update(

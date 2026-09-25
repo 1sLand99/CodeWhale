@@ -19,7 +19,7 @@ interactive TUI and in the engine turn loop it drives.
 | Surface | Fires hooks |
 | --- | --- |
 | `codewhale` / `codew` interactive TUI | yes |
-| `codewhale exec` (headless one-shot) | no |
+| `codewhale exec` (headless one-shot) | opt-in: `--hooks` fires `tool_call_before` and `shell_env` |
 | the `codewhale` CLI dispatcher and its subcommands | no |
 | app-server / ACP | no |
 | the `workflow` tool and sub-agent *internals* | no — but the TUI fires `subagent_spawn` / `subagent_complete` around them |
@@ -28,6 +28,19 @@ interactive TUI and in the engine turn loop it drives.
 The `crates/hooks` event-sink crate in this repository is an unrelated
 internal mechanism. It shares no configuration, no event names, and no
 contract with the hooks described here.
+
+### `codewhale exec --hooks`
+
+Headless runs fire no hooks by default — a CI job should not start paging an
+on-call rotation merely because a config exists. `codewhale exec --hooks`
+opts the run in. The engine-side events are `tool_call_before` (exit code 2
+still denies the call; `ask` resolves fail-closed because nothing can prompt
+headlessly) and `shell_env`. UI-driven events such as `session_start`,
+`message_submit`, and `turn_end` do not fire — they live in the interactive
+shell, not the turn loop. Fleet worker subprocesses never fire operator
+hooks. Independently of this flag, `permissions.toml` typed rules already
+apply to `exec` — the run drives the same turn loop, and a `deny` blocks in
+every mode.
 
 ## Quick start
 
@@ -55,13 +68,13 @@ default_timeout_secs = 30      # see the timeout note below
 working_dir = "/path/to/dir"   # default: the session workspace
 
 [[hooks.hooks]]
-event = "tool_call_before"     # required; one of the 11 names below
+event = "tool_call_before"     # required; one of the 15 names below
 command = "~/.codewhale/hooks/gate.sh"  # required; `sh -c` on Unix, `cmd /C` on Windows
 name = "gate"                  # optional label for /hooks and log lines
 timeout_secs = 30              # optional, default 30
 background = false             # optional; foreground inside the hook worker
 continue_on_error = true       # optional, default true
-condition = { type = "tool_name", name = "exec_shell" }  # optional
+condition = { type = "tool_name", name = "bash" }  # optional
 ```
 
 `timeout_secs` note, stated as implemented: when `[hooks].default_timeout_secs`
@@ -160,7 +173,7 @@ configured instead (the backend owns its base environment, and your
 | Condition | Matches | Supported on |
 | --- | --- | --- |
 | `{ type = "always" }` | every invocation (also the default when omitted) | every event |
-| `{ type = "tool_name", name = "exec_shell" }` | exact tool name; `*` globs are supported, e.g. `mcp__*` | `tool_call_before`, `tool_call_after`, `shell_env`, `on_error` |
+| `{ type = "tool_name", name = "bash" }` | exact tool name; `*` globs are supported, e.g. `mcp__*`. The shell tool's spellings `bash`, `Bash`, and `exec_shell` are aliases: a condition naming any one matches all three | `tool_call_before`, `tool_call_after`, `shell_env`, `on_error` |
 | `{ type = "tool_category", category = "shell" }` | tool category | `tool_call_before`, `tool_call_after`, `shell_env`, `on_error` |
 | `{ type = "mode", mode = "plan" }` | the context's mode string, case-insensitive | every event **except** `shell_env` |
 | `{ type = "exit_code", code = 1 }` | the exit code the tool actually reported | `tool_call_after`, `on_error` |
@@ -171,7 +184,7 @@ Three rules keep conditions from lying:
 
 - **`exit_code` needs a real exit code.** It matches only when the event
   actually observed a process exit code — `tool_call_after`, or `on_error` for
-  a tool failure, in both cases for a process-backed tool such as `exec_shell`.
+  a tool failure, in both cases for a process-backed tool such as `bash`.
   A tool that reports no exit code never matches an `exit_code` condition; the
   condition is not satisfied by a default, a zero, or a success flag. The value
   is a 64-bit integer, so a Windows crash code such as `3221225477`
@@ -199,28 +212,49 @@ A repository may ship `<workspace>/.codewhale/hooks.toml` using the same shape,
 but only its `[[hooks]]` entries are merged — a project file cannot change
 `enabled`, `default_timeout_secs`, or `working_dir`, which always come from your
 own config. Because hooks are executable configuration, project hooks load
-**only** after the workspace is trusted in user-owned config; session
-`/trust on` alone does not enable them. Trusted project hooks are appended
+**only** after both workspace trust and separate approval of the exact hooks file
+in user-owned config. Use `/hooks review` to inspect the commands and digest,
+then `/hooks approve <digest>` to enable those bytes on the next session. Review
+any scripts the commands call too. A file change requires another approval.
+`/hooks revoke` blocks future and queued launches; it does not stop commands
+already running. Session `/trust on` alone does not enable project hooks.
+Approved project hooks are appended
 after global hooks, so they run last and win `updatedInput` ties. A malformed
 trusted project file logs a warning and Codewhale falls back to global hooks
 only. Validation runs over the merged set, so a rejected project hook is
 reported the same way a rejected global one is.
 
-## The 11 events
+## The 15 events
 
 | Event | Fires | Steering |
 | --- | --- | --- |
 | `session_start` | once, after the engine is up and before the first draw | observer |
 | `session_end` | once, on graceful shutdown | observer |
+| `turn_end` | after a turn completes and post-turn state is updated | observer |
 | `message_submit` | before a submitted message reaches history or the model | **can replace or block the text** |
 | `tool_call_before` | before each tool call executes | **can allow / deny / ask, rewrite input, add context** |
 | `tool_call_after` | after each tool result settles, including completions the transcript does not redraw | observer |
 | `mode_change` | on every applied Plan/Work/Operate transition (`Act` is a compatibility alias for Work) | observer |
 | `on_error` | on transport, capacity, and auth errors, and on tool failures | observer |
-| `turn_end` | after a turn completes and post-turn state is updated | observer |
 | `subagent_spawn` | when a sub-agent starts | observer |
 | `subagent_complete` | when a sub-agent completes, fails, or is cancelled | observer |
 | `shell_env` | immediately before each `exec_shell` invocation | **contributes environment variables** |
+| `session_idle` | when the session settles back to idle after a turn or a wait — no prompt, approval, or continuation outstanding | observer |
+| `session_error` | when a turn ends in a terminal failure; transient tool failures the agent absorbs never fire it | observer |
+| `waiting_for_user` | when the agent starts waiting on you: an approval prompt opens, a `request_user_input` question is presented, or a goal continuation is parked between passes | observer |
+| `session_busy` | when an idle or waiting session begins or resumes work; startup and repeated observations of the same state stay silent | observer |
+
+`waiting_for_user`'s payload carries `reason`: `approval`, `user_input`, or
+`goal_continuation`. All three state events carry `from`/`to` transition fields;
+`session_idle` also carries `last_turn_status` when known, and `session_error` carries
+the bounded terminal `error` text. Busy, idle, and waiting map onto the session
+states the control socket's `status` verb already publishes
+(`idle` / `in_progress` / `waiting`), so a hook and a supervisor never
+disagree about what the session is doing. Hook authors that want opencode's
+grace-period semantics for error alerts should debounce inside the hook —
+`session_error` already excludes absorbed, transient failures, and a turn
+that fails and is retried by the operator fires again only if the retry also
+ends failed.
 
 ### What "observer" means, exactly
 
@@ -276,7 +310,8 @@ rebrand.
 
 **Mode-spelling note.** UI-fired events (`session_start`, `session_end`,
 `message_submit`, `tool_call_after`, `mode_change`, `on_error`, `turn_end`,
-`subagent_*`) set `DEEPSEEK_MODE` to the UI label — `ACT`, `PLAN`, `OPERATE`.
+`subagent_*`, `session_busy`, `session_idle`, `session_error`, `waiting_for_user`)
+set `DEEPSEEK_MODE` to the UI label — `ACT`, `PLAN`, `OPERATE`.
 `tool_call_before` fires inside the engine and uses the engine's own mode
 spelling (`Agent`, `Plan`, `Operate`). `mode` conditions compare
 case-insensitively, so `{ type = "mode", mode = "plan" }` matches both, but a
@@ -450,13 +485,32 @@ condition = { type = "tool_category", category = "shell" }
 
 ## Structured observer payloads
 
-`turn_end`, `subagent_spawn`, and `subagent_complete` receive JSON on stdin in
-addition to the environment variables. Their stdout is ignored. Background
-forms of these events receive the same payload on stdin.
+`turn_end`, `subagent_spawn`, `subagent_complete`, `session_busy`, `session_idle`,
+`session_error`, and `waiting_for_user` receive JSON on stdin in addition to the
+environment variables. Their stdout is ignored. Background forms of these
+events receive the same payload on stdin.
 
 The remaining observer events — `session_start`, `session_end`,
 `tool_call_after`, `mode_change`, `on_error` — receive environment variables
 only, with no stdin payload, in both foreground and background form.
+
+### Session state transitions
+
+The first observed state is recorded silently, whether idle, busy, or waiting.
+Repeating the same state emits nothing. For a turn that pauses for user input
+and then completes, the transition hooks receive these payloads in submission
+order:
+
+| Event | JSON stdin |
+| --- | --- |
+| `session_busy` | `{"from":"idle","to":"in_progress"}` |
+| `waiting_for_user` | `{"from":"in_progress","to":"waiting","reason":"user_input"}` |
+| `session_busy` | `{"from":"waiting","to":"in_progress"}` |
+| `session_idle` | `{"from":"in_progress","to":"idle","last_turn_status":"completed"}` |
+
+The dispatcher has two workers, so command completion order is not guaranteed.
+`session_error` is a separate terminal-failure event, with `status` and `error`
+fields rather than `from` and `to`.
 
 ### `turn_end`
 
@@ -541,7 +595,8 @@ has no effect because later matching hooks always run.
 - For `execute`-path events, `continue_on_error = false` stops later hooks for
   that event; except on `tool_call_before` (above) it does not roll back the
   action that fired them.
-- Structured observer events (`turn_end`, `subagent_*`) always continue to the
+- Structured observer events (`turn_end`, `subagent_*`, `session_busy`,
+  `session_idle`, `session_error`, `waiting_for_user`) always continue to the
   next matching hook.
 - Observer events use a bounded persistent dispatcher. Queue-full and
   dispatcher-unavailable submissions are not retried silently; the TUI keeps
@@ -554,7 +609,7 @@ has no effect because later matching hooks always run.
 
 - Hooks are arbitrary shell commands from your own config; treat
   `~/.codewhale/config.toml` as executable.
-- Project-supplied hooks require an explicit workspace trust decision in
+- Project-supplied hooks require exact-file approval in addition to workspace trust in
   user-owned config.
 - Hook commands inherit Codewhale's own environment. A local `exec_shell` does
   not — see [`shell_env`](#shell_env).

@@ -74,7 +74,7 @@ pub struct PreviewRequestInputs {
     pub allow_shell: bool,
     pub trust_mode: bool,
     pub auto_approve: bool,
-    pub approval_mode: crate::tui::approval::ApprovalMode,
+    pub approval_mode: ApprovalMode,
     pub allowed_tools: Option<Vec<String>>,
     pub dynamic_tools: Vec<DynamicToolSpec>,
     pub provenance: UserInputProvenance,
@@ -201,6 +201,7 @@ impl Engine {
                         crate::goal_loop::GoalBudget {
                             token_budget: snapshot.token_budget.map(u64::from),
                             time_budget_seconds: None,
+                            enforce_token_budget: self.config.goal_enforce_token_budget,
                             max_continuations: self.config.goal_max_continuations,
                         },
                     ))
@@ -424,7 +425,8 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = previewed_git_snapshot;
         // Classification input for the provenance section: the prompt this
         // request actually carries, not the session's current one.
-        let system_prompt_text = crate::prefix_cache::system_prompt_text(system_prompt.as_ref());
+        let system_prompt_text =
+            codewhale_core::prefix_cache::system_prompt_text(system_prompt.as_ref());
 
         let mut messages = self.messages_with_turn_metadata();
         messages.push(hypothetical_user_message);
@@ -436,13 +438,12 @@ impl Engine {
             .preview_runtime_transforms(&messages, system_prompt.as_ref(), &planned_compaction)
             .await;
 
-        // The turn loop resolves an `auto` sentinel tier against the messages
-        // it is about to send, *after* the planner normalized it. Skipping
-        // that step described a request carrying a literal `auto`, which no
-        // route receives.
+        // The turn loop resolves an `auto` sentinel tier to its declared
+        // policy value, *after* the planner normalized it. Skipping that step
+        // described a request carrying a literal `auto`, which no route
+        // receives.
         let effective_reasoning_effort = super::turn_loop::resolve_auto_effort(
             reasoning_effort.as_deref(),
-            &messages,
             provider,
             &base_url,
             &model,
@@ -630,7 +631,7 @@ impl Engine {
         if crate::compaction::compaction_pressure_reached(messages, system_prompt, compaction) {
             let prepared = self.prepare_compaction_envelope(compaction.clone());
             if should_compact(messages, system_prompt, &prepared) {
-                reasons.push("auto-compaction would rewrite the conversation first");
+                reasons.push("making room would summarize the conversation first");
             }
         }
 

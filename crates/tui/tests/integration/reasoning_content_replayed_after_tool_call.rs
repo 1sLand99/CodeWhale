@@ -2,8 +2,8 @@ use futures_util::StreamExt;
 
 use crate::llm_client::LlmClient;
 use crate::llm_client::mock::{MockLlmClient, canned};
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, MessageRequest};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, MessageRequest};
 
 fn user_message(text: &str) -> Message {
     Message {

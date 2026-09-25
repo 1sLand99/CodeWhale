@@ -14,7 +14,7 @@
 use std::borrow::Cow;
 
 use crate::core::events::{ToolGate, ToolGateVerdict, bounded_gate_reason};
-use crate::localization::{Locale, MessageId, tr};
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Longest tool name echoed into a receipt. Tool names are model-authored
 /// text on some wire dialects, so they are bounded like every other field.

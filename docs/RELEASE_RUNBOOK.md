@@ -29,6 +29,7 @@ Current packaging note:
   - `codewhale-hooks`
   - `codewhale-tools`
   - `codewhale-config`
+  - `codewhale-cloud-facts`
   - `codewhale-lane`
   - `codewhale-agent`
   - `codewhale-core`
@@ -99,12 +100,28 @@ clippy/test/npm-smoke gates for `fix/*`, `rebrand/*`, `work/v*`, and `main`.
 GitHub Actions keeps the cheap drift/fmt statuses plus macOS and Windows
 coverage, while CNB carries the Linux work.
 
-`publish-crates.sh dry-run` first validates the maintained publication order
-against the locked Cargo workspace graph. It then performs a full
-`cargo publish --dry-run` for crates without unpublished workspace dependencies
-and a packaging preflight for dependent workspace crates. That avoids false
-negatives from crates.io not yet containing the new workspace version while
-still validating package contents before publish.
+`publish-crates.sh` requires Cargo 1.90 or newer for multi-package verification;
+this release-tool requirement is separate from the runtime's Rust 1.88 MSRV.
+Use an up-to-date stable toolchain (`rustup update stable`) for release work.
+
+Both modes validate publication order against the locked workspace graph, then
+run one `cargo publish --dry-run --locked --registry crates-io` covering all
+release crates listed in `scripts/release/crates.sh`. Cargo resolves unpublished
+workspace dependencies through a
+temporary local registry, builds every unpacked tarball, and checks publication
+metadata before any upload. Dry-run mode permits source edits and stops there.
+
+If a dry-run is interrupted (Ctrl-C, or a shell that gets killed), delete the
+half-packed `target/package` before re-running. Cargo resumes against it and
+every unpacked tarball then fails with `error: Current directory is invalid:
+No such file or directory (os error 2)` — which looks like a compiler or
+workspace defect and is neither (seen 2026-09-21; a clean re-run passed).
+Publish mode requires the approved release checkout and assets, then skips
+versions already on crates.io and uploads the remaining crates in dependency
+order. Resuming still verifies the complete source release; it never weakens
+the artifact gate merely because an earlier crate was already uploaded.
+Registry-side acceptance and credentials are still checked during real upload;
+a successful preflight cannot guarantee that every later upload will succeed.
 
 For npm wrapper verification, build the single runtime and run the
 cross-platform smoke harness. This packs the npm wrapper, installs it into a
@@ -144,7 +161,13 @@ gates. A mismatch fails before those gates start; it never silently tests a
 different head.
 
 `release-candidate.yml` also fails unless the selected ref resolves to the
-exact requested SHA. It invokes the same reusable artifact workflow as the
+exact requested SHA. It runs the same parity gate as the public release
+(`release-parity.yml`: fmt, check, clippy, workspace nextest, doctests,
+protocol and state parity), and `release.yml` refuses to start unless a green
+release-candidate run with a green Parity job exists for the exact tag SHA
+(`scripts/release/require-rc-receipt.sh`). Tag the SHA the RC validated; if
+the receipt check fails, run the RC on that SHA rather than moving the tag.
+It invokes the same reusable artifact workflow as the
 public release, building all seven targets (including Android arm64 and native
 Windows arm64), staging `codewhale` and `codew` (single binary), building the
 NSIS installer and nine platform archives, and validating the authoritative
@@ -280,7 +303,7 @@ and fails branch-only release sources before assets are published.
    ```
 
    Both Cargo and npm publication fail closed unless `HEAD`, the clean local
-   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative 21-crate
+   checkout, and the remote `vX.Y.Z` tag still agree. The authoritative crate
    dependency order lives in `scripts/release/crates.sh`; do not maintain a
    second handwritten order in this runbook. The helper waits for each new
    version to appear on crates.io before moving to dependents and safely skips
@@ -369,7 +392,10 @@ fail; do not add a token fallback to make it pass.
 2. Set `codewhaleBinaryVersion` to the GitHub release tag that should supply binaries.
 3. Push the version bump to `main`. After the release source is frozen, create
    the matching `vX.Y.Z` tag from `main`; `release.yml` then builds the binary
-   matrix and drafts the GitHub Release.
+   matrix and publishes the GitHub Release after its artifact and container gates.
+   The tag also syncs to `cnb.cool/codewhale.net/codewhale`, whose pipeline
+   independently publishes a Linux x64 release and marks it latest. Include
+   that destination in publication approval; it does not wait for GitHub Release.
 4. **Wait for the GitHub Release to finalize** with the full binary and archive
    matrix, Windows installer, and both checksum manifests. The dependent `npm`
    job checks the remote tag again, runs the public asset freshness gate and
@@ -447,9 +473,13 @@ maintainer approval:
 gh release delete vX.Y.Z --repo Hmbown/CodeWhale --yes --cleanup-tag
 git push origin :refs/tags/vX.Y.Z    # belt-and-suspenders
 git tag -d vX.Y.Z                    # local
-# 3. recut at the fixed HEAD (workspace version unchanged)
+# 3. validate the fixed HEAD first: release.yml refuses a tag without a
+#    green release-candidate receipt (Parity included) for its exact SHA
+gh workflow run release-candidate.yml --repo Hmbown/CodeWhale --ref main \
+  -f expected_sha="$(git rev-parse origin/main)"
+# 4. once that RC run is green, recut at the same HEAD (version unchanged)
 gh workflow run auto-tag.yml --repo Hmbown/CodeWhale --ref main
-# 4. release.yml rebuilds assets; rebuild + reinstall locally from the new tag
+# 5. release.yml rebuilds assets; rebuild + reinstall locally from the new tag
 ```
 
 This is the sanctioned path from "do not delete/move/recreate a release tag
@@ -460,9 +490,20 @@ for that version — bump to the next patch instead.
 ### External publish gates (not code defects)
 
 - **crates.io:** publishing needs a valid `cargo login` token on the operator
-  machine (`curl -H "Authorization: <token>" https://crates.io/api/v1/me`
-  returning 200). A 403 means the token is missing/expired — `cargo login`,
-  then `./scripts/release/publish-crates.sh publish`.
+  machine. Verify it with an authenticated, read-only *client* call rather
+  than the `/api/v1/me` endpoint: crates.io answers `/api/v1/me` with
+  `403 {"errors":[{"detail":"this action can only be performed on the
+  crates.io website"}]}` even for a good token (checked 2026-09-21 with a
+  token that `cargo owner` accepts), so a 403 there proves nothing about the
+  credential.
+
+  ```bash
+  cargo owner --list codewhale-tui   # prints the owner, e.g. `Hmbown (Hunter Bown)`
+  ```
+
+  A 403 or `401` from this call, or `cargo publish` refusing credentials,
+  means the token is missing/expired — `cargo login`, then
+  `./scripts/release/publish-crates.sh publish`.
 - **npm:** the OIDC job publishes only if the npmjs.com Trusted Publisher for
   `Hmbown` / `CodeWhale` / workflow `release.yml` / blank environment is
   configured. Missing config → the `npm` job fails `E404 No match found`. Fix

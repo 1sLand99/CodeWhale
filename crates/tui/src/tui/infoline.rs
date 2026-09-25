@@ -8,10 +8,10 @@
 //! moved to the launch header and the git bottom view, and the DeepSeek
 //! harness session metrics came back on screen in their place.
 //!
-//! The row, left to right, joined by ` · `:
+//! The row, left to right, separated by three spaces:
 //!
 //! ```text
-//! deepseek-v4 · ctx 22% · $0.14 · ttft 400ms · 38 tok/s · ↓ 1.2K      Ctrl+/ help
+//! deepseek-v4   ctx 22%   $0.14   ttft 400ms   38 tok/s   ↓ 1.2K      Ctrl+/ help
 //! ```
 //!
 //! The model is the one route fact the user checks before a turn, and it
@@ -19,15 +19,26 @@
 //! inspector. Both are the floor and never shed. Everything else is a
 //! metric: the session cost (the same number `/cost`, the roster and the
 //! price widget print), time to first token, output rate and output tokens —
-//! live while a turn streams, the last turn's figures when idle, and never
-//! blank between turns once a turn has reported them.
+//! measured latency/rate averages persist between receipts; the output count
+//! updates during streaming. Missing measurements remain absent.
 //!
 //! The context reading is painted here and only here — the posture bar above
-//! used to print the same percentage a second time from the same snapshot.
+//! used to print the same percentage a second time from the same snapshot —
+//! and at every fullness, not only from 50% up (#5950).
 //!
-//! Shed order as width drops: `tok/s`, `ttft`, `↓ tokens`, the help hint,
-//! then the cost ([`InfoSegmentId::shed_priority`]). The model and `ctx NN%`
-//! never shed; below that floor the row clips at its right edge.
+//! Shed order as width drops: cache, output count and billing tier, the help
+//! hint, then rate and TTFT, then cost and balance
+//! ([`InfoSegmentId::shed_priority`]). The model and `ctx NN%` never shed; below that floor the row clips at its
+//! right edge.
+//!
+//! Which segments exist at all is the user's call: `/statusline` and
+//! `tui.status_items` compose the row, and [`crate::tui::ui::frame::info_segments`]
+//! builds only the ones that are on. Shedding decides what survives the
+//! width that is left. `tui.metrics_line` sizes the row (#5950): `hidden`
+//! gives the line back to the transcript, and `compact` starts the shed
+//! pass with secondary counts and the help hint already gone; TTFT and rate
+//! remain when selected and space allows
+//! ([`InfoLine::compact`]).
 //!
 //! Interaction: segment geometry is recorded for parity tests, but only the
 //! model/route segment and the context reading advertise an action in the
@@ -47,11 +58,11 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme};
 use crate::tui::glyphs;
+use codewhale_palette::{ChromeInk, UiTheme};
 
 /// Separator between items — the row's one piece of punctuation.
-const ITEM_JOIN: &str = " · ";
+const ITEM_JOIN: &str = "   ";
 /// Minimum gap between the last left item and the pinned help hint.
 const HELP_GAP: usize = 2;
 
@@ -66,6 +77,10 @@ pub enum InfoSegmentId {
     Context,
     /// Session cost, the one price number (`$0.14`).
     Cost,
+    /// The clock-dependent billing tier of the active route (`peak` /
+    /// `off-peak`), painted beside the cost only for routes whose rates move
+    /// with the clock (DeepSeek V4 Pro/Flash and Flash).
+    BillingTier,
     /// Output tokens of the live or last turn (`↓ 1.2K`).
     OutputTokens,
     /// Time to first token (`ttft 400ms`).
@@ -74,6 +89,20 @@ pub enum InfoSegmentId {
     Rate,
     /// Prompt cache hit percent (`cache 85%`).
     Cache,
+    /// Prepaid credit left on the active route (`balance $4.32`). Opt-in:
+    /// only painted when `/statusline` has the balance item on, which is
+    /// also what authorises the fetch behind it.
+    Balance,
+    /// Active goal with elapsed time and the model's reported progress
+    /// (`Goal (9m) 12% ▓▓░░░░░░`). Painted only while a goal is active.
+    Goal,
+    /// Session workspace leaf directory, left-truncated (`…atch/codewhale`).
+    /// Opt-in via `/statusline` (#6112).
+    Workspace,
+    /// Current git branch from the cached workspace context, or the short
+    /// SHA when HEAD is detached. Absent outside a repository. Opt-in via
+    /// `/statusline` (#6112).
+    GitBranch,
 }
 
 impl InfoSegmentId {
@@ -84,11 +113,25 @@ impl InfoSegmentId {
     #[must_use]
     pub fn shed_priority(self) -> u8 {
         match self {
-            Self::Rate => 9,
             Self::Cache => 8,
-            Self::Ttft => 8,
+            // Performance readings outlive help and secondary counts.
+            Self::Rate | Self::Ttft => 6,
             Self::OutputTokens => 7,
-            Self::Cost => 6,
+            // The tier is a reading about the cost, not the cost: it sheds
+            // with the telemetry, ahead of the number it annotates.
+            Self::BillingTier => 7,
+            Self::Cost => 5,
+            // The balance outlives the cost: it is off by default, so a row
+            // that shows one is a row whose owner asked for it by name.
+            Self::Balance => 4,
+            // An active goal is the session's deliberate long-running mode:
+            // its reading outlives every telemetry segment and sheds only
+            // ahead of the route and context readings.
+            Self::Goal => 3,
+            // Workspace and branch are opt-in like the balance: a row that
+            // shows them is a row whose owner asked by name, so they shed
+            // with it, ahead of telemetry but behind the goal.
+            Self::Workspace | Self::GitBranch => 4,
             Self::Model | Self::Context => 0,
         }
     }
@@ -147,6 +190,11 @@ pub struct InfoLine<'a> {
     /// ASCII-safe / NO_COLOR mode: every glyph goes through
     /// [`glyphs::ascii_fallback`].
     pub ascii_safe: bool,
+    /// `tui.metrics_line = "compact"` (#5950): the shed pass starts with
+    /// secondary counts (everything at or above
+    /// [`InfoSegmentId::SHED_BEFORE_HELP`]) and the help hint already gone.
+    /// Selected TTFT and rate readings remain; width sheds the rest.
+    pub compact: bool,
 }
 
 impl<'a> InfoLine<'a> {
@@ -158,12 +206,19 @@ impl<'a> InfoLine<'a> {
             segments,
             hovered: None,
             ascii_safe: false,
+            compact: false,
         }
     }
 
     #[must_use]
     pub fn ascii_safe(mut self, ascii_safe: bool) -> Self {
         self.ascii_safe = ascii_safe;
+        self
+    }
+
+    #[must_use]
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 
@@ -209,7 +264,15 @@ fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
     let ascii = info.ascii_safe;
     let help = sym(info.help_hint, ascii);
     let join_w = sym(ITEM_JOIN, ascii).width();
-    let mut kept: Vec<&InfoSegment> = info.segments.iter().collect();
+    // A compact row is the full row after its first shed rungs: the
+    // secondary counts and the help hint go before width is consulted.
+    let mut kept: Vec<&InfoSegment> = info
+        .segments
+        .iter()
+        .filter(|segment| {
+            !info.compact || segment.id.shed_priority() < InfoSegmentId::SHED_BEFORE_HELP
+        })
+        .collect();
     let left_width = |segs: &[&InfoSegment]| -> usize {
         segs.iter().map(|s| s.rendered_width(ascii)).sum::<usize>()
             + join_w * segs.len().saturating_sub(1)
@@ -231,7 +294,7 @@ fn shed_pass<'t>(info: &'t InfoLine<'_>, area: Rect) -> ShedRow<'t> {
             .map(|(i, _)| i)
     };
 
-    let mut show_help = !help.is_empty();
+    let mut show_help = !help.is_empty() && !info.compact;
     while total_needed(left_width(&kept), show_help) > area.width as usize {
         if let Some(pos) = sheddable(&kept, InfoSegmentId::SHED_BEFORE_HELP) {
             kept.remove(pos);
@@ -336,7 +399,7 @@ impl Widget for InfoLine<'_> {
 }
 
 fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
-    crate::palette::grammar::chrome_style(theme, ink)
+    codewhale_palette::grammar::chrome_style(theme, ink)
 }
 
 /// Recorded hitboxes for one rendered row. Mirrors the

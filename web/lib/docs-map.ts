@@ -124,6 +124,7 @@ export const DOC_TOPICS: DocTopic[] = [
     },
     repoSource: "docs/ARCHITECTURE.md",
     hasPage: true,
+    sitePath: "constitution",
     category: "core-concepts",
   },
   {
@@ -242,7 +243,7 @@ export const DOC_TOPICS: DocTopic[] = [
       en: "What stays local, what a hosted provider receives, approvals versus the OS sandbox, telemetry field by field, and where to report a vulnerability.",
       zh: "哪些留在本地、托管提供商收到什么、审批与 OS 沙箱的区别、逐项说明的遥测，以及在哪里报告漏洞。",
     },
-    repoSource: ["docs/SANDBOX.md", "docs/AUTHORIZATION_ORDER.md", "docs/TELEMETRY.md"],
+    repoSource: ["docs/SANDBOX.md", "docs/AUTHORIZATION_ORDER.md", "docs/TELEMETRY.md", "docs/public-surface-facts.json"],
     hasPage: true,
     category: "reference",
   },

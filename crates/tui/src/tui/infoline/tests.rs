@@ -9,12 +9,12 @@ use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use unicode_width::UnicodeWidthStr;
 
 use super::{InfoLine, InfoSegment, InfoSegmentId, context_meter_hitbox, infoline_hitboxes};
-use crate::palette::{ChromeInk, UI_THEME, UiTheme};
+use codewhale_palette::{ChromeInk, UI_THEME, UiTheme};
 
 /// The hint the live shell advertises, from the one binding module that owns
 /// it — a fixture string here would let chrome and routing drift apart.
 fn help_hint() -> String {
-    crate::tui::shell_key_routing::info_help_hint(crate::localization::Locale::En)
+    crate::tui::shell_key_routing::info_help_hint(codewhale_localization::Locale::En)
 }
 
 const BLOCKER_SIZES: [(u16, u16); 4] = [(80, 24), (100, 30), (120, 32), (160, 40)];
@@ -174,16 +174,15 @@ fn infoline_is_model_context_and_metrics_only() {
     }
     let work = render_row(&UI_THEME, 160, &work_segments());
     assert!(
-        work.starts_with("deepseek-v4 · ctx 61% · $0.42 · ttft 400ms · 38 tok/s · ↓ 1.2K  "),
+        work.starts_with("deepseek-v4   ctx 61%   $0.42   ttft 400ms   38 tok/s   ↓ 1.2K  "),
         "{work:?}"
     );
-    assert!(work.trim_end().ends_with("Ctrl+/ help"), "{work:?}");
+    assert!(work.trim_end().ends_with("/help"), "{work:?}");
 }
 
-/// Declared shed order: `tok/s`, `ttft`, `↓ tokens`, the help hint, then
-/// the cost. The model and `ctx NN%` are the floor at every width.
+/// Secondary counts and help yield before performance readings and cost. The model and `ctx NN%` are the floor at every width.
 #[test]
-fn infoline_sheds_rate_then_ttft_then_tokens_then_help_then_cost() {
+fn infoline_sheds_tokens_then_help_then_rate_then_ttft_then_cost() {
     let segments = work_segments();
     // The narrowest row that still shows a thing. A thing that sheds earlier
     // needs a wider row to survive, so these strictly decrease down the
@@ -200,7 +199,7 @@ fn infoline_sheds_rate_then_ttft_then_tokens_then_help_then_cost() {
     let help = narrowest_showing("help");
     let cost = narrowest_showing("$0.42");
     assert!(
-        rate > ttft && ttft > tokens && tokens > help && help > cost,
+        tokens > help && help > rate && rate > ttft && ttft > cost,
         "shed order broke: rate@{rate} ttft@{ttft} tokens@{tokens} help@{help} cost@{cost}"
     );
     for w in 24..=180u16 {
@@ -212,12 +211,77 @@ fn infoline_sheds_rate_then_ttft_then_tokens_then_help_then_cost() {
     }
 }
 
+/// `tui.metrics_line = "compact"` (#5950) is the row after its first shed
+/// rungs, at any width: output counts and help are gone before width is
+/// consulted; selected TTFT/rate survive when they fit. Hitboxes follow the same
+/// pass so a click still lands on what painted.
+#[test]
+fn infoline_compact_keeps_performance_readings_without_extra_rows() {
+    let segments = work_segments();
+    let hint = help_hint();
+    let compact_row = |width: u16| -> (String, Vec<InfoSegmentId>) {
+        let backend = TestBackend::new(width, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut ids = Vec::new();
+        terminal
+            .draw(|frame| {
+                let info = InfoLine::new(&UI_THEME, &hint, &segments).compact(true);
+                ids = infoline_hitboxes(&info, frame.area())
+                    .into_iter()
+                    .map(|hitbox| hitbox.id)
+                    .collect();
+                use ratatui::widgets::Widget;
+                Widget::render(info, frame.area(), frame.buffer_mut());
+            })
+            .expect("draw");
+        let row = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<String>();
+        (row, ids)
+    };
+    let (wide, ids) = compact_row(160);
+    assert_eq!(
+        wide.trim_end(),
+        "deepseek-v4   ctx 61%   $0.42   ttft 400ms   38 tok/s",
+        "compact keeps performance, route, context and price: {wide:?}"
+    );
+    assert_eq!(
+        ids,
+        vec![
+            InfoSegmentId::Model,
+            InfoSegmentId::Context,
+            InfoSegmentId::Cost,
+            InfoSegmentId::Ttft,
+            InfoSegmentId::Rate,
+        ]
+    );
+    for w in 24..=180u16 {
+        let (row, _) = compact_row(w);
+        for gone in ["1.2K", "help"] {
+            assert!(
+                !row.contains(gone),
+                "{w}: compact never paints {gone}: {row:?}"
+            );
+        }
+        assert!(
+            row.contains("deepseek-v4") && row.contains("ctx 61%"),
+            "{w}: the floor still never sheds: {row:?}"
+        );
+    }
+    // The full row at the same width is the row the user had before.
+    assert!(render_row(&UI_THEME, 160, &segments).contains("tok/s"));
+}
+
 /// At the 80% cap the context reading takes the error token — the caller
 /// picks the ink, and the row paints it on both the label and the value.
 #[test]
 fn infoline_context_takes_the_error_token_at_eighty() {
     let theme = &UI_THEME;
-    let failure = crate::palette::grammar::chrome_style(theme, ChromeInk::Failure)
+    let failure = codewhale_palette::grammar::chrome_style(theme, ChromeInk::Failure)
         .fg
         .expect("failure ink has a colour");
     for (pct, expect_failure) in [(79u8, false), (80, true), (99, true)] {
@@ -235,20 +299,23 @@ fn infoline_context_takes_the_error_token_at_eighty() {
     }
 }
 
-/// The hint must name a chord that actually opens help in this shell. `F1`
-/// is eaten by tmux and several emulators, and bare `?` is composer text.
+/// The hint must name a route that actually opens help in this shell. `F1`
+/// is eaten by tmux and several emulators, bare `?` is composer text, and how
+/// a terminal encodes `Ctrl+/` varies enough that printing it was a promise
+/// the product could not keep. `/help` reaches the same view through the
+/// composer in every terminal.
 #[test]
-fn infoline_help_hint_names_a_chord_that_opens_help() {
+fn infoline_help_hint_names_a_route_that_opens_help() {
     let hint = help_hint();
-    assert!(hint.ends_with(" help"), "{hint}");
+    assert_eq!(hint, "/help", "a slash command names itself: {hint}");
     assert!(!hint.contains("F1"), "terminals eat F1: {hint}");
     assert!(!hint.starts_with('?'), "bare ? is composer text: {hint}");
-    let chord = hint.split_whitespace().next().unwrap();
+    // The chord stays accepted for the terminals that do deliver it; it is
+    // only no longer what chrome promises.
     let key = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('/'),
         crossterm::event::KeyModifiers::CONTROL,
     );
-    assert_eq!(chord, "Ctrl+/");
     assert!(crate::tui::shell_key_routing::is_help_shortcut(&key));
     let row = render_row(&UI_THEME, 120, &work_segments());
     assert!(row.trim_end().ends_with(&hint), "pinned right: {row:?}");

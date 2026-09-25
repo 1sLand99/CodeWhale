@@ -31,7 +31,7 @@ Fleet 状态存储在工作区下的 `.codewhale/fleet.jsonl`。worker 日志与
 
 当前交互会话的子代理是**另一组**对象，现在它们有自己的名字：
 
-- `/fleet workers`（或 `/subagents`，或 `n`）显示附着在当前 TUI 会话上的子代理。它不读取持久 ledger。
+- `/fleet workers`（或 `/subagents`，或在 `/fleet` roster 中按 Tab / `w`）显示附着在当前 TUI 会话上的子代理。它不读取持久 ledger。
 - `/fleet list|status|interrupt|resume` 与 `codewhale fleet list|status|interrupt|resume` 作用于持久 ledger。
 - `codewhale fleet restart <worker-id>` 仅限 CLI：它重新获取任务的 lease，然后驱动 manager 循环直至完成。`/fleet restart` 不会默默做一个更小的动作——它会报告 `surface_not_supported` 并指名 CLI 命令。
 
@@ -534,14 +534,9 @@ SSH workers 在生产中应始终设置 `host_key_fingerprint`：
 
 ### 配置文件
 
-`config.toml` 中的 `[fleet]` 表设置全局信任策略默认值：
+`config.toml` 中的 `[fleet]` 表设置角色、profile 与执行默认值（信任键已在 0.9.14 移除；旧键仍可解析但被忽略）：
 
 ```toml
-[fleet]
-default_trust_level = "sandbox"
-require_identity_verification = true
-max_trust_level = "operator"
-
 [fleet.exec]
 # 递归深度与独立子代理共享同一条轴线——fleet worker
 # 就是无头子代理。0 会阻止子 agent（根 worker 仍会运行）；

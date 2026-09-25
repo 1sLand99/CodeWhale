@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures_util::StreamExt;
 
 use crate::config::{Config, ProviderConfig, ProvidersConfig, RetryConfig};
-use crate::models::Message;
-use crate::models::Role;
-use crate::models::SystemPrompt;
+use codewhale_models::Message;
+use codewhale_models::Role;
+use codewhale_models::SystemPrompt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -113,7 +113,7 @@ async fn responses_stream_retries_rate_limited_request() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut request = minimal_responses_request();
     request.max_tokens = 384_000;
@@ -168,7 +168,7 @@ async fn responses_stream_retries_transient_server_error() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -209,7 +209,7 @@ async fn responses_stream_retries_upstream_499_before_streaming() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -253,7 +253,7 @@ async fn responses_stream_finishes_on_semantic_terminal_event_without_done_marke
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -301,7 +301,7 @@ async fn responses_stream_surfaces_notice_for_web_search_call_items() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -349,7 +349,7 @@ async fn responses_stream_fails_fast_on_non_retryable_provider_error() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
 
     let err = match client
@@ -388,8 +388,8 @@ async fn responses_stream_fails_fast_on_non_retryable_provider_error() {
 fn responses_body_serializes_the_child_catalog_without_duplication() {
     // Mirror of the Anthropic contract: the real child catalog fixture
     // maps 1:1 into Responses function tools with one canonical `read` entry.
-    // Skills are discoverable through tool_search, so the child wire catalog
-    // carries no load_skill at all.
+    // `load_skill` is eager in DEFAULT_ACTIVE_NATIVE_TOOLS and children resolve
+    // the same catalog authority, so it maps through exactly once too.
     let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
     let mut request = minimal_responses_request();
     request.tools = Some(tools);
@@ -411,9 +411,13 @@ fn responses_body_serializes_the_child_catalog_without_duplication() {
         "read keeps a valid parameters schema: {}",
         reads[0]
     );
-    assert!(
-        serialized.iter().all(|tool| tool["name"] != "load_skill"),
-        "load_skill must not appear on the child Responses wire"
+    assert_eq!(
+        serialized
+            .iter()
+            .filter(|tool| tool["name"] == "load_skill")
+            .count(),
+        1,
+        "exactly one canonical load_skill definition reaches the Responses wire"
     );
 }
 
@@ -446,7 +450,7 @@ async fn responses_stream_open_preserves_wire_headers_through_shared_seam() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -493,7 +497,7 @@ async fn responses_stream_inserts_boundary_between_reasoning_summary_parts() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -526,16 +530,107 @@ async fn responses_stream_inserts_boundary_between_reasoning_summary_parts() {
 
 #[test]
 fn codex_reasoning_effort_uses_responses_labels() {
-    assert_eq!(codex_responses_reasoning_effort("max"), Some("xhigh"));
-    assert_eq!(codex_responses_reasoning_effort("maximum"), Some("xhigh"));
+    assert_eq!(codex_responses_reasoning_effort("max"), Some("max"));
+    assert_eq!(codex_responses_reasoning_effort("maximum"), Some("max"));
     assert_eq!(codex_responses_reasoning_effort("xhigh"), Some("xhigh"));
-    assert_eq!(codex_responses_reasoning_effort("ultra"), Some("xhigh"));
-    assert_eq!(codex_responses_reasoning_effort("ultracode"), Some("xhigh"));
+    assert_eq!(codex_responses_reasoning_effort("ultra"), Some("ultra"));
+    assert_eq!(codex_responses_reasoning_effort("ultracode"), Some("ultra"));
     assert_eq!(codex_responses_reasoning_effort("high"), Some("high"));
     assert_eq!(codex_responses_reasoning_effort("medium"), Some("medium"));
     assert_eq!(codex_responses_reasoning_effort("minimal"), Some("low"));
     assert_eq!(codex_responses_reasoning_effort("auto"), Some("medium"));
     assert_eq!(codex_responses_reasoning_effort("off"), Some("low"));
+}
+
+#[tokio::test]
+async fn codex_selected_effort_reaches_preview_wire_and_restored_receipt_unchanged() {
+    use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
+    use crate::work_graph::WorkActivityEvent;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(CODEX_RESPONSES_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .expect(6)
+        .mount(&server)
+        .await;
+    let client = {
+        let _lock = crate::test_support::lock_test_env();
+        let _token =
+            crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+        let _legacy = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
+    };
+    let receipts = tempfile::tempdir().unwrap();
+    for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+        let selected = ReasoningEffort::parse_strict(effort).unwrap();
+        let activity = WorkActivityEvent::ReasoningEffortChanged {
+            requested: selected.into(),
+            effective: selected.into(),
+            provider_kind: Some(ApiProvider::OpenaiCodex),
+            provider: "openai-codex".to_string(),
+            endpoint_identity: Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL.to_string()),
+            model: Some("gpt-6-astra".to_string()),
+            ts: 1,
+            operation: None,
+        };
+        let persisted = serde_json::to_value(activity).unwrap();
+        assert_eq!(persisted["requested"], effort);
+        assert_eq!(persisted["effective"], effort);
+        let receipt_path = receipts.path().join(format!("{effort}.json"));
+        std::fs::write(&receipt_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+        let WorkActivityEvent::ReasoningEffortChanged { effective, .. } =
+            serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+        let restored = EffectiveReasoningEffort::from(effective)
+            .request_tier_for_replay()
+            .unwrap();
+        assert_eq!(restored, selected);
+        let mut request = minimal_responses_request();
+        request.model = "gpt-6-astra".to_string();
+        request.reasoning_effort = restored
+            .api_value_for_provider(ApiProvider::OpenaiCodex)
+            .map(str::to_string);
+        let prepared = client.prepare_outbound_request(request, true).unwrap();
+        assert_eq!(
+            prepared.reasoning.wire_effort(),
+            Some(("reasoning.effort", effort))
+        );
+        assert_eq!(prepared.body["reasoning"]["effort"], effort);
+        let mut stream = client.handle_responses_stream(&prepared).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 6);
+    for (request, effort) in requests
+        .iter()
+        .zip(["low", "medium", "high", "xhigh", "max", "ultra"])
+    {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["model"], "gpt-6-astra");
+        assert_eq!(body["reasoning"]["effort"], effort);
+    }
+}
+
+#[test]
+fn codex_tiers_do_not_change_other_responses_provider_dialects() {
+    let mut request = minimal_responses_request();
+    for effort in ["max", "ultra"] {
+        request.reasoning_effort = Some(effort.to_string());
+        assert_eq!(
+            build_responses_body_for_provider(&request, ApiProvider::Concentrate)["reasoning"]["effort"],
+            "xhigh"
+        );
+        assert_eq!(
+            build_responses_body_for_provider(&request, ApiProvider::Deepseek)["reasoning"]["effort"],
+            "max"
+        );
+    }
 }
 
 /// Concentrate's parameter reference documents `model`, `input`, `stream`,
@@ -654,7 +749,7 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
         "{}",
         body["top_p"]
     );
-    assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("max")));
+    assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("high")));
     assert!(body.pointer("/reasoning/summary").is_none());
     assert!(body.get("include").is_none());
     assert!(body.get("store").is_none());
@@ -769,7 +864,7 @@ async fn codex_stream_captures_encrypted_reasoning_as_opaque_state() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -803,7 +898,7 @@ fn deepseek_responses_reasoning_effort_uses_documented_labels() {
     assert_eq!(responses_reasoning_effort("low", true), Some("low"));
     assert_eq!(responses_reasoning_effort("medium", true), Some("high"));
     assert_eq!(responses_reasoning_effort("high", true), Some("high"));
-    assert_eq!(responses_reasoning_effort("xhigh", true), Some("max"));
+    assert_eq!(responses_reasoning_effort("xhigh", true), Some("high"));
     assert_eq!(responses_reasoning_effort("max", true), Some("max"));
     // The off tier must disable thinking on the wire, not collapse into
     // low: DeepSeek documents `reasoning.effort: "none"` as the off value.
@@ -819,7 +914,7 @@ fn deepseek_responses_reasoning_effort_uses_documented_labels() {
 #[test]
 fn codex_responses_body_uses_responses_reasoning_not_deepseek_thinking() {
     let request = MessageRequest {
-        model: "gpt-5.5".to_string(),
+        model: "gpt-6-astra".to_string(),
         messages: vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -843,7 +938,7 @@ fn codex_responses_body_uses_responses_reasoning_not_deepseek_thinking() {
 
     assert_eq!(
         body.pointer("/reasoning/effort").and_then(Value::as_str),
-        Some("xhigh")
+        Some("max")
     );
     assert_eq!(
         body.pointer("/reasoning/summary").and_then(Value::as_str),
@@ -1248,7 +1343,7 @@ fn user_image_becomes_an_input_image_item() {
 
     let mut request = minimal_responses_request();
     request.messages[0].content.push(ContentBlock::ImageUrl {
-        image_url: crate::models::ImageUrlContent {
+        image_url: codewhale_models::ImageUrlContent {
             url: DATA_URL.to_string(),
         },
     });
@@ -1299,7 +1394,7 @@ fn tool_result_image_becomes_native_function_output_content() {
                 content_blocks: Some(vec![serde_json::json!({
                     "type": "image",
                     "mime_type": "image/png",
-                    "data": "QUJD",
+                    "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
                 })]),
             }],
         },
@@ -1320,7 +1415,10 @@ fn tool_result_image_becomes_native_function_output_content() {
         })
     );
     assert_eq!(content[1]["type"], "input_image");
-    assert_eq!(content[1]["image_url"], "data:image/png;base64,QUJD");
+    assert_eq!(
+        content[1]["image_url"],
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+    );
 }
 
 /// A `system`-role history message — the shape a compaction summary, a branch

@@ -16,15 +16,20 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::{McpManagedClient, McpResourceDescriptor, McpServerConfig, McpToolDescriptor};
-
-/// Protocol revision advertised during the handshake. Matches the revision the
-/// TUI's MCP pool negotiates (`crates/tui/src/mcp.rs`), so a server that works
-/// in the TUI works here.
-const PROTOCOL_VERSION: &str = "2024-11-05";
+use crate::{
+    MCP_PROTOCOL_VERSION, MCP_SUPPORTED_PROTOCOL_VERSIONS, McpManagedClient, McpResourceDescriptor,
+    McpServerConfig, McpToolDescriptor,
+};
 
 /// Budget for spawn + `initialize` + `notifications/initialized`. Generous
 /// because a first `npx`/`uvx` launch may download the server package.
@@ -429,9 +434,12 @@ fn validate_initialize_result(
         .with_context(|| {
             format!("MCP server '{server_name}': initialize result omitted protocolVersion")
         })?;
-    if protocol_version != PROTOCOL_VERSION {
+    // Negotiation per spec: we advertise the newest revision and accept any
+    // dated revision we still implement; anything else ends the handshake.
+    if !MCP_SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version) {
         bail!(
-            "MCP server '{server_name}': unsupported protocol version '{protocol_version}' (expected {PROTOCOL_VERSION})"
+            "MCP server '{server_name}': unsupported protocol version '{protocol_version}' (supported: {})",
+            MCP_SUPPORTED_PROTOCOL_VERSIONS.join(", ")
         );
     }
 
@@ -506,13 +514,35 @@ impl ChildProcessMcpClient {
             // one.
             .stderr(Stdio::inherit());
 
-        let mut child = command.spawn().with_context(|| {
+        // Own descendants too: shell/package launchers can exit before the
+        // actual server, leaving it alive with inherited protocol pipes.
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(windows::Win32::System::Threading::CREATE_SUSPENDED.0);
+
+        let child = command.spawn().with_context(|| {
             format!(
                 "MCP server '{server_name}': failed to spawn command '{}'",
                 config.command
             )
         })?;
 
+        #[cfg(windows)]
+        let job = match contain_windows_child(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                // It has not been allowed to run without containment.
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.context(format!(
+                    "MCP server '{server_name}': failed to contain child"
+                )));
+            }
+        };
+        let (sender, responses) = sync_channel(MAX_PENDING_CHILD_MESSAGES);
+        let mut child = child;
         let stdin = child
             .stdin
             .take()
@@ -521,15 +551,24 @@ impl ChildProcessMcpClient {
             .stdout
             .take()
             .with_context(|| format!("MCP server '{server_name}': child stdout unavailable"))?;
+        let mut connection = Connection {
+            child: Some(child),
+            stdin: None,
+            responses,
+            next_id: 1,
+            #[cfg(windows)]
+            _job: job,
+        };
 
         // A dedicated reader thread keeps `recv_timeout` able to bound a wait
         // that a blocking read on the child would not. The custom line reader
         // also caps memory before a hostile child can complete an oversized
         // stdout line.
         let stdin = Arc::new(Mutex::new(stdin));
+        connection.stdin = Some(Arc::clone(&stdin));
         let response_stdin = Arc::downgrade(&stdin);
+        drop(stdin);
         let response_server_name = server_name.clone();
-        let (sender, responses) = sync_channel(MAX_PENDING_CHILD_MESSAGES);
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -582,18 +621,11 @@ impl ChildProcessMcpClient {
             }
         });
 
-        let mut connection = Connection {
-            child,
-            stdin: Some(stdin),
-            responses,
-            next_id: 1,
-        };
-
         let initialize = connection.request(
             &server_name,
             "initialize",
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "clientInfo": {
                     "name": "codewhale-mcp-server",
                     "version": env!("CARGO_PKG_VERSION")
@@ -741,10 +773,69 @@ impl McpManagedClient for ChildProcessMcpClient {
 }
 
 struct Connection {
-    child: Child,
+    /// `None` once `Drop` hands the child to the reaper thread.
+    child: Option<Child>,
     stdin: Option<Arc<Mutex<ChildStdin>>>,
     responses: Receiver<ChildStdoutMessage>,
     next_id: u64,
+    #[cfg(windows)]
+    _job: OwnedHandle,
+}
+
+/// Use the same suspended-spawn, kill-on-close Job Object ownership as hook
+/// and shell children. The TUI depends on this crate, so its private guards
+/// cannot be imported here without creating a dependency cycle.
+#[cfg(windows)]
+fn contain_windows_child(child: &Child) -> Result<OwnedHandle> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    use windows::core::PCWSTR;
+
+    unsafe {
+        let handle = CreateJobObjectW(None, PCWSTR::null())?;
+        let job = OwnedHandle::from_raw_handle(handle.0);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&limits) as u32,
+        )?;
+        AssignProcessToJobObject(handle, HANDLE(child.as_raw_handle()))?;
+
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?;
+        let snapshot = OwnedHandle::from_raw_handle(snapshot.0);
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut next = Thread32First(HANDLE(snapshot.as_raw_handle()), &mut entry);
+        let mut resumed = 0usize;
+        while next.is_ok() {
+            if entry.th32OwnerProcessID == child.id() {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)?;
+                let thread = OwnedHandle::from_raw_handle(thread.0);
+                if ResumeThread(HANDLE(thread.as_raw_handle())) == u32::MAX {
+                    return Err(io::Error::last_os_error().into());
+                }
+                resumed += 1;
+            }
+            next = Thread32Next(HANDLE(snapshot.as_raw_handle()), &mut entry);
+        }
+        if resumed == 0 {
+            bail!("suspended MCP child had no resumable thread");
+        }
+        Ok(job)
+    }
 }
 
 impl Connection {
@@ -847,9 +938,12 @@ impl Connection {
     /// so the cost buys a real diagnostic ("exited with status 127" is the
     /// difference between a crashed server and a missing one).
     fn exit_note(&mut self) -> String {
+        let Some(child) = self.child.as_mut() else {
+            return String::new();
+        };
         let deadline = Instant::now() + EXIT_STATUS_GRACE;
         loop {
-            match self.child.try_wait() {
+            match child.try_wait() {
                 Ok(Some(status)) => return format!(" (process exited with {status})"),
                 Ok(None) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(5));
@@ -870,24 +964,66 @@ fn is_broken_pipe(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Reap stdio children off the dropping thread (#6211 R4). `Drop` runs on
+/// whichever thread drops the client — manager reload, pool rebuild — and
+/// the half-second grace wait must not stall it, least of all an executor
+/// thread. One shared thread reaps every child; drops only send. What this
+/// does not do: join the reaper at process exit, so a child that ignores
+/// EOF can outlive a racing shutdown where the old synchronous `Drop`
+/// would have killed it first.
+fn child_reaper() -> &'static std::sync::mpsc::Sender<Child> {
+    static REAPER: std::sync::OnceLock<std::sync::mpsc::Sender<Child>> = std::sync::OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Child>();
+        thread::Builder::new()
+            .name("mcp-stdio-reaper".to_string())
+            .spawn(move || {
+                for mut child in rx {
+                    reap_child(&mut child);
+                }
+            })
+            .expect("MCP stdio reaper thread spawns");
+        tx
+    })
+}
+
+/// Grace-wait a child, then kill what ignores stdin-close. Runs on the
+/// reaper thread, or inline in `Drop` if the reaper is gone.
+fn reap_child(child: &mut Child) {
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            _ => break,
+        }
+    }
+    #[cfg(unix)]
+    unsafe {
+        // Also run after the immediate launcher exited. Descendants can
+        // still own the group and the stdout/stderr pipe descriptors.
+        let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Drop for Connection {
     fn drop(&mut self) {
         // Closing stdin is the protocol-level shutdown signal for a stdio MCP
         // server; kill only the ones that ignore it, so servers get a chance
         // to flush state.
         self.stdin.take();
-        let deadline = Instant::now() + SHUTDOWN_GRACE;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                _ => break,
-            }
+        // The grace wait leaves the dropping thread: the child is reaped on
+        // the shared reaper thread. If the reaper itself is gone, reap
+        // inline — today's behavior — rather than leak the child.
+        if let Some(child) = self.child.take()
+            && let Err(mut failed) = child_reaper().send(child)
+        {
+            reap_child(&mut failed.0);
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -1095,7 +1231,7 @@ mod tests {
     #[test]
     fn initialize_result_requires_supported_protocol_and_server_identity() {
         let valid = json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "serverInfo": {"name": "fixture", "version": "1"},
             "capabilities": {"tools": {}, "resources": {}}
         });
@@ -1105,6 +1241,20 @@ mod tests {
         assert!(capabilities.tools);
         assert!(capabilities.resources);
 
+        // Negotiation accepts every dated revision still implemented, not only
+        // the newest one advertised at initialize.
+        for version in ["2025-03-26", "2024-11-05"] {
+            let older = json!({
+                "protocolVersion": version,
+                "serverInfo": {"name": "fixture", "version": "1"},
+                "capabilities": {"tools": {}}
+            });
+            assert!(
+                validate_initialize_result("fixture", &older).is_ok(),
+                "supported revision {version} was rejected"
+            );
+        }
+
         for invalid in [
             json!({}),
             json!({
@@ -1112,11 +1262,11 @@ mod tests {
                 "serverInfo": {"name": "fixture", "version": "1"}
             }),
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "serverInfo": {"name": "fixture"}
             }),
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "serverInfo": {"name": "fixture", "version": "1"},
                 "capabilities": []
             }),
@@ -1236,6 +1386,213 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn reaper_kills_a_child_that_ignores_stdin_close() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Close stdin like `Drop` does, then reap: the sleeper ignores it.
+        drop(child.stdin.take());
+        reap_child(&mut child);
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "reaper must have killed the child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_connection_with_a_live_child_returns_before_the_grace() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (_tx, responses) = sync_channel(1);
+        let connection = Connection {
+            child: Some(child),
+            stdin: None,
+            responses,
+            next_id: 1,
+        };
+        let started = Instant::now();
+        drop(connection);
+        assert!(
+            started.elapsed() < SHUTDOWN_GRACE,
+            "drop must hand off instead of grace-waiting"
+        );
+        // The reaper owns the child now: it must die without anyone waiting
+        // inline, so the handoff leaks nothing.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(Instant::now() < deadline, "reaper never reaped pid {pid}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_descendant_cleanup(handshake: bool, launcher_exits: bool) {
+        use std::io::Read;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "codewhale-mcp-tree-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let pipe = root.join("pipe");
+        let pids = root.join("pids");
+        let path = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let (eof_tx, eof_rx) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            let result =
+                std::fs::File::open(pipe).and_then(|mut pipe| pipe.read_to_end(&mut Vec::new()));
+            let _ = eof_tx.send(result);
+        });
+        let mut script = String::from(
+            "exec 3>\"$MCP_TEST_PIPE\"\nsleep 30 &\nprintf '%s %s\\n' \"$$\" \"$!\" >\"$MCP_TEST_PIDS\"\n",
+        );
+        if handshake {
+            script.push_str(
+                r#"IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"tree","version":"1"}}}\n' "$id"
+IFS= read -r initialized
+"#,
+            );
+        }
+        script.push_str(if launcher_exits { "exit 0\n" } else { "wait\n" });
+        let mut cfg = config("/bin/sh", &["-c", &script]);
+        cfg.env.insert(
+            "MCP_TEST_PIPE".into(),
+            root.join("pipe").display().to_string(),
+        );
+        cfg.env
+            .insert("MCP_TEST_PIDS".into(), pids.display().to_string());
+
+        let result = std::panic::catch_unwind(|| {
+            let spawned = ChildProcessMcpClient::spawn_with_timeouts(
+                &cfg,
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            );
+            if handshake {
+                let client = spawned.expect("normal handshake must succeed");
+                if launcher_exits {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        if client
+                            .connection
+                            .lock()
+                            .unwrap()
+                            .child
+                            .as_mut()
+                            .expect("child present before drop")
+                            .try_wait()
+                            .unwrap()
+                            .is_some()
+                        {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "launcher did not exit");
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                drop(client);
+            } else {
+                assert!(format!("{:#}", spawned.unwrap_err()).contains("initialize timed out"));
+            }
+            let ids: Vec<libc::pid_t> = std::fs::read_to_string(&pids)
+                .unwrap()
+                .split_whitespace()
+                .map(|pid| pid.parse().unwrap())
+                .collect();
+            assert_eq!(ids.len(), 2, "must observe both launcher and descendant");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            for pid in ids {
+                loop {
+                    let gone = unsafe { libc::kill(pid, 0) } != 0
+                        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                    // An adopted Linux zombie has exited; its reaping belongs
+                    // to init, not this client. It cannot retain a pipe or run.
+                    #[cfg(target_os = "linux")]
+                    let gone = gone
+                        || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                            .ok()
+                            .and_then(|stat| {
+                                stat.rsplit_once(") ")
+                                    .map(|(_, tail)| tail.starts_with('Z'))
+                            })
+                            .unwrap_or(false);
+                    if gone {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "MCP process {pid} survived cleanup"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            eof_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("descendant still holds inherited pipe")
+                .expect("pipe read failed");
+        });
+        if result.is_err() {
+            // Test failures must not leave their controlled sleepers running.
+            if let Ok(ids) = std::fs::read_to_string(&pids) {
+                for pid in ids
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse::<libc::pid_t>().ok())
+                {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        if result.is_ok() {
+            reader.join().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(root);
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handshake_timeout_terminates_launcher_descendant_and_pipes() {
+        assert_descendant_cleanup(false, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_connection_drop_terminates_descendant_and_pipes() {
+        assert_descendant_cleanup(true, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_drop_after_launcher_exit_terminates_descendant_and_pipes() {
+        assert_descendant_cleanup(true, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn handshake_answers_a_same_id_child_ping_before_accepting_the_response() {
         let script = r#"
 IFS= read -r line
@@ -1326,9 +1683,24 @@ printf 'stdin closed\n' > "$CODEWHALE_MCP_TEST_MARKER"
 
         // The reader owns only a weak stdin handle. Dropping the client must
         // therefore still deliver EOF to the child and let it exit cleanly;
-        // a strong reader-thread handle would force Drop's kill fallback.
+        // a strong reader-thread handle would force the kill fallback. Drop
+        // hands the child to the reaper thread instead of waiting, so poll
+        // for the marker the clean exit writes.
         drop(client);
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "stdin closed\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // The child creates and truncates the marker before writing it,
+            // so a successful read can still land on an empty or partial
+            // file. Poll until it carries the whole line a clean exit writes.
+            if std::fs::read_to_string(&marker).is_ok_and(|body| body == "stdin closed\n") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "dropped client never delivered stdin EOF"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
         std::fs::remove_file(marker).unwrap();
     }
 
@@ -1374,12 +1746,8 @@ while IFS= read -r line; do
   esac
 done
 "#;
-        let client = ChildProcessMcpClient::spawn_with_timeouts(
-            &config("/bin/sh", &["-c", script]),
-            Duration::from_secs(2),
-            Duration::from_millis(250),
-        )
-        .expect("handshake");
+        let client =
+            ChildProcessMcpClient::spawn(&config("/bin/sh", &["-c", script])).expect("handshake");
 
         let tools_error = client.list_tools().unwrap_err();
         assert!(

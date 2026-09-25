@@ -10,12 +10,13 @@ use std::time::Duration;
 use anyhow::Result;
 
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
+use super::http_client::McpHttpClient;
 use super::sse::SseTransport;
 use super::streamable_http::{StreamableHttpTransport, StreamableSendError};
 use super::{McpServerConfig, McpTransport, ReviewedPluginMcpSource, oauth};
 pub(super) struct HttpTransport {
     mode: HttpTransportMode,
-    client: reqwest::Client,
+    client: McpHttpClient,
     base_url: String,
     auth: McpHttpAuth,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -34,6 +35,19 @@ pub(super) struct McpHttpAuth {
     pub(super) env_headers: HashMap<String, String>,
     pub(super) bearer_token_env_var: Option<String>,
     pub(super) oauth: Option<oauth::McpOAuthRuntime>,
+    /// Whether the server's *configuration* routes authentication through
+    /// OAuth, independent of whether a credential is cached yet: a URL-based
+    /// server that is neither plugin-contributed nor supplied a manual
+    /// bearer/Authorization credential (#6030).
+    ///
+    /// This is [`oauth::server_supports_oauth_login`] — the same predicate the
+    /// login flow itself is gated on — so the recovery copy it selects
+    /// (`/mcp login <name>`) names a command that will actually run. A live
+    /// [`Self::oauth`] runtime always implies it: the runtime is only built
+    /// for a server that passes this predicate. A first-run OAuth server has
+    /// no runtime yet, which is exactly the case that used to fall through to
+    /// the bearer-token copy.
+    pub(super) oauth_configured: bool,
     pub(super) suppress_server_error_details: bool,
     pub(super) reviewed_plugin: Option<ReviewedPluginMcpSource>,
 }
@@ -50,6 +64,7 @@ impl McpHttpAuth {
             env_headers: config.env_headers.clone(),
             bearer_token_env_var: config.bearer_token_env_var.clone(),
             oauth,
+            oauth_configured: oauth::server_supports_oauth_login(config),
             suppress_server_error_details: config.reviewed_plugin.is_some(),
             reviewed_plugin: config.reviewed_plugin.clone(),
         }
@@ -119,7 +134,7 @@ pub(super) fn mcp_headers_have_authorization(headers: &HashMap<String, String>) 
 
 impl HttpTransport {
     pub(super) fn new(
-        client: reqwest::Client,
+        client: McpHttpClient,
         url: String,
         auth: McpHttpAuth,
         cancel_token: tokio_util::sync::CancellationToken,
@@ -201,7 +216,7 @@ impl HttpTransport {
             _ = cancel.cancelled() => {
                 anyhow::bail!("MCP session preflight cancelled after plugin authority changed")
             }
-            response = tokio::time::timeout(Duration::from_secs(5), request.send()) => {
+            response = tokio::time::timeout(Duration::from_secs(5), transport.client.send(request)) => {
                 response
                     .map_err(|_| anyhow::anyhow!("GET timeout"))?
                     .map_err(|e| anyhow::anyhow!("GET error: {e}"))?
@@ -235,6 +250,14 @@ impl HttpTransport {
 
 #[async_trait::async_trait]
 impl McpTransport for HttpTransport {
+    fn set_protocol_version(&mut self, version: &str) {
+        // Only Streamable HTTP carries the MCP-Protocol-Version header; the
+        // legacy SSE transport predates it and ignores the negotiation result.
+        if let HttpTransportMode::Streamable(transport) = &mut self.mode {
+            transport.set_protocol_version(version);
+        }
+    }
+
     async fn send(&mut self, msg: Vec<u8>) -> Result<()> {
         match &mut self.mode {
             HttpTransportMode::Streamable(transport) => match transport.send(msg.clone()).await {

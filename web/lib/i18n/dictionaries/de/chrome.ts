@@ -25,12 +25,9 @@ export const chrome: ChromeDict = {
   navCommunity: "Community",
   navContribute: "Mitwirken",
 
-  navDocsSecondary: "Docs",
-  navStartSecondary: "Start",
-  navInstallSecondary: "Install",
-  navFaqSecondary: "FAQ",
-  navCommunitySecondary: "Community",
-  navContributeSecondary: "Contribute",
+  navProduct: "Produkt",
+  navModels: "Modelle",
+  navPlugins: "Plugins",
 
   skipToContent: "Zum Hauptinhalt springen",
 
@@ -40,17 +37,12 @@ export const chrome: ChromeDict = {
   installCta: "Installieren →",
 
   authSignIn: "Anmelden",
-  authRegister: "Registrieren",
-  authGroupAria: "Konto",
 
   wordmarkSeal: "深",
   wordmarkTag: "jedes Modell, auf deiner Maschine",
 
   issueLabel: "Ausgabe vom {date}",
   dateLocale: "de-DE",
-
-  starsAria: "GitHub-Sterne",
-  githubFallback: "GitHub",
 
   tickerLiveLabel: "Echtzeit",
   tickerLiveTag: "LIVE",
@@ -71,11 +63,11 @@ export const chrome: ChromeDict = {
   themeAuto: "auto",
   themeLight: "hell",
   themeDark: "dunkel",
-  themeAria: "Dokumentations-Design: {mode} (Klick zum Wechseln)",
-  themeTitle: "Dokumentations-Design · auto / hell / dunkel",
+  themeAria: "Design: {mode} (Klick zum Wechseln)",
+  themeTitle: "Design · auto / hell / dunkel",
 
   footerTagline:
-    "Codewhale taucht in die Tiefe, damit du es nicht musst — Docs, Quellcode und Community für die Open-Source-Runtime.",
+    "Erstelle, was du möchtest, und automatisiere alltägliche Arbeit mit den Modellen deiner Wahl.",
   footerProduct: "Produkt",
   footerProject: "Projekt",
   footerDocs: "Dokumentation",
@@ -87,7 +79,6 @@ export const chrome: ChromeDict = {
   footerIssues: "Issues",
   footerContribute: "Mitwirken",
   footerLicense: "MIT-Lizenz",
-  footerPricing: "Preise",
   footerTerms: "Nutzungsbedingungen",
   footerPrivacy: "Datenschutz",
   footerChangelog: "Änderungsprotokoll",

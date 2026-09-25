@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 
 #[allow(unused_imports)]
 pub use codewhale_config::{
@@ -53,6 +53,10 @@ impl FleetProfileScope {
 }
 
 pub fn personal_agent_profile_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if !crate::test_support::guarded_environment_provides_state_paths() {
+        return Ok(crate::test_support::unsealed_test_state_root().join(PERSONAL_AGENT_PROFILE_DIR));
+    }
     Ok(codewhale_config::codewhale_home()?.join(PERSONAL_AGENT_PROFILE_DIR))
 }
 
@@ -92,6 +96,37 @@ pub struct AgentProfile {
 pub struct AgentProfileIdentity {
     pub id: String,
     pub source: PathBuf,
+}
+
+/// Keep a failed definition's identity so selecting it cannot run a lower
+/// roster layer by accident. Parser excerpts stay in logs, not tool output.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentProfileLoadIssue {
+    pub id: String,
+    pub source: PathBuf,
+    pub origin: ProfileOrigin,
+    #[serde(skip_serializing)]
+    pub detail: String,
+}
+
+impl AgentProfileLoadIssue {
+    fn new(path: &Path, id: Option<&str>, origin: ProfileOrigin, detail: String) -> Self {
+        Self {
+            id: id
+                .or_else(|| path.file_stem().and_then(|stem| stem.to_str()))
+                .unwrap_or("profile")
+                .to_string(),
+            source: path.to_path_buf(),
+            origin,
+            detail,
+        }
+    }
+}
+
+impl std::fmt::Display for AgentProfileLoadIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,7 +213,7 @@ pub fn load_workspace_agent_profiles(workspace: impl AsRef<Path>) -> Result<Vec<
 /// not hide a newly-authored valid profile (or the rest of the party).
 pub fn load_workspace_agent_profiles_tolerant(
     workspace: impl AsRef<Path>,
-) -> Result<(Vec<AgentProfile>, Vec<String>)> {
+) -> Result<(Vec<AgentProfile>, Vec<AgentProfileLoadIssue>)> {
     let dir = workspace.as_ref().join(WORKSPACE_AGENT_PROFILE_DIR);
     load_agent_profiles_from_dir_tolerant(dir, ProfileOrigin::Workspace)
 }
@@ -186,7 +221,7 @@ pub fn load_workspace_agent_profiles_tolerant(
 pub fn load_agent_profiles_from_dir_tolerant(
     dir: impl AsRef<Path>,
     origin: ProfileOrigin,
-) -> Result<(Vec<AgentProfile>, Vec<String>)> {
+) -> Result<(Vec<AgentProfile>, Vec<AgentProfileLoadIssue>)> {
     let dir = dir.as_ref();
     let paths = agent_profile_paths(dir)?;
     let mut profiles = Vec::new();
@@ -206,16 +241,26 @@ pub fn load_agent_profiles_from_dir_tolerant(
                 }
                 identified.push((path, identity, canonical_id));
             }
-            Err(err) => issues.push(format!("{err:#}")),
+            Err(err) => issues.push(AgentProfileLoadIssue::new(
+                &path,
+                None,
+                origin,
+                format!("{err:#}"),
+            )),
         }
     }
 
-    for (path, _identity, canonical_id) in identified {
+    for (path, identity, canonical_id) in identified {
         if duplicates.contains(&canonical_id) {
-            issues.push(format!(
-                "duplicate agent profile id {} includes {}",
-                canonical_id,
-                path.display()
+            issues.push(AgentProfileLoadIssue::new(
+                &path,
+                Some(&identity.id),
+                origin,
+                format!(
+                    "duplicate agent profile id {} includes {}",
+                    canonical_id,
+                    path.display()
+                ),
             ));
             continue;
         }
@@ -224,7 +269,12 @@ pub fn load_agent_profiles_from_dir_tolerant(
                 profile.origin = origin;
                 profiles.push(profile);
             }
-            Err(err) => issues.push(format!("{err:#}")),
+            Err(err) => issues.push(AgentProfileLoadIssue::new(
+                &path,
+                Some(&identity.id),
+                origin,
+                format!("{err:#}"),
+            )),
         }
     }
 
@@ -234,7 +284,7 @@ pub fn load_agent_profiles_from_dir_tolerant(
 pub(crate) fn load_plugin_agent_profiles_from_component(
     component: &Path,
     authority: &crate::plugins::types::PluginAuthority,
-) -> Result<(Vec<AgentProfile>, Vec<String>)> {
+) -> Result<(Vec<AgentProfile>, Vec<AgentProfileLoadIssue>)> {
     let (mut profiles, issues) = if component.is_dir() {
         load_agent_profiles_from_dir_tolerant(component, ProfileOrigin::Plugin)?
     } else if component.is_file() {
@@ -243,7 +293,18 @@ pub(crate) fn load_plugin_agent_profiles_from_component(
                 profile.origin = ProfileOrigin::Plugin;
                 (vec![profile], Vec::new())
             }
-            Err(error) => (Vec::new(), vec![format!("{error:#}")]),
+            Err(error) => {
+                let identity = load_agent_profile_identity_file(component).ok();
+                (
+                    Vec::new(),
+                    vec![AgentProfileLoadIssue::new(
+                        component,
+                        identity.as_ref().map(|identity| identity.id.as_str()),
+                        ProfileOrigin::Plugin,
+                        format!("{error:#}"),
+                    )],
+                )
+            }
         }
     } else {
         return Err(anyhow!(
@@ -1241,8 +1302,8 @@ models = ["glm-5.2", "deepseek-v4-pro"]
             Some("deepseek-v4-flash")
         );
         assert_eq!(issues.len(), 1);
-        assert!(issues[0].contains("reviewer.toml"), "{issues:?}");
-        assert!(issues[0].contains("model_class_hint"), "{issues:?}");
+        assert!(issues[0].detail.contains("reviewer.toml"), "{issues:?}");
+        assert!(issues[0].detail.contains("model_class_hint"), "{issues:?}");
     }
 
     #[test]
@@ -1268,7 +1329,7 @@ models = ["glm-5.2", "deepseek-v4-pro"]
         assert!(
             issues
                 .iter()
-                .all(|issue| issue.contains("duplicate agent profile id reviewer")),
+                .all(|issue| issue.detail.contains("duplicate agent profile id reviewer")),
             "{issues:?}"
         );
     }
@@ -1339,7 +1400,7 @@ models = ["glm-5.2", "deepseek-v4-pro"]
             Some("deepseek-v4-flash")
         );
         assert_eq!(issues.len(), 1);
-        assert!(issues[0].contains("reviewer.toml"), "{issues:?}");
+        assert!(issues[0].detail.contains("reviewer.toml"), "{issues:?}");
     }
 
     #[test]

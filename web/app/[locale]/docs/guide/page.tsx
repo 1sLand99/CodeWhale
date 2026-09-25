@@ -33,7 +33,7 @@ export default async function GuidePage({ params }: { params: Promise<{ locale: 
         <GettingStartedSteps locale={locale} />
       </section>
 
-      {session && (
+      {session?.status === "published" && (
         <section id="session-media" className="scroll-mt-32">
           <h2 className="font-display text-2xl mb-1">{t.sessionTitle}</h2>
           <p className={`${t.bodyClassName} mt-3 mb-4`}>{t.sessionLead}</p>
@@ -57,9 +57,8 @@ export default async function GuidePage({ params }: { params: Promise<{ locale: 
         </div>
       </section>
 
-      <section id="source" className="hairline-t pt-8">
-        <p className="text-sm text-ink-mute">{t.sourceNote}</p>
-      </section>
+      {/* Maintainer pointer: kept out of the rendered copy (experience mark 5). */}
+      <div hidden data-source-note={t.sourceNote} />
     </section>
   );
 }

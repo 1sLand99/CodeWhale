@@ -10,8 +10,8 @@
 //! `SendMessage` action that asks the model to translate the changelog into
 //! the user's language.
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{Locale, MessageId, tr};
 
 use super::CommandResult;
 
@@ -300,9 +300,9 @@ fn next_contentful_version_after(lines: &[&str], mut pos: usize) -> Option<Strin
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::localization::Locale;
     use crate::test_support::{EnvVarGuard, lock_test_env};
     use crate::tui::app::{App, TuiOptions};
+    use codewhale_localization::Locale;
     fn make_app(tmpdir: &tempfile::TempDir, locale: Locale, has_api_key: bool) -> App {
         let mut config = Config::default();
         if has_api_key {

@@ -4,8 +4,8 @@
 //! approval and elevation views can render the decision without owning the
 //! policy itself.
 
-use crate::command_safety::is_parallel_readonly_command;
 use crate::tools::canonical_action::canonical_action_alias;
+use codewhale_execpolicy::command_safety::is_parallel_readonly_command;
 use serde_json::Value;
 
 /// Categorizes tools by cost/risk level.
@@ -120,6 +120,7 @@ pub fn get_tool_category(name: &str) -> ToolCategory {
             | "git_log"
             | "git_show"
             | "git_blame"
+            | "git_commit_plan"
             | "project"
             | "diagnostics"
     ) || name.starts_with("read_")
@@ -386,6 +387,7 @@ mod tests {
             ("Git", "log", ToolCategory::Safe, RiskLevel::Benign),
             ("Git", "show", ToolCategory::Safe, RiskLevel::Benign),
             ("Git", "blame", ToolCategory::Safe, RiskLevel::Benign),
+            ("Git", "commit_plan", ToolCategory::Safe, RiskLevel::Benign),
             (
                 "Run",
                 "tests",

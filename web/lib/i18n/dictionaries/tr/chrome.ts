@@ -22,12 +22,9 @@ export const chrome: ChromeDict = {
   navCommunity: "Topluluk",
   navContribute: "Katkı",
 
-  navDocsSecondary: "Docs",
-  navStartSecondary: "Start",
-  navInstallSecondary: "Install",
-  navFaqSecondary: "FAQ",
-  navCommunitySecondary: "Community",
-  navContributeSecondary: "Contribute",
+  navProduct: "Ürün",
+  navModels: "Modeller",
+  navPlugins: "Eklentiler",
 
   skipToContent: "Ana içeriğe geç",
 
@@ -37,17 +34,12 @@ export const chrome: ChromeDict = {
   installCta: "Kur →",
 
   authSignIn: "Giriş yap",
-  authRegister: "Kayıt ol",
-  authGroupAria: "Hesap",
 
   wordmarkSeal: "深",
   wordmarkTag: "istediğin model, senin makinen",
 
   issueLabel: "{date} sayısı",
   dateLocale: "tr-TR",
-
-  starsAria: "GitHub yıldızları",
-  githubFallback: "GitHub",
 
   tickerLiveLabel: "Canlı",
   tickerLiveTag: "LIVE",
@@ -68,11 +60,11 @@ export const chrome: ChromeDict = {
   themeAuto: "otomatik",
   themeLight: "açık",
   themeDark: "koyu",
-  themeAria: "Belge teması: {mode} (geçiş için tıkla)",
-  themeTitle: "Belge teması · otomatik / açık / koyu",
+  themeAria: "Tema: {mode} (geçiş için tıkla)",
+  themeTitle: "Tema · otomatik / açık / koyu",
 
   footerTagline:
-    "Derinlere Codewhale dalar — senin dalmana gerek yok: açık kaynak çalışma zamanı için belgeler, kaynak ve topluluk.",
+    "Seçtiğin modellerle istediğini oluştur ve günlük işleri otomatikleştir.",
   footerProduct: "Ürün",
   footerProject: "Proje",
   footerDocs: "Belgeler",
@@ -84,7 +76,6 @@ export const chrome: ChromeDict = {
   footerIssues: "Issues",
   footerContribute: "Katkı",
   footerLicense: "MIT lisansı",
-  footerPricing: "Fiyatlandırma",
   footerTerms: "Hizmet şartları",
   footerPrivacy: "Gizlilik",
   footerChangelog: "Değişiklik günlüğü",

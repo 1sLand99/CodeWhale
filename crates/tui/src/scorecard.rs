@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::config::ApiProvider;
 #[cfg(test)]
 use crate::config::{DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC};
-use crate::models::Usage;
 use crate::pricing::{
     CostEstimate, TurnCostAudit, audit_turn_cost_for_route_at, token_usage_for_pricing,
 };
+use codewhale_models::Usage;
 
 /// One turn's normalized token economics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

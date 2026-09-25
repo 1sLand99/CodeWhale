@@ -234,7 +234,10 @@ impl Engine {
         tx_event: &mpsc::Sender<Event>,
         name: &str,
         input: serde_json::Value,
+        disallowed_tools: &[String],
     ) -> Result<RichToolResult, ToolError> {
+        McpPool::authorize_call(disallowed_tools, name, &input)
+            .map_err(|error| ToolError::not_available(error.to_string()))?;
         // A synthetic `mcp_<server>_authenticate` call runs the shared OAuth
         // login flow with the pool lock released during the browser wait, so
         // parallel MCP tools and the `/mcp` manager keep working while the
@@ -245,7 +248,7 @@ impl Engine {
         // call yet.
         let auth_target = pool.lock().await.authenticate_tool_target(name);
         if let Some(server) = auth_target {
-            let result = crate::mcp::authenticate_tool_via_pool(&pool, &server, |url| {
+            let mut result = crate::mcp::authenticate_tool_via_pool(&pool, &server, |url| {
                 // The model cannot relay the URL until the call returns, and
                 // the call returns only after the sign-in completes — so the
                 // user must see it now. This status is the only copy of the
@@ -265,6 +268,7 @@ impl Engine {
             })
             .await
             .map_err(|e| ToolError::execution_failed(format!("MCP tool failed: {e}")))?;
+            McpPool::filter_authenticate_result(&mut result, disallowed_tools);
             let mut rich = crate::tools::registry::mcp_result_to_bounded_rich_tool_result(result);
             if rich.result.success {
                 rich.result.metadata = Some(serde_json::json!({ "mcp_catalog_changed": true }));
@@ -272,7 +276,11 @@ impl Engine {
             return Ok(rich);
         }
         let needs_auth_generation_before = pool.lock().await.needs_auth_generation();
-        let result = pool.lock().await.call_tool(name, input).await;
+        let result = pool
+            .lock()
+            .await
+            .call_tool_with_disallowed(name, input, disallowed_tools)
+            .await;
         match result {
             Ok(result) => {
                 Ok(crate::tools::registry::mcp_result_to_bounded_rich_tool_result(result))
@@ -475,7 +483,7 @@ impl Engine {
             "mcp"
         } else if matches!(
             tool_name.as_str(),
-            CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME
+            CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME | EXECUTE_TOOLS_TOOL_NAME
         ) {
             "interpreter"
         } else if registry.is_some() {
@@ -518,6 +526,13 @@ impl Engine {
             ));
         }
 
+        if let Some(context) = context_override
+            .as_ref()
+            .or_else(|| registry.map(|registry| registry.context()))
+        {
+            super::tool_catalog::enforce_tool_denial(context, &tool_name, &tool_input)?;
+        }
+
         let tool_authority = context_override
             .as_ref()
             .and_then(|context| context.tool_authority.as_ref())
@@ -533,7 +548,7 @@ impl Engine {
             }
             if matches!(
                 tool_name.as_str(),
-                CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME
+                CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME | EXECUTE_TOOLS_TOOL_NAME
             ) {
                 return Err(ToolError::permission_denied(format!(
                     "worker '{}' cannot run {tool_name}: arbitrary code execution is outside its machine-readable authority envelope",
@@ -544,7 +559,19 @@ impl Engine {
 
         let outcome: Result<RichToolResult, ToolError> = if McpPool::is_mcp_tool(&tool_name) {
             if let Some(pool) = mcp_pool {
-                Engine::execute_mcp_tool_with_pool(pool, &tx_event, &tool_name, tool_input).await
+                let disallowed_tools = context_override
+                    .as_ref()
+                    .or_else(|| registry.map(|registry| registry.context()))
+                    .map(|context| context.disallowed_tools.as_slice())
+                    .unwrap_or_default();
+                Engine::execute_mcp_tool_with_pool(
+                    pool,
+                    &tx_event,
+                    &tool_name,
+                    tool_input,
+                    disallowed_tools,
+                )
+                .await
             } else {
                 Err(ToolError::not_available(format!(
                     "tool '{tool_name}' is not registered"
@@ -558,6 +585,20 @@ impl Engine {
             execute_js_execution_tool(&tool_input, &workspace)
                 .await
                 .map(RichToolResult::plain)
+        } else if tool_name == EXECUTE_TOOLS_TOOL_NAME {
+            if let Some(registry) = registry {
+                let context = context_override
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| registry.context().clone());
+                crate::tools::codemode::execute_tools_tool(&tool_input, registry, &context)
+                    .await
+                    .map(RichToolResult::plain)
+            } else {
+                Err(ToolError::not_available(format!(
+                    "tool '{tool_name}' is not registered"
+                )))
+            }
         } else if let Some(registry) = registry {
             registry
                 .execute_rich_full_with_context(&tool_name, tool_input, context_override.as_ref())

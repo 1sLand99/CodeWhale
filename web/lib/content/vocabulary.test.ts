@@ -24,6 +24,7 @@ function repoText(path: string): string {
 
 const matrix = JSON.parse(repoText("docs/public-surface-facts.json")) as {
   product: { terminology: Record<string, string> };
+  install: { recommended: string };
   control: { modes: string[]; permissionPostures: string[] };
 };
 
@@ -90,11 +91,11 @@ describe("shared product vocabulary", () => {
 });
 
 describe("shared getting-started path", () => {
-  it("keeps the four-step order: install → offline session → provider → fleet", () => {
+  it("connects a provider before the first task, with Fleet optional afterward", () => {
     expect(GETTING_STARTED_STEPS.map((s) => s.id)).toEqual([
       "install",
-      "first-session",
       "connect-provider",
+      "first-session",
       "fleet-workflow",
     ]);
   });
@@ -123,11 +124,7 @@ describe("shared getting-started path", () => {
     expect(GUIDE_NEXT_LINKS.some((l) => l.href === "/docs/hooks")).toBe(true);
   });
 
-  it("describes the first session truthfully: keyless launch, provider for replies", () => {
-    const first = GETTING_STARTED_STEPS.find((s) => s.id === "first-session")!;
-    expect(first.body.en).toContain("without any API key");
-    expect(first.body.en).toContain("Plan mode");
-    expect(first.body.en).toMatch(/Model replies need a provider/);
+  it("keeps offline setup documented without requiring it before a first task", () => {
     // The keyless-launch claim must stay backed by documented runtime
     // behavior. Assert the meaning docs/GUIDE.md owes this step -- a first
     // launch that asks only for the decisions still needed, and a provider
@@ -148,7 +145,8 @@ describe("shared getting-started path", () => {
     // leading with the Fleet noun; see its naming/compatibility section.
     const fleetDoc = repoText("docs/FLEET.md");
     const install = GETTING_STARTED_STEPS.find((s) => s.id === "install")!;
-    expect(install.commands).toContain("npm install -g codewhale");
+    expect(install.commands[0]).toBe(matrix.install.recommended);
+    expect(repoText("docs/INSTALL.md")).toContain(install.commands[0]);
     expect(guide).toContain("codewhale doctor");
     const provider = GETTING_STARTED_STEPS.find((s) => s.id === "connect-provider")!;
     expect(provider.commands).toContain("codewhale auth set --provider deepseek");

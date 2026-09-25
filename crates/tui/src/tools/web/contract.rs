@@ -30,6 +30,7 @@ pub(crate) enum BackendId {
     Baidu,
     Volcengine,
     Sofya,
+    Serply,
 }
 
 impl BackendId {
@@ -47,6 +48,7 @@ impl BackendId {
             Self::Baidu => "baidu",
             Self::Volcengine => "volcengine",
             Self::Sofya => "sofya",
+            Self::Serply => "serply",
         }
     }
 }
@@ -63,7 +65,6 @@ pub(crate) enum Recency {
 
 impl Recency {
     #[must_use]
-    #[cfg(test)]
     pub(crate) const fn days(self) -> u16 {
         match self {
             Self::Day => 1,

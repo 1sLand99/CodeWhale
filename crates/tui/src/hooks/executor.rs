@@ -76,7 +76,6 @@ impl HookContext {
         Self::default()
     }
 
-    #[allow(dead_code)] // Public builder API, used in tests
     pub fn with_tool_name(mut self, name: &str) -> Self {
         self.tool_name = Some(name.to_string());
         self
@@ -87,7 +86,6 @@ impl HookContext {
         self
     }
 
-    #[allow(dead_code)] // Public builder API
     pub fn with_tool_args(mut self, args: &serde_json::Value) -> Self {
         self.tool_args = Some(truncate_env_value(
             &args.to_string(),
@@ -96,7 +94,6 @@ impl HookContext {
         self
     }
 
-    #[allow(dead_code)] // Public builder API
     pub fn with_tool_result(mut self, result: &str, success: bool, exit_code: Option<i64>) -> Self {
         self.tool_result = Some(truncate_env_value(
             result,
@@ -107,7 +104,6 @@ impl HookContext {
         self
     }
 
-    #[allow(dead_code)] // Public builder API, used in tests
     pub fn with_mode(mut self, mode: &str) -> Self {
         self.mode = Some(mode.to_string());
         self
@@ -118,7 +114,6 @@ impl HookContext {
         self
     }
 
-    #[allow(dead_code)] // Public builder API, used in tests
     pub fn with_workspace(mut self, path: PathBuf) -> Self {
         self.workspace = Some(path);
         self
@@ -134,13 +129,11 @@ impl HookContext {
         self
     }
 
-    #[allow(dead_code)] // Public builder API
     pub fn with_message(mut self, message: &str) -> Self {
         self.message = Some(message.to_string());
         self
     }
 
-    #[allow(dead_code)] // Public builder API
     pub fn with_error(mut self, error: &str) -> Self {
         self.error_message = Some(truncate_env_value(error, HOOK_ERROR_CONTEXT_MAX_BYTES));
         self
@@ -148,12 +141,6 @@ impl HookContext {
 
     pub fn with_tokens(mut self, tokens: u32) -> Self {
         self.total_tokens = Some(tokens);
-        self
-    }
-
-    #[allow(dead_code)] // Public builder API
-    pub fn with_cost(mut self, cost: f64) -> Self {
-        self.session_cost = Some(cost);
         self
     }
 
@@ -281,7 +268,6 @@ fn truncate_env_value(value: &str, max_bytes: usize) -> String {
 
 /// Result of a hook execution
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // Fields are part of public API for hook consumers
 pub struct HookResult {
     /// Hook name (if specified)
     pub name: Option<String>,
@@ -310,6 +296,7 @@ pub struct HookResult {
     /// Standard output
     pub stdout: String,
     /// Standard error
+    #[allow(dead_code)] // written by prod constructors, read only in tests
     pub stderr: String,
     /// Time taken to execute
     pub duration: Duration,
@@ -905,7 +892,7 @@ pub struct TurnEndPayloadInput<'a> {
     pub status: &'a str,
     pub error: Option<&'a str>,
     pub duration: Duration,
-    pub usage: &'a crate::models::Usage,
+    pub usage: &'a codewhale_models::Usage,
     pub totals: TurnEndTotals,
     pub tool_count: usize,
     pub queued_message_count: usize,
@@ -950,6 +937,7 @@ impl HookProcessTree {
     fn terminate(&self, child: &mut Child) {
         #[cfg(unix)]
         {
+            // SAFETY: kill(2) dereferences no pointers.
             let result = unsafe { libc::kill(-self.pgid, libc::SIGKILL) };
             if result != 0 {
                 let error = std::io::Error::last_os_error();
@@ -985,6 +973,7 @@ impl HookProcessTree {
 impl Drop for HookProcessTree {
     fn drop(&mut self) {
         #[cfg(unix)]
+        // SAFETY: kill(2) dereferences no pointers.
         unsafe {
             // The shell may have exited while one of its descendants still
             // holds a captured pipe. Reaping the process group keeps hook
@@ -1004,11 +993,13 @@ struct WindowsHookJob {
 #[cfg(windows)]
 impl WindowsHookJob {
     fn attach(child: &Child) -> std::io::Result<Self> {
+        // SAFETY: returned handle is owned by the new wrapper.
         let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()).map_err(windows_io_error)? };
         let job = Self { handle };
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
+        // SAFETY: `limits` is live with matching size; both handles are live.
         unsafe {
             SetInformationJobObject(
                 job.handle,
@@ -1024,6 +1015,7 @@ impl WindowsHookJob {
     }
 
     fn terminate(&self) -> std::io::Result<()> {
+        // SAFETY: `self.handle` is a live owned job handle.
         unsafe { TerminateJobObject(self.handle, 1).map_err(windows_io_error) }
     }
 }
@@ -1031,6 +1023,7 @@ impl WindowsHookJob {
 #[cfg(windows)]
 impl Drop for WindowsHookJob {
     fn drop(&mut self) {
+        // SAFETY: `self.handle` is owned here; Drop runs once.
         unsafe {
             let _ = CloseHandle(self.handle);
         }
@@ -1045,21 +1038,26 @@ fn windows_io_error(error: windows::core::Error) -> std::io::Error {
 #[cfg(windows)]
 fn resume_windows_process(child: &Child) -> std::io::Result<()> {
     let snapshot =
+        // SAFETY: returned handle is owned here; closed before return.
         unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).map_err(windows_io_error)? };
     let result = (|| {
         let mut entry = THREADENTRY32 {
             dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
             ..Default::default()
         };
+        // SAFETY: `entry` is live with dwSize initialized above.
         let mut next = unsafe { Thread32First(snapshot, &mut entry) };
         let mut resumed = 0usize;
         while next.is_ok() {
             if entry.th32OwnerProcessID == child.id() {
+                // SAFETY: returned handle is owned here; closed below.
                 let thread = unsafe {
                     OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
                         .map_err(windows_io_error)?
                 };
+                // SAFETY: `thread` is a live owned handle.
                 let resume_result = unsafe { ResumeThread(thread) };
+                // SAFETY: `thread` is owned here and not used after.
                 let close_result = unsafe { CloseHandle(thread).map_err(windows_io_error) };
                 if resume_result == u32::MAX {
                     return Err(std::io::Error::last_os_error());
@@ -1067,6 +1065,7 @@ fn resume_windows_process(child: &Child) -> std::io::Result<()> {
                 close_result?;
                 resumed += 1;
             }
+            // SAFETY: `entry` is live with dwSize initialized above.
             next = unsafe { Thread32Next(snapshot, &mut entry) };
         }
         if resumed == 0 {
@@ -1076,6 +1075,7 @@ fn resume_windows_process(child: &Child) -> std::io::Result<()> {
         }
         Ok(())
     })();
+    // SAFETY: `snapshot` is owned here and not used after.
     let close_result = unsafe { CloseHandle(snapshot).map_err(windows_io_error) };
     result?;
     close_result
@@ -1396,6 +1396,7 @@ struct BackgroundHookJob {
     label: String,
     timeout: Duration,
     plugin_authority: Option<crate::plugins::types::PluginAuthority>,
+    project_authority: Option<super::authority::ProjectHookAuthority>,
 }
 
 impl BackgroundHookJob {
@@ -1408,18 +1409,17 @@ impl BackgroundHookJob {
             label,
             timeout,
             plugin_authority,
+            project_authority,
         } = self;
-        if let Some(authority) = plugin_authority.as_ref()
-            && let Err(error) = crate::plugins::registry::verify_plugin_component_authority(
-                authority,
-                crate::plugins::activation::PluginActivationCapability::Hooks,
-            )
-        {
+        if let Err(error) = super::authority::verify_hook_authorities(
+            plugin_authority.as_ref(),
+            project_authority.as_ref(),
+        ) {
             tracing::warn!(
                 target: "hooks",
                 hook = %label,
                 error = %error,
-                "denied queued plugin hook after authority changed"
+                "denied queued hook after authority changed"
             );
             return;
         }
@@ -1594,7 +1594,7 @@ impl HookExecutor {
     }
 
     /// Create a disabled `HookExecutor` (no hooks will run)
-    #[allow(dead_code)] // Used in tests and as convenience constructor
+    #[cfg(test)]
     pub fn disabled() -> Self {
         Self {
             config: HooksConfig {
@@ -1611,7 +1611,7 @@ impl HookExecutor {
     }
 
     /// Check if hooks are enabled
-    #[allow(dead_code)] // Public API for hook system consumers
+    #[cfg(test)]
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
     }
@@ -2055,15 +2055,60 @@ impl HookExecutor {
     }
 
     /// Check whether a tool name matches a condition pattern with `*` glob support.
+    ///
+    /// DOCS-04: MCP-scoped patterns match on the owning MCP server, not on the
+    /// `mcp_` name prefix. The model calls a server tool by
+    /// [`crate::mcp::McpPool::mcp_model_tool_name`] (`mcp_<server>_<tool>`),
+    /// while the documented spelling is `mcp__<server>__<tool>`; both are
+    /// accepted. Any glob starting with `mcp_`, and any `mcp__` pattern, only
+    /// ever selects tools a server owns, so the built-in MCP helpers such as
+    /// `mcp_read_resource` are reachable by exact name only.
+    ///
+    /// Known limit: ownership is read from the model name, not the live pool,
+    /// so `mcp__<server>__…` splits at the first `__` (a server whose name
+    /// contains `__` needs the `mcp_<server>_…` spelling), and a server tool
+    /// whose model name collides with a helper name is treated as the helper.
     fn tool_name_matches_condition(tool_name: &str, pattern: &str) -> bool {
+        if tool_name == pattern {
+            return true;
+        }
+        // The shell tool is spelled `bash` / `Bash` on the model surface, and
+        // `exec_shell` is still stamped for the `shell_env` event and lives
+        // on in older hook configs. Treat the three as one tool, matching
+        // `tool_category_for`, so a condition written with any spelling fires.
+        if is_shell_tool_name(tool_name) && is_shell_tool_name(pattern) {
+            return true;
+        }
+        if let Some(rest) = pattern.strip_prefix("mcp_") {
+            let documented = rest.strip_prefix('_');
+            if documented.is_some() || pattern.contains('*') {
+                if !is_mcp_server_tool(tool_name) {
+                    return false;
+                }
+                let model_pattern = match documented {
+                    Some(rest) => match rest.split_once("__") {
+                        Some((server, tool)) => {
+                            crate::mcp::McpPool::mcp_model_tool_name(server, tool)
+                        }
+                        None => format!("mcp_{rest}"),
+                    },
+                    None => pattern.to_string(),
+                };
+                return Self::glob_matches(tool_name, &model_pattern);
+            }
+        }
+        Self::glob_matches(tool_name, pattern)
+    }
+
+    fn glob_matches(tool_name: &str, pattern: &str) -> bool {
         if !pattern.contains('*') {
             return tool_name == pattern;
         }
-        // Escape regex metacharacters except `*`, which becomes `.*`.
-        let escaped = regex::escape(pattern);
-        let regex_pattern = escaped.replace(r"\*", ".*");
-        let anchored = format!("^{regex_pattern}$");
-        regex::Regex::new(&anchored).is_ok_and(|re| re.is_match(tool_name))
+        // #6208: the pattern is fixed by configuration while this runs once per
+        // hook per tool-call/stop event, so compile it once and reuse it rather
+        // than building a fresh `Regex` on every event.
+        codewhale_execpolicy::matcher::compiled_glob(pattern)
+            .is_some_and(|re| re.is_match(tool_name))
     }
 
     /// Check if a hook's condition matches the context
@@ -2073,7 +2118,8 @@ impl HookExecutor {
             None | Some(HookCondition::Always) => true,
             Some(HookCondition::ToolName { name }) => {
                 // #3026: Support `*` globs in tool_name conditions so
-                // `mcp__*` matches all MCP tools.  Exact names keep working.
+                // `mcp__*` matches every tool an MCP server owns (DOCS-04:
+                // not the built-in `mcp_*` helpers). Exact names keep working.
                 context
                     .tool_name
                     .as_ref()
@@ -2137,12 +2183,10 @@ impl HookExecutor {
         stdin_json: Option<&serde_json::Value>,
     ) -> HookResult {
         let started = Instant::now();
-        if let Some(authority) = hook.plugin_authority.as_ref()
-            && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
-                authority,
-                crate::plugins::activation::PluginActivationCapability::Hooks,
-            )
-        {
+        if let Err(reason) = super::authority::verify_hook_authorities(
+            hook.plugin_authority.as_ref(),
+            hook.project_authority.as_ref(),
+        ) {
             return HookResult {
                 name: hook.name.clone(),
                 background: false,
@@ -2152,7 +2196,7 @@ impl HookExecutor {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: started.elapsed(),
-                error: Some(format!("Plugin hook authority was denied: {reason}")),
+                error: Some(format!("Hook authority was denied: {reason}")),
             };
         }
         let working_dir = self
@@ -2394,12 +2438,10 @@ impl HookExecutor {
         stdin_json: Option<&serde_json::Value>,
     ) -> HookResult {
         let started = Instant::now();
-        if let Some(authority) = hook.plugin_authority.as_ref()
-            && let Err(reason) = crate::plugins::registry::verify_plugin_component_authority(
-                authority,
-                crate::plugins::activation::PluginActivationCapability::Hooks,
-            )
-        {
+        if let Err(reason) = super::authority::verify_hook_authorities(
+            hook.plugin_authority.as_ref(),
+            hook.project_authority.as_ref(),
+        ) {
             return HookResult {
                 name: hook.name.clone(),
                 background: true,
@@ -2409,7 +2451,7 @@ impl HookExecutor {
                 stdout: String::new(),
                 stderr: String::new(),
                 duration: started.elapsed(),
-                error: Some(format!("Plugin hook authority was denied: {reason}")),
+                error: Some(format!("Hook authority was denied: {reason}")),
             };
         }
         let working_dir = self
@@ -2442,6 +2484,7 @@ impl HookExecutor {
             label: sanitize_hook_label(hook.name.as_deref()),
             timeout: Duration::from_secs(self.effective_timeout_secs(hook)),
             plugin_authority: hook.plugin_authority.clone(),
+            project_authority: hook.project_authority.clone(),
         });
 
         // The result describes the bounded submission, not the run: no caller
@@ -2476,6 +2519,26 @@ impl HookExecutor {
     }
 }
 
+/// Whether `name` is a tool some MCP server owns, as opposed to one of the
+/// built-in MCP helpers the TUI itself registers (`McpPool::is_mcp_tool`
+/// counts both). Server tools are named by `McpPool::mcp_model_tool_name`.
+fn is_mcp_server_tool(name: &str) -> bool {
+    name.starts_with("mcp_")
+        && !matches!(
+            name,
+            "mcp_read_resource"
+                | "mcp_get_prompt"
+                | "list_mcp_resources"
+                | "list_mcp_resource_templates"
+                | "read_mcp_resource"
+        )
+}
+
+/// The spellings of the one shell tool (see `tool_category_for`).
+fn is_shell_tool_name(name: &str) -> bool {
+    matches!(name, "bash" | "Bash" | "exec_shell")
+}
+
 /// Classify a tool call for `condition = { type = "tool_category", … }`.
 ///
 /// Categories are `shell`, `file_write`, `safe`, and `other`, as documented in
@@ -2504,7 +2567,7 @@ fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
     match tool_name {
         // The shell surface. `exec_shell` is retired but kept here because
         // `shell.rs` still stamps it for the `shell_env` hook event.
-        "bash" | "Bash" | "exec_shell" => "shell",
+        name if is_shell_tool_name(name) => "shell",
         // The lowercase primitives ship without an action envelope.
         "read" | "todo_write" => "safe",
         "write" | "edit" => "file_write",
@@ -2517,7 +2580,7 @@ fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
         "Git" | "git" => match action.as_deref() {
             // Every shipped Git action is read-only today; classify by action
             // anyway so adding a mutating one cannot silently inherit `safe`.
-            Some("status" | "diff" | "log" | "show" | "blame") => "safe",
+            Some("status" | "diff" | "log" | "show" | "blame" | "commit_plan") => "safe",
             _ => "other",
         },
         // `Run` executes test/verifier commands — closer to shell than safe.
@@ -3329,7 +3392,7 @@ NOEQUAL line dropped
             .with_mode("agent")
             .with_model("deepseek-v4")
             .with_tokens(125);
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 40,
             output_tokens: 9,
             prompt_cache_hit_tokens: Some(10),
@@ -3782,7 +3845,7 @@ printf '%s\n' '{{"text":"stdout is not a mutation contract"}}'
             },
             dir.path().to_path_buf(),
         );
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 12,
             output_tokens: 3,
             prompt_cache_hit_tokens: None,
@@ -4302,16 +4365,36 @@ exit 7
 
     // ── #3026: glob matchers for tool_name conditions ──────────────────────
 
+    /// DOCS-04: the documented `mcp__*` glob must match the name the model
+    /// actually calls (built by `McpPool::mcp_model_tool_name`, which is
+    /// `mcp_<server>_<tool>`), and must not catch the built-in MCP helpers.
     #[test]
-    fn tool_name_glob_matches_mcp_prefix() {
-        assert!(HookExecutor::tool_name_matches_condition(
-            "mcp__github__create_issue",
-            "mcp__*"
-        ));
-        assert!(!HookExecutor::tool_name_matches_condition(
-            "read_file",
-            "mcp__*"
-        ));
+    fn mcp_glob_matches_real_model_tool_names_by_owning_server() {
+        let served = crate::mcp::McpPool::mcp_model_tool_name("github", "create_issue");
+        let other = crate::mcp::McpPool::mcp_model_tool_name("wiki", "lookup");
+        let matches = HookExecutor::tool_name_matches_condition;
+
+        assert!(matches(&served, "mcp__*"), "{served} must match mcp__*");
+        assert!(matches(&served, "mcp_*"), "{served} must match mcp_*");
+        assert!(matches(&served, "mcp__github__*"));
+        assert!(!matches(&other, "mcp__github__*"));
+        assert!(matches(&served, "mcp__github__create_issue"));
+        assert!(matches(&served, "mcp__*__create_issue"));
+        assert!(!matches(&other, "mcp__*__create_issue"));
+
+        for helper in [
+            "mcp_read_resource",
+            "mcp_get_prompt",
+            "list_mcp_resources",
+            "list_mcp_resource_templates",
+            "read_mcp_resource",
+        ] {
+            assert!(!matches(helper, "mcp__*"), "{helper} is built in");
+            assert!(!matches(helper, "mcp_*"), "{helper} is built in");
+            // Exact names still select a helper deliberately.
+            assert!(matches(helper, helper));
+        }
+        assert!(!matches("read_file", "mcp__*"));
     }
 
     #[test]
@@ -4324,6 +4407,29 @@ exit 7
             "read_files",
             "read_file"
         ));
+    }
+
+    #[test]
+    fn tool_name_shell_spellings_match_each_other_in_both_directions() {
+        let spellings = ["bash", "Bash", "exec_shell"];
+        for tool in spellings {
+            for pattern in spellings {
+                assert!(
+                    HookExecutor::tool_name_matches_condition(tool, pattern),
+                    "tool {tool} should match condition {pattern}"
+                );
+            }
+        }
+        // The alias is exact: it does not widen to other shell-ish tools.
+        assert!(!HookExecutor::tool_name_matches_condition(
+            "task_shell_start",
+            "bash"
+        ));
+        assert!(!HookExecutor::tool_name_matches_condition(
+            "bash",
+            "read_file"
+        ));
+        assert!(!HookExecutor::tool_name_matches_condition("BASH", "bash"));
     }
 
     #[test]
@@ -4346,10 +4452,6 @@ exit 7
 
     #[test]
     fn tool_name_glob_supports_infix_and_suffix_positions() {
-        assert!(HookExecutor::tool_name_matches_condition(
-            "mcp__github__create_issue",
-            "mcp__*__create_issue"
-        ));
         assert!(HookExecutor::tool_name_matches_condition(
             "task_shell_start",
             "*_shell_start"
@@ -4401,6 +4503,8 @@ command = "echo project"
             ..HooksConfig::default()
         };
 
+        let (authority, _) = super::super::authority::review_project_hooks(dir.path()).unwrap();
+        super::super::authority::approve_project_hooks(dir.path(), &authority.digest).unwrap();
         let merged = HooksConfig::load_with_project(global, dir.path());
         assert_eq!(merged.hooks.len(), 2);
         assert_eq!(
@@ -4495,6 +4599,97 @@ command = "echo project"
         let merged = HooksConfig::load_with_project(global, dir.path());
         assert_eq!(merged.hooks.len(), 1, "malformed project file is ignored");
         assert_eq!(merged.hooks[0].command, "echo global");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_hooks_require_exact_review_at_load_and_every_spawn() {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _config = trust_workspace_for_project_hooks(dir.path(), &dir.path().join("user.toml"));
+        let _legacy = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        std::fs::create_dir(dir.path().join(".codewhale")).unwrap();
+        let hook_path = dir.path().join(".codewhale/hooks.toml");
+        let contents = "[[hooks]]\nevent = \"session_start\"\ncommand = \"touch hook-ran\"\n";
+        std::fs::write(&hook_path, contents).unwrap();
+        let load = || {
+            HooksConfig::load_with_project(
+                HooksConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                dir.path(),
+            )
+        };
+        assert!(load().hooks.is_empty(), "folder trust is not hook approval");
+        let (authority, _) = super::super::authority::review_project_hooks(dir.path()).unwrap();
+        assert!(super::super::authority::approve_project_hooks(dir.path(), "bad-digest").is_err());
+        super::super::authority::approve_project_hooks(dir.path(), &authority.digest).unwrap();
+        let config = load();
+        let hook = config.hooks[0].clone();
+        let executor = HookExecutor::new(config, dir.path().to_path_buf());
+        let good = executor.execute_sync(&hook, &HashMap::new());
+        assert!(good.success, "{good:?}");
+        std::fs::remove_file(dir.path().join("hook-ran")).unwrap();
+        std::fs::write(&hook_path, format!("{contents}# changed\n")).unwrap();
+        assert!(load().hooks.is_empty());
+        assert!(!executor.execute_sync(&hook, &HashMap::new()).success);
+        assert!(
+            !executor
+                .execute_background_inner(&hook, &HashMap::new(), None)
+                .success
+        );
+        let queued = BackgroundHookJob {
+            command: hook.command.clone(),
+            env: HashMap::new(),
+            working_dir: dir.path().to_path_buf(),
+            stdin_bytes: None,
+            label: "project".into(),
+            timeout: Duration::from_secs(2),
+            plugin_authority: None,
+            project_authority: hook.project_authority.clone(),
+        };
+        queued.run();
+        assert!(
+            !dir.path().join("hook-ran").exists(),
+            "queued work must revalidate"
+        );
+        std::fs::write(&hook_path, contents).unwrap();
+        crate::config::save_workspace_hook_receipt(dir.path(), "").unwrap();
+        assert!(!executor.execute_sync(&hook, &HashMap::new()).success);
+        assert!(!dir.path().join("hook-ran").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_hook_approval_rejects_symlinks_and_repository_receipts() {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _config = trust_workspace_for_project_hooks(dir.path(), &dir.path().join("user.toml"));
+        let _legacy = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        std::fs::create_dir(dir.path().join(".codewhale")).unwrap();
+        let target = dir.path().join("hook-source.toml");
+        std::fs::write(
+            &target,
+            "[[hooks]]\nevent = \"session_start\"\ncommand = \"true\"\n",
+        )
+        .unwrap();
+        let hook_path = dir.path().join(".codewhale/hooks.toml");
+        std::os::unix::fs::symlink(&target, &hook_path).unwrap();
+        assert!(super::super::authority::review_project_hooks(dir.path()).is_err());
+        std::fs::remove_file(&hook_path).unwrap();
+        std::fs::copy(&target, &hook_path).unwrap();
+        let (authority, _) = super::super::authority::review_project_hooks(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join(".codewhale/config.toml"),
+            format!("hooks_sha256 = \"{}\"", authority.digest),
+        )
+        .unwrap();
+        assert!(
+            HooksConfig::load_with_project(HooksConfig::default(), dir.path())
+                .hooks
+                .is_empty()
+        );
     }
 
     // === v0.9.2 hooks contract regression tests ===============================
@@ -4638,14 +4833,7 @@ command = "echo project"
         // Background hooks cannot steer.
         assert_eq!(outcome, MessageSubmitOutcome::unchanged());
 
-        // Give the submitted child time to land.
-        for _ in 0..50 {
-            if out.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let raw = std::fs::read_to_string(&out).expect("background hook wrote no stdin payload");
+        let raw = wait_for_captured_output(&out);
         let payload: serde_json::Value = serde_json::from_str(raw.trim()).expect("valid JSON");
         assert_eq!(payload["event"], "message_submit");
         assert_eq!(payload["text"], "hello world");
@@ -4686,14 +4874,34 @@ command = "echo project"
         assert_eq!(results.len(), 1);
         assert!(results[0].background);
 
-        for _ in 0..50 {
-            if out.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let captured = std::fs::read_to_string(&out).expect("background hook wrote no env");
+        let captured = wait_for_captured_output(&out);
         assert_eq!(captured.trim(), "sess_test|agent|exec_shell");
+    }
+
+    /// Wait for a background hook's capture file to hold real bytes.
+    ///
+    /// The capture scripts redirect with `> out`, so the shell creates the
+    /// file — empty — before `cat`/`printf` writes the payload. Polling for
+    /// existence alone can win that race under load and read an empty capture,
+    /// which surfaced in CI as `valid JSON: EOF while parsing a value` (#5929).
+    /// Both captures are single small writes, so waiting for non-empty bytes
+    /// means the write has landed without weakening what the tests assert.
+    #[cfg(unix)]
+    fn wait_for_captured_output(path: &std::path::Path) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(path)
+                && !raw.trim().is_empty()
+            {
+                return raw;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background hook wrote no output to {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]
@@ -5231,7 +5439,7 @@ command = "echo project"
     #[test]
     fn turn_end_error_is_sanitized_and_bounded() {
         let context = HookContext::new();
-        let usage = crate::models::Usage::default();
+        let usage = codewhale_models::Usage::default();
         let error = format!(
             "boom\u{1b}[2J{}",
             "x".repeat(super::HOOK_TURN_ERROR_MAX_CHARS * 2)
@@ -5509,8 +5717,10 @@ command = "echo project"
     #[cfg(unix)]
     #[test]
     fn helper_wait_and_uncontained_reap_paths_are_bounded() {
-        let mut helper = Command::new("sh")
-            .args(["-c", "sleep 30"])
+        // These helpers reap one immediate child. A shell can fork `sleep`
+        // and leave that descendant holding the test's output pipes.
+        let mut helper = Command::new("sleep")
+            .arg("30")
             .spawn()
             .expect("spawn helper");
         let started = Instant::now();
@@ -5520,8 +5730,8 @@ command = "echo project"
         assert!(started.elapsed() < super::HOOK_REAP_TIMEOUT + Duration::from_secs(1));
         assert!(matches!(helper.try_wait(), Ok(Some(_))));
 
-        let mut uncontained = Command::new("sh")
-            .args(["-c", "sleep 30"])
+        let mut uncontained = Command::new("sleep")
+            .arg("30")
             .spawn()
             .expect("spawn uncontained child");
         assert!(super::kill_and_reap_immediate_child(
@@ -5770,7 +5980,17 @@ command = "echo project"
             ("bash", "shell"),
             // The router itself touches nothing a hook needs to gate.
             ("agent", "other"),
+            ("workflow", "other"),
             ("todo_write", "safe"),
+            // Goal controls retain their existing hook classification when
+            // promoted from deferred discovery to the eager catalog.
+            ("create_goal", "other"),
+            ("get_goal", "other"),
+            ("update_goal", "other"),
+            // Reads the skill registry, not caller-named paths, so it keeps
+            // the classification it already had as a deferred tool. Making it
+            // eager must not silently re-gate it.
+            ("load_skill", "other"),
         ];
         for name in crate::core::engine::tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS {
             let expected = EXPECTED.iter().find(|(n, _)| n == name).map(|(_, c)| *c);
@@ -5819,6 +6039,10 @@ command = "echo project"
         assert_eq!(tool_category_for("apply_patch", None), "file_write");
         assert_eq!(
             tool_category_for("Git", Some(r#"{"action":"log"}"#)),
+            "safe"
+        );
+        assert_eq!(
+            tool_category_for("Git", Some(r#"{"action":"commit_plan"}"#)),
             "safe"
         );
         assert_eq!(tool_category_for("web.run", None), "other");

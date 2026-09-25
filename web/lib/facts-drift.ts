@@ -16,6 +16,7 @@ import type {
   PublishedReleaseFact,
   RepoFacts,
   ProviderFact,
+  ModelFact,
 } from "./facts.generated";
 import { FACTS as BUILD_FACTS } from "./facts.generated";
 
@@ -128,7 +129,7 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
     Deepinfra: { id: "deepinfra", label: "DeepInfra", env: "DEEPINFRA_API_KEY / DEEPINFRA_TOKEN" },
     Together: { id: "together", label: "Together AI", env: "TOGETHER_API_KEY" },
     Qianfan: { id: "qianfan", label: "Baidu Qianfan", env: "QIANFAN_API_KEY / BAIDU_QIANFAN_API_KEY" },
-    OpenaiCodex: { id: "openai-codex", label: "OpenAI Codex", env: "ChatGPT/Codex OAuth via `codex login` (OPENAI_CODEX_ACCESS_TOKEN / CODEX_ACCESS_TOKEN override)" },
+    OpenaiCodex: { id: "openai-codex", label: "OpenAI Codex", env: "ChatGPT OAuth via `codewhale auth chatgpt`; optional consented Codex CLI credentials (OPENAI_CODEX_ACCESS_TOKEN / CODEX_ACCESS_TOKEN override)" },
     OpencodeGo: { id: "opencode-go", label: "OpenCode Go", env: "OPENCODE_GO_API_KEY" },
     OpencodeZen: { id: "opencode-zen", label: "OpenCode Zen", env: "OPENCODE_ZEN_API_KEY / OPENCODE_API_KEY" },
     Anthropic: { id: "anthropic", label: "Anthropic", env: "ANTHROPIC_API_KEY" },
@@ -146,16 +147,19 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
     Google: { id: "google", label: "Google Gemini", env: "GOOGLE_API_KEY / GEMINI_API_KEY" },
     Edenai: { id: "edenai", label: "Eden AI", env: "EDENAI_API_KEY" },
     Concentrate: { id: "concentrate", label: "Concentrate", env: "CONCENTRATE_API_KEY" },
+    Codewhale: { id: "codewhale", label: "Codewhale", env: "CODEWHALE_API_KEY" },
     ModelstudioTokenPlan: { id: "modelstudio-token-plan", label: "Model Studio Token Plan", env: "MODELSTUDIO_API_KEY" },
     ModelstudioTokenPlanAnthropic: { id: "modelstudio-token-plan-anthropic", label: "Model Studio Token Plan (Anthropic-compatible)", env: "MODELSTUDIO_API_KEY" },
     ModelstudioCodingPlan: { id: "modelstudio-coding-plan", label: "Model Studio Coding Plan", env: "MODELSTUDIO_API_KEY" },
     ModelstudioCodingPlanAnthropic: { id: "modelstudio-coding-plan-anthropic", label: "Model Studio Coding Plan (Anthropic-compatible)", env: "MODELSTUDIO_API_KEY" },
+    Zenmux: { id: "zenmux", label: "ZenMux", env: "ZENMUX_API_KEY" },
+    Csdn: { id: "csdn", label: "CSDN 星图 (Starmap)", env: "CSDN_API_KEY" },
   };
   // Log loudly on unmapped variants so a new provider can never be silently
   // dropped from the drift-derived facts again. DeepseekCN (#1104), the
   // dynamic Custom meta-provider (#1519, user-defined endpoints), and
-  // Antigravity (off the website 44 until the cloud-code wire is a
-  // first-class advertised outbound route) are the deliberate exclusions.
+  // Antigravity (a non-runnable legacy config tombstone, never a website
+  // provider) are the deliberate exclusions.
   const EXCLUDED = new Set(["DeepseekCN", "Custom", "Antigravity"]);
   const unmapped = variants.filter((v) => !EXCLUDED.has(v) && !labelMap[v]);
   if (unmapped.length > 0) {
@@ -164,7 +168,10 @@ function deriveProvidersFromConfig(cfg: string): ProviderFact[] {
         "Add them to labelMap here AND PROVIDER_LABEL_MAP in web/scripts/facts-lib.mjs (or to EXCLUDED if intentionally hidden).",
     );
   }
-  return variants.map((v) => labelMap[v]).filter(Boolean);
+  return variants
+    .filter((v) => !EXCLUDED.has(v))
+    .map((v) => labelMap[v])
+    .filter(Boolean);
 }
 
 function deriveDefaultModel(cfg: string): string | null {
@@ -227,21 +234,54 @@ function deriveLicense(licText: string): string | null {
   return first.trim();
 }
 
-function deriveToolCountFromGeneratedFacts(source: string): number | null {
+function parseGeneratedFacts(source: string): Record<string, unknown> | null {
   const match = source.match(
     /export\s+const\s+FACTS(?:\s*:\s*RepoFacts)?\s*=\s*(\{[\s\S]*\})\s*;?\s*$/,
   );
   if (!match) return null;
 
   try {
-    const parsed = JSON.parse(match[1]) as { toolCount?: unknown };
-    const toolCount = parsed.toolCount;
-    return typeof toolCount === "number" && Number.isSafeInteger(toolCount) && toolCount >= 0
-      ? toolCount
+    const parsed = JSON.parse(match[1]) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
       : null;
   } catch {
     return null;
   }
+}
+
+function deriveToolCountFromGeneratedFacts(source: string): number | null {
+  const toolCount = parseGeneratedFacts(source)?.toolCount;
+  return typeof toolCount === "number" && Number.isSafeInteger(toolCount) && toolCount >= 0
+    ? toolCount
+    : null;
+}
+
+/**
+ * Model rows come through the checked-in generated file, same as toolCount:
+ * the remote path cannot run `git log` pickaxe passes for `addedAt`, and the
+ * checked-in snapshot is guarded by the exact revision's CI drift check.
+ */
+function deriveModelsFromGeneratedFacts(source: string): ModelFact[] | null {
+  const models = parseGeneratedFacts(source)?.models;
+  if (!Array.isArray(models)) return null;
+  const valid = models.every(
+    (m) =>
+      m &&
+      typeof m === "object" &&
+      !Array.isArray(m) &&
+      typeof (m as ModelFact).id === "string" &&
+      ((m as ModelFact).provider === null ||
+        typeof (m as ModelFact).provider === "string") &&
+      ((m as ModelFact).contextWindow === null ||
+        typeof (m as ModelFact).contextWindow === "number") &&
+      ((m as ModelFact).maxOutput === null ||
+        typeof (m as ModelFact).maxOutput === "number") &&
+      typeof (m as ModelFact).reasoning === "boolean" &&
+      ((m as ModelFact).addedAt === null ||
+        typeof (m as ModelFact).addedAt === "string"),
+  );
+  return valid ? (models as ModelFact[]) : null;
 }
 
 export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts | null> {
@@ -263,10 +303,13 @@ export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts
   const toolCount = generatedFacts
     ? deriveToolCountFromGeneratedFacts(generatedFacts)
     : null;
-  // Never attach current-main provenance to a build-time tool count. The
+  const models = generatedFacts
+    ? deriveModelsFromGeneratedFacts(generatedFacts)
+    : null;
+  // Never attach current-main provenance to build-time tool/model facts. The
   // checked-in generated snapshot is guarded by the exact revision's CI drift
   // check, so an absent or malformed value makes the whole derivation fail.
-  if (toolCount === null) return null;
+  if (toolCount === null || models === null) return null;
 
   const facts: RepoFacts = {
     generatedAt: new Date().toISOString(),
@@ -278,6 +321,7 @@ export async function deriveFactsFromRemote(ghToken?: string): Promise<RepoFacts
       ? deriveSandboxBackends(sandboxSource)
       : BUILD_FACTS.sandboxBackends,
     providers: deriveProvidersFromConfig(configRs),
+    models,
     defaultModel: deriveDefaultModel(`${configRs}\n${configModels ?? ""}`),
     nodeEngines: (() => {
       try { return npmPkg ? JSON.parse(npmPkg).engines?.node ?? null : null; } catch { return null; }
@@ -308,6 +352,7 @@ function diff(a: RepoFacts, b: RepoFacts): DriftDiff[] {
     "crates",
     "sandboxBackends",
     "providers",
+    "models",
     "defaultModel",
     "nodeEngines",
     "toolCount",

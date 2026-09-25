@@ -13,11 +13,10 @@
 //! host must supply — so it lands with the engine handle in Phase C/D, not
 //! here.
 //!
-//! No runtime surface calls these projections yet: the first consumer is the
-//! in-process engine handle that Phase D attaches the TUI and app-server to.
-//! Until then the guard is the compile of this module itself, so dead-code
-//! is allowed here on purpose rather than hidden behind a test cfg (which
-//! would let `cargo build` pass with an unmapped variant).
+//! The foreground pet observer consumes the event projection, retaining only
+//! lifecycle metadata. Other projections remain compile-time parity guards;
+//! dead-code is allowed here rather than hiding those guards behind a test cfg
+//! (which would let `cargo build` pass with an unmapped variant).
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -28,6 +27,7 @@ use codewhale_protocol::op as wire_op;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::agent_roster::{AgentRosterRow, RosterState};
 use crate::compaction::CompactionConfig;
 use crate::config::ApiProvider;
 use crate::core::engine::preview::PreviewUnresolved;
@@ -38,14 +38,13 @@ use crate::core::ops::Op;
 use crate::cost_status::RouteBillingMode;
 use crate::mcp::{McpManagerSnapshot, McpServerCapabilityMetadata};
 use crate::model_profile::SupportState;
-use crate::models::Usage;
 use crate::route_billing::RouteProduct;
 use crate::tools::spec::ToolError;
 use crate::tools::subagent::AgentWorkerStatus;
 use crate::tools::user_input::UserInputRequest;
-use crate::tui::agent_roster::{AgentRosterRow, RosterState};
-use crate::tui::app::AppMode;
-use crate::tui::approval::ApprovalMode;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::Usage;
 use codewhale_protocol::ResponseChannel;
 
 /// Routing ids the engine does not carry on each event; the emitter supplies
@@ -104,6 +103,7 @@ fn roster_state_str(state: RosterState) -> &'static str {
     match state {
         RosterState::Running => "running",
         RosterState::Waiting => "waiting",
+        RosterState::Parked => "parked",
         RosterState::Done => "done",
         RosterState::Failed => "failed",
         RosterState::Cancelled => "cancelled",
@@ -171,8 +171,17 @@ fn route_product_to_wire(product: RouteProduct) -> wire::RouteProduct {
 
 fn billing_to_wire(billing: &RouteBillingEnvelope) -> wire::RouteBillingEnvelope {
     wire::RouteBillingEnvelope {
+        openrouter_vendor: billing
+            .openrouter_vendor
+            .as_deref()
+            .map(crate::cost_status::sanitize_persisted_route_label),
         billing_surface: billing.billing_surface.clone(),
         endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+        provider_live_pricing: billing
+            .provider_live_pricing
+            .as_ref()
+            .map(to_value)
+            .filter(|v| !v.is_null()),
         billing_mode: billing_mode_str(billing.billing_mode).to_string(),
         dispatched_at: billing.dispatched_at,
     }
@@ -372,6 +381,36 @@ fn compaction_to_wire(config: &CompactionConfig) -> wire_op::CompactionPolicy {
     }
 }
 
+/// Project the engine's per-turn authority onto the wire `TurnSpec`. Host-only
+/// fields (`initial_routed_usage`, `hook_executor`) and resolved routes are
+/// stripped; only their non-secret receipts cross.
+fn turn_spec_to_wire(spec: &crate::core::ops::TurnSpec) -> wire_op::TurnSpec {
+    wire_op::TurnSpec {
+        max_output_tokens: spec.max_output_tokens,
+        content: spec.content.clone(),
+        images: spec.images.clone(),
+        mode: app_mode_str(spec.mode).to_string(),
+        model: Some(spec.route.model.clone()),
+        model_provider: Some(spec.route.identity.key.clone()),
+        allowed_tools: spec.allowed_tools.clone(),
+        dynamic_tools: spec.dynamic_tools.clone(),
+        provenance: spec.provenance.as_str().to_string(),
+        compaction: Some(Box::new(compaction_to_wire(&spec.compaction))),
+        goal_objective: spec.goal_objective.clone(),
+        goal_token_budget: spec.goal_token_budget,
+        goal_status: spec.goal_status.as_str().to_string(),
+        reasoning_effort: spec.reasoning_effort.clone(),
+        reasoning_effort_auto: spec.reasoning_effort_auto,
+        auto_model: spec.auto_model,
+        allow_shell: spec.allow_shell,
+        trust_mode: spec.trust_mode,
+        auto_approve: spec.auto_approve,
+        approval_mode: approval_mode_str(spec.approval_mode).to_string(),
+        translation_enabled: spec.translation_enabled,
+        verbosity: spec.verbosity.clone(),
+    }
+}
+
 fn preview_unresolved_str(unresolved: &PreviewUnresolved) -> String {
     match unresolved {
         PreviewUnresolved::AutoRouteNeedsPrompt => "auto_route_needs_prompt".to_string(),
@@ -406,6 +445,12 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             provider: provider.clone(),
             omitted_tool_names: omitted_tool_names.clone(),
             omitted_tool_count: count(*omitted_tool_count),
+        },
+        Event::SnapshotsDisabled { workspace, reason } => wire::EventMsg::SnapshotsDisabled {
+            thread_id,
+            session_id,
+            workspace: workspace.clone(),
+            reason: reason.clone(),
         },
         Event::MessageStarted { index } => wire::EventMsg::MessageStarted {
             thread_id,
@@ -492,6 +537,8 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
         },
         Event::TurnComplete {
             usage,
+            parent_route_usage,
+            routed_usage_dropped_records,
             status,
             error,
             tool_catalog,
@@ -503,17 +550,34 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             status: outcome_status_to_wire(*status),
             error: error.clone(),
             usage: usage_to_wire(usage),
+            parent_route_usage: Some(usage_to_wire(parent_route_usage)),
+            routed_usage_dropped_records: *routed_usage_dropped_records,
             tool_catalog: tool_catalog
                 .as_ref()
                 .map(|tools| tools.iter().map(to_value).collect()),
             base_url: base_url.clone(),
         },
         Event::TurnUsage {
+            max_output_tokens,
             usage,
             duration_ms,
             first_token_ms,
             request_ms,
         } => wire::EventMsg::TurnUsage {
+            max_output_tokens: *max_output_tokens,
+            thread_id,
+            session_id,
+            usage: usage_to_wire(usage),
+            duration_ms: *duration_ms,
+            first_token_ms: *first_token_ms,
+            request_ms: *request_ms,
+        },
+        Event::RoutedTurnUsage {
+            usage,
+            duration_ms,
+            first_token_ms,
+            request_ms,
+        } => wire::EventMsg::RoutedTurnUsage {
             thread_id,
             session_id,
             usage: usage_to_wire(usage),
@@ -609,6 +673,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id,
             id,
             prompt,
+            worker_status,
             parent_run_id,
             spawn_depth,
             model,
@@ -619,6 +684,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id: owner_session_id.clone(),
             id: id.clone(),
             prompt: prompt.clone(),
+            worker_status: worker_status.map(|status| worker_status_str(status).to_string()),
             parent_run_id: parent_run_id.clone(),
             spawn_depth: *spawn_depth,
             model: model.clone(),
@@ -649,12 +715,25 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id,
             id,
             result,
+            outcome,
+            parent_run_id,
+            spawn_depth,
+            continuable,
+            // Child usage stays off the wire: no protocol client consumes
+            // it, and metrics reads the persisted runtime payload (#6315).
+            usage: _,
         } => wire::EventMsg::AgentComplete {
             thread_id,
             session_id,
             owner_session_id: owner_session_id.clone(),
             id: id.clone(),
             result: result.clone(),
+            worker_status: outcome
+                .as_ref()
+                .map(|status| crate::tools::subagent::subagent_status_name(status).to_string()),
+            parent_run_id: parent_run_id.clone(),
+            spawn_depth: *spawn_depth,
+            continuable: *continuable,
         },
         Event::SubAgentFollowUp {
             owner_session_id,
@@ -896,50 +975,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
 #[must_use]
 pub fn op_to_protocol(op: &Op) -> wire_op::Op {
     match op {
-        Op::SendMessage {
-            content,
-            mode,
-            route,
-            compaction,
-            goal_objective,
-            goal_token_budget,
-            goal_status,
-            reasoning_effort,
-            reasoning_effort_auto,
-            auto_model,
-            allow_shell,
-            trust_mode,
-            auto_approve,
-            approval_mode,
-            translation_enabled,
-            allowed_tools,
-            dynamic_tools,
-            // Host configuration, never turn input.
-            hook_executor: _,
-            verbosity,
-            provenance,
-        } => wire_op::Op::SendMessage {
-            content: content.clone(),
-            mode: app_mode_str(*mode).to_string(),
-            model: Some(route.model.clone()),
-            model_provider: Some(route.identity.key.clone()),
-            allowed_tools: allowed_tools.clone(),
-            dynamic_tools: dynamic_tools.clone(),
-            provenance: provenance.as_str().to_string(),
-            compaction: Some(Box::new(compaction_to_wire(compaction))),
-            goal_objective: goal_objective.clone(),
-            goal_token_budget: *goal_token_budget,
-            goal_status: goal_status.as_str().to_string(),
-            reasoning_effort: reasoning_effort.clone(),
-            reasoning_effort_auto: *reasoning_effort_auto,
-            auto_model: *auto_model,
-            allow_shell: *allow_shell,
-            trust_mode: *trust_mode,
-            auto_approve: *auto_approve,
-            approval_mode: approval_mode_str(*approval_mode).to_string(),
-            translation_enabled: *translation_enabled,
-            verbosity: verbosity.clone(),
-        },
+        Op::SendMessage(spec) => wire_op::Op::SendMessage(turn_spec_to_wire(spec)),
         Op::ContinueGoal {
             dynamic_tools,
             engine_schedule_id,
@@ -962,14 +998,21 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             auto_approve: *auto_approve,
             approval_mode: approval_mode_str(*approval_mode).to_string(),
         },
-        Op::SetGoalStatus { status, clear } => wire_op::Op::SetGoalStatus {
+        Op::SetGoalStatus {
+            status,
+            clear,
+            goal_id,
+        } => wire_op::Op::SetGoalStatus {
+            goal_id: goal_id.clone(),
             status: status.as_str().to_string(),
             clear: *clear,
         },
         Op::SetGoalObjective {
             objective,
             token_budget,
+            goal_id,
         } => wire_op::Op::SetGoalObjective {
+            goal_id: goal_id.clone(),
             objective: objective.clone(),
             token_budget: *token_budget,
         },
@@ -1000,6 +1043,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             },
         },
         Op::ListSubAgents => wire_op::Op::ListSubAgents,
+        Op::GetSubAgentSettlement { tx: _ } => wire_op::Op::GetSubAgentSettlement,
         Op::CancelSubAgent { agent_id } => wire_op::Op::CancelSubAgent {
             agent_id: agent_id.clone(),
         },
@@ -1037,9 +1081,6 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
         },
         Op::SetCompaction { config } => wire_op::Op::SetCompaction {
             config: compaction_to_wire(config),
-        },
-        Op::SetPermissionRuleset { ruleset } => wire_op::Op::SetPermissionRuleset {
-            ruleset: to_value(ruleset),
         },
         Op::SetStreamChunkTimeout { timeout_secs } => wire_op::Op::SetStreamChunkTimeout {
             timeout_secs: *timeout_secs,
@@ -1101,6 +1142,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
         Op::CancelCompaction { id } => wire_op::Op::CancelCompaction { id: id.clone() },
         // Reply channels never cross the wire: the answer is a frame.
         Op::GetSessionSnapshot { tx: _ } => wire_op::Op::GetSessionSnapshot,
+        Op::GetContextBudget { tx: _ } => wire_op::Op::GetContextBudget,
         Op::GetProviderRuntimeStatus { tx: _ } => wire_op::Op::GetProviderRuntimeStatus,
         Op::BootstrapMcp { tx: _ } => wire_op::Op::BootstrapMcp,
         Op::RetryMcpServer { name, tx: _ } => wire_op::Op::RetryMcpServer { name: name.clone() },
@@ -1180,6 +1222,149 @@ mod tests {
         }
     }
 
+    #[test]
+    fn worker_lifecycle_wire_preserves_typed_outcomes_without_parsing_result_text() {
+        use crate::tools::subagent::SubAgentStatus;
+        let ids = ids();
+        for (outcome, expected) in [
+            (Some(SubAgentStatus::Completed), Some("completed")),
+            (
+                Some(SubAgentStatus::Failed("private failure".into())),
+                Some("failed"),
+            ),
+            (
+                Some(SubAgentStatus::Interrupted("private reason".into())),
+                Some("interrupted"),
+            ),
+            (Some(SubAgentStatus::Cancelled), Some("cancelled")),
+            (
+                Some(SubAgentStatus::BudgetExhausted),
+                Some("budget_exhausted"),
+            ),
+            (None, None),
+        ] {
+            let event = Event::AgentComplete {
+                owner_session_id: "owner".into(),
+                id: "worker".into(),
+                result: "Completed successfully".into(),
+                outcome,
+                parent_run_id: Some("parent".into()),
+                spawn_depth: Some(2),
+                continuable: Some(false),
+                usage: None,
+            };
+            let wire = serde_json::to_value(event_to_protocol(&event, &ids)).unwrap();
+            assert_eq!(wire["worker_status"].as_str(), expected);
+            assert_eq!(wire["parent_run_id"], "parent");
+            assert_eq!(wire["spawn_depth"], 2);
+            assert_eq!(wire["continuable"], false);
+            assert!(!wire.to_string().contains("private"));
+        }
+        for status in [
+            AgentWorkerStatus::Queued,
+            AgentWorkerStatus::Starting,
+            AgentWorkerStatus::Running,
+            AgentWorkerStatus::WaitingForUser,
+            AgentWorkerStatus::ModelWait,
+            AgentWorkerStatus::RunningTool,
+            AgentWorkerStatus::Completed,
+            AgentWorkerStatus::Failed,
+            AgentWorkerStatus::Cancelled,
+            AgentWorkerStatus::Interrupted,
+        ] {
+            // Runtime serializes the producer enum; stream-json uses this
+            // exhaustive adapter. Their discriminants must remain identical.
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                worker_status_str(status)
+            );
+        }
+    }
+
+    #[test]
+    fn wire_accounting_preserves_parent_total_and_distinct_routed_telemetry() {
+        let ids = ids();
+        let total = Usage {
+            input_tokens: 49,
+            output_tokens: 19,
+            ..Usage::default()
+        };
+        let parent = Usage {
+            input_tokens: 7,
+            output_tokens: 5,
+            ..Usage::default()
+        };
+        let complete = event_to_protocol(
+            &Event::TurnComplete {
+                usage: total.clone(),
+                parent_route_usage: parent.clone(),
+                routed_usage_dropped_records: 3,
+                status: TurnOutcomeStatus::Completed,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            },
+            &ids,
+        );
+        let json = serde_json::to_value(&complete).unwrap();
+        assert_eq!(json["usage"]["input_tokens"], 49);
+        assert_eq!(json["usage"]["output_tokens"], 19);
+        assert_eq!(json["parent_route_usage"]["input_tokens"], 7);
+        assert_eq!(json["parent_route_usage"]["output_tokens"], 5);
+        assert_eq!(json["routed_usage_dropped_records"], 3);
+        assert_eq!(
+            serde_json::from_value::<wire::EventMsg>(json.clone()).unwrap(),
+            complete
+        );
+
+        // A legacy terminal receipt has no parent subset, which differs from
+        // an explicitly reported zero parent on a compaction-only turn.
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("parent_route_usage");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("routed_usage_dropped_records");
+        assert!(matches!(
+            serde_json::from_value::<wire::EventMsg>(legacy).unwrap(),
+            wire::EventMsg::TurnComplete {
+                parent_route_usage: None,
+                routed_usage_dropped_records: 0,
+                ..
+            }
+        ));
+
+        for (event, tag) in [
+            (
+                Event::TurnUsage {
+                    max_output_tokens: None,
+                    usage: parent,
+                    duration_ms: 12,
+                    first_token_ms: Some(2),
+                    request_ms: Some(10),
+                },
+                "turn_usage",
+            ),
+            (
+                Event::RoutedTurnUsage {
+                    usage: total,
+                    duration_ms: 27,
+                    first_token_ms: None,
+                    request_ms: None,
+                },
+                "routed_turn_usage",
+            ),
+        ] {
+            let projected = event_to_protocol(&event, &ids);
+            let json = serde_json::to_value(&projected).unwrap();
+            assert_eq!(json["event"], tag);
+            assert_eq!(
+                serde_json::from_value::<wire::EventMsg>(json).unwrap(),
+                projected
+            );
+        }
+    }
+
     /// The guard is the exhaustive `match` in `event_to_protocol`: this test
     /// exists so the guard has a name in the test log and so the projection
     /// is proven to agree with the protocol's wire-tag table.
@@ -1224,12 +1409,21 @@ mod tests {
             },
             Event::TurnComplete {
                 usage: usage.clone(),
+                parent_route_usage: usage.clone(),
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Interrupted,
                 error: Some("stopped".into()),
                 tool_catalog: None,
                 base_url: Some("https://example.invalid".into()),
             },
+            Event::RoutedTurnUsage {
+                usage: usage.clone(),
+                duration_ms: 12,
+                first_token_ms: Some(3),
+                request_ms: None,
+            },
             Event::TurnUsage {
+                max_output_tokens: None,
                 usage,
                 duration_ms: 12,
                 first_token_ms: Some(3),
@@ -1303,19 +1497,27 @@ mod tests {
             serde_json::to_value(events[8].to_protocol(&ids)).unwrap()["status"],
             "interrupted"
         );
-        let error = serde_json::to_value(events[10].to_protocol(&ids)).unwrap();
+        let error = events
+            .iter()
+            .find(|event| matches!(event, Event::Error { .. }))
+            .unwrap();
+        let error = serde_json::to_value(error.to_protocol(&ids)).unwrap();
         assert_eq!(error["category"], "rate_limit");
         assert_eq!(error["severity"], "warning");
     }
 
     #[test]
     fn protocol_covers_engine_ops() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let settlement_reply = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         let ops = vec![
             Op::SetGoalStatus {
+                goal_id: None,
                 status: GoalStatus::Paused,
                 clear: false,
             },
             Op::SetGoalObjective {
+                goal_id: None,
                 objective: "ship".into(),
                 token_budget: Some(7),
             },
@@ -1340,6 +1542,9 @@ mod tests {
             Op::GetSessionSnapshot {
                 tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
+            Op::GetContextBudget {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
             Op::GetProviderRuntimeStatus {
                 tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
@@ -1359,6 +1564,9 @@ mod tests {
                 new_message: "again".into(),
             },
             Op::SetAdvisorEnabled { enabled: true },
+            Op::GetSubAgentSettlement {
+                tx: std::sync::Arc::clone(&settlement_reply),
+            },
             Op::Shutdown,
         ];
 
@@ -1383,6 +1591,19 @@ mod tests {
             serde_json::to_value(ops[8].to_protocol()).unwrap(),
             json!({"kind": "get_session_snapshot"}),
             "reply channels must not leak onto the wire"
+        );
+        let settlement = ops
+            .iter()
+            .find(|op| matches!(op, Op::GetSubAgentSettlement { .. }))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(settlement.to_protocol()).unwrap(),
+            json!({"kind": "get_sub_agent_settlement"}),
+            "the settlement operation must retain its own channel-free protocol twin"
+        );
+        assert!(
+            settlement_reply.lock().unwrap().is_some(),
+            "projection must not consume the host's live response sender"
         );
     }
 

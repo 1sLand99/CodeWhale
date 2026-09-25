@@ -2,8 +2,10 @@
 # Map a workspace area or source path to the fastest cargo/nextest
 # invocation for that area, and apply the portable cache topology so a
 # new worktree actually gets isolated build-dir (+ sccache only when
-# incremental is already off). Developer iteration aid only; no product
-# behavior.
+# incremental is already off). Tests run under the shared temporary HOME
+# boundary; compiler caches and toolchain homes remain persistent.
+# A libtest run with an explicit filter refuses green when the filter
+# matches zero tests (nextest already fails loud on empty selections).
 #
 # Usage:
 #   scripts/dev-test.sh <area|path> [filter...]
@@ -77,7 +79,8 @@ When cargo-nextest is on PATH, the run stage is `cargo nextest run`
 instead of `cargo test` (same binaries; process per test). Set
 CODEWHALE_DEV_NEXTEST=0 to force libtest. New worktrees get an isolated
 Cargo build-dir via scripts/dev-cache.sh; sccache wraps rustc only when
-incremental is already off. Do not use cargo test --workspace for a
+incremental is already off. Test HOME and config paths are isolated by
+scripts/with-hermetic-test-home.sh. Do not use cargo test --workspace for a
 single-area edit. --lib and --tests are disjoint; a green --lib run does
 not cover crates/tui/tests/.
 EOF
@@ -195,12 +198,6 @@ case $area in
     ;;
 esac
 
-codewhale_dev_cache_apply
-if [ -z "${RUST_MIN_STACK:-}" ]; then
-  RUST_MIN_STACK=16777216
-  export RUST_MIN_STACK
-fi
-
 use_nextest=0
 _cw_nextest=${CODEWHALE_DEV_NEXTEST:-auto}
 if codewhale_dev_cache_falsey "$_cw_nextest"; then
@@ -215,18 +212,67 @@ fi
 if [ "$target" = "--test" ]; then
   if [ "$use_nextest" -eq 1 ]; then
     set -- nextest run -p "$pkg" --test "$harness" --locked "$@"
-    printf '+ cargo %s\n' "$*"
-    codewhale_dev_cache_exec_cargo "$@"
+  else
+    set -- test -p "$pkg" --test "$harness" --locked "$@"
   fi
-  set -- test -p "$pkg" --test "$harness" --locked "$@"
 else
   if [ "$use_nextest" -eq 1 ]; then
     set -- nextest run -p "$pkg" --lib --locked "$@"
-    printf '+ cargo %s\n' "$*"
-    codewhale_dev_cache_exec_cargo "$@"
+  else
+    set -- test -p "$pkg" --lib --locked "$@"
   fi
-  set -- test -p "$pkg" --lib --locked "$@"
 fi
 
 printf '+ cargo %s\n' "$*"
-codewhale_dev_cache_exec_cargo "$@"
+# Resolve the persistent cache before replacing HOME; dev-cargo applies the
+# topology once, retaining Cargo's build-dir template and any caller overrides.
+CODEWHALE_CACHE_ROOT=$(codewhale_dev_cache_root)
+export CODEWHALE_CACHE_ROOT
+# libtest exits 0 when a filter matches nothing, which has been mistaken for
+# a pass. With an explicit filter, refuse that green. (nextest already fails
+# loud on an empty selection, so the guard only wraps libtest.)
+#
+# pipefail is not POSIX and probing it outside a subshell is fatal where it
+# is unsupported: `set` is a special builtin, so an illegal option exits the
+# shell outright with status 2 instead of returning a status a `&&` list can
+# absorb. That killed this script on every filtered libtest run under dash
+# (Ubuntu's /bin/sh, which is what CI and Debian users get) while passing on
+# macOS. Probe in a subshell, and on shells without pipefail capture the run
+# and replay it so the refusal below still applies; those shells lose live
+# streaming for the duration of the filtered run, not the guard.
+base_args=5
+if [ "$target" = "--test" ]; then
+  base_args=6
+fi
+if [ "$use_nextest" -eq 0 ] && [ "$#" -gt "$base_args" ]; then
+  tmp_log=$(mktemp -t dev-test-log.XXXXXX)
+  trap 'rm -f "$tmp_log"' EXIT INT TERM
+  set +e
+  if (set -o pipefail) 2>/dev/null; then
+    set -o pipefail
+    "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@" 2>&1 | tee "$tmp_log"
+    test_status=$?
+  else
+    "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@" > "$tmp_log" 2>&1
+    test_status=$?
+    cat "$tmp_log"
+  fi
+  set -e
+  if [ "$test_status" -eq 0 ]; then
+    if grep -q 'test result:' "$tmp_log"; then
+      if grep 'test result:' "$tmp_log" | grep -Eqv '(^|[^0-9])0 passed;'; then
+        : # at least one binary ran tests
+      else
+        printf '%s\n' "dev-test: filter matched zero tests (every binary reports 0 passed); refusing green." >&2
+        test_status=1
+      fi
+    else
+      printf '%s\n' "dev-test: no 'test result:' lines in output; refusing green." >&2
+      test_status=1
+    fi
+  fi
+  rm -f "$tmp_log"
+  trap - EXIT INT TERM
+  exit "$test_status"
+fi
+exec "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@"

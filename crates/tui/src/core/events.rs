@@ -10,14 +10,15 @@ use serde_json::Value;
 
 use crate::config::ApiProvider;
 use crate::error_taxonomy::ErrorEnvelope;
-use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::tools::goal::GoalSnapshot;
 use crate::tools::spec::{ToolError, ToolResult};
 use crate::tools::subagent::{AgentWorkerStatus, CoordinationDetailProjection, SubAgentResult};
 use crate::tools::user_input::UserInputRequest;
+use codewhale_models::{Message, SystemPrompt, Tool, Usage};
 
 /// Final status for a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnOutcomeStatus {
     Completed,
     Interrupted,
@@ -48,13 +49,15 @@ pub struct TurnRoute {
     /// `None` when no concrete client was installed (injected-client engines,
     /// or a client that failed to construct).
     pub receipt: Option<crate::route_receipt::TurnRouteReceipt>,
-    /// Billing evidence for the request that was actually put on the wire.
+    /// Billing evidence for a request admitted to application dispatch.
     ///
     /// `None` at `TurnStarted`: a lifecycle start is not a dispatch, and a
-    /// route that has not been sent has no billing time, no metering surface,
-    /// and no endpoint to attest. Populated exactly once, at the wire
-    /// boundary, and delivered on `RouteDispatched`. Consumers that price a
-    /// turn must treat `None` as *unknown*, never as a zero-cost turn.
+    /// route that has not reached admission has no billing time, no metering
+    /// surface, and no endpoint to attest. Populated exactly once at the
+    /// pre-permit application-dispatch boundary and delivered on
+    /// `RouteDispatched`. This does not attest network delivery or a provider
+    /// invoice-time rate. Consumers that price a turn must treat `None` as
+    /// *unknown*, never as a zero-cost turn.
     pub billing: Option<RouteBillingEnvelope>,
     /// Endpoint this turn's client was frozen against, verbatim.
     ///
@@ -92,14 +95,17 @@ pub struct TurnRoute {
 ///   it bill* — a [`crate::route_billing::DispatchedReceipt`]. They must be
 ///   readable from `TurnStarted` onward so a child turn arriving mid-flight
 ///   can be billed against the parent's frozen route.
-/// - This envelope is stamped at the **wire** boundary and answers *what was
-///   actually put on the wire, when*. A planned-but-unsent route has no
-///   metering surface and no dispatch instant, so it must be structurally
-///   absent rather than defaulted.
+/// - This envelope is stamped at the **pre-permit application-dispatch**
+///   boundary and answers *what CodeWhale admitted for provider execution,
+///   when*. It does not claim network delivery or provider invoice-time
+///   pricing. A merely planned route has no metering surface or dispatch
+///   instant, so it must be structurally absent rather than defaulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteBillingEnvelope {
+    pub openrouter_vendor: Option<String>,
     pub billing_surface: Option<String>,
     pub endpoint_fingerprint: Option<String>,
+    pub provider_live_pricing: Option<crate::provider_catalog_live::ProviderLivePricingQuote>,
     pub billing_mode: crate::cost_status::RouteBillingMode,
     pub dispatched_at: DateTime<Utc>,
 }
@@ -115,8 +121,10 @@ impl TurnRoute {
             provider: self.provider,
             provider_identity: self.provider_identity.clone(),
             model: self.model.clone(),
+            openrouter_vendor: billing.openrouter_vendor.clone(),
             billing_surface: billing.billing_surface.clone(),
             endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+            provider_live_pricing: billing.provider_live_pricing.clone(),
             billing_mode: billing.billing_mode,
             dispatched_at: billing.dispatched_at,
         })
@@ -135,6 +143,17 @@ pub struct AgentProgressEventMeta {
     /// Canonical action/tool name. Presentation aliases are applied by the UI
     /// when it creates the bounded current-activity projection.
     pub tool_name: Option<String>,
+    /// True when this progress is the routine per-step wait heartbeat
+    /// ("requesting model response"). Retry/timeout waits share the
+    /// `ModelWait` status but carry informative text, so the status alone
+    /// cannot tell them apart — the producer sets this instead, and UI
+    /// consumers rewrite on it rather than sniffing the message (#6290).
+    pub routine_wait: bool,
+    /// The child approval id this progress reports on: set while the agent
+    /// waits on a person and on the first progress after that wait ends, so
+    /// hosts can retire the matching card and pending entry by identity
+    /// (approvals C1) instead of by parsing the message.
+    pub approval_id: Option<String>,
 }
 
 impl AgentProgressEventMeta {
@@ -144,6 +163,8 @@ impl AgentProgressEventMeta {
             worker_status,
             step: None,
             tool_name: None,
+            routine_wait: false,
+            approval_id: None,
         }
     }
 
@@ -154,8 +175,20 @@ impl AgentProgressEventMeta {
     }
 
     #[must_use]
+    pub const fn routine_wait(mut self) -> Self {
+        self.routine_wait = true;
+        self
+    }
+
+    #[must_use]
     pub fn with_tool(mut self, tool_name: impl Into<String>) -> Self {
         self.tool_name = Some(tool_name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_approval_id(mut self, approval_id: impl Into<String>) -> Self {
+        self.approval_id = Some(approval_id.into());
         self
     }
 }
@@ -171,6 +204,13 @@ pub enum Event {
         omitted_tool_names: Vec<String>,
         omitted_tool_count: usize,
     },
+
+    /// Workspace snapshots (undo) could not be enabled for this workspace.
+    /// Emitted once per session/workspace so another session cannot consume
+    /// its notice. The disabled state also remains visible in `/status` (#5930).
+    /// `reason` is the single localized line rendered from the gate, so every
+    /// surface states the workspace, the limit, and the recovery exactly once.
+    SnapshotsDisabled { workspace: String, reason: String },
     // === Streaming Events ===
     /// A new message block has started
     MessageStarted { index: usize },
@@ -218,7 +258,7 @@ pub enum Event {
         turn_id: String,
         created_at: DateTime<Utc>,
         /// Legacy/non-model hosts may still attach a route at start. Model
-        /// turns emit it separately at the real provider dispatch boundary.
+        /// turns emit it separately at the application dispatch boundary.
         route: Option<TurnRoute>,
     },
 
@@ -228,13 +268,23 @@ pub enum Event {
         snapshot: crate::tool_inspection::ToolInspectionSnapshot,
     },
 
-    /// Immutable billing route captured immediately before the first provider
-    /// request, after snapshots and other potentially slow pre-dispatch work.
+    /// Immutable billing route captured at CodeWhale's pre-permit application
+    /// dispatch boundary, after request preparation. This is admission-time
+    /// evidence, not proof of network delivery or provider invoice-time rates.
     RouteDispatched { turn_id: String, route: TurnRoute },
 
     /// The turn is complete (no more tool calls)
     TurnComplete {
+        /// Total usage for session/goal/token metrics, including programmatic
+        /// child calls performed inline during this turn.
         usage: Usage,
+        /// Usage served by the parent turn's frozen route only. Consumers
+        /// price this under the parent quote and price routed children from
+        /// their own receipts, avoiding double billing without subtraction.
+        parent_route_usage: Usage,
+        /// Provider calls whose execution/usage could not be receipted.
+        /// Non-zero makes cost coverage explicitly incomplete.
+        routed_usage_dropped_records: u64,
         status: TurnOutcomeStatus,
         error: Option<String>,
         /// Tool catalog sent with this turn's model request.
@@ -251,18 +301,33 @@ pub enum Event {
     /// provider never reported usage for the call — absence is honest, and
     /// fields inside `usage` stay `None` when the provider omits them.
     TurnUsage {
+        /// Primary request allowance; not a claim of provider-reported usage.
+        max_output_tokens: Option<u32>,
         usage: Usage,
         /// Wall-clock duration of this model call's stream.
         duration_ms: u64,
         /// Wall-clock time from the moment the request was dispatched to the
         /// provider until the first content-bearing stream event arrived
         /// (time to first token). `None` when the call produced no content
-        /// or the emitting path does not measure dispatch (reviewer / REPL
-        /// consults), so the session metrics never invent a latency.
+        /// or the emitting path does not measure the first content event
+        /// (non-streaming reviewer / REPL consults).
         first_token_ms: Option<u64>,
         /// Wall-clock time from request dispatch to the usage receipt for
         /// this model call — the whole call including connection setup, not
-        /// only the stream. `None` where dispatch is not measured.
+        /// only the stream. `None` where an individual request is not
+        /// measured (for example an aggregate REPL child receipt). This is
+        /// the denominator for effective session-average throughput.
+        request_ms: Option<u64>,
+    },
+
+    /// Usage telemetry for a programmatic provider call whose cost is carried
+    /// by its own routed receipt rather than the active parent route. TUI
+    /// consumers fold this into model-call metrics only; `TurnComplete.usage`
+    /// remains the authoritative total-token reconciliation.
+    RoutedTurnUsage {
+        usage: Usage,
+        duration_ms: u64,
+        first_token_ms: Option<u64>,
         request_ms: Option<u64>,
     },
 
@@ -354,6 +419,7 @@ pub enum Event {
         owner_session_id: String,
         id: String,
         prompt: String,
+        worker_status: Option<AgentWorkerStatus>,
         parent_run_id: Option<String>,
         spawn_depth: u32,
         /// Model the child runtime was actually installed with, after route
@@ -381,6 +447,14 @@ pub enum Event {
         owner_session_id: String,
         id: String,
         result: String,
+        /// Producer-owned outcome. None is a legacy receipt, never success.
+        outcome: Option<crate::tools::subagent::SubAgentStatus>,
+        parent_run_id: Option<String>,
+        spawn_depth: Option<u32>,
+        continuable: Option<bool>,
+        /// Provider-reported child usage from the durable ledger (#6315).
+        /// None means the worker has no usage receipt, never zero tokens.
+        usage: Option<crate::tools::subagent::AgentRunUsage>,
     },
 
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).
@@ -406,7 +480,7 @@ pub enum Event {
         /// status, current step, elapsed and token usage per row, built from
         /// the retained worker records rather than from live agent state, so a
         /// finished agent keeps the numbers it finished with.
-        roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
+        roster: Vec<crate::agent_roster::AgentRosterRow>,
     },
 
     /// Structured sub-agent mailbox envelope (issue #128). Carries the
@@ -518,7 +592,9 @@ pub enum Event {
     /// later `reasoning_content` replay.
     SessionUpdated {
         session_id: String,
-        messages: Vec<Message>,
+        /// Shared history snapshot (#6214 T2): the engine hands out an `Arc`
+        /// instead of deep-copying the transcript per event.
+        messages: Arc<Vec<Message>>,
         system_prompt: Option<SystemPrompt>,
         model: String,
         workspace: PathBuf,
@@ -707,6 +783,75 @@ impl Event {
     }
 }
 
+/// Who a [`Event::Status`] line is for once it leaves the engine.
+///
+/// The TUI shows every status in its transient footer, so it needs no
+/// classification. Durable clients (the runtime thread store and anything
+/// that renders its items) do: scheduler, continuation and schema-hydration
+/// lines are engine plumbing, and rendering them as transcript rows buries
+/// the user's actual conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusVisibility {
+    /// Worth a transcript row.
+    User,
+    /// Engine plumbing: keep the receipt, but clients collapse it by default.
+    Internal,
+    /// Addressed to the model, which already receives it in a tool result.
+    /// Never persist it as a user-facing item.
+    ModelOnly,
+}
+
+impl StatusVisibility {
+    /// Wire value carried in runtime item metadata (`metadata.visibility`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Internal => "internal",
+            Self::ModelOnly => "model_only",
+        }
+    }
+}
+
+/// Classify an engine status line for durable clients.
+///
+/// Matches the engine's own fixed status wording (turn scheduler, step
+/// continuation, deferred-tool hydration). Unknown lines stay user-visible,
+/// so a new status is never silently hidden.
+#[must_use]
+pub fn status_visibility(message: &str) -> StatusVisibility {
+    let message = message.trim();
+    if message.starts_with("Loaded deferred tool '")
+        && message.contains("Retry the call with its visible schema")
+    {
+        return StatusVisibility::ModelOnly;
+    }
+    let scheduler_row = message.starts_with("Executing tools sequentially")
+        || (message.starts_with("Executing ") && message.ends_with(" parallel chunk(s)"));
+    let continuation_row = message.starts_with("Continuing — ")
+        || message.starts_with("Continuing active goal (pass ");
+    // Successful agent completions already have their own durable receipts.
+    // Keep failure-bearing or unknown resumption notices visible.
+    let agent_resume_row = message
+        .strip_prefix("Resuming turn with ")
+        .and_then(|rest| rest.strip_suffix(" sub-agent completion(s)"))
+        .is_some_and(|count| {
+            let count = [" idle", " queued", " late"]
+                .iter()
+                .find_map(|suffix| count.strip_suffix(suffix))
+                .unwrap_or(count);
+            count.parse::<usize>().is_ok_and(|count| count > 0)
+        });
+    let approval_wait_row = (message.starts_with("Still waiting for tool approval on `")
+        || message.starts_with("Still waiting for user input on `"))
+        && message.ends_with("s — the turn is parked here until it is answered");
+    if scheduler_row || continuation_row || agent_resume_row || approval_wait_row {
+        StatusVisibility::Internal
+    } else {
+        StatusVisibility::User
+    }
+}
+
 /// Which permission gate produced a [`Event::ToolGateDecision`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolGate {
@@ -796,5 +941,58 @@ mod tool_projection_warning_tests {
         );
         assert!(bounded.iter().all(|name| !name.contains('\n')));
         assert!(tool_projection_warning_tool_list(&bounded, names.len()).ends_with(", …"));
+    }
+}
+
+#[cfg(test)]
+mod status_visibility_tests {
+    use super::{StatusVisibility, status_visibility};
+
+    #[test]
+    fn engine_plumbing_statuses_are_not_user_rows() {
+        for internal in [
+            "Executing tools sequentially (writes, approvals, or non-parallel tools detected)",
+            "Executing 3 read-only tools in 2 parallel chunk(s)",
+            "Continuing — tool results",
+            "Continuing — queued steer input",
+            "Continuing active goal (pass 2 this turn, 5 total)",
+            "Resuming turn with 1 sub-agent completion(s)",
+            "Resuming turn with 2 idle sub-agent completion(s)",
+            "Resuming turn with 3 queued sub-agent completion(s)",
+            "Resuming turn with 4 late sub-agent completion(s)",
+            "Still waiting for tool approval on `call-1` after 60s — the turn is parked here until it is answered",
+            "Still waiting for user input on `call-2` after 120s — the turn is parked here until it is answered",
+        ] {
+            assert_eq!(
+                status_visibility(internal),
+                StatusVisibility::Internal,
+                "{internal}"
+            );
+        }
+        for model_only in [
+            "Loaded deferred tool 'load_skill'. Retry the call with its visible schema.",
+            "Loaded deferred tool 'load_skill' after resolving 'skill'. Retry the call with its visible schema.",
+        ] {
+            assert_eq!(
+                status_visibility(model_only),
+                StatusVisibility::ModelOnly,
+                "{model_only}"
+            );
+        }
+        for user in [
+            "Request cancelled",
+            "Reconnecting…",
+            "Goal set; starting goal work.",
+            "Still waiting for the service to reconnect; retry in a moment.",
+            "Still waiting for tool approval on `call-1` after an unexpected failure",
+            "Resuming turn with 1 sub-agent completion(s) (1 failed)",
+            "Resuming turn with 2 idle sub-agent completion(s) (1 failed)",
+            "Resuming turn with unexpected sub-agent completion(s)",
+            "Resuming turn with 1 unknown sub-agent completion(s)",
+            "Turn ending with 1 detached sub-agent(s) still running in the background; they'll report when done.",
+        ] {
+            assert_eq!(status_visibility(user), StatusVisibility::User, "{user}");
+        }
+        assert_eq!(StatusVisibility::Internal.as_str(), "internal");
     }
 }

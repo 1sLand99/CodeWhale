@@ -7,11 +7,12 @@ use crate::config::{
     ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL,
     normalize_custom_model_id, normalize_model_name_for_provider,
 };
-use crate::localization::{Locale, MessageId, tr};
 #[cfg(test)]
-use crate::tui::app::ReasoningEffort;
-use crate::tui::app::{App, AppAction, AppMode};
+use crate::reasoning_preference::ReasoningEffort;
+use crate::tui::app::{App, AppAction};
 use crate::tui::views::{HelpView, ModalKind, SubAgentsView, subagent_view_agents};
+use codewhale_config::AppMode;
+use codewhale_localization::{Locale, MessageId, tr};
 
 use super::CommandResult;
 
@@ -156,6 +157,11 @@ pub fn clear(app: &mut App) -> CommandResult {
             tr(app.ui_locale, MessageId::ClearConversationBusy).to_string(),
         );
     }
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let queue_transition = match crate::tui::ui::prepare_offline_queue_transition(app, &new_id) {
+        Ok(transition) => transition,
+        Err(error) => return CommandResult::error(error),
+    };
     if !reset_conversation_state(app) {
         return CommandResult::error(
             tr(app.ui_locale, MessageId::ClearConversationBusy).to_string(),
@@ -165,7 +171,7 @@ pub fn clear(app: &mut App) -> CommandResult {
     // and every autosave, so mint the next id here (as `/new` does) rather
     // than letting the engine generate one the App only learns about from
     // `SessionUpdated`. Two ids for one conversation orphan the checkpoint.
-    let new_id = uuid::Uuid::new_v4().to_string();
+    crate::tui::ui::install_offline_queue_transition(app, queue_transition);
     app.current_session_id = Some(new_id.clone());
     app.current_session_metadata = None;
     app.session_title = None;
@@ -193,13 +199,20 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     if !app.clear_todos() {
         return false;
     }
+    // Explicit reset discards the queue it was invoked on. Capture its owner
+    // before `/clear` or `/new` installs the next session id.
+    if let Some(lease) = app.offline_queue_lease.clone() {
+        crate::tui::persistence_actor::persist(
+            crate::tui::persistence_actor::PersistRequest::ClearOfflineQueue { lease },
+        );
+    }
     // Atomically retire background accounting before zeroing the session.
     // Late reports retain the old scope token and are discarded instead of
     // appearing in the new conversation.
     let _settled_old_cost_scope = crate::cost_status::close_current_scope();
     app.clear_history();
     app.mark_history_updated();
-    app.api_messages.clear();
+    app.clear_api_messages();
     app.system_prompt = None;
     app.viewport.transcript_selection.clear();
     app.queued_messages.clear();
@@ -225,7 +238,6 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     app.last_exec_wait_command = None;
     app.session.last_prompt_tokens = None;
     app.session.last_completion_tokens = None;
-    app.session.last_output_throughput = None;
     app.session.last_prompt_cache_hit_tokens = None;
     app.session.last_prompt_cache_miss_tokens = None;
     app.session.last_reasoning_replay_tokens = None;
@@ -234,6 +246,13 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     app.session.last_warmup_key = None;
     app.session.last_tool_catalog = None;
     app.session.last_base_url = None;
+    // A fresh conversation inherits neither this one's denials nor its
+    // "approve for session" grants (UX-8).
+    app.approval_session_denied.clear();
+    app.approval_session_approved.clear();
+    // Nor this one's child-agent approval cards, footer rows, or web-mirror
+    // copies: the reset finalizes those children engine-side.
+    crate::tui::pending_requests::clear_all(app);
     true
 }
 
@@ -246,6 +265,13 @@ pub fn exit() -> CommandResult {
 /// picker (Pro/Flash + thinking effort) per #39 — gives users a discoverable
 /// way to flip both knobs without memorising the docs.
 pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
+    // `/model router …` is `/router …` (#6525): one Router setup view.
+    if let Some(name) = model_name.map(str::trim) {
+        let (head, rest) = name.split_once(char::is_whitespace).unwrap_or((name, ""));
+        if head.eq_ignore_ascii_case("router") {
+            return super::router::router_command(Some(rest));
+        }
+    }
     if model_name.is_some_and(|name| name.eq_ignore_ascii_case("save-default")) {
         // Explicit persistence of the pending session route as the startup
         // default — only an explicit command can write settings after an
@@ -272,7 +298,6 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             } else {
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
-                app.session.last_output_throughput = None;
             }
             let provider_identity = app.provider_identity_for_persistence().to_string();
             app.provider_models
@@ -290,7 +315,21 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 AppAction::UpdateCompaction(app.compaction_config()),
             );
         }
-        let model_id = if app.accepts_custom_model_ids() {
+        let declared = app.api_provider != ApiProvider::OpenaiCodex
+            && codewhale_config::catalog::configured::validate_configured_models(
+                &app.configured_models,
+            )
+            .is_ok()
+            && app.configured_models.iter().any(|model| {
+                model.id == name
+                    && model.matches_route(
+                        app.provider_identity_for_persistence(),
+                        &app.active_route_base_url,
+                    )
+            });
+        let model_id = if declared {
+            name.to_string()
+        } else if app.accepts_custom_model_ids() {
             let Some(model_id) = normalize_custom_model_id(name) else {
                 return CommandResult::error(format!(
                     "Invalid model '{name}'. Expected a non-empty model ID."
@@ -311,7 +350,20 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 app.api_provider,
                 ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::Zai
             );
-        let route_resolution = if strict_direct_custom_endpoint {
+        let route_resolution = if declared {
+            match crate::route_runtime::resolve_declared_model_candidate(
+                app.api_provider,
+                app.provider_identity_for_persistence(),
+                &model_id,
+                &app.active_route_base_url,
+                app.active_context_window_override,
+                app.active_model_context_windows.as_ref(),
+                &app.configured_models,
+            ) {
+                Ok(resolution) => Some(resolution),
+                Err(reason) => return CommandResult::error(reason),
+            }
+        } else if strict_direct_custom_endpoint {
             None
         } else {
             // `/model` normally resolves against the active provider's
@@ -334,6 +386,7 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 None,
                 route_base_url,
                 app.active_context_window_override,
+                app.active_model_context_windows.as_ref(),
                 None,
             ) {
                 Ok(resolution) => Some(resolution),
@@ -351,11 +404,10 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             );
         } else {
             app.active_route_limits = app.context_window_override_limits();
-            app.active_context_window_source = if app.active_context_window_override.is_some() {
-                crate::route_runtime::ContextWindowSource::Configured
-            } else {
-                crate::route_runtime::ContextWindowSource::Fallback
-            };
+            app.active_context_window_source = app
+                .configured_context_window_for(&app.model)
+                .map(|resolution| resolution.source)
+                .unwrap_or(crate::route_runtime::ContextWindowSource::Fallback);
         }
         app.update_model_compaction_budget();
         if model_changed {
@@ -363,17 +415,11 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
         } else {
             app.session.last_prompt_tokens = None;
             app.session.last_completion_tokens = None;
-            app.session.last_output_throughput = None;
         }
         let provider_identity = app.provider_identity_for_persistence().to_string();
         app.provider_models
             .insert(provider_identity.clone(), model_id.clone());
-        app.enable_provider_model(&provider_identity, &model_id);
-        app.fleet_roster_stale |= crate::fleet::members::auto_enroll_fleet_model(
-            &app.workspace,
-            &provider_identity,
-            &model_id,
-        );
+        app.note_route_used(&provider_identity, &model_id);
         // Route changes are temporary by default: nothing is written here.
         // The route-save prompt offers the explicit persistence choices.
         app.note_session_route_change(&provider_identity, &model_id);
@@ -722,10 +768,11 @@ mod tests {
     use super::*;
     use crate::client::PromptInspection;
     use crate::config::Config;
-    use crate::models::Message;
-    use crate::models::Role;
-    use crate::tui::app::{App, AppMode, TuiOptions, TurnCacheRecord};
+    use crate::tui::app::{App, TuiOptions, TurnCacheRecord};
     use crate::tui::history::HistoryCell;
+    use codewhale_config::AppMode;
+    use codewhale_models::Message;
+    use codewhale_models::Role;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::Instant;
@@ -819,7 +866,7 @@ mod tests {
             ..crate::test_support::test_tui_options(PathBuf::from("/tmp/test-workspace"))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app.model = "deepseek-v4-pro".to_string();
         app.auto_model = false;
@@ -879,8 +926,10 @@ mod tests {
         let result = help(&mut app, Some("memory"));
         let msg = result.message.expect("help topic should return message");
         assert!(msg.contains("memory"));
-        assert!(msg.contains("persistent user-memory file"));
-        assert!(msg.contains("Usage: /memory [show|path|clear|edit|help]"));
+        assert!(msg.contains("persistent structured user memory"));
+        assert!(msg.contains(
+            "Usage: /memory [status|path|search|get|remember|import|export|reindex|clear|help]"
+        ));
     }
 
     #[test]
@@ -909,7 +958,7 @@ mod tests {
         app.history.push(HistoryCell::User {
             content: "test".to_string(),
         });
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![],
         });
@@ -965,7 +1014,7 @@ mod tests {
         app.history.push(HistoryCell::User {
             content: "keep me".to_string(),
         });
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![],
         });
@@ -991,7 +1040,7 @@ mod tests {
         app.history.push(HistoryCell::User {
             content: "keep active turn".to_string(),
         });
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![],
         });
@@ -1249,6 +1298,8 @@ mod tests {
         // model either — the change is session-local until the user explicitly
         // saves it via the route-save prompt.
         let _settings = SettingsPathGuard::new();
+        let startup_config = crate::config::home_config_path().expect("isolated startup config");
+        let startup_before = std::fs::read(&startup_config).ok();
         {
             let seed = crate::settings::Settings {
                 default_provider: Some("deepseek".to_string()),
@@ -1267,7 +1318,8 @@ mod tests {
         assert!(!result.is_error, "GLM-5.2 is valid on Z.ai");
 
         let settings = crate::settings::Settings::load().expect("load settings");
-        // The shared default provider is untouched.
+        // Neither canonical startup config nor the legacy archive changes.
+        assert_eq!(std::fs::read(startup_config).ok(), startup_before);
         assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
         // No scoped entry was written either — session-local.
         assert_eq!(
@@ -1592,7 +1644,7 @@ mod tests {
         assert_eq!(app.view_stack.top_kind(), Some(ModalKind::SubAgents));
         assert_eq!(
             app.status_message,
-            Some("Fetching current-session sub-agents...".to_string())
+            Some("Finding this session's agents...".to_string())
         );
     }
 
@@ -1753,7 +1805,7 @@ mod tests {
 
     #[test]
     fn home_dashboard_localizes_in_zh_hans() {
-        use crate::localization::Locale;
+        use codewhale_localization::Locale;
         let mut app = create_test_app();
         app.ui_locale = Locale::ZhHans;
         let result = home_dashboard(&mut app);

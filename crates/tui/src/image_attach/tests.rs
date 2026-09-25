@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::Role;
+use codewhale_models::Role;
 
 /// A 1x1 PNG, as bytes rather than a fixture file so the encoding tests
 /// have no filesystem dependency.
@@ -37,6 +37,45 @@ fn sniffing_ignores_the_extension_and_believes_the_bytes() {
 }
 
 #[test]
+fn rich_tool_images_reject_corruption_mime_spoofing_and_decode_bombs() {
+    use crate::tools::spec::{RichToolResult, ToolResult};
+    use codewhale_tools::ToolResultContentBlock;
+    let mut oversized_header = PNG_1X1.to_vec();
+    oversized_header[16..20].copy_from_slice(&(MAX_IMAGE_DIMENSION + 1).to_be_bytes());
+    for (mime, bytes) in [
+        ("image/png", &PNG_1X1[..8]),
+        ("image/jpeg", PNG_1X1),
+        ("image/png", oversized_header.as_slice()),
+    ] {
+        assert!(prepare_tool_image_bytes(bytes, mime).block.is_none());
+        let rich = bound_rich_tool_result(RichToolResult::with_content_blocks(
+            ToolResult::success("capture receipt"),
+            vec![ToolResultContentBlock::Image {
+                mime_type: mime.into(),
+                data: STANDARD.encode(bytes),
+            }],
+        ));
+        assert!(rich.result.success);
+        assert!(rich.content_blocks.is_empty());
+        assert!(rich.result.content.starts_with("capture receipt"));
+        assert!(
+            rich.result
+                .content
+                .contains("1 tool-result image block(s) omitted")
+        );
+        let stored = vec![
+            serde_json::json!({"type":"image","mime_type":mime,"data":STANDARD.encode(bytes)}),
+        ];
+        let (image, omitted) = provider_tool_result_image_refs(Some(&stored));
+        assert!(
+            image.is_none(),
+            "restored history must not bypass validation"
+        );
+        assert_eq!(omitted, 1);
+    }
+}
+
+#[test]
 fn lowercase_read_image_preparation_is_typed_and_bounded() {
     let prepared = prepare_tool_image_bytes(PNG_1X1, "image/png");
     assert_eq!(prepared.note, "Read image file [image/png]");
@@ -52,7 +91,7 @@ fn lowercase_read_image_preparation_is_typed_and_bounded() {
 
 #[test]
 fn blind_route_removes_nested_tool_result_image() {
-    let mut messages = vec![crate::models::Message {
+    let mut messages = vec![codewhale_models::Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call-image".to_string(),
@@ -200,8 +239,8 @@ fn classifies_remote_urls() {
     assert!(!is_remote_image_url("file:///tmp/a.png"));
 }
 
-fn message_with_image(url: &str) -> crate::models::Message {
-    crate::models::Message {
+fn message_with_image(url: &str) -> codewhale_models::Message {
+    codewhale_models::Message {
         role: Role::User,
         content: vec![
             ContentBlock::ImageUrl {
@@ -321,7 +360,7 @@ fn ingest_does_not_consult_model_capability() {
 fn a_blind_route_gets_text_in_place_of_every_image() {
     let mut messages = vec![
         message_with_image("data:image/png;base64,QUJD"),
-        crate::models::Message {
+        codewhale_models::Message {
             role: Role::Assistant,
             content: vec![ContentBlock::Text {
                 text: "sure".to_string(),
@@ -456,4 +495,226 @@ fn attach_from_path_reports_an_unreadable_file() {
         matches!(error, ImageAttachError::Unreadable { .. }),
         "got {error:?}"
     );
+}
+
+pub(crate) fn runtime_image_fixture(color: u8) -> codewhale_protocol::runtime::RuntimeImageInput {
+    let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        2,
+        2,
+        image::Rgba([color, 31, 99, 255]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    codewhale_protocol::runtime::RuntimeImageInput {
+        mime: "image/png".into(),
+        data_base64: STANDARD.encode(bytes.into_inner()),
+    }
+}
+
+#[test]
+fn runtime_image_validation_preserves_exact_bytes_and_rejects_corruption() {
+    let input = runtime_image_fixture(7);
+    let blocks = prepare_runtime_images(std::slice::from_ref(&input)).unwrap();
+    assert_eq!(
+        runtime_images_from_blocks(&blocks).unwrap().as_slice(),
+        std::slice::from_ref(&input)
+    );
+    for bad in [
+        codewhale_protocol::runtime::RuntimeImageInput {
+            mime: "image/jpeg".into(),
+            ..input.clone()
+        },
+        codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: "not base64".into(),
+            ..input.clone()
+        },
+        codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: String::new(),
+            ..input.clone()
+        },
+        // Existing signature sniffing alone accepted this truncated PNG.
+        codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+            ..input.clone()
+        },
+    ] {
+        assert!(prepare_runtime_images(&[bad]).is_err());
+    }
+}
+
+#[test]
+fn runtime_image_validation_bounds_count_encoded_size_and_decode_dimensions() {
+    let input = runtime_image_fixture(7);
+    assert!(prepare_runtime_images(&vec![input.clone(); 11]).is_err());
+    assert!(
+        prepare_runtime_images(&[codewhale_protocol::runtime::RuntimeImageInput {
+            data_base64: "A".repeat(MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1),
+            ..input
+        }])
+        .is_err()
+    );
+    let wide = image::DynamicImage::ImageRgba8(image::RgbaImage::new(MAX_IMAGE_DIMENSION + 1, 1));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    wide.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let input = codewhale_protocol::runtime::RuntimeImageInput {
+        mime: "image/png".into(),
+        data_base64: STANDARD.encode(bytes.into_inner()),
+    };
+    assert!(prepare_runtime_images(&[input]).is_err());
+}
+
+pub(crate) fn runtime_image_fixture_bytes(
+    size: usize,
+) -> codewhale_protocol::runtime::RuntimeImageInput {
+    let mut image = runtime_image_fixture(42);
+    let mut bytes = STANDARD.decode(&image.data_base64).unwrap();
+    bytes.resize(size, 0);
+    image.data_base64 = STANDARD.encode(bytes);
+    image
+}
+
+#[test]
+fn runtime_image_network_four_mib_and_historical_five_mib_bounds_are_distinct() {
+    let at_network_limit = runtime_image_fixture_bytes(MAX_RUNTIME_IMAGE_BYTES);
+    assert!(prepare_runtime_images(&[at_network_limit]).is_ok());
+    let historical = runtime_image_fixture_bytes(MAX_RUNTIME_IMAGE_BYTES + 1);
+    assert!(prepare_runtime_images(std::slice::from_ref(&historical)).is_err());
+    let stored = prepare_stored_images(std::slice::from_ref(&historical)).unwrap();
+    assert_eq!(runtime_images_from_blocks(&stored).unwrap(), [historical]);
+    assert!(prepare_stored_images(&[runtime_image_fixture_bytes(MAX_IMAGE_BYTES)]).is_ok());
+    assert!(prepare_stored_images(&[runtime_image_fixture_bytes(MAX_IMAGE_BYTES + 1)]).is_err());
+    let three_mib = runtime_image_fixture_bytes(3 * 1024 * 1024);
+    assert!(prepare_runtime_images(&[three_mib.clone(), three_mib.clone()]).is_err());
+    assert!(prepare_stored_images(&[three_mib.clone(), three_mib]).is_ok());
+    assert!(prepare_stored_images(&vec![runtime_image_fixture(1); 11]).is_ok());
+}
+
+fn noise_png(width: u32, height: u32) -> Vec<u8> {
+    // A cheap xorshift so the PNG does not compress: a stand-in for a busy
+    // Retina screenshot that exceeds the 5 MiB inline limit as PNG.
+    let mut state = 0x2545_f491_u32;
+    let buffer = image::RgbImage::from_fn(width, height, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        // Low-amplitude gray noise: too busy for PNG, like screenshot
+        // texture, yet flat enough to stay on the PNG rungs once fitted.
+        let level = 96 + (state & 15) as u8;
+        image::Rgb([level, level, level])
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(buffer)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode noise png");
+    bytes
+}
+
+fn attached_dimensions(attached: &AttachedImage) -> (u32, u32) {
+    let (_, payload) = parse_data_url(&attached.data_url).expect("data url");
+    let bytes = STANDARD.decode(payload).expect("base64");
+    image::load_from_memory(&bytes)
+        .expect("decodable attachment")
+        .to_rgb8()
+        .dimensions()
+}
+
+#[test]
+fn oversized_screenshot_is_downscaled_at_attach_time() {
+    let png = noise_png(2880, 1800);
+    assert!(
+        png.len() > MAX_IMAGE_BYTES,
+        "fixture must exceed the inline limit"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("retina.png");
+    std::fs::write(&path, &png).expect("write fixture");
+
+    let attached = attach_image_from_path(&path).expect("large screenshot attaches");
+    assert!(attached.source_bytes <= MAX_IMAGE_BYTES);
+    let (width, height) = attached_dimensions(&attached);
+    assert_eq!(width, ATTACH_MAX_EDGE_PX);
+    assert!(
+        (1279..=1281).contains(&height),
+        "aspect ratio is kept: {height}"
+    );
+}
+
+#[test]
+fn small_file_with_a_long_edge_is_fitted_to_the_attach_edge() {
+    let wide = image::RgbImage::from_pixel(4000, 200, image::Rgb([30, 30, 30]));
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgb8(wide)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encode");
+    assert!(png.len() < MAX_IMAGE_BYTES);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("wide.png");
+    std::fs::write(&path, &png).expect("write fixture");
+
+    let attached = attach_image_from_path(&path).expect("attach");
+    assert_eq!(attached.media_type, "image/png", "flat content stays PNG");
+    let (width, height) = attached_dimensions(&attached);
+    assert_eq!(width, ATTACH_MAX_EDGE_PX);
+    assert!(
+        (102..=103).contains(&height),
+        "aspect ratio is kept: {height}"
+    );
+}
+
+#[test]
+fn small_image_attaches_byte_for_byte() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("dot.png");
+    std::fs::write(&path, PNG_1X1).expect("write fixture");
+    let attached = attach_image_from_path(&path).expect("attach");
+    let (_, payload) = parse_data_url(&attached.data_url).expect("data url");
+    assert_eq!(STANDARD.decode(payload).expect("base64"), PNG_1X1);
+}
+
+#[test]
+fn only_images_since_the_latest_prompt_count_as_this_turns() {
+    let image = || ContentBlock::ImageUrl {
+        image_url: ImageUrlContent {
+            url: "data:image/png;base64,AAAA".to_string(),
+        },
+    };
+    let text = |text: &str| ContentBlock::Text {
+        text: text.to_string(),
+        cache_control: None,
+    };
+    let old_turn = codewhale_models::Message {
+        role: Role::User,
+        content: vec![text("earlier screenshot"), image()],
+    };
+    let reply = codewhale_models::Message {
+        role: Role::Assistant,
+        content: vec![text("seen")],
+    };
+    let prompt = |content| codewhale_models::Message {
+        role: Role::User,
+        content,
+    };
+    let tool_image = codewhale_models::Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call".to_string(),
+            content: "Read image".to_string(),
+            is_error: None,
+            content_blocks: Some(vec![serde_json::json!({"type": "image"})]),
+        }],
+    };
+
+    let history_only = vec![old_turn.clone(), reply.clone(), prompt(vec![text("go on")])];
+    assert_eq!(images_since_last_user_prompt(&history_only), 0);
+
+    let fresh = vec![
+        old_turn,
+        reply,
+        prompt(vec![text("look"), image()]),
+        tool_image,
+    ];
+    assert_eq!(images_since_last_user_prompt(&fresh), 2);
 }

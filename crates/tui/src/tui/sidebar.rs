@@ -82,10 +82,18 @@ pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                 name: display_name,
                 model: Some(agent.model.clone()).filter(|model| !model.trim().is_empty()),
                 status: current_activity
-                    .map(|activity| sidebar_current_activity_status_text(activity.status))
-                    .or_else(|| agent.worker_status.map(sidebar_worker_status_text))
-                    .unwrap_or_else(|| subagent_status_text(&agent.status))
-                    .to_string(),
+                    .map(|activity| {
+                        sidebar_current_activity_status_text(activity.status, app.ui_locale)
+                    })
+                    .or_else(|| {
+                        agent.worker_status.map(|status| {
+                            std::borrow::Cow::Borrowed(sidebar_worker_status_text(status))
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        std::borrow::Cow::Borrowed(subagent_status_text(&agent.status))
+                    })
+                    .into_owned(),
                 steps_taken: agent.steps_taken,
                 duration_ms: Some(agent.duration_ms),
                 // Filled in by `annotate_child_progress` once every row exists.
@@ -115,9 +123,13 @@ pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                     name: display_name,
                     model: meta.and_then(|meta| meta.resolved_model.clone()),
                     status: current_activity
-                        .map(|activity| sidebar_current_activity_status_text(activity.status))
-                        .unwrap_or(sidebar_worker_status_text(AgentWorkerStatus::Running))
-                        .to_string(),
+                        .map(|activity| {
+                            sidebar_current_activity_status_text(activity.status, app.ui_locale)
+                        })
+                        .unwrap_or(std::borrow::Cow::Borrowed(sidebar_worker_status_text(
+                            AgentWorkerStatus::Running,
+                        )))
+                        .into_owned(),
                     steps_taken: 0,
                     duration_ms: None,
                     children_settled: None,
@@ -233,8 +245,19 @@ fn sidebar_worker_status_text(status: AgentWorkerStatus) -> &'static str {
     }
 }
 
-fn sidebar_current_activity_status_text(status: AgentCurrentActivityStatus) -> &'static str {
-    match status {
+fn sidebar_current_activity_status_text(
+    status: AgentCurrentActivityStatus,
+    locale: codewhale_localization::Locale,
+) -> std::borrow::Cow<'static, str> {
+    // A parked husk gets its own word, translated (#5906) — "waiting" here
+    // would be the same lie the work surface used to tell.
+    if status == AgentCurrentActivityStatus::Parked {
+        return codewhale_localization::tr(
+            locale,
+            codewhale_localization::MessageId::AgentStatusParked,
+        );
+    }
+    std::borrow::Cow::Borrowed(match status {
         AgentCurrentActivityStatus::Queued => "queued",
         AgentCurrentActivityStatus::Starting => "starting",
         AgentCurrentActivityStatus::Running => "running",
@@ -245,7 +268,8 @@ fn sidebar_current_activity_status_text(status: AgentCurrentActivityStatus) -> &
         AgentCurrentActivityStatus::Failed => "failed",
         AgentCurrentActivityStatus::Canceled => "canceled",
         AgentCurrentActivityStatus::Interrupted => "interrupted",
-    }
+        AgentCurrentActivityStatus::Parked => unreachable!("handled above"),
+    })
 }
 
 fn sidebar_agent_status_is_terminal(status: &str) -> bool {
@@ -259,11 +283,11 @@ fn sidebar_agent_status_is_terminal(status: &str) -> bool {
 mod tests {
     use super::sidebar_agent_rows;
     use crate::config::Config;
-    use crate::localization::Locale;
     use crate::tui::app::{
         AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App,
         SidebarHoverSection, SidebarHoverState, TuiOptions,
     };
+    use codewhale_localization::Locale;
     use std::path::PathBuf;
 
     fn create_test_app() -> App {
@@ -350,6 +374,7 @@ mod tests {
                 provider_id: "deepseek".to_string(),
                 model_id: "deepseek-v4-pro".to_string(),
                 route_source: "roster".to_string(),
+                fallback_note: None,
                 requested_reasoning: "inherit".to_string(),
                 effective_reasoning: None,
                 runtime_version: "test".to_string(),
@@ -445,6 +470,7 @@ mod tests {
             provider_id: "deepseek".to_string(),
             model_id: "deepseek-v4-pro".to_string(),
             route_source: "roster".to_string(),
+            fallback_note: None,
             requested_reasoning: "inherit".to_string(),
             effective_reasoning: None,
             runtime_version: "test".to_string(),
@@ -461,6 +487,7 @@ mod tests {
         nickname: Option<&str>,
     ) -> crate::tools::subagent::SubAgentResult {
         crate::tools::subagent::SubAgentResult {
+            usage: None,
             // An unnamed dispatch: the manager seeds `name` with the agent id
             // and only replaces it when the caller supplied one.
             name: agent_id.to_string(),
@@ -704,6 +731,7 @@ mod tests {
             provider_id: "deepseek".to_string(),
             model_id: "deepseek-v4-flash-vision-exp".to_string(),
             route_source: "fleet".to_string(),
+            fallback_note: None,
             requested_reasoning: "inherit".to_string(),
             effective_reasoning: None,
             runtime_version: "test".to_string(),
@@ -743,6 +771,91 @@ mod tests {
                 crate::tools::subagent::whale_name_for_id_in_locale(&row.id, "en")
             );
         }
+    }
+
+    // === #5906: parked husks vs. children that actually asked ============
+
+    /// A child parked at the parent's turn end is handed a `needs_input` note
+    /// phrased as a question ("Resume this parked child with ..."), which is
+    /// why every surface used to label it `waiting`. Build one exactly the way
+    /// the runtime does and assert the row names the state instead.
+    fn parked_agent(agent_id: &str) -> crate::tools::subagent::SubAgentResult {
+        let mut agent = cached_agent(agent_id, None);
+        agent.status = crate::tools::subagent::SubAgentStatus::Interrupted(
+            "Parent turn ended before this turn-owned child settled.".to_string(),
+        );
+        agent.worker_status = Some(crate::tools::subagent::AgentWorkerStatus::WaitingForUser);
+        agent.needs_input = Some(crate::tools::subagent::SubAgentNeedsInput {
+            question: format!(
+                "Resume this parked child with agent(action=\"start\", resume_from=\"{agent_id}\")."
+            ),
+        });
+        agent.checkpoint = Some(crate::tools::subagent::SubAgentCheckpoint {
+            checkpoint_id: format!("{agent_id}:step:2"),
+            agent_id: agent_id.to_string(),
+            continuation_handle: format!("agent:{agent_id}:checkpoint"),
+            reason: "Parent turn ended before this turn-owned child settled.".to_string(),
+            continuable: true,
+            steps_taken: 2,
+            message_count: 4,
+            created_at_ms: 1_000,
+            messages: Vec::new(),
+            omitted_messages: 0,
+            parked_at_turn_end: true,
+        });
+        agent
+    }
+
+    fn asking_agent(agent_id: &str) -> crate::tools::subagent::SubAgentResult {
+        let mut agent = cached_agent(agent_id, None);
+        agent.worker_status = Some(crate::tools::subagent::AgentWorkerStatus::WaitingForUser);
+        agent.needs_input = Some(crate::tools::subagent::SubAgentNeedsInput {
+            question: "Which path should I use?".to_string(),
+        });
+        agent
+    }
+
+    #[test]
+    fn a_parked_row_says_parked_and_a_real_question_still_says_waiting() {
+        let mut app = create_test_app();
+        app.subagent_cache.push(parked_agent("agent_parked"));
+        app.subagent_cache.push(asking_agent("agent_asking"));
+        crate::tui::subagent_routing::reconcile_subagent_activity_state(&mut app);
+
+        let rows = sidebar_agent_rows(&app);
+        let parked = rows
+            .iter()
+            .find(|row| row.id == "agent_parked")
+            .expect("parked row");
+        let asking = rows
+            .iter()
+            .find(|row| row.id == "agent_asking")
+            .expect("asking row");
+
+        assert_eq!(parked.status, "parked");
+        assert_ne!(
+            parked.status, "waiting",
+            "a parked husk must not wear the label a child a user can answer wears"
+        );
+        assert_eq!(asking.status, "waiting");
+    }
+
+    /// The status word is registry copy, not a hardcoded English literal.
+    #[test]
+    fn the_parked_status_word_follows_the_ui_locale() {
+        let mut app = create_test_app();
+        app.ui_locale = Locale::De;
+        app.subagent_cache.push(parked_agent("agent_parked_de"));
+        crate::tui::subagent_routing::reconcile_subagent_activity_state(&mut app);
+
+        let rows = sidebar_agent_rows(&app);
+        assert_eq!(
+            rows[0].status,
+            codewhale_localization::tr(
+                Locale::De,
+                codewhale_localization::MessageId::AgentStatusParked
+            )
+        );
     }
 
     // --- Unicode / CJK / terminal-width QA (issue #3488) -------------------

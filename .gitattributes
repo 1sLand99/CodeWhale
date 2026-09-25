@@ -19,13 +19,24 @@ crates/telemetry/tests/golden/*.json text eol=lf
 # always join rows with LF (golden_harness.rs::render_golden_text), so a
 # CRLF checkout failed all eight Windows golden tests with a pure \r\n diff.
 crates/tui/src/tui/goldens/*.txt text eol=lf
+# FEAT-025 baseline export goldens (crates/tui/src/commands/fixtures/*.md) are
+# include_str!()'d and compared byte for byte against a document the exporter
+# builds with LF, so a CRLF checkout failed the four Windows golden tests with a
+# pure \r\n diff (Windows CI caught this; Linux cannot see it).
+crates/tui/src/commands/fixtures/*.md text eol=lf
 crates/*/assets/**/*.json text eol=lf
 crates/*/assets/**/*.md text eol=lf
 crates/*/locales/*.json text eol=lf
 workflows/*.js text eol=lf
+# Executable documentation: the Fleet tutorial's JSON fence is parsed by the
+# task-spec contract test, so its bytes must agree on Windows and Unix.
+docs/FLEET_WORKFLOW_TUTORIAL.md text eol=lf
 # The dsh bundle scene is include_str!() into the generated client.js and
 # hashed for stale detection; CRLF would change both across platforms.
 crates/tui/src/integrations/dsh/*.js text eol=lf
+# The native DSH import fixture bundle is hashed into the conversion receipt,
+# so a CRLF checkout changed the expected digest on Windows.
+scripts/fixtures/dsh-web-app/** text eol=lf
 
 # Rustfmt writes LF; keep Rust sources stable across Windows/Linux/macOS.
 *.rs text eol=lf
@@ -39,3 +50,6 @@ scripts/release/*.sh text eol=lf
 
 # Everything else auto-detects (default).
 * text=auto
+
+# Preserve the qualified upstream font license, including its trailing space.
+web/public/brand/fonts/OFL.txt text eol=lf whitespace=-blank-at-eol

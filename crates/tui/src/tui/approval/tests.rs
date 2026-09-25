@@ -265,7 +265,7 @@ fn test_approval_request_derives_impact_summary() {
         request
             .impacts
             .iter()
-            .any(|line| line.contains("Executes a Bash command"))
+            .any(|line| line.contains("Runs a shell command"))
     );
     assert!(
         request
@@ -296,7 +296,7 @@ fn mcp_impact_summary_preserves_full_target_for_underscored_names() {
         request
             .impacts
             .iter()
-            .any(|line| line == "MCP target: my_db_execute_sql")
+            .any(|line| line == "Connected app: my_db_execute_sql")
     );
     assert!(!request.impacts.iter().any(|line| line == "Server: my"));
 
@@ -304,7 +304,7 @@ fn mcp_impact_summary_preserves_full_target_for_underscored_names() {
     assert!(
         zh_impacts
             .iter()
-            .any(|line| line == "MCP 目标：my_db_execute_sql")
+            .any(|line| line == "已连接应用：my_db_execute_sql")
     );
     assert!(!zh_impacts.iter().any(|line| line == "服务器：my"));
 }
@@ -643,6 +643,37 @@ fn test_approval_view_initial_state() {
     assert_eq!(view.current_option(), ApprovalOption::Deny);
     assert!(view.timeout.is_none());
     assert_eq!(view.risk(), RiskLevel::Benign);
+}
+
+#[test]
+fn zero_timeout_builder_keeps_the_card_unbounded() {
+    let mut view =
+        ApprovalView::new(benign_request()).with_timeout(Some(std::time::Duration::ZERO));
+    assert!(view.timeout.is_none());
+    assert!(matches!(view.tick(), ViewAction::None));
+}
+
+#[test]
+fn expired_approval_card_denies_fail_closed() {
+    let mut view =
+        ApprovalView::new(benign_request()).with_timeout(Some(std::time::Duration::from_secs(30)));
+    view.requested_at = std::time::Instant::now() - std::time::Duration::from_secs(31);
+
+    assert!(matches!(
+        view.tick(),
+        ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+            decision: ReviewDecision::Denied,
+            timed_out: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn unexpired_approval_card_stays_open() {
+    let mut view =
+        ApprovalView::new(benign_request()).with_timeout(Some(std::time::Duration::from_secs(30)));
+    assert!(matches!(view.tick(), ViewAction::None));
 }
 
 #[test]
@@ -1769,8 +1800,8 @@ fn agent_tool_is_classified_and_renders_calm() {
     let view = ApprovalView::new(request);
     let lines = render_lines(&view, 100, 40);
     let joined = lines.join("\n");
-    assert!(joined.contains("APPROVAL"), "{joined}");
-    assert!(!joined.contains("DESTRUCTIVE"), "{joined}");
+    assert!(joined.contains("Starts an agent"), "{joined}");
+    assert!(!joined.contains("Can't be undone"), "{joined}");
     assert!(
         !joined.contains("not classified"),
         "agent must not render the unknown-tool warning:\n{joined}"
@@ -1801,7 +1832,12 @@ fn render_benign_includes_review_badge_and_selection_hint() {
     let view = ApprovalView::new(benign_request());
     let lines = render_lines(&view, 100, 40);
     let joined = lines.join("\n");
-    assert!(joined.contains("REVIEW"), "missing REVIEW badge:\n{joined}");
+    assert!(
+        joined.contains("Reads only"),
+        "missing effect badge:\n{joined}"
+    );
+    // The card leads with the plain summary, workspace-relative (E6).
+    assert!(joined.contains("Read src/main.rs"), "{joined}");
     assert_approval_key_badges_visible(&joined);
     // The selection prose moved into the per-option key badges; the footer
     // keeps only the escape-hatch hints.
@@ -1809,7 +1845,6 @@ fn render_benign_includes_review_badge_and_selection_hint() {
         joined.contains("Pg↑/↓ review"),
         "footer controls hint missing:\n{joined}"
     );
-    assert!(joined.contains("read_file"));
 }
 
 #[test]
@@ -1817,7 +1852,7 @@ fn approval_footer_hints_use_muted_contrast_tier() {
     // #3380: the footer key hints ("Pg↑/↓ review · Alt+V/⌥V details · Esc abort")
     // must render one contrast tier above TEXT_HINT — TEXT_MUTED, the same
     // color the app-wide ActionHint modal footers use for labels.
-    use crate::palette;
+    use codewhale_palette as palette;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -1846,16 +1881,19 @@ fn approval_footer_hints_use_muted_contrast_tier() {
 
 #[test]
 fn render_elevated_write_is_calm_and_compact() {
-    // Ordinary state-touching work (a file write) renders as a calm
-    // APPROVAL ask: no DESTRUCTIVE badge, no policy dossier, no
-    // impact/category taxonomy — that detail stays one details chord away.
+    // Ordinary state-touching work (a file write) renders as a calm ask
+    // that names its effect: no "Can't be undone" badge, no policy dossier,
+    // no impact/category taxonomy — that detail stays one details chord away.
     let view = ApprovalView::new(destructive_request());
     let lines = render_lines(&view, 100, 40);
     let joined = lines.join("\n");
-    assert!(joined.contains("APPROVAL"), "missing calm badge:\n{joined}");
     assert!(
-        !joined.contains("DESTRUCTIVE"),
-        "routine write must not scream DESTRUCTIVE:\n{joined}"
+        joined.contains("Changes files"),
+        "missing effect badge:\n{joined}"
+    );
+    assert!(
+        !joined.contains("Can't be undone"),
+        "routine write must not claim it is irreversible:\n{joined}"
     );
     assert_approval_key_badges_visible(&joined);
     assert!(
@@ -1863,7 +1901,7 @@ fn render_elevated_write_is_calm_and_compact() {
         "footer controls hint missing:\n{joined}"
     );
     assert!(
-        !joined.contains("active approval policy"),
+        !joined.contains("Your permissions"),
         "policy prose is critical-only:\n{joined}"
     );
     assert!(
@@ -1874,7 +1912,7 @@ fn render_elevated_write_is_calm_and_compact() {
         !joined.contains("Type:"),
         "category taxonomy is critical-only:\n{joined}"
     );
-    assert!(joined.contains("write_file"));
+    assert!(joined.contains("Write src/main.rs"), "{joined}");
 }
 
 #[test]
@@ -1885,18 +1923,22 @@ fn render_critical_shows_warning_badge_and_policy_semantics() {
     let lines = render_lines(&view, 100, 40);
     let joined = lines.join("\n");
     assert!(
-        joined.contains("DESTRUCTIVE"),
-        "missing DESTRUCTIVE badge:\n{joined}"
+        joined.contains("Can't be undone"),
+        "missing irreversible badge:\n{joined}"
     );
     assert_approval_key_badges_visible(&joined);
     assert!(
-        joined.contains("active approval policy"),
-        "missing policy/review-rule semantics:\n{joined}"
+        joined.contains("Your permissions, a review rule"),
+        "missing permission/review-rule semantics:\n{joined}"
     );
     assert!(
-        joined.contains("Deny rejects only this tool call"),
-        "missing deny-vs-abort semantics:\n{joined}"
+        joined.contains("Don't allow skips only this step"),
+        "missing don't-allow-vs-stop semantics:\n{joined}"
     );
+    // Mark 4: no approval surface says Bash, MCP or abort.
+    for banned in ["Bash", "MCP", "abort", "Abort"] {
+        assert!(!joined.contains(banned), "{banned} on the card:\n{joined}");
+    }
     assert!(joined.contains("rm -rf"));
 }
 
@@ -1906,11 +1948,11 @@ fn render_elevated_zh_hans_is_calm_and_localized() {
     let lines = render_lines(&view, 100, 40);
     let joined = compact_rendered_text(&lines);
     assert!(
-        joined.contains("需要批准"),
-        "missing zh calm badge:\n{joined}"
+        joined.contains("修改文件"),
+        "missing zh effect badge:\n{joined}"
     );
     assert!(
-        !joined.contains("破坏性"),
+        !joined.contains("无法撤销"),
         "routine write must not use the destructive zh badge:\n{joined}"
     );
     assert!(
@@ -1958,7 +2000,7 @@ fn render_critical_zh_hans_localizes_security_copy() {
     let lines = render_lines(&view, 100, 40);
     let joined = compact_rendered_text(&lines);
     assert!(
-        joined.contains("破坏性"),
+        joined.contains("无法撤销"),
         "missing zh risk badge:\n{joined}"
     );
     assert!(
@@ -2142,6 +2184,29 @@ fn test_elevation_render_en_has_expected_strings() {
         joined.contains("Reason:"),
         "missing en reason label:\n{joined}"
     );
+}
+
+#[test]
+fn elevation_always_paints_every_option_including_the_safe_exit() {
+    // The card used to be a fixed 22 rows centred on the frame, with no scroll
+    // rail and no truncation hint, so the option list ran off the bottom and
+    // `Abort` — the only choice that grants nothing — was unreachable by sight
+    // at every terminal size. Options are reserved now; the denial detail is
+    // what shortens.
+    let view = ElevationView::new(elevation_shell_request(), Locale::En);
+    for (w, h) in [(70, 22), (80, 24), (100, 32), (140, 40), (60, 16)] {
+        let joined = compact_elevation_text(&render_elevation_lines(&view, w, h));
+        for option in ["Abort", "Fullaccess", "Allowoutboundnetwork"] {
+            assert!(
+                joined.contains(option),
+                "{w}x{h}: option '{option}' is not on screen:\n{joined}"
+            );
+        }
+        assert!(
+            joined.contains("SandboxDenied"),
+            "{w}x{h}: the card lost its title:\n{joined}"
+        );
+    }
 }
 
 #[test]
@@ -2474,38 +2539,6 @@ fn workflow_plan_card_edit_plan_and_cancel_keys() {
         }
         other => panic!("expected cancel abort, got {other:?}"),
     }
-}
-
-// ========================================================================
-// ApprovalMode Tests
-// ========================================================================
-
-#[test]
-fn test_approval_mode_labels() {
-    assert_eq!(ApprovalMode::Auto.label(), "AUTO");
-    assert_eq!(ApprovalMode::Suggest.label(), "SUGGEST");
-    assert_eq!(ApprovalMode::Never.label(), "NEVER");
-}
-
-#[test]
-fn test_approval_mode_from_config_value_accepts_aliases() {
-    assert_eq!(
-        ApprovalMode::from_config_value("auto"),
-        Some(ApprovalMode::Auto)
-    );
-    assert_eq!(
-        ApprovalMode::from_config_value("on-request"),
-        Some(ApprovalMode::Suggest)
-    );
-    assert_eq!(
-        ApprovalMode::from_config_value("full_access"),
-        Some(ApprovalMode::Bypass)
-    );
-    assert_eq!(
-        ApprovalMode::from_config_value("deny"),
-        Some(ApprovalMode::Never)
-    );
-    assert_eq!(ApprovalMode::from_config_value("unknown"), None);
 }
 
 #[test]

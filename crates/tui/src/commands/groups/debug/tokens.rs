@@ -1,9 +1,9 @@
 //! Token/cost introspection and context commands.
 
 use crate::compaction::estimate_input_tokens_conservative;
-use crate::localization::{Locale, MessageId, tr};
-use crate::models::SystemPrompt;
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::SystemPrompt;
 
 use super::CommandResult;
 
@@ -101,7 +101,7 @@ fn cache_write_summary(app: &App, locale: Locale) -> String {
 /// Show session cost breakdown.
 ///
 /// The figure is an **estimate** computed from provider-reported usage and
-/// published rates; it is never an invoice. Turns whose route produced no
+/// the recorded pricing sources; it is never an invoice. Turns whose route produced no
 /// authoritative price are missing from it entirely, so the coverage of the
 /// number is reported alongside it rather than left implicit (#4318).
 pub fn cost(app: &mut App) -> CommandResult {
@@ -116,7 +116,16 @@ pub fn cost(app: &mut App) -> CommandResult {
     } else {
         MessageId::CmdCostReport
     };
-    let mut report = tr(locale, headline).replace("{cost}", &cost_report_amount(app, locale));
+    let mut report = if has_declared_estimates(app) {
+        // Like the diagnostic breakdown below, state the actual accounting
+        // basis without the legacy templates' published-rate assertion.
+        format!(
+            "Session cost estimate (priced subtotal): {}",
+            cost_report_amount(app, locale)
+        )
+    } else {
+        tr(locale, headline).replace("{cost}", &cost_report_amount(app, locale))
+    };
     if priced > 0 || has_saved_legacy_subtotal {
         report.push_str(&cost_breakdown_report(app));
     }
@@ -268,6 +277,12 @@ fn joined(values: &std::collections::BTreeSet<String>) -> String {
         .join(", ")
 }
 
+fn has_declared_estimates(app: &App) -> bool {
+    app.session
+        .cost_pricing_provenances
+        .contains("user_override")
+}
+
 /// The honesty block appended to `/cost` and `/tokens`: what the estimate covers
 /// and what it cannot.
 ///
@@ -276,13 +291,23 @@ fn joined(values: &std::collections::BTreeSet<String>) -> String {
 pub(crate) fn cost_coverage_report(app: &App, locale: Locale) -> String {
     let (priced, unpriced) = cost_coverage_counts(app);
     let mut out = String::from("\n\n");
-    out.push_str(&tr(locale, MessageId::CmdCostEstimateOnly));
+    let declared = has_declared_estimates(app);
+    if declared {
+        out.push_str("Includes user-declared, unverified price estimates calculated from recorded usage. These amounts do not establish provider prices, billing mode, or an invoice.");
+    } else {
+        out.push_str(&tr(locale, MessageId::CmdCostEstimateOnly));
+    }
     out.push('\n');
     if app.session.cost_coverage_unknown_legacy {
         // A restored pre-coverage session has real money and no evidence of what
         // it covers. Saying "0 of 0 priced" here would assert the total is
         // complete, so the unknown state is stated instead.
         out.push_str(&tr(locale, MessageId::CmdCostCoverageUnknownLegacy));
+    } else if declared {
+        out.push_str(&format!(
+            "Coverage: {priced} of {} tracked turns priced or estimated.",
+            priced.saturating_add(unpriced)
+        ));
     } else {
         out.push_str(
             &tr(locale, MessageId::CmdCostCoverage)
@@ -296,10 +321,25 @@ pub(crate) fn cost_coverage_report(app: &App, locale: Locale) -> String {
             crate::pricing::CostCurrency::Cny => &app.session.cost_cny_unpriced_reasons,
         };
         out.push('\n');
+        let excluded = if declared {
+            "Excluded: {unpriced} turns have incomplete prices ({reasons}); their cost is unknown."
+                .to_string()
+        } else {
+            tr(locale, MessageId::CmdCostUnpricedTurns).to_string()
+        };
         out.push_str(
-            &tr(locale, MessageId::CmdCostUnpricedTurns)
+            &excluded
                 .replace("{unpriced}", &unpriced.to_string())
-                .replace("{reasons}", &joined(reasons)),
+                .replace(
+                    "{reasons}",
+                    &crate::route_billing::format_unpriced_reasons(
+                        &reasons
+                            .iter()
+                            .map(|reason| crate::pricing::UnpricedReason::from_label(reason))
+                            .collect::<Vec<_>>(),
+                        locale,
+                    ),
+                ),
         );
     }
     if !app.session.cost_unpriced_classes.is_empty() {
@@ -443,7 +483,7 @@ mod cost_breakdown_tests {
             ..crate::test_support::test_tui_options(PathBuf::from("/tmp/test-workspace"))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.cost_currency = CostCurrency::Usd;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app
@@ -477,6 +517,20 @@ mod cost_breakdown_tests {
             reasoning_replay_tokens: None,
             recorded_at: Instant::now(),
         }
+    }
+
+    #[test]
+    fn configured_model_cost_copy_does_not_claim_published_rates() {
+        let _env = crate::test_support::lock_test_env();
+        let mut app = test_app();
+        app.session
+            .cost_pricing_provenances
+            .insert("user_override".into());
+        app.session.cost_priced_turns = 1;
+        let report = cost_coverage_report(&app, Locale::En);
+        assert!(report.contains("user-declared, unverified price estimates"));
+        assert!(!report.contains("published rates"));
+        assert!(!report.contains("money-metered"));
     }
 
     /// The decomposition's terms are exactly the headline's inputs, so their

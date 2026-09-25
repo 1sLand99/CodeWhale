@@ -5,11 +5,12 @@ use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
+use super::http_client::McpHttpClient;
 use super::wire::{MAX_MCP_RESPONSE_BYTES, parse_sse_message_data};
 use super::{ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, bounded_body_excerpt, mask_url_secrets};
 
 pub(super) struct StreamableHttpTransport {
-    pub(super) client: reqwest::Client,
+    pub(super) client: McpHttpClient,
     pub(super) url: String,
     /// Request-time auth and custom header resolver for outbound POSTs.
     pub(super) auth: McpHttpAuth,
@@ -20,6 +21,11 @@ pub(super) struct StreamableHttpTransport {
     /// request so the server can correlate messages within the same
     /// session.
     pub(super) session_id: Option<String>,
+    /// Protocol revision negotiated at `initialize`. Attached as the
+    /// `MCP-Protocol-Version` header on every subsequent outbound request
+    /// per the Streamable HTTP spec (absent means the server assumes
+    /// the 2025-03-26 default, so the negotiated value is always sent).
+    protocol_version: Option<String>,
 }
 
 #[derive(Debug)]
@@ -30,14 +36,19 @@ pub(super) enum StreamableSendError {
 }
 
 impl StreamableHttpTransport {
-    pub(super) fn new(client: reqwest::Client, url: String, auth: McpHttpAuth) -> Self {
+    pub(super) fn new(client: McpHttpClient, url: String, auth: McpHttpAuth) -> Self {
         Self {
             client,
             url,
             auth,
             pending_messages: VecDeque::new(),
             session_id: None,
+            protocol_version: None,
         }
+    }
+
+    pub(super) fn set_protocol_version(&mut self, version: &str) {
+        self.protocol_version = Some(version.to_string());
     }
 
     pub(super) async fn send(
@@ -67,11 +78,16 @@ impl StreamableHttpTransport {
             if let Some(ref sid) = self.session_id {
                 request = request.header("Mcp-Session-Id", sid.as_str());
             }
-            let response = request
-                .body(msg.clone())
-                .send()
+            // Per the Streamable HTTP spec, subsequent requests carry the
+            // negotiated revision; absent means the server assumes 2025-03-26.
+            if let Some(ref version) = self.protocol_version {
+                request = request.header("MCP-Protocol-Version", version.as_str());
+            }
+            let response = self
+                .client
+                .send(request.body(msg.clone()))
                 .await
-                .map_err(|err| StreamableSendError::Other(err.into()))?;
+                .map_err(StreamableSendError::Other)?;
 
             let status = response.status();
 
@@ -108,7 +124,7 @@ impl StreamableHttpTransport {
                         }
                     }
                 }
-                let hint = unauthorized_session_hint(self.auth.oauth.is_some());
+                let hint = unauthorized_session_hint(self.auth.oauth_configured);
                 return Err(StreamableSendError::Other(anyhow::anyhow!(
                     "MCP server {} rejected the request with {status}; the session is no longer accepted. {hint}",
                     mask_url_secrets(&self.url),
@@ -223,6 +239,13 @@ fn oauth_refresh_failed_hint() -> &'static str {
     super::oauth::tui_reauth_refresh_failed_hint()
 }
 
+/// TUI recovery for a rejected OAuth session. `oauth_configured` is the
+/// server's configured auth path ([`McpHttpAuth::oauth_configured`]), not the
+/// presence of a cached token, so a first-run OAuth server — a 401 with
+/// nothing stored yet — is still pointed at `/mcp login <name>` rather than at
+/// a bearer token it never had (#6030). Servers where a bearer credential is
+/// genuinely configured (or that are plugin-contributed, where OAuth login is
+/// disabled) keep the bearer-token copy.
 fn unauthorized_session_hint(oauth_configured: bool) -> &'static str {
     if oauth_configured {
         super::oauth::tui_reauth_hint()
@@ -255,7 +278,42 @@ fn is_streamable_http_stale_session_status(status: StatusCode, body_excerpt: &st
 
 #[cfg(test)]
 mod tests {
-    use super::{oauth_refresh_failed_hint, unauthorized_session_hint};
+    use super::{McpHttpAuth, oauth_refresh_failed_hint, unauthorized_session_hint};
+    use crate::mcp::McpServerConfig;
+
+    fn server_config(json: serde_json::Value) -> McpServerConfig {
+        serde_json::from_value(json).expect("MCP server config fixture")
+    }
+
+    #[test]
+    fn oauth_configured_server_without_a_cached_token_names_login() {
+        // The OAuth fields are optional in MCP config, so a URL-based server
+        // with no manual bearer configuration is OAuth's to claim — including
+        // before the first login, when there is no runtime to observe.
+        let auth = McpHttpAuth::from_config(
+            "remote",
+            &server_config(serde_json::json!({ "url": "https://example.invalid/mcp" })),
+            None,
+        );
+        assert!(auth.oauth.is_none(), "precondition: no cached credential");
+        assert!(auth.oauth_configured, "a URL server is OAuth-servable");
+        assert!(
+            unauthorized_session_hint(auth.oauth_configured).contains("/mcp login <name>"),
+            "a first-run OAuth 401 must name the login command, not a bearer token"
+        );
+
+        // A server whose bearer token is genuinely expected keeps that copy.
+        let bearer = McpHttpAuth::from_config(
+            "remote",
+            &server_config(serde_json::json!({
+                "url": "https://example.invalid/mcp",
+                "bearer_token_env_var": "EXAMPLE_MCP_TOKEN",
+            })),
+            None,
+        );
+        assert!(!bearer.oauth_configured);
+        assert!(unauthorized_session_hint(bearer.oauth_configured).contains("bearer token"));
+    }
 
     #[test]
     fn unauthorized_oauth_hints_name_the_login_command() {

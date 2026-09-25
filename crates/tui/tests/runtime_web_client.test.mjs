@@ -407,7 +407,10 @@ test("new thread dialog labels exact vision capability without exposing attachme
   assert.match(html, /does not change your Runtime defaults/);
   assert.doesNotMatch(html, /type="file"/);
   assert.match(source, /api\("\/v1\/providers"\)/);
-  assert.match(source, /\/v1\/providers\/\$\{encodeURIComponent\(provider\.id\)\}\/models/);
+  // The dialog loads the catalog through the bounded, paginated collector
+  // keyed by provider.id; the wire endpoint stays /v1/providers/<id>/models.
+  assert.match(source, /collectProviderModelPages\(provider\.id/);
+  assert.match(source, /\/v1\/providers\/\$\{encodeURIComponent\(provider\)\}\/models\?\$\{query\.toString\(\)\}/);
   assert.match(source, /body: JSON\.stringify\(request\)/);
   assert.match(source, /function trapFocusWithin\(event, container\)/);
   assert.match(source, /dom\.newThreadCancel\.focus\(\{ preventScroll: true \}\)/);
@@ -599,12 +602,33 @@ test("registers the full emitted Runtime vocabulary and advances continuity for 
   let previousSeq = 7;
   for (const eventName of STREAM_EVENT_NAMES) {
     const sequence = previousSeq + 2;
-    const envelope = runtimeEvent(sequence, eventName, {}, { previous_seq: previousSeq });
+    const turnBefore = state.turns.get("turn-1");
+    const payload = eventName === "turn.usage"
+      ? { usage: { input_tokens: 100, output_tokens: 20 } }
+      : {};
+    const envelope = runtimeEvent(sequence, eventName, payload, { previous_seq: previousSeq });
     assert.equal(runtimeEventContinuity(state, envelope), "next", eventName);
     assert.equal(applyRuntimeEvent(state, envelope), true, eventName);
     assert.equal(state.latestSeq, sequence, eventName);
+    if (eventName === "turn.usage") {
+      // Request diagnostics advance continuity; only the settled turn owns totals.
+      assert.equal(state.turns.get("turn-1"), turnBefore);
+      assert.equal(applyRuntimeEvent(state, envelope), false);
+    }
     previousSeq = sequence;
   }
+  const settledTurn = {
+    id: "turn-1",
+    status: "completed",
+    usage: { input_tokens: 300, output_tokens: 60 },
+  };
+  assert.equal(applyRuntimeEvent(state, runtimeEvent(
+    previousSeq + 1,
+    "turn.completed",
+    { turn: settledTurn },
+    { previous_seq: previousSeq },
+  )), true);
+  assert.deepEqual(state.turns.get("turn-1"), settledTurn);
 });
 
 test("gap recovery snapshot restores approval and user-input attention before resubscribing", async () => {

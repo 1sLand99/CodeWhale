@@ -15,7 +15,7 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use crate::models::Tool;
+use codewhale_models::Tool;
 
 /// Sanitize a JSON Schema in-place for DeepSeek strict-tool compatibility.
 ///

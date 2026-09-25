@@ -7,6 +7,12 @@
 use super::*;
 
 impl App {
+    /// Install the Config owner's current policy and refresh its read-only UI projection.
+    pub(crate) fn refresh_notification_settings(&mut self, config: &Config) {
+        self.notification_settings = config.notifications_config();
+        let _ = crate::tui::notifications::settings(config);
+    }
+
     #[cfg(test)]
     pub fn new(options: TuiOptions, config: &Config) -> Self {
         let workspace = options.workspace.clone();
@@ -114,6 +120,23 @@ impl App {
             false
         };
         settings.apply_env_overrides();
+        // Config::load resolves this once for every runtime. Direct in-memory
+        // callers use the same policy here, before any startup route is used.
+        let mut startup_config = config.clone();
+        if config_profile.is_some()
+            || (startup_config.remembered_selection_scope.is_none()
+                && (crate::config::explicit_launch_provider_override().is_some()
+                    || crate::config::explicit_launch_model_override().is_some()))
+        {
+            startup_config.remembered_selection_scope = Some(false);
+        }
+        let selected = startup_config.apply_saved_selection(&settings);
+        let config = &startup_config;
+        let model = if selected {
+            config.default_model()
+        } else {
+            model
+        };
         // Tideline Startup is the fresh interactive landing surface. It must
         // not be bypassed by a stale historical `launch_screen = false`, a
         // provider/config notice, or a previous session record: only an
@@ -136,47 +159,22 @@ impl App {
                 None
             }
         });
-        let tui_prefs_warning = crate::settings::TuiPrefs::path().ok().and_then(|p| {
-            if p.exists() {
-                std::fs::read_to_string(&p).ok().and_then(|raw| {
-                    ::toml::from_str::<::toml::Value>(&raw)
-                        .err()
-                        .map(|e| format!("⚠ tui.toml is malformed — using defaults ({e})"))
-                })
-            } else {
-                None
-            }
-        });
-
-        let mut provider = config.api_provider();
-
-        // A startup route saved explicitly from `/model` is a user choice and
-        // must win over a provider merely seeded in config.toml. A one-launch
-        // CLI/environment provider override still wins so scripts can pin
-        // their route without changing the user's next interactive launch.
-        let explicit_launch_provider = crate::config::explicit_launch_provider_override().is_some();
-        let mut provider_identity_record = config
-            .active_provider_identity(provider)
-            .unwrap_or_else(|_| {
-                let key = config.provider_identity_for(provider);
-                let exact_id = (!(provider == ApiProvider::Custom
-                    && config.uses_legacy_literal_custom_route()))
-                .then(|| key.clone());
-                crate::config::ProviderIdentity {
-                    provider,
-                    key,
-                    exact_id,
-                    migrated_legacy_ollama_cloud_route: false,
-                }
-            });
-        if !explicit_launch_provider
-            && !config.fleet_operator_route_applied
-            && let Some(ref provider_str) = settings.default_provider
-            && let Ok(resolved) = config.resolve_provider_identity(provider_str)
-        {
-            provider = resolved.provider;
-            provider_identity_record = resolved;
-        }
+        let provider = config.api_provider();
+        let provider_identity_record =
+            config
+                .active_provider_identity(provider)
+                .unwrap_or_else(|_| {
+                    let key = config.provider_identity_for(provider);
+                    let exact_id = (!(provider == ApiProvider::Custom
+                        && config.uses_legacy_literal_custom_route()))
+                    .then(|| key.clone());
+                    crate::config::ProviderIdentity {
+                        provider,
+                        key,
+                        exact_id,
+                        migrated_legacy_ollama_cloud_route: false,
+                    }
+                });
         let mut effective_auth_config = config.clone();
         effective_auth_config.scope_to_provider_identity(&provider_identity_record);
         let provider_identity = provider_identity_record.key;
@@ -201,12 +199,20 @@ impl App {
             && effective_auth_config
                 .provider_config_for(ApiProvider::Xai)
                 .and_then(|entry| entry.auth_mode.as_deref())
-                .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
-            && !crate::xai_oauth::credentials_present(&effective_auth_config);
+                .is_some_and(crate::oauth::auth_mode_uses_xai_oauth)
+            && !crate::oauth::credentials_present(
+                crate::oauth::OAuthProvider::Xai,
+                &effective_auth_config,
+            );
         let xai_dangling_repair_message = if xai_oauth_needs_reauth {
-            if crate::xai_oauth::owned_generation_is_dangling(&effective_auth_config) {
-                match crate::xai_oauth::clear_dangling_xai_oauth_generation(config_path.as_deref())
-                {
+            if crate::oauth::owned_generation_is_dangling(
+                crate::oauth::OAuthProvider::Xai,
+                &effective_auth_config,
+            ) {
+                match crate::oauth::clear_dangling_generation(
+                    crate::oauth::OAuthProvider::Xai,
+                    config_path.as_deref(),
+                ) {
                     Ok(()) => {
                         // Keep the in-memory route consistent with the repaired
                         // persisted file so the running app never reaches for
@@ -266,6 +272,9 @@ impl App {
         let settings_auto_compact = settings.auto_compact;
         let auto_compact_user_configured = Settings::auto_compact_explicitly_configured();
         let auto_compact_threshold_percent = settings.auto_compact_threshold_percent;
+        let compaction_summary_instructions = config.compaction_summary_instructions();
+        let compaction_retained_user_message_tokens =
+            config.compaction_retained_user_message_tokens();
         let calm_mode = settings.calm_mode;
         let low_motion = settings.low_motion;
         let constrained_frame_rate = settings.constrained_frame_rate;
@@ -288,6 +297,13 @@ impl App {
         let show_tool_details = settings.show_tool_details;
         let inline_diff_mode = InlineDiffMode::parse(&settings.inline_diffs);
         let ui_locale = resolve_locale(&settings.locale);
+        // The dead `tui.toml` store was folded into settings.toml on load.
+        // Say so once, in the user's language, rather than letting a theme
+        // move under them unexplained.
+        let tui_prefs_migration_notice = settings
+            .tui_prefs_migration()
+            .map(|receipt| receipt.lines(ui_locale).join(" "))
+            .filter(|line| !line.is_empty());
         let cost_currency = match (settings.cost_currency.as_str(), ui_locale.tag()) {
             ("usd", "zh-Hans") => CostCurrency::Cny,
             _ => CostCurrency::from_setting(&settings.cost_currency).unwrap_or(CostCurrency::Usd),
@@ -301,13 +317,10 @@ impl App {
             .eq_ignore_ascii_case("vim");
         let transcript_spacing = TranscriptSpacing::from_setting(&settings.transcript_spacing);
         let max_input_history = settings.max_input_history;
-        // The rapid-keystroke heuristic is the fallback for terminals
-        // without bracketed paste, not a second guess layered on top of a
-        // working one: when bracketed paste is enabled it must stay off, or
-        // every fast-typed command goes through hold/buffer windows that
-        // scramble the composer (Y-7, 2026-08-31 QA). The setting remains
-        // the fallback's switch, honored only when bracketed paste is off.
-        let use_paste_burst_detection = settings.paste_burst_detection && !use_bracketed_paste;
+        // Requesting bracketed paste does not prove the terminal delivers it.
+        // Keep the fallback until handle_paste_burst_key observes a real paste
+        // via bracketed_paste_seen; otherwise raw pasted newlines can submit.
+        let use_paste_burst_detection = settings.paste_burst_detection;
         // Resolve the named theme from settings; unknown values were already
         // normalised to the underwater default in Settings::load. The
         // background_color setting still overlays on top.
@@ -324,7 +337,7 @@ impl App {
                 settings.theme
             )
         });
-        let (_, theme_id, ui_theme) = resolved_theme.unwrap_or_else(|_| {
+        let (theme_name, theme_id, ui_theme) = resolved_theme.unwrap_or_else(|_| {
             let id = palette::ThemeId::System;
             let mut theme = id.ui_theme();
             if let Some(background) = background_color_override {
@@ -332,48 +345,34 @@ impl App {
             }
             (id.name().to_string(), id, theme)
         });
-        let provider_models = settings.provider_models.clone().unwrap_or_default();
-        // `provider_models` remembers the last `/model` pick per provider. It
-        // is a convenience default, not an override: when this launch named a
-        // model explicitly (`--model`, forwarded as `CODEWHALE_MODEL`), that
-        // request wins. Before this fix the memory won unconditionally, so
-        // `codewhale --provider moonshot --model kimi-k3` silently kept running
-        // the remembered `kimi-k2.7-code` while `doctor` reported `kimi-k3`.
-        let model = if crate::config::explicit_launch_model_override().is_some()
-            || config.fleet_operator_route_applied
-        {
-            model
-        } else {
-            let configured = model;
-            provider_models
-                .get(&provider_identity)
-                .cloned()
-                .or_else(|| {
-                    // default_model is a DeepSeek-centric setting; other providers
-                    // get their model from config.toml / env (e.g. OPENAI_MODEL).
-                    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                        settings.default_model.clone()
-                    } else {
-                        None
-                    }
-                })
-                // The remembered pick may be a catalog spelling of the model
-                // the config file already names. Case-sensitive self-hosted
-                // endpoints reject the wrong spelling, so config.toml wins a
-                // case-only disagreement (the selection itself is unchanged).
-                .map(|remembered| {
-                    crate::config::prefer_configured_model_spelling(&configured, remembered)
-                })
-                .unwrap_or(configured)
-        };
-        let auto_model = model.trim().eq_ignore_ascii_case("auto");
-        let mut enabled_provider_models = settings.enabled_models.clone().unwrap_or_default();
-        for (saved_provider, saved_model) in &provider_models {
-            push_enabled_provider_model(&mut enabled_provider_models, saved_provider, saved_model);
+        // Remembered route choices were resolved once into Config. The
+        // chooser and hotbar must not revive archived Settings values.
+        let mut provider_models = HashMap::new();
+        for &candidate in ApiProvider::all() {
+            if candidate != ApiProvider::Custom
+                && let Some(model) = config
+                    .provider_config_for(candidate)
+                    .and_then(|entry| entry.model.as_ref())
+            {
+                provider_models.insert(config.provider_identity_for(candidate), model.clone());
+            }
         }
-        push_enabled_provider_model(&mut enabled_provider_models, &provider_identity, &model);
+        if let Some(providers) = config.providers.as_ref() {
+            for (identity, entry) in &providers.custom {
+                if let Some(model) = entry.model.as_ref() {
+                    provider_models.insert(identity.clone(), model.clone());
+                }
+            }
+        }
+        provider_models.insert(provider_identity.clone(), model.clone());
+        let auto_model = model.trim().eq_ignore_ascii_case("auto");
+        // `settings.toml [enabled_models]` is no longer read (#6533): the
+        // picker ranks by use, which this index derives from saved sessions.
+        let route_usage = crate::model_relevance::SharedRouteUsage::default();
+        crate::model_relevance::spawn_build(route_usage.clone());
         let active_context_window_override = config.context_window_for_provider_config(provider);
-        let configured_route_base_url = effective_auth_config.deepseek_base_url();
+        let active_model_context_windows = config.model_context_windows_for(provider).cloned();
+        let configured_route_base_url = effective_auth_config.active_route_base_url();
         let (active_route_limits, active_route_base_url, active_context_window_source) =
             if auto_model {
                 (
@@ -389,16 +388,10 @@ impl App {
                     },
                 )
             } else {
-                let saved_provider_model = config
-                    .provider_config_for(provider)
-                    .and_then(|provider| provider.model.as_deref());
-                crate::route_runtime::resolve_route_candidate_with_context_metadata(
+                crate::route_runtime::resolve_runtime_route(
+                    &effective_auth_config,
                     provider,
                     Some(&model),
-                    saved_provider_model,
-                    Some(configured_route_base_url.clone()),
-                    active_context_window_override,
-                    None,
                 )
                 .map(|resolution| {
                     (
@@ -474,7 +467,7 @@ impl App {
             && !reasoning_effort_explicit
             && let Some(effort) = crate::config::legacy_deepseek_alias_effort_for_route(
                 provider,
-                &effective_auth_config.deepseek_base_url(),
+                &effective_auth_config.active_route_base_url(),
                 &model,
             )
         {
@@ -679,10 +672,31 @@ impl App {
                 plugin_registry.as_ref(),
             )
             .map(|cfg| {
+                // Boot is lazy (#6033): the pre-event "connecting" prediction
+                // is the eager set — `required` servers plus ones the user's
+                // `tools.always_load` selection covers — not every enabled
+                // server. The engine's first boot event replaces this with
+                // the real in-flight set.
+                let requested = config
+                    .tools
+                    .as_ref()
+                    .map(|tools| {
+                        tools
+                            .always_load
+                            .iter()
+                            .map(|name| name.trim().to_ascii_lowercase())
+                            .filter(|name| name.starts_with("mcp_"))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let mut connecting = cfg
                     .servers
                     .iter()
                     .filter(|(_, server)| server.is_enabled())
+                    .filter(|(name, server)| {
+                        server.required
+                            || crate::mcp::tool_selection_covers_server(&requested, name)
+                    })
                     .map(|(name, _)| name.clone())
                     .collect::<Vec<_>>();
                 connecting.sort();
@@ -722,7 +736,7 @@ impl App {
                 selected_attachment_index: None,
                 slash_menu_selected: 0,
                 slash_menu_hidden: false,
-                    mention_menu_selected: 0,
+                mention_menu_selected: 0,
                 mention_menu_hidden: false,
                 mention_completion_cache: None,
                 mention_discovery: crate::tui::mention_completion::MentionDiscovery::default(),
@@ -731,8 +745,20 @@ impl App {
                 vim_mode: VimMode::Normal,
                 vim_pending_d: false,
                 selection_anchor: None,
+                // Seeded text was not typed, so it makes no command claim;
+                // startup integrity is decided by the replay receipt (#5925).
+                line_began_with_slash: false,
+                startup_input_unproven: false,
             },
-            viewport: ViewportState::default(),
+            viewport: ViewportState {
+                selection_copy_markdown: config
+                    .tui
+                    .as_ref()
+                    .and_then(|tui| tui.selection_copy_markdown)
+                    .unwrap_or(true),
+                ..ViewportState::default()
+            },
+            pet_watch: crate::tui::pet_watch::PetWatch::default(),
             work_surface: {
                 let mut state = crate::tui::work_surface::WorkSurfaceState::with_layout(
                     work_surface_placement,
@@ -757,7 +783,9 @@ impl App {
             history_revisions: Vec::new(),
             tool_run_cache: ToolRunCache::default(),
             next_history_revision: 1,
-            api_messages: Vec::new(),
+            api_messages: Arc::new(Vec::new()),
+            api_message_stamps: Vec::new(),
+            session_journal: crate::session_tree::SessionJournal::new(),
             completed_assistant_outputs: Vec::new(),
             context_token_cache: std::cell::RefCell::new(Default::default()),
             remote_control: crate::remote_control::RemoteControlController::default(),
@@ -768,6 +796,7 @@ impl App {
             last_enter_instant: None,
             provider_wait_incident_logged: false,
             prompt_suggestion: None,
+            notification_settings: config.notifications_config(),
             prompt_suggestion_gen: std::sync::atomic::AtomicU64::new(0),
             offline_mode: false,
             turn_error_posted: false,
@@ -775,7 +804,7 @@ impl App {
             // broken instead of silently losing all settings.
             status_message: xai_dangling_repair_message
                 .or(settings_parse_warning)
-                .or(tui_prefs_warning)
+                .or(tui_prefs_migration_notice)
                 .or(theme_warning),
             status_toasts: VecDeque::new(),
             update_available: None,
@@ -783,13 +812,12 @@ impl App {
             last_status_message_seen: None,
             context_pressure_warning_dismissed: None,
             plugin_reload_nudge_stamp: None,
-            plugin_prompt_suggest_names: HashSet::new(),
-            plugin_prompt_suggest_count: 0,
             last_plugin_catalog_poll: None,
-            plugin_cta: crate::tui::plugin_suggestions::PluginCtaState::default(),
+            plugin_cta: crate::tui::plugin_suggestions::PluginCtaState::from_settings(&settings),
             model,
             provider_models,
-            enabled_provider_models,
+            route_usage,
+            configured_models: config.custom_models.clone().unwrap_or_default(),
             pinned_models: settings.pinned_models.clone(),
             auto_model,
             last_effective_model: None,
@@ -811,6 +839,7 @@ impl App {
             active_route_base_url,
             active_context_window_source,
             active_context_window_override,
+            active_model_context_windows,
             pending_provider_switch: None,
             reasoning_effort,
             reasoning_effort_preference,
@@ -818,6 +847,7 @@ impl App {
             workspace,
             workflow_config: config.workflow_config(),
             goal_max_continuations: config.goal_max_continuations(),
+            goal_enforce_token_budget: config.goal_enforce_token_budget(),
             goal_continuation_waiting: false,
             configured_sandbox_mode: config.sandbox_mode.clone(),
             configured_sandbox_network: config.sandbox_network_access,
@@ -847,10 +877,13 @@ impl App {
             use_bracketed_paste,
             use_paste_burst_detection,
             bracketed_paste_seen: false,
+            bracketed_paste_trusted: crate::tui::paste::terminal_delivers_bracketed_paste(),
             system_prompt: None,
             auto_compact,
             auto_compact_user_configured,
             auto_compact_threshold_percent,
+            compaction_summary_instructions,
+            compaction_retained_user_message_tokens,
             stopped_turn: false,
             calm_mode,
             low_motion,
@@ -924,7 +957,11 @@ impl App {
             ui_theme,
             background_color_override,
             theme_id,
+            theme_name,
             onboarding,
+            redaction_gate: false,
+            redaction_gate_confirming: false,
+            redaction_gate_scroll: std::cell::Cell::new(0),
             onboarding_needs_api_key: needs_api_key,
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
@@ -955,8 +992,11 @@ impl App {
             },
             view_stack: ViewStack::new(),
             pending_user_input_prompt: None,
+            pending_child_requests: std::collections::BTreeMap::new(),
+            child_agent_sessions: std::collections::HashMap::new(),
             backtrack: crate::tui::backtrack::BacktrackState::new(),
             current_session_id: None,
+            offline_queue_lease: None,
             last_known_work_state: None,
             last_known_goal_state: None,
             pending_goal_controls: VecDeque::new(),
@@ -970,15 +1010,20 @@ impl App {
                 .as_ref()
                 .and_then(|tui| tui.status_items.clone())
                 .unwrap_or_else(crate::config::StatusItem::default_footer),
+            posture_bar: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.posture_bar)
+                .unwrap_or_default(),
+            metrics_line: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.metrics_line)
+                .unwrap_or(crate::config::ChromeRowPreset::Compact),
             // Prose wrap cap (`[transcript] prose_measure`, #5436). Resolved
             // once here so every render pass — main cache and full-screen
             // overlay — shares one effective width; `None` = full width.
             prose_measure: config.prose_measure(),
-            header_items: config
-                .tui
-                .as_ref()
-                .and_then(|tui| tui.header_items.clone())
-                .unwrap_or_else(crate::config::HeaderItem::default_header),
             project_doc: None,
             plan_state,
             todos,
@@ -1002,6 +1047,7 @@ impl App {
             // or malformed config simply hides the chip.
             mcp_configured_count,
             mcp_reload_required: false,
+            mcp_reload_in_flight: false,
             tool_log: Vec::new(),
             active_skill: None,
             active_skill_provenance: None,
@@ -1014,6 +1060,7 @@ impl App {
             active_cell_revision: 0,
             active_tool_details: HashMap::new(),
             agent_roster: Vec::new(),
+            agent_roster_session_id: None,
             agent_roster_print_requested: false,
             active_tool_entry_completed_at: HashMap::new(),
             exploring_cell: None,
@@ -1036,7 +1083,7 @@ impl App {
             queued_messages: VecDeque::new(),
             queued_draft: None,
             pending_steers: VecDeque::new(),
-            rejected_steers: VecDeque::new(),
+            inflight_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
             turn_started_at: None,
             turn_last_activity_at: None,
@@ -1046,6 +1093,7 @@ impl App {
             draft_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             constitution_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            mcp_login: None,
             prompt_suggestion_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             balance_initiated: false,
             last_balance_fetch: None,
@@ -1054,13 +1102,19 @@ impl App {
             turn_counter: 0,
             dispatch_started_at: None,
             workspace_context: None,
+            workspace_is_linked_worktree: false,
             workspace_context_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             workspace_context_refreshed_at: None,
             memory_size_hint: None,
             task_panel: Vec::new(),
+            task_panel_session_id: None,
+            task_panel_unavailable: false,
             automation_panel: crate::tui::automation_panel::AutomationPanelState::default(),
             automation_scan: None,
-            behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState::default(),
+            behavioral_tips: crate::tui::behavioral_tips::BehavioralTipState::new(
+                settings.contextual_tips,
+            ),
+            footer_hint_uses: settings.footer_hint_uses.clone(),
             workflow_panel: None,
             session_started_at: chrono::Utc::now(),
             needs_redraw: true,
@@ -1088,7 +1142,7 @@ impl App {
             prefix_drift_count: 0,
             prefix_context_updates: 0,
             collapsed_cells: HashSet::new(),
-            folded_thinking: HashSet::new(),
+            thinking_folds: HashMap::new(),
             collapsed_cell_map: Vec::new(),
             edit_in_progress: false,
             lsp_enabled: config.lsp.as_ref().and_then(|l| l.enabled).unwrap_or(true),

@@ -8,7 +8,7 @@ import type { DocsWebDict } from "../types";
 export const docsWeb: DocsWebDict = {
   metaTitle: "Browser Client · Codewhale Docs",
   metaDescription:
-    "The loopback-only embedded browser client: one-time bootstrap, session cookie, and the local trust boundary.",
+    "The loopback-only embedded browser client — one-time bootstrap, session cookie, the local trust boundary — and remote control of a running local session from the signed-in web app with /rc.",
   bodyClassName: "text-ink-soft leading-relaxed",
   overviewTitle: "Browser Client",
   overviewLead:
@@ -21,6 +21,11 @@ export const docsWeb: DocsWebDict = {
   localTitle: "Local means local",
   localLead:
     "{webCommand} accepts only {portFlag} — there is no {hostFlag} and no insecure-auth option on this command. Do not treat it as a public website or expose its port through router forwarding, a public reverse proxy, or a tunnel. The separate {mobileCommand} and {httpFlag} modes carry different deployment and authentication contracts; read the Runtime API documentation before operating either one, especially before selecting a non-loopback bind.",
+  remoteTitle: "Remote control from the web app",
+  remoteLead:
+    "Available now. To continue the exact running local session from the signed-in Codewhale web app, type /rc in that session or launch with codewhale rc, then approve the one-time code in your browser. While the lease is active the browser owns new prompts and approvals and the terminal stays a readable safety surface; interrupt remains available from both.",
+  remoteBody:
+    "Once connected, the banner and a transcript note show the live session link. /rc open opens it in your browser, /rc link prints it, /rc status shows who owns the session, and /rc stop returns it to the terminal. A dropped connection keeps local input locked until the last web lease expires, so two controllers never race. Every folder you enroll from one terminal shares a single stable device id, so the web app lists one computer per machine, not one per session. This is different from the loopback browser client above: /rc pairs a local session with your account; codewhale web serves a local page with no account at all.",
   troubleshootingTitle: "Troubleshooting",
   troubleshootingLead:
     "If port 7878 is occupied, pass an unused --port. If the browser cannot be opened, the command exits with an error rather than leaving a reusable bootstrap capability behind; check the OS default-browser setup and start again. If the page loads but a provider is unavailable, inspect codewhale doctor and /provider — the web command does not configure or move provider credentials. If a session expired, restart codewhale web to mint a new process-local session; reusing an old bootstrap URL is expected to fail.",

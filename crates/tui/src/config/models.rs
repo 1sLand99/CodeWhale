@@ -6,7 +6,7 @@
 //! re-exported from `crate::config` via `pub use models::*;`, so every existing
 //! `crate::config::<CONST>` path keeps resolving unchanged (#3311).
 
-pub const DEFAULT_TEXT_MODEL: &str = "deepseek-v4-pro";
+pub const DEFAULT_TEXT_MODEL: &str = "deepseek-flash";
 pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/beta";
 pub const DEFAULT_DEEPSEEK_ANTHROPIC_MODEL: &str = DEFAULT_TEXT_MODEL;
 pub const DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
@@ -126,11 +126,11 @@ pub const KIMI_CODE_K3_256K_MODEL: &str = "k3-256k";
 pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";
 // The K3 contract constants (`KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS`,
 // `KIMI_K3_CONTEXT_WINDOW_TOKENS`, and the distinct default/direct output
-// limits) live in `crate::models` — the model-facts table, which also compiles
+// limits) live in `codewhale_models` — the model-facts table, which also compiles
 // standalone in integration tests — so the facts have exactly one home.
 // Re-export only the route-owned floor, which existing `crate::config` call
 // sites import.
-pub use crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS;
+pub use codewhale_models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS;
 pub const DEFAULT_SGLANG_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_SGLANG_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";
@@ -153,6 +153,8 @@ pub const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = codewhale_config::provider::OLLA
 pub const DEFAULT_HUGGINGFACE_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_HUGGINGFACE_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://router.huggingface.co/v1";
+pub const DEFAULT_MODELSCOPE_MODEL: &str = "Qwen/Qwen3.5-397B-A17B";
+pub const DEFAULT_MODELSCOPE_BASE_URL: &str = "https://api-inference.modelscope.cn/v1";
 pub const DEFAULT_DEEPINFRA_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_DEEPINFRA_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_DEEPINFRA_BASE_URL: &str = "https://api.deepinfra.com/v1/openai";
@@ -185,6 +187,11 @@ pub const COMMON_DEEPSEEK_MODELS: &[&str] = &[
 ];
 pub const OFFICIAL_DEEPSEEK_MODELS: &[&str] = &[
     "deepseek-v4-pro",
+    // V4.1 Flash ships as the unversioned id `deepseek-flash`, verified live on
+    // api.deepseek.com /v1/models 2026-09-10 — the account roster returns
+    // exactly `deepseek-flash` and `deepseek-v4-pro`. The version number was
+    // dropped, so guessing `deepseek-v4.1-flash` would have been a dead route.
+    "deepseek-flash",
     "deepseek-v4-flash",
     // Vision-experimental sibling of v4-flash; verified live on
     // api.deepseek.com /models 2026-08-21. Same family aliases apply.
@@ -239,11 +246,12 @@ pub const DEFAULT_LONGCAT_MODEL: &str = "LongCat-2.0";
 pub const DEFAULT_LONGCAT_BASE_URL: &str = "https://api.longcat.chat/openai/v1";
 pub const DEFAULT_OPENCODE_GO_MODEL: &str = "deepseek-v4-pro";
 pub const DEFAULT_OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
-pub use codewhale_config::OPENCODE_GO_CHAT_MODELS;
+pub use codewhale_config::opencode_go_models;
 pub const DEFAULT_OPENCODE_ZEN_MODEL: &str = "gpt-5.6";
 pub const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1";
 pub const DEFAULT_META_MODEL: &str = "muse-spark-1.2";
 pub const DEFAULT_META_BASE_URL: &str = "https://api.meta.ai/v1";
+pub const XAI_GROK_4_7_MODEL: &str = "grok-4.7";
 pub const XAI_GROK_4_6_MODEL: &str = "grok-4.6";
 pub const DEFAULT_XAI_MODEL: &str = XAI_GROK_4_6_MODEL;
 pub const XAI_GROK_4_5_MODEL: &str = "grok-4.5";
@@ -255,8 +263,8 @@ pub const XAI_GROK_4_20_0309_NON_REASONING_MODEL: &str = "grok-4.20-0309-non-rea
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_MISTRAL_MODEL: &str = "mistral-code-latest";
 pub const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1";
-pub const DEFAULT_ANTIGRAVITY_MODEL: &str = "gemini-3-pro-preview";
-pub const DEFAULT_ANTIGRAVITY_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+pub const DEFAULT_ANTIGRAVITY_MODEL: &str = "legacy-antigravity-disabled";
+pub const DEFAULT_ANTIGRAVITY_BASE_URL: &str = "https://legacy-antigravity.invalid";
 pub const DEFAULT_GOOGLE_MODEL: &str = "gemini-3.1-pro-preview";
 pub const DEFAULT_GOOGLE_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai/";
@@ -264,10 +272,18 @@ pub const DEFAULT_TELECOMJS_MODEL: &str = "deepseek-v4-pro";
 pub const DEFAULT_TELECOMJS_BASE_URL: &str = "https://aigw.telecomjs.com/v1";
 pub const DEFAULT_EDENAI_MODEL: &str = "deepseek/deepseek-v4-pro";
 pub const DEFAULT_EDENAI_BASE_URL: &str = "https://api.edenai.run/v3";
+pub const DEFAULT_ZENMUX_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+pub const DEFAULT_ZENMUX_BASE_URL: &str = "https://zenmux.ai/api/v1";
+pub const DEFAULT_CSDN_MODEL: &str = "glm_for_coding";
+pub const DEFAULT_CSDN_BASE_URL: &str = "https://ai.csdn.net/api/model/v1";
 // Concentrate (OpenAI Responses-compatible AI gateway) defaults; mirrors
 // crates/config/src/provider_defaults.rs for the docs drift check.
 pub const DEFAULT_CONCENTRATE_MODEL: &str = "deepseek-v4-pro";
 pub const DEFAULT_CONCENTRATE_BASE_URL: &str = "https://api.concentrate.ai/v1";
+// Codewhale API (account-backed model access) defaults; mirrors
+// codewhale_config::DEFAULT_CODEWHALE_*.
+pub const DEFAULT_CODEWHALE_MODEL: &str = "deepseek/deepseek-v4-pro";
+pub const DEFAULT_CODEWHALE_BASE_URL: &str = "https://api.codewhale.net/v1";
 // Alibaba Cloud Model Studio (DashScope) defaults
 pub const DEFAULT_MODELSTUDIO_TOKEN_PLAN_MODEL: &str = "qwen3.8-max";
 pub const DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL: &str =
