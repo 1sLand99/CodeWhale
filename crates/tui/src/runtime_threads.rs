@@ -14375,12 +14375,7 @@ fn runtime_policy_with_overrides(
     auto_approve: Option<bool>,
 ) -> Result<RuntimePolicyProjection> {
     let requested_mode = mode.unwrap_or(&thread.mode);
-    let legacy_bypass_mode = mode.is_some_and(|mode| {
-        matches!(
-            mode.trim().to_ascii_lowercase().as_str(),
-            "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions"
-        )
-    });
+    let legacy_bypass_mode = mode.is_some_and(codewhale_config::AppMode::is_legacy_bypass_alias);
     let inherited = RuntimePolicyProjection::from_persisted(
         &thread.mode,
         thread.permission_posture.as_deref(),

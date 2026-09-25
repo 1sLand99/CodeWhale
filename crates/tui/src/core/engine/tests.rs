@@ -7559,6 +7559,16 @@ async fn isolated_runtime_chat_provider_request_contains_no_host_context_or_tool
         request.tools.as_ref().is_none_or(Vec::is_empty),
         "isolated Chat must expose no provider tools"
     );
+    // #6517: the engine and the Runtime Chat relay once carried two different
+    // isolated-chat prompts. The engine must send exactly what the relay does.
+    let system = match request.system.as_ref() {
+        Some(SystemPrompt::Text(text)) => text.clone(),
+        other => panic!("isolated Chat should send one text system prompt: {other:?}"),
+    };
+    assert_eq!(
+        system,
+        crate::runtime_chat_relay::dedicated_chat_system_prompt(None)
+    );
     let serialized = serde_json::to_string(&request).expect("serialize captured request");
     assert!(serialized.contains("Say hello."), "{serialized}");
     assert!(serialized.contains("Attachment omitted"), "{serialized}");

@@ -1654,12 +1654,11 @@ pub(crate) async fn run_event_loop(
 
         // Per-session control socket: rebind when the owned session id
         // changes, republish the `status` snapshot, and execute queued
-        // verbs on the UI thread. A verb that asks for quit (the `relaunch`
-        // seam) exits the loop through the ordinary `/exit` teardown.
+        // verbs on the UI thread.
         session_control.reconcile(app.current_session_id.as_deref());
         session_control.update_status(app);
         execute_session_state_transition_hooks(app, &mut previous_turn_state);
-        if session_control
+        session_control
             .drain(
                 app,
                 config,
@@ -1667,10 +1666,7 @@ pub(crate) async fn run_event_loop(
                 &mut current_streaming_text,
                 &mut stream_display_clock,
             )
-            .await
-        {
-            return Ok(());
-        }
+            .await;
 
         while let Some(completion) = app.clipboard.poll_write_completion() {
             if let Err(err) = completion {
