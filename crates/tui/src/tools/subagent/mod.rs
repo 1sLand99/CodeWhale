@@ -804,6 +804,13 @@ pub struct AgentWorkerSpec {
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<String>,
+    /// Workflow run that launched this child, stamped before the worker is
+    /// registered. Its terminal result belongs to that run's driver, so the
+    /// parent turn must never have it synthesized a second time. Kept apart
+    /// from `parent_run_id`, which the lineage walk and manifest owner check
+    /// read. Absent on records written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_name: Option<String>,
     pub objective: String,
@@ -1534,6 +1541,16 @@ fn default_subagent_artifacts(run_id: &str) -> Vec<AgentRunArtifactRef> {
     ]
 }
 
+/// Whether a settled child's result is the parent turn's to receive.
+///
+/// A nested child reports to its own parent agent, and a workflow child
+/// reports to its run's driver, which folds the result into the one workflow
+/// receipt. Synthesizing either into the root turn delivered the same report
+/// twice and billed it twice.
+fn delivers_to_parent_turn(spec: &AgentWorkerSpec) -> bool {
+    spec.parent_run_id.is_none() && spec.workflow_run_id.is_none()
+}
+
 fn normalize_worker_spec(mut spec: AgentWorkerSpec) -> AgentWorkerSpec {
     if spec.run_id.is_empty() {
         spec.run_id = spec.worker_id.clone();
@@ -1787,6 +1804,8 @@ pub(crate) struct SubAgentSpawnOptions {
     /// Checkpoint resume: preserve the interrupted child's runtime posture
     /// instead of rebuilding it from the caller's role.
     pub preserve_runtime_profile: Option<WorkerRuntimeProfile>,
+    /// Workflow run that owns this child; recorded on the worker spec.
+    pub workflow_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -7213,6 +7232,7 @@ impl SubAgentManager {
             worker_id: agent_id.clone(),
             run_id: agent_id.clone(),
             parent_run_id: Some("parent_session".to_string()),
+            workflow_run_id: None,
             session_name: Some(name.to_string()),
             objective: "test".to_string(),
             role: None,
@@ -7758,6 +7778,7 @@ impl SubAgentManager {
             worker_id: agent_id.clone(),
             run_id: agent_id.clone(),
             parent_run_id: runtime.parent_agent_id.clone(),
+            workflow_run_id: options.workflow_run_id.clone(),
             session_name: Some(agent.session_name.clone()),
             objective: assignment.objective.clone(),
             role: assignment.role.clone(),
@@ -7992,7 +8013,7 @@ impl SubAgentManager {
             .filter(|agent| {
                 self.worker_records
                     .get(&agent.id)
-                    .is_none_or(|record| record.spec.parent_run_id.is_none())
+                    .is_none_or(|record| delivers_to_parent_turn(&record.spec))
             })
             .filter(|agent| !delivered_ids.contains(&agent.id))
             .map(|agent| self.snapshot_for_listing(agent))
@@ -8030,7 +8051,7 @@ impl SubAgentManager {
                 && self
                     .worker_records
                     .get(&agent.id)
-                    .is_none_or(|record| record.spec.parent_run_id.is_none())
+                    .is_none_or(|record| delivers_to_parent_turn(&record.spec))
                 && !delivered_ids.contains(&agent.id)
         })
     }
@@ -11322,6 +11343,7 @@ async fn spawn_subagent_from_input(
             checkpoint_continuation: false,
             claim_pre_namespaced: false,
             preserve_runtime_profile: None,
+            workflow_run_id: workflow_identity.map(|identity| identity.workflow_run_id.clone()),
         },
         precomputed_delivery_evidence,
     );

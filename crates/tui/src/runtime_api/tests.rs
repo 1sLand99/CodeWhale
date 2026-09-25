@@ -2700,6 +2700,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             worker_id: "agent_receipt".to_string(),
             run_id: "run_receipt".to_string(),
             parent_run_id: Some("parent_run".to_string()),
+            workflow_run_id: None,
             session_name: Some("receipt_lane".to_string()),
             objective: "Verify run receipt projection".to_string(),
             role: Some("verifier".to_string()),
