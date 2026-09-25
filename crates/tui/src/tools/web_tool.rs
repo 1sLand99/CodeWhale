@@ -5,6 +5,7 @@
 //! removed in v0.9.3.
 
 use async_trait::async_trait;
+use codewhale_protocol::engine_owner::OwnerActivityKind;
 use serde_json::{Value, json};
 
 use super::canonical_action::required_action;
@@ -12,6 +13,7 @@ use super::dev_server_readiness::WaitForDevServerTool;
 use super::fetch_url::FetchUrlTool;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
+    with_operation_activity,
 };
 use super::web_search::WebSearchTool;
 
@@ -200,9 +202,24 @@ impl ToolSpec for WebTool {
         let input = self.strip_action(input)?;
 
         match action.as_str() {
-            "search" => WebSearchTool.execute(input, context).await,
-            "fetch" => FetchUrlTool.execute(input, context).await,
-            "wait" => WaitForDevServerTool.execute(input, context).await,
+            "search" => with_operation_activity(
+                context,
+                OwnerActivityKind::Browsing,
+                WebSearchTool.execute(input, context),
+            )
+            .await,
+            "fetch" => with_operation_activity(
+                context,
+                OwnerActivityKind::Browsing,
+                FetchUrlTool.execute(input, context),
+            )
+            .await,
+            "wait" => with_operation_activity(
+                context,
+                OwnerActivityKind::Browsing,
+                WaitForDevServerTool.execute(input, context),
+            )
+            .await,
             other => Err(ToolError::invalid_input(format!(
                 "Unknown Web action \"{other}\"; nothing was run. Pass one of: {}.",
                 Self::ACTIONS.join(", ")

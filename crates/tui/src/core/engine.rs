@@ -8298,7 +8298,7 @@ pub(crate) mod reviewer;
 mod streaming;
 mod token_estimate_cache;
 pub(crate) mod tool_catalog;
-mod tool_execution;
+pub(crate) mod tool_execution;
 mod tool_media;
 mod tool_preparation;
 mod tool_setup;

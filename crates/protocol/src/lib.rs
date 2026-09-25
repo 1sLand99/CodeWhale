@@ -12,6 +12,7 @@ use serde_json::Value;
 pub mod agent_mail;
 pub mod agent_run;
 pub mod event_msg;
+pub mod engine_owner;
 pub mod fleet;
 pub mod ids;
 pub mod journal;

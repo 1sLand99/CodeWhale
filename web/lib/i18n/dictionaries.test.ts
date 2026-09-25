@@ -59,7 +59,6 @@ import type { ChromeDict, HomeDict } from "./dictionaries/types";
 const NON_PROSE_KEYS = new Set([
   "wordmarkSeal",
   "dateLocale",
-  "githubFallback",
   "tickerLiveTag",
 ]);
 
@@ -72,7 +71,6 @@ const CHROME_PROSE_KEYS = [
   "navPrimaryAria",
   "navHomeAria",
   "wordmarkTag",
-  "starsAria",
   "traceLabel",
   "traceTabsAria",
   "menuOpen",
@@ -116,6 +114,7 @@ const HOME_PROSE_KEYS = [
   "heroTitle",
   "heroIntro",
   "getCodewhale",
+  "heroInstallAria",
   "exploreProduct",
   "shotPreview",
   "shotBuild",

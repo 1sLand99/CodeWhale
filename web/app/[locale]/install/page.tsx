@@ -3,7 +3,7 @@ import Image from "next/image";
 import { InstallCodeBlock } from "@/components/install-code-block";
 import { InstallBinary } from "@/components/install-binary";
 import { GETTING_STARTED_STEPS } from "@/lib/content/getting-started";
-import { INSTALL_COPY } from "@/lib/content/install";
+import { INSTALL_COMMANDS, INSTALL_COPY } from "@/lib/content/install";
 import type { LocalizedText } from "@/lib/content/vocabulary";
 import { fill, getComputerUse, getHome, pickText } from "@/lib/i18n/dictionaries";
 import { getFacts } from "@/lib/facts";
@@ -21,8 +21,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
   });
 }
 
-const SHELL_INSTALL = `curl -fsSL https://codewhale.net/install.sh | sh`;
-const NPM_INSTALL = `npm install -g codewhale`;
+const SHELL_INSTALL = INSTALL_COMMANDS.shell;
+const NPM_INSTALL = INSTALL_COMMANDS.npm;
 const CARGO_INSTALL = `cargo install codewhale-cli --locked`;
 const UPDATE = `codewhale update`;
 

@@ -252,6 +252,19 @@ pub enum Event {
         result: Result<ToolResult, ToolError>,
     },
 
+    /// Trusted operation activity emitted only after dispatch and authority
+    /// gates resolve the underlying operation. The payload deliberately
+    /// excludes tool names, arguments, commands, and results.
+    OperationActivityStarted {
+        span_id: String,
+        activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
+    },
+    OperationActivityCompleted {
+        span_id: String,
+        activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
+        outcome: codewhale_protocol::engine_owner::OwnerOperationOutcome,
+    },
+
     // === Turn Lifecycle ===
     /// A new turn has started (user sent a message)
     TurnStarted {

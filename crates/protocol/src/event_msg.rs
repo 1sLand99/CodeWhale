@@ -363,6 +363,22 @@ pub enum EventMsg {
         tool_name: String,
         result: ToolCallOutcome,
     },
+    /// Trusted Engine-owned activity for an operation that passed dispatch
+    /// and authority checks. No tool name, arguments, command, or result is
+    /// included in the pet-facing activity contract.
+    OperationActivityStarted {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        span_id: String,
+        activity_kind: crate::engine_owner::OwnerActivityKind,
+    },
+    OperationActivityCompleted {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        span_id: String,
+        activity_kind: crate::engine_owner::OwnerActivityKind,
+        outcome: crate::engine_owner::OwnerOperationOutcome,
+    },
 
     // === Turn lifecycle ===
     TurnStarted {
@@ -749,6 +765,8 @@ pub const EVENT_KINDS: &[&str] = &[
     "tool_call_started",
     "tool_call_heartbeat",
     "tool_call_complete",
+    "operation_activity_started",
+    "operation_activity_completed",
     "turn_started",
     "tool_request_snapshot",
     "route_dispatched",
@@ -802,6 +820,8 @@ impl EventMsg {
             Self::ToolCallStarted { .. } => "tool_call_started",
             Self::ToolCallHeartbeat { .. } => "tool_call_heartbeat",
             Self::ToolCallComplete { .. } => "tool_call_complete",
+            Self::OperationActivityStarted { .. } => "operation_activity_started",
+            Self::OperationActivityCompleted { .. } => "operation_activity_completed",
             Self::TurnStarted { .. } => "turn_started",
             Self::ToolRequestSnapshot { .. } => "tool_request_snapshot",
             Self::RouteDispatched { .. } => "route_dispatched",
@@ -855,6 +875,8 @@ impl EventMsg {
             | Self::ToolCallStarted { thread_id, .. }
             | Self::ToolCallHeartbeat { thread_id, .. }
             | Self::ToolCallComplete { thread_id, .. }
+            | Self::OperationActivityStarted { thread_id, .. }
+            | Self::OperationActivityCompleted { thread_id, .. }
             | Self::TurnStarted { thread_id, .. }
             | Self::ToolRequestSnapshot { thread_id, .. }
             | Self::RouteDispatched { thread_id, .. }
@@ -908,6 +930,8 @@ impl EventMsg {
             | Self::ToolCallStarted { session_id, .. }
             | Self::ToolCallHeartbeat { session_id, .. }
             | Self::ToolCallComplete { session_id, .. }
+            | Self::OperationActivityStarted { session_id, .. }
+            | Self::OperationActivityCompleted { session_id, .. }
             | Self::TurnStarted { session_id, .. }
             | Self::ToolRequestSnapshot { session_id, .. }
             | Self::RouteDispatched { session_id, .. }

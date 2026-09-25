@@ -1,6 +1,7 @@
 //! Live view transport replacing the app-local QuickJS Worker. Only immutable
 //! projections cross back to Ratatui; network, raster and encoding stay here.
 use super::{graphics, owner};
+use codewhale_protocol::engine_owner::EngineOwnerProjection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -26,13 +27,7 @@ pub struct Pose {
     pub style: Style,
     pub state: Value,
 }
-#[derive(Clone, Deserialize, Serialize)]
-pub struct Activity {
-    pub label: String,
-    pub tool: Option<String>,
-    pub observed: bool,
-    pub parallel: usize,
-}
+pub type Activity = EngineOwnerProjection;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scene {
@@ -71,6 +66,12 @@ impl Scene {
                 .chain(&self.still.points)
                 .flatten()
                 .all(|p| p.is_finite() && p.abs() <= 8.0)
+            && self.activity.as_ref().is_none_or(|activity| {
+                activity.is_valid()
+                    && activity.cursor == self.cursor
+                    && activity.session_id.as_deref()
+                        == (self.source != "unattached").then_some(self.source.as_str())
+            })
     }
 }
 #[derive(Clone)]

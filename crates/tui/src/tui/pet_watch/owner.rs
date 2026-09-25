@@ -556,6 +556,17 @@ fn run_world(
             frame["cursor"] = json!(saved.cursor);
             frame["source"] = json!(saved.source);
             frame["sourceRevision"] = json!(saved.source_revision);
+            if let Some(activity) = frame["activity"].as_object_mut() {
+                activity.insert(
+                    "sessionId".into(),
+                    if saved.source == "unattached" {
+                        Value::Null
+                    } else {
+                        json!(saved.source)
+                    },
+                );
+                activity.insert("cursor".into(), json!(saved.cursor));
+            }
             // Presentation material keeps missing coverage legible. The core
             // pigment, score, particle digest and recording are unchanged.
             for key in ["", "still"] {

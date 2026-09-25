@@ -16,6 +16,129 @@ use super::*;
 
 const TOOL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
+type OwnerActivityKind = codewhale_protocol::engine_owner::OwnerActivityKind;
+type OwnerOperationOutcome = codewhale_protocol::engine_owner::OwnerOperationOutcome;
+
+pub(crate) fn owner_activity_kind_for_operation(name: &str) -> OwnerActivityKind {
+    use OwnerActivityKind as Kind;
+    match name {
+        "read" | "read_file" | "list_dir" | "read_media" => Kind::Reading,
+        "write" | "edit" | "write_file" | "edit_file" | "apply_patch" | "fim_edit" => {
+            Kind::Editing
+        }
+        "file_search" | "grep_files" | "search_files" => Kind::Searching,
+        "run_tests" | "run_verifiers" => Kind::Testing,
+        "bash" | "Bash" | "exec_shell" | "exec_shell_wait" | "exec_shell_interact" | "exec_shell_cancel"
+        | CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME | "task_gate_run"
+        | "automation_run" | "rlm_eval" => Kind::Executing,
+        "web_search" | "fetch_url" | "wait_for_dev_server" | "rlm_open" => Kind::Browsing,
+        "memory_search" => Kind::Memory,
+        _ => Kind::Tool,
+    }
+}
+
+fn owner_activity_kind_for_mcp_server(server: &str) -> OwnerActivityKind {
+    if server == "computer-use" || server.ends_with("-computer-use") {
+        OwnerActivityKind::Computer
+    } else {
+        OwnerActivityKind::Tool
+    }
+}
+
+/// Resolve activity from the same registry/MCP authority that dispatches the
+/// call. Concrete tool identity and trusted MCP registration are the only
+/// classification inputs. Action wrappers report from their selected
+/// underlying dispatch arm; their arguments are not inspected here.
+async fn resolved_owner_activity_kind(
+    tool_name: &str,
+    registry: Option<&crate::tools::ToolRegistry>,
+    mcp_pool: Option<&Arc<AsyncMutex<McpPool>>>,
+) -> Option<OwnerActivityKind> {
+    if McpPool::is_mcp_tool(tool_name) {
+        let pool = mcp_pool?;
+        let servers = pool.lock().await.resolved_tool_servers();
+        let server = servers.get(tool_name)?;
+        return Some(owner_activity_kind_for_mcp_server(server));
+    }
+
+    // execute_tools is a wrapper. Its nested calls report their own resolved
+    // operations through the existing registry; the wrapper itself is not an
+    // activity classifier.
+    if tool_name == EXECUTE_TOOLS_TOOL_NAME {
+        return None;
+    }
+
+    if crate::tools::canonical_action::is_action_family(tool_name) {
+        // These calls dispatch on an action inside their tool implementation.
+        // That implementation reports after selecting the concrete operation.
+        return None;
+    }
+    if matches!(tool_name, CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME) {
+        return Some(OwnerActivityKind::Executing);
+    }
+    let registered = registry
+        .and_then(|registry| registry.get(tool_name))
+        .is_some();
+    registered.then(|| owner_activity_kind_for_operation(tool_name))
+}
+
+pub(crate) fn owner_operation_outcome(
+    outcome: &Result<RichToolResult, ToolError>,
+    cancelled: bool,
+) -> OwnerOperationOutcome {
+    if cancelled {
+        return OwnerOperationOutcome::Cancelled;
+    }
+    match outcome {
+        Ok(result) if result.result.success => OwnerOperationOutcome::Succeeded,
+        Ok(_) => OwnerOperationOutcome::Failed,
+        Err(ToolError::Cancelled { .. }) => OwnerOperationOutcome::Cancelled,
+        Err(
+            ToolError::InvalidInput { .. }
+            | ToolError::MissingField { .. }
+            | ToolError::PathEscape { .. }
+            | ToolError::NotAvailable { .. }
+            | ToolError::PermissionDenied { .. },
+        ) => OwnerOperationOutcome::Denied,
+        Err(ToolError::ExecutionFailed { .. } | ToolError::Timeout { .. }) => {
+            OwnerOperationOutcome::Failed
+        }
+    }
+}
+
+struct EngineOperationActivityReporter {
+    tx_event: mpsc::Sender<Event>,
+}
+
+#[async_trait::async_trait]
+impl crate::tools::spec::OperationActivityReporter for EngineOperationActivityReporter {
+    async fn started(&self, span_id: String, activity_kind: OwnerActivityKind) {
+        let _ = self
+            .tx_event
+            .send(Event::OperationActivityStarted {
+                span_id,
+                activity_kind,
+            })
+            .await;
+    }
+
+    async fn completed(
+        &self,
+        span_id: String,
+        activity_kind: OwnerActivityKind,
+        outcome: OwnerOperationOutcome,
+    ) {
+        let _ = self
+            .tx_event
+            .send(Event::OperationActivityCompleted {
+                span_id,
+                activity_kind,
+                outcome,
+            })
+            .await;
+    }
+}
+
 fn inherited_interactive_shell_refusal(tool_name: &str, interactive: bool) -> Option<ToolError> {
     if !interactive || !matches!(tool_name, "bash" | "Bash" | "exec_shell") {
         return None;
@@ -393,6 +516,7 @@ impl Engine {
                     tx_event,
                     Some(cancel_token),
                     tool_name.clone(),
+                    Some(format!("parallel:{}:{index}", uuid::Uuid::new_v4())),
                     tool_input.clone(),
                     workspace,
                     Some(registry_ref),
@@ -455,6 +579,7 @@ impl Engine {
         tx_event: mpsc::Sender<Event>,
         cancel_token: Option<CancellationToken>,
         tool_name: String,
+        activity_call_id: Option<String>,
         tool_input: serde_json::Value,
         workspace: PathBuf,
         registry: Option<&crate::tools::ToolRegistry>,
@@ -557,6 +682,32 @@ impl Engine {
             }
         }
 
+        let activity_kind = if activity_call_id.is_some() {
+            resolved_owner_activity_kind(&tool_name, registry, mcp_pool.as_ref()).await
+        } else {
+            None
+        };
+        if let (Some(span_id), Some(activity_kind)) =
+            (activity_call_id.as_ref(), activity_kind)
+        {
+            let _ = tx_event
+                .send(Event::OperationActivityStarted {
+                    span_id: span_id.clone(),
+                    activity_kind,
+                })
+                .await;
+        }
+
+        let registry_context = registry.map(|registry| {
+            let mut context = context_override
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| registry.context().clone());
+            context.operation_activity_reporter = Some(Arc::new(EngineOperationActivityReporter {
+                tx_event: tx_event.clone(),
+            }));
+            context
+        });
         let outcome: Result<RichToolResult, ToolError> = if McpPool::is_mcp_tool(&tool_name) {
             if let Some(pool) = mcp_pool {
                 let disallowed_tools = context_override
@@ -587,7 +738,7 @@ impl Engine {
                 .map(RichToolResult::plain)
         } else if tool_name == EXECUTE_TOOLS_TOOL_NAME {
             if let Some(registry) = registry {
-                let context = context_override
+                let context = registry_context
                     .as_ref()
                     .cloned()
                     .unwrap_or_else(|| registry.context().clone());
@@ -601,13 +752,29 @@ impl Engine {
             }
         } else if let Some(registry) = registry {
             registry
-                .execute_rich_full_with_context(&tool_name, tool_input, context_override.as_ref())
+                .execute_rich_full_with_context(&tool_name, tool_input, registry_context.as_ref())
                 .await
         } else {
             Err(ToolError::not_available(format!(
                 "tool '{tool_name}' is not registered"
             )))
         };
+
+        if let (Some(span_id), Some(activity_kind)) =
+            (activity_call_id, activity_kind)
+        {
+            let cancelled = cancel_token
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled);
+            let operation_outcome = owner_operation_outcome(&outcome, cancelled);
+            let _ = tx_event
+                .send(Event::OperationActivityCompleted {
+                    span_id,
+                    activity_kind,
+                    outcome: operation_outcome,
+                })
+                .await;
+        }
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
         // The surface-agnostic choke point for every tool call, so this one
@@ -675,6 +842,29 @@ mod tests {
     use std::time::Duration;
 
     const TEST_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn activity_kind_uses_resolved_tool_identity_and_covers_lowercase_mutations() {
+        use OwnerActivityKind as Kind;
+
+        assert_eq!(owner_activity_kind_for_operation("write"), Kind::Editing);
+        assert_eq!(owner_activity_kind_for_operation("edit"), Kind::Editing);
+        assert_eq!(owner_activity_kind_for_operation("read"), Kind::Reading);
+        assert_eq!(owner_activity_kind_for_operation("computer-use"), Kind::Tool);
+        assert_eq!(owner_activity_kind_for_operation("unknown_tool"), Kind::Tool);
+        assert_eq!(owner_activity_kind_for_mcp_server("computer-use"), Kind::Computer);
+        assert_eq!(owner_activity_kind_for_mcp_server("mcp-computer-use"), Kind::Computer);
+        assert_eq!(owner_activity_kind_for_mcp_server("browser"), Kind::Tool);
+    }
+
+    #[tokio::test]
+    async fn action_wrappers_wait_for_the_selected_underlying_operation() {
+        assert!(resolved_owner_activity_kind("File", None, None).await.is_none());
+        assert!(resolved_owner_activity_kind("Web", None, None).await.is_none());
+        assert!(resolved_owner_activity_kind(EXECUTE_TOOLS_TOOL_NAME, None, None)
+            .await
+            .is_none());
+    }
 
     #[tokio::test]
     async fn tool_heartbeat_emits_for_slow_tool() {

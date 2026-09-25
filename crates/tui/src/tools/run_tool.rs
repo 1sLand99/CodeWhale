@@ -5,11 +5,13 @@
 //! in v0.9.3.
 
 use async_trait::async_trait;
+use codewhale_protocol::engine_owner::OwnerActivityKind;
 use serde_json::{Value, json};
 
 use super::canonical_action::required_action;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
+    with_operation_activity,
 };
 use super::test_runner::RunTestsTool;
 use super::verifier::RunVerifiersTool;
@@ -158,8 +160,18 @@ impl ToolSpec for RunTool {
         let input = self.strip_action(input)?;
 
         match action.as_str() {
-            "tests" => RunTestsTool.execute(input, context).await,
-            "verifiers" => RunVerifiersTool.execute(input, context).await,
+            "tests" => with_operation_activity(
+                context,
+                OwnerActivityKind::Testing,
+                RunTestsTool.execute(input, context),
+            )
+            .await,
+            "verifiers" => with_operation_activity(
+                context,
+                OwnerActivityKind::Testing,
+                RunVerifiersTool.execute(input, context),
+            )
+            .await,
             other => Err(ToolError::invalid_input(format!(
                 "Unknown Run action \"{other}\"; nothing was run. Pass one of: {}.",
                 Self::ACTIONS.join(", ")
