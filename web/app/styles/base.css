@@ -159,6 +159,10 @@ pre.code-block {
   white-space: pre;
   tab-size: 2;
   -webkit-overflow-scrolling: touch;
+  /* Commands read left to right in every locale, including RTL pages. */
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: isolate;
 }
 pre.code-block .prompt,
 pre.code-block .comment { color: var(--muted); }
