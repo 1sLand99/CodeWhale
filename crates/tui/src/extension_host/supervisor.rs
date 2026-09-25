@@ -1,10 +1,21 @@
-//! One extension-host process: spawn, handshake, channel, exit.
+//! One extension-host process: launch plan, spawn, handshake, channel, exit.
 //!
 //! Phase 1 has no heartbeat and no auto-restart. When the process exits for
 //! any reason, every in-flight call fails with a typed error, the owner
 //! registry is revoked wholesale, and the host is marked failed with its
 //! stderr tail. Nothing respawns until the next session or a newly enabled
 //! plugin.
+//!
+//! **OS sandbox.** Where Codewhale's default command sandbox is available
+//! (Seatbelt on macOS; bubblewrap stays opt-in for shell commands and is not
+//! used here) the host runs under a workspace-write profile rooted at
+//! `$CODEWHALE_HOME/extension-host/data`: no network, writes only there and
+//! in the temp dirs, and **no reads** of the credential-store default
+//! deny-list (`sandbox::read_guard`) plus Codewhale's own secret, credential,
+//! config, MCP and session stores. Elsewhere (Linux, Windows) the host runs
+//! unsandboxed with the user's permissions, and
+//! `/plugin` says so. This is defense-in-depth, not the phase-5 sandbox:
+//! exec is not restricted beyond what the profile allows.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -47,6 +58,102 @@ pub enum HostCallError {
     Busy,
 }
 
+/// How the host is started: the argv (wrapped by the OS sandbox when one is
+/// available), its working directory, and which sandbox applies.
+#[derive(Debug, Clone)]
+pub(crate) struct HostLaunch {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    /// `seatbelt` / `bwrap`, or `None` when the host runs unsandboxed.
+    pub sandbox: Option<String>,
+    /// Environment the sandbox wrapper adds (`CODEWHALE_SANDBOX`, …).
+    pub sandbox_env: Vec<(String, String)>,
+}
+
+/// Paths the host process must never read, even though the sandbox otherwise
+/// grants full-disk read: the curated credential-store defaults, plus
+/// Codewhale's own stores under both the runtime home and the ambient
+/// `~/.codewhale` (a relocated home is not a licence to read the real one).
+pub(crate) fn host_denied_read_paths(home: &Path) -> Vec<PathBuf> {
+    let mut paths = crate::sandbox::read_guard::ReadDenylist::build(true, &[], &[]).subtree_paths();
+    let mut roots = vec![home.to_path_buf()];
+    roots.extend(codewhale_config::codewhale_home().ok());
+    roots.extend(
+        codewhale_paths::user_home().map(|user| user.join(codewhale_config::CODEWHALE_APP_DIR)),
+    );
+    for root in roots {
+        for store in [
+            "secrets",
+            "credentials",
+            codewhale_config::CONFIG_FILE_NAME,
+            "mcp.json",
+            "sessions",
+            "session-archives",
+        ] {
+            let path = root.join(store);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// Plan the host launch. Blocking (creates the data dir, canonicalizes the
+/// deny-list); call from `spawn_blocking`.
+pub(crate) fn plan_launch(node: &Path, bundle: &Path, home: &Path) -> Result<HostLaunch, String> {
+    use crate::sandbox::{CommandSpec, SandboxManager, SandboxPolicy, SandboxType};
+    let data = home.join("extension-host").join("data");
+    std::fs::create_dir_all(&data)
+        .map_err(|error| format!("cannot create {}: {error}", data.display()))?;
+    let args: Vec<String> = [
+        "--max-old-space-size=256",
+        "--disable-proto=throw",
+        "--no-addons",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .chain(std::iter::once(bundle.to_string_lossy().into_owned()))
+    .collect();
+    let unsandboxed = HostLaunch {
+        program: node.to_path_buf(),
+        args: args.clone(),
+        cwd: data.clone(),
+        sandbox: None,
+        sandbox_env: Vec::new(),
+    };
+    if cfg!(windows) {
+        // The Windows helper is process containment only; ProcessTree already
+        // provides that, and it must not be reported as isolation.
+        return Ok(unsandboxed);
+    }
+    let spec = CommandSpec::program(&node.to_string_lossy(), args, data, Duration::ZERO)
+        .with_policy(SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: false,
+            exclude_tmpdir: false,
+            exclude_slash_tmp: false,
+        });
+    let mut manager = SandboxManager::new();
+    manager.set_denied_read_subpaths(host_denied_read_paths(home));
+    let env = manager.prepare(&spec);
+    if matches!(env.sandbox_type, SandboxType::None) {
+        return Ok(unsandboxed);
+    }
+    let mut command = env.command.into_iter();
+    let program = command
+        .next()
+        .ok_or("sandbox wrapper produced an empty command")?;
+    Ok(HostLaunch {
+        program: PathBuf::from(program),
+        args: command.collect(),
+        cwd: env.cwd,
+        sandbox: Some(env.sandbox_type.to_string()),
+        sandbox_env: env.env.into_iter().collect(),
+    })
+}
+
 /// Callbacks from the channel into the manager.
 pub(crate) trait HostEvents: Send + Sync + 'static {
     fn register(&self, params: &protocol::RegisterParams) -> RegisterResult;
@@ -74,6 +181,9 @@ struct Handshake {
 pub(crate) struct HostProcess {
     pub pid: Option<u32>,
     pub node_version: std::sync::OnceLock<String>,
+    /// `seatbelt` / `bwrap`, or `None` when unsandboxed.
+    pub sandbox: Option<String>,
+    tree: Arc<crate::process_tree::ProcessTree>,
     outbound: mpsc::Sender<Vec<u8>>,
     pending: Arc<Mutex<HashMap<u64, PendingCall>>>,
     next_id: AtomicU64,
@@ -102,18 +212,15 @@ impl HostProcess {
     /// anti-substitution: the control is that Rust chooses what to exec).
     pub(crate) async fn spawn(
         generation: u64,
-        node: &Path,
-        bundle: &Path,
+        launch: &HostLaunch,
         expected_sha256: &str,
         events: Arc<dyn HostEvents>,
     ) -> Result<Arc<Self>, String> {
-        let mut command = tokio::process::Command::new(node);
+        let mut command = tokio::process::Command::new(&launch.program);
         crate::utils::suppress_tokio_console_window(&mut command);
         command
-            .arg("--max-old-space-size=256")
-            .arg("--disable-proto=throw")
-            .arg("--no-addons")
-            .arg(bundle)
+            .args(&launch.args)
+            .current_dir(&launch.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -121,10 +228,14 @@ impl HostProcess {
         // Scrubbed environment: no credentials, no ambient proxy URLs.
         command.env_clear();
         let parent_pid = std::process::id().to_string();
-        for (key, value) in crate::child_env::sanitized_plugin_mcp_env_from(
-            std::env::vars_os(),
-            [("CODEWHALE_HOST_PARENT_PID", parent_pid.as_str())],
-        ) {
+        let overrides = launch
+            .sandbox_env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .chain([("CODEWHALE_HOST_PARENT_PID", parent_pid.as_str())]);
+        for (key, value) in
+            crate::child_env::sanitized_plugin_mcp_env_from(std::env::vars_os(), overrides)
+        {
             command.env(key, value);
         }
         #[cfg(unix)]
@@ -132,8 +243,15 @@ impl HostProcess {
 
         let mut child = command
             .spawn()
-            .map_err(|error| format!("failed to start {}: {error}", node.display()))?;
+            .map_err(|error| format!("failed to start {}: {error}", launch.program.display()))?;
         let pid = child.id();
+        let tree = match crate::process_tree::ProcessTree::attach_tokio(&child) {
+            Ok(tree) => Arc::new(tree),
+            Err(error) => {
+                let _ = child.start_kill();
+                return Err(format!("failed to contain the extension host: {error}"));
+            }
+        };
         let stdin = child.stdin.take().ok_or("host stdin unavailable")?;
         let stdout = child.stdout.take().ok_or("host stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("host stderr unavailable")?;
@@ -211,6 +329,7 @@ impl HostProcess {
             let pending = Arc::clone(&pending);
             let tail = Arc::clone(&stderr_tail);
             let events = Arc::clone(&events);
+            let tree = Arc::clone(&tree);
             tokio::spawn(async move {
                 let reason = tokio::select! {
                     status = child.wait() => match status {
@@ -218,11 +337,13 @@ impl HostProcess {
                         Err(error) => format!("wait failed: {error}"),
                     },
                     Some(reason) = kill_rx.recv() => {
-                        kill_process_tree(pid);
+                        let _ = tree.kill();
                         let _ = child.kill().await;
                         reason
                     }
                 };
+                // The leader is gone; take anything it left behind with it.
+                let _ = tree.kill();
                 let drained: Vec<PendingCall> = pending
                     .lock()
                     .expect("pending lock")
@@ -242,6 +363,8 @@ impl HostProcess {
         let host = Arc::new(Self {
             pid,
             node_version: std::sync::OnceLock::new(),
+            sandbox: launch.sandbox.clone(),
+            tree,
             outbound,
             pending,
             next_id: AtomicU64::new(1),
@@ -449,36 +572,19 @@ impl HostProcess {
         })
         .await;
         if waited.is_err() {
-            kill_process_tree(self.pid);
+            let _ = self.tree.kill();
         }
     }
 }
 
 impl Drop for HostProcess {
     fn drop(&mut self) {
+        // The exit watcher also holds the tree; kill explicitly so dropping
+        // the last handle to a live host never leaves it running.
         if !self.has_exited() {
-            kill_process_tree(self.pid);
+            let _ = self.tree.kill();
         }
     }
-}
-
-/// Kill the host's process group (Unix) or the process (elsewhere).
-///
-/// Phase-1 deviation from the design: the hooks' `HookProcessTree` /
-/// `WindowsHookJob` were not moved into a shared module; the host is its
-/// own process group on Unix and `kill_on_drop` covers the immediate child
-/// elsewhere. Phase-1 hosts spawn no brokered children.
-pub(crate) fn kill_process_tree(pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = pid {
-        // SAFETY: kill(2) dereferences no pointers; a negative pid names the
-        // process group created with `process_group(0)` at spawn.
-        unsafe {
-            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
 }
 
 fn handle_host_message(

@@ -83,6 +83,7 @@ mod oauth;
 mod operate;
 mod plugins;
 mod pricing;
+mod process_tree;
 mod project_context;
 mod project_context_cache;
 mod prompt_zones;

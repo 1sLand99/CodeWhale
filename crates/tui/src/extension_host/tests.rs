@@ -467,7 +467,26 @@ async fn disabling_mid_call_revokes_at_once_and_teardown_waits_for_async_dispose
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let disabled = fixture.disable("slow-tool");
-    let revoked_at = Instant::now();
+    // The revocation scan (a full re-hash of the staged tree) runs first;
+    // the clock for the 500 ms bound starts when the registry drops the
+    // handle, which is the moment revocation takes effect. A plain thread
+    // watches for it, because this runtime is single-threaded (the policy
+    // override is thread-local) and would only look when `sync` yields.
+    let watcher = {
+        let manager = Arc::clone(&manager);
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            while !manager.live_tool_names().is_empty() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "revocation never happened"
+                );
+                std::thread::yield_now();
+            }
+            Instant::now()
+        })
+    };
+    let sync_started = Instant::now();
     let sync = {
         let manager = Arc::clone(&manager);
         tokio::spawn(async move { manager.sync(disabled).await })
@@ -476,23 +495,23 @@ async fn disabling_mid_call_revokes_at_once_and_teardown_waits_for_async_dispose
         .await
         .expect("call resolves")
         .unwrap();
-    let call_resolved = revoked_at.elapsed();
+    let resolved_at = Instant::now();
+    let revoked_at = watcher.join().unwrap();
+    let call_resolved = resolved_at.saturating_duration_since(revoked_at);
     assert!(
         matches!(outcome, Err(ToolError::Cancelled { .. })),
         "{outcome:?}"
     );
-    // The revocation scan (a full re-hash of the staged tree) runs first; the
-    // 500 ms bound is on the cancellation itself.
+    eprintln!(
+        "extension host: in-flight call resolved as cancelled {:.1} ms after revocation",
+        call_resolved.as_secs_f64() * 1000.0
+    );
     assert!(
-        call_resolved < Duration::from_millis(1500),
+        call_resolved < Duration::from_millis(500),
         "{call_resolved:?}"
     );
-    assert!(
-        manager.live_tool_names().is_empty(),
-        "revoked synchronously"
-    );
     sync.await.unwrap().unwrap();
-    let teardown = revoked_at.elapsed();
+    let teardown = sync_started.elapsed();
     assert!(
         teardown >= Duration::from_millis(300),
         "ack must wait for the 300 ms async disposer (got {teardown:?})"
@@ -520,8 +539,14 @@ async fn killed_host_fails_calls_with_a_typed_error_and_does_not_respawn() {
     let context = ToolContext::new(fixture.workspace());
     let call = tokio::spawn(async move { tool.execute(json!({}), &context).await });
     tokio::time::sleep(Duration::from_millis(150)).await;
+    #[cfg(unix)]
     let status = std::process::Command::new("kill")
         .args(["-9", &pid.to_string()])
+        .status()
+        .unwrap();
+    #[cfg(windows)]
+    let status = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
         .status()
         .unwrap();
     assert!(status.success());
@@ -656,4 +681,79 @@ async fn with_no_native_plugin_the_host_is_never_spawned() {
     assert_eq!(manager.spawn_attempts(), 0);
     assert_eq!(manager.status(), HostStatus::Idle);
     assert!(!temp.path().join("home").exists(), "nothing materialized");
+}
+
+async fn probe(tool: &Arc<dyn ToolSpec>, path: &Path, context: &ToolContext) -> Value {
+    let result = tool
+        .execute(json!({"path": path.to_string_lossy()}), context)
+        .await
+        .unwrap();
+    serde_json::from_str(&result.content).unwrap()
+}
+
+#[tokio::test]
+async fn sandboxed_host_cannot_read_codewhale_secrets_or_write_outside_its_data_dir() {
+    let Some(node) = node_for_tests("sandboxed_host") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["secret-probe"]);
+    // Created before launch: the deny-list records the canonical spelling of
+    // paths that exist (macOS `/var` → `/private/var`).
+    let secrets = fixture.root.join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    let token = secrets.join("token");
+    std::fs::write(&token, "s3cret-value").unwrap();
+    let readable = fixture.root.join("readable.txt");
+    std::fs::write(&readable, "plain").unwrap();
+
+    let manager = fixture.manager(node);
+    manager.sync(fixture.registry()).await.unwrap();
+    let HostStatus::Ready { sandbox, .. } = manager.status() else {
+        panic!("host not ready: {:?}", manager.status());
+    };
+    let Some(sandbox) = sandbox else {
+        assert!(
+            cfg!(windows) || crate::sandbox::get_platform_sandbox().is_none(),
+            "an OS sandbox is available here, so the host must run under it"
+        );
+        eprintln!("skipping sandbox assertions: no OS sandbox for the host on this platform");
+        manager.shutdown().await;
+        return;
+    };
+    assert!(super::render_status(&manager).contains(&format!("{sandbox} sandbox")));
+
+    let context = ToolContext::new(fixture.workspace());
+    let read = host_tool(&manager, fixture.workspace(), "probe_read");
+    let write = host_tool(&manager, fixture.workspace(), "probe_write");
+
+    let plain = probe(&read, &readable, &context).await;
+    assert_eq!(
+        plain,
+        json!({"ok": true, "text": "plain"}),
+        "ordinary reads work"
+    );
+    let secret = probe(&read, &token, &context).await;
+    assert_eq!(secret["ok"], false, "{secret}");
+    assert!(!secret.to_string().contains("s3cret"), "{secret}");
+
+    let data = fixture.root.join("extension-host/data/probe.txt");
+    assert_eq!(probe(&write, &data, &context).await["ok"], true);
+    // Outside the data dir and the temp dirs (the fixture itself lives under
+    // TMPDIR, which the profile leaves writable): the crate's source dir,
+    // unless the checkout itself sits in a temp dir.
+    let crate_dir = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let in_temp = [std::env::temp_dir(), PathBuf::from("/tmp")]
+        .iter()
+        .filter_map(|dir| std::fs::canonicalize(dir).ok())
+        .any(|dir| crate_dir.starts_with(dir));
+    if !in_temp {
+        let escape = crate_dir.join(format!(".ext-host-probe-{}", uuid::Uuid::new_v4().simple()));
+        let escaped = probe(&write, &escape, &context).await;
+        let leaked = escape.exists();
+        let _ = std::fs::remove_file(&escape);
+        assert_eq!(escaped["ok"], false, "{escaped}");
+        assert!(!leaked);
+    }
+    manager.shutdown().await;
 }

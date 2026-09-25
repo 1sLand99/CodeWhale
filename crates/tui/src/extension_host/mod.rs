@@ -20,12 +20,17 @@
 //! * No heartbeat and no auto-restart. A dead host fails in-flight calls with
 //!   a typed error and stays failed until the next session or until a plugin
 //!   the session has not seen before becomes desired.
-//! * One host per engine process and one trust tier; host plugins run
-//!   unsandboxed with the user's permissions, so the flag is Experimental.
+//! * One host per engine process and one trust tier. On macOS (Seatbelt) the
+//!   host has no network and cannot read Codewhale's secret/credential/config
+//!   stores (`supervisor::plan_launch`); on Linux and Windows it runs
+//!   unsandboxed with the user's permissions. Either way the flag is
+//!   Experimental.
 //! * The owner token is a bug/staleness guard, not a boundary between
 //!   plugins that share the process.
-//! * Windows: the host is killed as a single process (`kill_on_drop`); the
-//!   hooks' job-object tree was not moved into a shared module yet.
+//! * The host's process tree (Unix process group / Windows Job Object,
+//!   shared with hooks via `crate::process_tree`) is killed as a whole. On
+//!   Windows the host is assigned to its job just after spawn, not created
+//!   suspended as hooks are.
 
 pub(crate) mod protocol;
 pub(crate) mod registry;
@@ -134,6 +139,8 @@ pub enum HostStatus {
     Ready {
         pid: Option<u32>,
         node_version: String,
+        /// `seatbelt` / `bwrap`, or `None` when the host runs unsandboxed.
+        sandbox: Option<String>,
     },
     Failed {
         reason: String,
@@ -328,6 +335,7 @@ impl ExtensionHostManager {
             HostSlot::Ready(host) => HostStatus::Ready {
                 pid: host.pid,
                 node_version: host.node_version.get().cloned().unwrap_or_default(),
+                sandbox: host.sandbox.clone(),
             },
             HostSlot::Failed {
                 reason,
@@ -663,7 +671,7 @@ impl ExtensionHostManager {
         }
         shared.spawn_attempts.fetch_add(1, Ordering::SeqCst);
         let options = shared.options.clone();
-        let prepared = tokio::task::spawn_blocking(move || -> Result<(PathBuf, PathBuf), String> {
+        let prepared = tokio::task::spawn_blocking(move || -> Result<supervisor::HostLaunch, String> {
             let resolution =
                 crate::dependencies::resolve_node_for_extension_host(options.node_override.as_deref());
             let Some((node, _)) = resolution.selected else {
@@ -677,16 +685,17 @@ impl ExtensionHostManager {
                 None => codewhale_config::codewhale_home()
                     .map_err(|error| format!("Codewhale home unavailable: {error}"))?,
             };
-            Ok((node, materialize_bundle(&root)?))
+            let bundle = materialize_bundle(&root)?;
+            supervisor::plan_launch(&node, &bundle, &root)
         })
         .await
         .map_err(|error| format!("extension host preparation failed: {error}"))
         .and_then(|result| result);
         let spawned = match prepared {
-            Ok((node, bundle)) => {
+            Ok(launch) => {
                 let generation = shared.host_generation.fetch_add(1, Ordering::SeqCst) + 1;
                 let events: Arc<dyn HostEvents> = Arc::new(Events(Arc::downgrade(shared)));
-                HostProcess::spawn(generation, &node, &bundle, bundle_sha256(), events).await
+                HostProcess::spawn(generation, &launch, bundle_sha256(), events).await
             }
             Err(error) => Err(error),
         };
@@ -696,10 +705,11 @@ impl ExtensionHostManager {
                 *slot = HostSlot::Ready(Arc::clone(&host));
                 drop(slot);
                 shared.diagnostic(format!(
-                    "extension host started (pid {}, node {})",
+                    "extension host started (pid {}, node {}, sandbox {})",
                     host.pid
                         .map_or_else(|| "?".to_string(), |pid| pid.to_string()),
-                    host.node_version.get().map_or("?", String::as_str)
+                    host.node_version.get().map_or("?", String::as_str),
+                    host.sandbox.as_deref().unwrap_or("none")
                 ));
                 Ok(host)
             }
@@ -757,11 +767,21 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
             "not running (starts in the background when a reviewed plugin with host code is enabled)",
         ),
         HostStatus::Starting => out.push_str("starting"),
-        HostStatus::Ready { pid, node_version } => {
+        HostStatus::Ready {
+            pid,
+            node_version,
+            sandbox,
+        } => {
             let _ = write!(
                 out,
-                "running · pid {} · node {node_version}",
-                pid.map_or_else(|| "?".to_string(), |pid| pid.to_string())
+                "running · pid {} · node {node_version} · {}",
+                pid.map_or_else(|| "?".to_string(), |pid| pid.to_string()),
+                match sandbox {
+                    Some(sandbox) => format!(
+                        "{sandbox} sandbox (no network; Codewhale secrets and credential stores unreadable)"
+                    ),
+                    None => "UNSANDBOXED: host code runs with your user permissions".to_string(),
+                }
             );
         }
         HostStatus::Failed {

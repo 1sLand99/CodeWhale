@@ -181,6 +181,9 @@
   "crates/tui/src/extension_host/mod.rs": {
     "std_fs": 7
   },
+  "crates/tui/src/extension_host/supervisor.rs": {
+    "std_fs": 1
+  },
   "crates/tui/src/external_credentials.rs": {
     "std_fs": 2
   },

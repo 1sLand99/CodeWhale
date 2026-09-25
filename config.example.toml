@@ -1240,8 +1240,11 @@ exec_policy = true
 # extension_host = false # EXPERIMENTAL. Run reviewed plugins' `native` host code
                         # (TypeScript/JavaScript, Cordis/DSH plugin model) in a
                         # Node.js sidecar. Tools only in this phase; every
-                        # extension tool always asks for approval. Host code
-                        # runs with your user permissions (no sandbox yet).
+                        # extension tool always asks for approval. On macOS
+                        # the host runs under Seatbelt (no network, no reads of
+                        # ~/.codewhale secrets/credentials/config/sessions,
+                        # writes only to its data dir and temp dirs); on Linux
+                        # and Windows it runs with your user permissions.
                         # Toggling this changes the plugin activation policy,
                         # so every plugin must be re-reviewed afterwards.
 
