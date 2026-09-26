@@ -18380,6 +18380,46 @@ mod adoption_refusal {
     }
 }
 
+/// The exact-prefix search a fork's alignment runs, in one pass.
+///
+/// It replaces a rebuild-per-prefix search that was quadratic in the
+/// transcript (measured at ~9 s on a 5 MB session), so what it must keep is
+/// the *answer*: the first prefix whose projection is the kept one, and no
+/// match at all when the transcript drifted.
+#[test]
+fn exact_prefix_boundary_finds_the_first_matching_prefix() {
+    let user = |text: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    };
+    let messages = vec![user("first"), user("second"), user("third")];
+    let projection = |messages: &[Message]| session_recovery_projection(messages);
+
+    // A boundary in the middle: the kept projection names the first two turns.
+    assert_eq!(
+        exact_prefix_boundary(&messages, &projection(&messages[..2])),
+        Some(2)
+    );
+    // Every message, and none of them.
+    assert_eq!(
+        exact_prefix_boundary(&messages, &projection(&messages)),
+        Some(3)
+    );
+    assert_eq!(exact_prefix_boundary(&messages, &[]), Some(0));
+    // A prefix the transcript cannot produce is no match, not a neighbour.
+    assert_eq!(
+        exact_prefix_boundary(&messages, &projection(&[user("other")])),
+        None
+    );
+    // A projection that runs past the end of the transcript is no match either.
+    let mut longer = projection(&messages);
+    longer.push(serde_json::json!(["user", "beyond"]));
+    assert_eq!(exact_prefix_boundary(&messages, &longer), None);
+}
+
 #[test]
 fn saved_history_boundary_refuses_until_every_kept_prompt_is_seen() {
     let user = |text: &str| Message {
