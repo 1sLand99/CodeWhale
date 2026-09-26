@@ -1,5 +1,7 @@
 # Termux / Android arm64 Support
 
+> 阅读简体中文版：[zh_hans/TERMUX.md](zh_hans/TERMUX.md)。
+
 Codewhale provides an Android arm64 build and archive path for
 [Termux](https://termux.dev). Treat Termux support as a preview until the
 real-device runtime QA tracked in #4236 and #4242 is complete. This document

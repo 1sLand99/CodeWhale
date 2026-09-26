@@ -1,5 +1,7 @@
 # CNB Cool mirror
 
+> 阅读简体中文版：[zh_hans/CNB_MIRROR.md](zh_hans/CNB_MIRROR.md)。
+
 `cnb.cool/codewhale.net/codewhale` is a one-way mirror of this
 GitHub repository for users on networks where GitHub is slow or blocked
 (primarily mainland China). The mirror receives every push to `main`, every
