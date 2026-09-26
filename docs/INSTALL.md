@@ -158,7 +158,7 @@ Installed checksummed release commands:
 PATH selects no codewhale command; this install is /home/you/.local/bin/codewhale
 ```
 
-#### macOS notes
+### macOS notes
 
 Re-checked on macOS 26.1, Apple silicon (`macos-arm64`), with a fresh `HOME`:
 
@@ -723,6 +723,14 @@ codewhale exec --auto --output-format stream-json "…"   # one JSON event per l
 
 `--auto` auto-approves shell commands, so use it only in a repo or sandbox you
 trust.
+
+Plain `exec` offers the model no tools. Only `--auto`, `--yolo`,
+`--allowed-tools` or resuming a session opens a tool surface; limits such as
+`--max-turns`, `--disallowed-tools`, `--sandbox` and the output format never
+add tools (tool-only flags print a warning). If the provider stops a reply at
+its output limit, the model is asked to continue and the printed answer is the
+whole reply. A plain run takes at most 8 model steps unless `--max-turns` sets
+another limit; a reply still cut off at that limit fails the run.
 
 ### Resuming
 

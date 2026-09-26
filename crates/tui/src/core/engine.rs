@@ -137,7 +137,10 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
 
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
 const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry\n\nThe Registry installs and connects a local MCP server when this session lacks a capability. It is a fallback for a capability you do not have, not a step before ordinary work.\n\nPrefer what is already available, in order: tools already in this catalog, the project's own scripts, tests, and dev tooling, and platform capabilities. Creating a file, reading a fixture, running a repo command, and checking your own output are ordinary work — do them directly.\n\nReach for the Registry once you have identified a specific capability that no available tool covers and that you would otherwise install or reimplement, such as a document or media converter, access to an external database or service, or a protocol client. Then call `registry_sync` with a `query` naming that capability; it scores the local Registry snapshot host-side and returns at most eight matches, so the full index never enters the conversation. When a returned server plausibly covers that capability, call `start_registry_mcp_server` with its exact name rather than installing or running its package command through the shell. If nothing matches, refine the query once, then continue with local tools.\n\nBoth Registry tools are deferred: load one with `tool_search` before its first call, and use the returned schema. If a call instead reports that it only loaded the schema, retry once with that schema. Do not go searching for them for work you can already do.";
-const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
+/// The one system prompt for an isolated Runtime Chat session. The engine owns
+/// it; the Runtime Chat relay sends the same text (plus any account chat
+/// instructions) so the two never drift apart (#6517).
+pub(crate) const ISOLATED_CHAT_SYSTEM_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This is an isolated chat-only session: no local project, workspace, memory, skill, account, credential, path, or runtime context is available or implied. Do not claim to inspect or change local files, run tools, or perform work execution.";
 
 pub(crate) fn sanitize_isolated_chat_attachments(mut text: String) -> String {
     let references = codewhale_core::media_attachment_references(&text);
@@ -1380,6 +1383,41 @@ impl Engine {
         ))
     }
 
+    /// Where the user message just added sits in the session, for
+    /// [`Self::retract_unanswered_user_message`].
+    pub(super) fn mark_unanswered_user_message(&self) -> crate::core::turn::UnansweredUserMessage {
+        crate::core::turn::UnansweredUserMessage {
+            len: self.session.messages.len(),
+            revision: self.session.messages_revision,
+        }
+    }
+
+    /// Remove this turn's user message when nothing followed it — the request
+    /// was refused before any model output (#6566). The mark is the session
+    /// length and messages revision right after the message was added: an
+    /// append since (an answer, a tool call, a runtime note) changes the
+    /// length, and a rewrite (compaction, context recovery) changes the
+    /// revision even when the length happens to match, so either leaves the
+    /// session as it is rather than delete some other message.
+    pub(super) fn retract_unanswered_user_message(
+        &mut self,
+        mark: crate::core::turn::UnansweredUserMessage,
+    ) -> bool {
+        let messages = &self.session.messages;
+        if mark.len == 0
+            || messages.len() != mark.len
+            || self.session.messages_revision != mark.revision
+            || messages
+                .last()
+                .is_none_or(|message| message.role != Role::User)
+        {
+            return false;
+        }
+        self.session.messages.truncate_to(mark.len - 1);
+        self.session.bump_messages_revision();
+        true
+    }
+
     pub(super) fn decorate_auth_error_message(&self, message: String) -> String {
         let Some(hint) = self.api_key_env_only_recovery.as_ref() else {
             return message;
@@ -1706,7 +1744,7 @@ impl Engine {
             prompts::PromptHost::Headless
         };
         let system_prompt = if api_config.runtime_chat_isolated {
-            SystemPrompt::Text(ISOLATED_CHAT_ENGINE_PROMPT.to_string())
+            SystemPrompt::Text(ISOLATED_CHAT_SYSTEM_PROMPT.to_string())
         } else {
             prompts::system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
                 &config.workspace,
@@ -4697,7 +4735,6 @@ impl Engine {
                     Some(Vec::new()),
                     None,
                     Some(0),
-                    input_policy.approval_mode_for_session(),
                     tool_catalog::ToolMode::Direct,
                 ),
                 mcp_tool_names: Vec::new(),
@@ -4953,7 +4990,6 @@ impl Engine {
             allowed_tools,
             self.config.disallowed_tools.clone(),
             self.config.max_tool_calls,
-            input_policy.approval_mode_for_session(),
             // Model metadata wins once wired; today the hint is always None
             // and the [features] flags decide (model_registry follow-up).
             tool_catalog::requested_tool_mode(None, &self.config.features),
@@ -5521,6 +5557,7 @@ impl Engine {
         };
         user_msg.content.splice(image_index..image_index, images);
         self.session.add_message(user_msg);
+        turn.unanswered_user_message = Some(self.mark_unanswered_user_message());
 
         self.emit_session_updated().await;
 
@@ -7281,7 +7318,7 @@ impl Engine {
         context: &NextTurnPromptContext,
     ) -> Option<SystemPrompt> {
         if self.api_config.runtime_chat_isolated {
-            return Some(SystemPrompt::Text(ISOLATED_CHAT_ENGINE_PROMPT.to_string()));
+            return Some(SystemPrompt::Text(ISOLATED_CHAT_SYSTEM_PROMPT.to_string()));
         }
         let user_memory_block = crate::native_memory::native_prompt_block_traced(
             self.config.memory_enabled,
@@ -7500,9 +7537,9 @@ pub(crate) fn auto_review_plan_decision_for_context(
     let plan_decision = if context.approval_mode == ApprovalMode::Auto
         && context.tool_name == REQUEST_USER_INPUT_NAME
     {
-        // This synthetic tool does not execute user work. Let the turn loop
-        // return its ordinary autonomous guidance result instead of treating
-        // a hallucinated question as an unknown external action.
+        // A question executes no user work and changes no state. Auto-Review
+        // reviews tool approvals only, so let the turn loop ask the user
+        // instead of treating the question as an unknown external action.
         AutoReviewPlanDecision::Allow
     } else {
         match decision.action {
@@ -8309,7 +8346,7 @@ pub(crate) mod turn_heartbeat;
 pub(crate) mod turn_loop;
 pub(crate) use dispatch::{
     FLEET_FINAL_REPORT_NOTICE, FLEET_NO_PROGRESS_STOP, FLEET_STRATEGY_SWITCH_NOTICE,
-    FleetDenialAction, FleetDenialBatch, FleetDenialGuard,
+    FleetDenialAction, FleetDenialBatch, FleetDenialGuard, content_without_approval_note,
 };
 pub(crate) use token_estimate_cache::TokenEstimateCache;
 
