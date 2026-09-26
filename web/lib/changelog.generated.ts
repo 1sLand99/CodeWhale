@@ -40,9 +40,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
-          "Official model routing: /router (also /model router) sets up the Auto router with presets: Jev (TypeSafe's decision model, via OpenRouter or a TypeSafe key), your provider's fast tier, Off, or Custom. Each preset makes one test call before it saves, /status shows the router's choice, cost and latency, and a failing router is shown as failing (#6525)."
+          "Official model routing: /router (also /model router) sets up the Auto router with presets: Jev (TypeSafe's decision model, via OpenRouter or a TypeSafe key), your provider's fast tier, Off, or Custom. Each preset makes one test call before it saves, /status shows the router's choice, cost and latency, and a failing router is shown as failing (#6525).",
+          "Code mode composes MCP and plugin tools and is on by default: execute_tools programs can call MCP tools, and each nested call passes the same approval gate as a direct call, pausing the program for approval when needed. Every nested call keeps its receipt, including calls that finish before a deadline, and code_mode = false turns it off. codewhale mcp list and codewhale doctor warn when a user MCP server duplicates the built-in Computer Use bundle (#6562, #6509)."
         ],
-        "itemCount": 1
+        "itemCount": 2
       },
       {
         "heading": "Fixed",
@@ -60,7 +61,20 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Hooks treat bash, Bash and exec_shell as one tool in tool_name conditions, so the documented example fires.",
           "macOS no longer reports Codewhale's ordinary heap as GPU (IOAccelerator) memory."
         ],
-        "itemCount": 16
+        "itemCount": 19
+      },
+      {
+        "heading": "Removed",
+        "items": [
+          "Flags, settings and tool parameters that did nothing are gone (#6516). --output-mode is hidden. It is still accepted, prints a warning, and is ignored.",
+          "The dispatcher no longer exports DEEPSEEK_* copies of its CODEWHALE_* variables. A DEEPSEEK_* variable you set yourself is still read.",
+          "lane start and workflow run --runtime vm|ci are rejected before a lane is created. Older lane records for those runtimes still load.",
+          "The control socket's relaunch verb is removed; it always returned an error.",
+          "The speech tool drops stream. stream=true used to fail; it is now ignored, a complete audio file is written, and the result no longer carries \"stream\": false. The finance tool drops market, and a call that still passes it has it ignored.",
+          "[context].enabled, the seam-manager keys and tui.terminal_probe_timeout_ms no longer load; old configs that carry them still start. The [workshop] docs now describe bounded spillover instead of a synthesis sub-agent.",
+          "About 2,650 lines of workflow code that nothing ran are deleted: the replay executor, the review-repair loop and experimental search. The replay_diverged status they produced goes with them. The isolated Runtime Chat prompt and the legacy YOLO alias list each have one owner now (#6517)."
+        ],
+        "itemCount": 7
       },
       {
         "heading": "Experience",

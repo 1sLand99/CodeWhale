@@ -31,6 +31,15 @@ quieter, and Fleet runs can be checked before they spend anything.
   one test call before it saves, `/status` shows the router's choice, cost and
   latency, and a failing router is shown as failing
   ([#6525](https://github.com/Hmbown/Codewhale/issues/6525)).
+- Code mode composes MCP and plugin tools and is on by default:
+  `execute_tools` programs can call MCP tools, and each nested call passes the
+  same approval gate as a direct call, pausing the program for approval when
+  needed. Every nested call keeps its receipt, including calls that finish
+  before a deadline, and `code_mode = false` turns it off. `codewhale mcp list`
+  and `codewhale doctor` warn when a user MCP server duplicates the built-in
+  Computer Use bundle
+  ([#6562](https://github.com/Hmbown/Codewhale/issues/6562),
+  [#6509](https://github.com/Hmbown/Codewhale/issues/6509)).
 
 ### Fixed
 
@@ -88,6 +97,53 @@ quieter, and Fleet runs can be checked before they spend anything.
   honours `NO_COLOR` ([#5846](https://github.com/Hmbown/Codewhale/issues/5846)).
 - `/cache`, `/stash`, `/config`, session prune, `metrics --since` and the
   `lane start`/`lane stop --json` flags handle their edge cases.
+- Plain `codewhale exec` (no `--auto`) runs one Engine turn with the same
+  system prompt as every other run, so `--json` no longer changes the model's
+  instructions. It offers no tools unless a flag grants them (`--auto`,
+  `--yolo`, `--allowed-tools`, or resuming a session): `--max-turns`,
+  `--disallowed-tools`, `--append-system-prompt`, `--sandbox` and
+  `--output-format stream-json` no longer turn a chat call into a tool-using
+  agent, and tool-only flags passed without a grant print a warning. A reply
+  cut off at the provider's output limit is continued instead of failing the
+  run, for at most 8 model steps unless `--max-turns` sets another limit.
+  Breaking for scripts: the `--json` one-shot receipt no longer has
+  `stop_reason`, adds the agent receipt's fields (`prompt`, `tools`,
+  `outcomes`, `status`, `termination_reason`, `error_category`), and leaves
+  out `usage` when the turn never settled
+  ([#6510](https://github.com/Hmbown/Codewhale/issues/6510)).
+- `codewhale review` of a plain diff uses the same review prompt as
+  `review --pr` and prints the structured review as Markdown, or the model's
+  prose when it ignores the JSON format
+  ([#6510](https://github.com/Hmbown/Codewhale/issues/6510)).
+- A recursive `rlm_query` that runs out of rounds returns its last answer
+  marked `[rlm_query incomplete: …]` instead of an empty string, its model
+  calls appear in the parent turn's record, and its history is no longer
+  trimmed ([#6511](https://github.com/Hmbown/Codewhale/issues/6511)).
+
+### Removed
+
+- Flags, settings and tool parameters that did nothing are gone
+  ([#6516](https://github.com/Hmbown/Codewhale/issues/6516)). `--output-mode`
+  is hidden. It is still accepted, prints a warning, and is ignored.
+- The dispatcher no longer exports `DEEPSEEK_*` copies of its `CODEWHALE_*`
+  variables. A `DEEPSEEK_*` variable you set yourself is still read.
+- `lane start` and `workflow run --runtime vm|ci` are rejected before a lane
+  is created. Older lane records for those runtimes still load.
+- The control socket's `relaunch` verb is removed; it always returned an
+  error.
+- The `speech` tool drops `stream`. `stream=true` used to fail; it is now
+  ignored, a complete audio file is written, and the result no longer carries
+  `"stream": false`. The `finance` tool drops `market`, and a call that still
+  passes it has it ignored.
+- `[context].enabled`, the seam-manager keys and
+  `tui.terminal_probe_timeout_ms` no longer load; old configs that carry
+  them still start. The `[workshop]` docs now describe bounded spillover
+  instead of a synthesis sub-agent.
+- About 2,650 lines of workflow code that nothing ran are deleted: the replay
+  executor, the review-repair loop and experimental search. The
+  `replay_diverged` status they produced goes with them. The isolated
+  Runtime Chat prompt and the legacy YOLO alias list each have one owner now
+  ([#6517](https://github.com/Hmbown/Codewhale/issues/6517)).
 
 ### Experience
 
