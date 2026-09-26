@@ -9089,16 +9089,21 @@ impl RuntimeThreadManager {
         self.publish_prepared_fork(prepared).await
     }
 
-    /// How many turns a named anchor keeps, and its distance from the tail.
+    /// How many turns a named anchor keeps, the first user turn it drops, and
+    /// its distance from the tail.
     ///
     /// The fork keeps the anchor turn, so the cut is one past it: the branch
     /// point is the answer a person is looking at, not the question above it.
+    /// The turn right after the anchor need not be a user turn — a manual
+    /// `/compact` is a turn of its own with no prompt — so the receipt names
+    /// the next *user* turn, which is what was asked next, while the cut still
+    /// drops everything after the anchor.
     fn fork_cut_for_user_turn(
         &self,
         turns: &[TurnRecord],
         items_by_turn: &HashMap<String, Vec<TurnItemRecord>>,
         turn_id: &str,
-    ) -> Result<(usize, usize)> {
+    ) -> Result<(usize, Option<usize>, usize)> {
         // Oldest → newest, so the named turn's position is a direct index.
         let user_turn_indices = Self::user_turn_indices(turns, items_by_turn);
         let position = user_turn_indices
@@ -9109,6 +9114,7 @@ impl RuntimeThreadManager {
             })?;
         Ok((
             user_turn_indices[position] + 1,
+            user_turn_indices.get(position + 1).copied(),
             user_turn_indices.len() - 1 - position,
         ))
     }
@@ -9184,6 +9190,7 @@ impl RuntimeThreadManager {
             source_turns,
             items_by_turn,
             target_turn_idx,
+            Some(target_turn_idx),
             depth_from_tail,
         )
     }
@@ -9196,19 +9203,21 @@ impl RuntimeThreadManager {
         let source = self.get_thread(id).await?;
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
         let items_by_turn = self.prepared_items_for_turns(&source_turns)?;
-        let (cutoff_turn_idx, depth_from_tail) =
+        let (cutoff_turn_idx, receipt_turn_idx, depth_from_tail) =
             self.fork_cut_for_user_turn(&source_turns, &items_by_turn, turn_id)?;
         self.prepare_fork_from_cutoff(
             source,
             source_turns,
             items_by_turn,
             cutoff_turn_idx,
+            receipt_turn_idx,
             depth_from_tail,
         )
     }
 
     /// Clone the turns before `cutoff_turn_idx` into a sibling thread, and name
-    /// the first turn left behind in the receipt.
+    /// the first *user* turn left behind (`receipt_turn_idx`, at or after the
+    /// cutoff) in the receipt.
     ///
     /// One body for every fork that cuts a suffix: the depth-relative path
     /// (`/undo`, retry, backtrack) passes the anchor turn's own index and drops
@@ -9221,13 +9230,17 @@ impl RuntimeThreadManager {
         source_turns: Vec<TurnRecord>,
         mut items_by_turn: HashMap<String, Vec<TurnItemRecord>>,
         cutoff_turn_idx: usize,
+        receipt_turn_idx: Option<usize>,
         depth_from_tail: usize,
     ) -> Result<PreparedThreadFork> {
-        // The first turn the fork drops, when it drops any. Its prompt is what
-        // the caller puts back in the composer: for a depth-relative cut that
-        // is the turn being undone, and for an anchored cut it is the question
-        // that followed the branch point.
-        let dropped_turn = source_turns.get(cutoff_turn_idx);
+        // The first user turn the fork drops, when it drops any. Its prompt is
+        // what the caller puts back in the composer: for a depth-relative cut
+        // that is the turn being undone, and for an anchored cut it is the
+        // question that followed the branch point — not a prompt-less turn
+        // (a manual compaction, a routing settlement) that happens to sit
+        // between them.
+        debug_assert!(receipt_turn_idx.is_none_or(|idx| idx >= cutoff_turn_idx));
+        let dropped_turn = receipt_turn_idx.and_then(|idx| source_turns.get(idx));
         let dropped_turn_id = dropped_turn.map(|turn| turn.id.clone());
         let dropped_user_item = dropped_turn
             .and_then(|turn| items_by_turn.get(&turn.id))
@@ -9304,12 +9317,15 @@ impl RuntimeThreadManager {
                         // turn begins at — see `saved_history_boundary`.
                         //
                         // That turn is the one the kept history stops *before*: the
-                        // anchor itself for a depth-relative cut, and the turn after
-                        // the anchor for a fork at a named turn, which keeps it.
-                        let dropped_turn = dropped_turn.context(
-                            "A fork that trims saved history has no dropped turn to align it with",
-                        )?;
-                        let dropped_prompt = projected_user_texts(
+                        // anchor itself for a depth-relative cut, and the next user
+                        // turn after the anchor for a fork at a named turn, which
+                        // keeps it. When no user turn is dropped at all, every
+                        // saved prompt belongs to a kept turn, and so does the
+                        // whole saved transcript.
+                        match dropped_turn {
+                            None => messages.len(),
+                            Some(dropped_turn) => {
+                                let dropped_prompt = projected_user_texts(
                         &self.reconstruct_messages_from_turns_with(
                             std::slice::from_ref(dropped_turn),
                             &items_by_turn,
@@ -9323,12 +9339,14 @@ impl RuntimeThreadManager {
                             dropped_turn.id
                         )
                     })?;
-                        saved_history_boundary(
+                                saved_history_boundary(
                         &messages,
                         &projected_user_texts(&kept_messages),
                         &dropped_prompt,
                     )
                     .context("Cannot identify an exact saved-history boundary for this backtrack; the source thread was preserved")?
+                            }
+                        }
                     },
                 )
             };

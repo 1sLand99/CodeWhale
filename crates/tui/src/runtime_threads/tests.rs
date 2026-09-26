@@ -16031,6 +16031,108 @@ async fn fork_at_user_turn_leaves_a_running_turn_alone() -> Result<()> {
 }
 
 #[tokio::test]
+async fn fork_at_user_turn_receipt_skips_a_compaction_turn_after_the_anchor() -> Result<()> {
+    // A manual `/compact` is a turn of its own whose only item is the
+    // compaction: no prompt. Branching at the turn before it must still drop
+    // it (the fork keeps only the anchor and what precedes it), but the
+    // receipt belongs to the next *user* turn — the question that was asked
+    // next — not to the prompt-less compaction that happens to sit between.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: None,
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    let turn_ids =
+        seed_turns_with_user_messages(&manager, &thread.id, &["first", "second", "third"])?;
+    let seeded = manager.store.list_turns_for_thread(&thread.id)?;
+    let anchor = seeded
+        .iter()
+        .find(|turn| turn.id == turn_ids[1])
+        .context("seeded second turn")?;
+
+    // The compaction turn lands between the anchor and the next user turn.
+    let compaction_at = anchor.created_at + chrono::Duration::microseconds(500);
+    let compaction_item_id = "item_compaction_between".to_string();
+    manager.store.save_item(&TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: compaction_item_id.clone(),
+        turn_id: "turn_compaction_between".to_string(),
+        kind: TurnItemKind::ContextCompaction,
+        status: TurnItemLifecycleStatus::Completed,
+        summary: "Context compacted".to_string(),
+        detail: Some("summary of first and second".to_string()),
+        metadata: None,
+        artifact_refs: Vec::new(),
+        started_at: Some(compaction_at),
+        ended_at: Some(compaction_at),
+    })?;
+    let mut compaction_turn = anchor.clone();
+    compaction_turn.id = "turn_compaction_between".to_string();
+    compaction_turn.input_summary = "Context compacted".to_string();
+    compaction_turn.created_at = compaction_at;
+    compaction_turn.started_at = Some(compaction_at);
+    compaction_turn.ended_at = Some(compaction_at);
+    compaction_turn.item_ids = vec![compaction_item_id];
+    manager.store.save_turn(&compaction_turn)?;
+
+    // The next user turn carries its own allowance, which travels with it.
+    let mut next_user_turn = seeded
+        .iter()
+        .find(|turn| turn.id == turn_ids[2])
+        .context("seeded third turn")?
+        .clone();
+    next_user_turn.max_output_tokens = std::num::NonZeroU32::new(4096);
+    next_user_turn.schema_version = OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION;
+    manager.store.save_turn(&next_user_turn)?;
+
+    let order: Vec<String> = manager
+        .store
+        .list_turns_for_thread(&thread.id)?
+        .into_iter()
+        .map(|turn| turn.id)
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            turn_ids[0].clone(),
+            turn_ids[1].clone(),
+            "turn_compaction_between".to_string(),
+            turn_ids[2].clone(),
+        ],
+        "the compaction turn sits right after the anchor"
+    );
+
+    let (forked, original_text, original_images, max_output_tokens) =
+        manager.fork_at_user_turn(&thread.id, &turn_ids[1]).await?;
+
+    assert_eq!(original_text.as_deref(), Some("third"));
+    assert!(original_images.is_empty());
+    assert_eq!(max_output_tokens, std::num::NonZeroU32::new(4096));
+    let summaries: Vec<String> = manager
+        .store
+        .list_turns_for_thread(&forked.id)?
+        .into_iter()
+        .map(|turn| turn.input_summary)
+        .collect();
+    assert_eq!(
+        summaries,
+        vec!["first".to_string(), "second".to_string()],
+        "the fork keeps the anchor and drops the compaction after it"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn fork_at_user_message_out_of_range_errors() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
