@@ -16,7 +16,6 @@ use crate::mcp::McpPool;
 use crate::model_profile::ToolSurfaceBudget;
 use crate::tools::spec::{ToolError, ToolResult, optional_str, optional_u64, required_str};
 use codewhale_config::AppMode;
-use codewhale_execpolicy::ApprovalMode;
 use codewhale_models::Tool;
 
 use crate::core::session::ToolActivationCache;
@@ -24,7 +23,7 @@ use crate::dependencies::ExternalTool;
 use crate::features::{Feature, Features};
 use crate::regex_cache::compile_user_regex;
 
-pub(super) const MULTI_TOOL_PARALLEL_NAME: &str = "multi_tool_use.parallel";
+pub(crate) const MULTI_TOOL_PARALLEL_NAME: &str = "multi_tool_use.parallel";
 pub(crate) const REQUEST_USER_INPUT_NAME: &str = "request_user_input";
 pub(super) const CODE_EXECUTION_TOOL_NAME: &str = "code_execution";
 const CODE_EXECUTION_TOOL_TYPE: &str = "code_execution_20250825";
@@ -525,7 +524,6 @@ pub(super) struct ToolSurfacePolicy {
     /// this limit into its own admission counter at turn start; `None` means
     /// unlimited (the default), which keeps the admission gate inert.
     pub(super) max_tool_calls: Option<u32>,
-    questions_allowed: bool,
 }
 
 impl ToolSurfacePolicy {
@@ -540,7 +538,6 @@ impl ToolSurfacePolicy {
         allowed_tools: Option<Vec<String>>,
         disallowed_tools: Option<Vec<String>>,
         max_tool_calls: Option<u32>,
-        approval_mode: ApprovalMode,
         tool_mode: ToolMode,
     ) -> Self {
         let mut catalog = tools.unwrap_or_default();
@@ -576,12 +573,6 @@ impl ToolSurfacePolicy {
                 .and_then(Value::as_array)
                 .is_none_or(|actions| !actions.is_empty())
         });
-        let questions_allowed =
-            super::super::authority::permission_posture_allows_questions(approval_mode);
-        if !questions_allowed {
-            catalog.retain(|tool| tool.name != REQUEST_USER_INPUT_NAME);
-        }
-
         let mut active_names = initial_active_tools(&catalog);
         active_names.extend(dynamic_active_tools.iter().map(|name| (*name).to_string()));
         active_names.retain(|name| catalog.iter().any(|tool| tool.name == *name));
@@ -597,7 +588,6 @@ impl ToolSurfacePolicy {
             allowed_tools,
             disallowed_tools,
             max_tool_calls,
-            questions_allowed,
         }
     }
 
@@ -616,10 +606,6 @@ impl ToolSurfacePolicy {
 
     pub(super) fn denies_call(&self, name: &str, input: &Value) -> bool {
         tool_call_denied(self.disallowed_tools.as_deref(), name, input)
-    }
-
-    pub(super) fn allows_questions(&self) -> bool {
-        self.questions_allowed
     }
 }
 
@@ -1570,6 +1556,47 @@ fn execute_tool_search_inner(
             "unavailable_tool_references": unavailable_references,
         })),
     })
+}
+
+/// Describe-only `tool_search` for `execute_tools` programs: the same
+/// ranking as a direct search, answered with each match's name, description
+/// and input schema — and no activation, so the request's tool array and
+/// the session-pinned prefix stay exactly as they were.
+pub(super) fn describe_tools_for_program(
+    input: &serde_json::Value,
+    catalog: &[Tool],
+) -> Result<ToolResult, ToolError> {
+    let query = required_str(input, "query")?;
+    let match_kind = optional_str(input, "match")?.unwrap_or("bm25");
+    let max_results = usize::try_from(optional_u64(
+        input,
+        "max_results",
+        TOOL_SEARCH_DEFAULT_MAX_RESULTS as u64,
+    )?)
+    .unwrap_or(TOOL_SEARCH_DEFAULT_MAX_RESULTS)
+    .clamp(1, TOOL_SEARCH_MAX_RESULTS_LIMIT);
+    let names = match match_kind {
+        "regex" => discover_tools_with_regex(catalog, query, max_results)?,
+        "bm25" => discover_tools_with_bm25_like(catalog, query, max_results),
+        other => {
+            return Err(ToolError::invalid_input(format!(
+                "Unsupported match algorithm '{other}'. Expected one of: bm25, regex"
+            )));
+        }
+    };
+    let tools = names
+        .iter()
+        .filter_map(|name| catalog.iter().find(|tool| &tool.name == name))
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect::<Vec<_>>();
+    ToolResult::json(&json!({ "tools": tools }))
+        .map_err(|error| ToolError::execution_failed(error.to_string()))
 }
 
 pub(super) async fn execute_code_execution_tool(

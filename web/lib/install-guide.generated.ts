@@ -1,7 +1,7 @@
 // Generated from docs/INSTALL.md by scripts/derive-install.mjs. Do not edit.
 
 export const INSTALL_GUIDE = {
-  "sourceHash": "36955c1448b6c6d31046183e696705acc4e16f72530db8305381a968c6c4767b",
+  "sourceHash": "158b2b791f3194810c4288e2dbade45c4f637ae1868156b313cfc7308d0edb46",
   "anchors": [
     "installing-codewhale",
     "60-second-quickstart-linux-or-macos",
@@ -118,7 +118,7 @@ export const INSTALL_GUIDE = {
     },
     {
       "kind": "html",
-      "text": "<h4 id=\"macos-notes\">macOS notes</h4>\n<p>Re-checked on macOS 26.1, Apple silicon (<code>macos-arm64</code>), with a fresh <code>HOME</code>:</p>\n<ul>\n<li>The installer printed <code>Installing Codewhale for macos-arm64</code>, verified\nchecksums with the system tools, and installed <code>codewhale</code> and <code>codew</code>\n(64 MiB each, Mach-O arm64) in 4.3 s. Both report\n<code>codewhale 0.10.0 (1be1a703b975)</code>. They ran without a Gatekeeper prompt.</li>\n<li>When Node isn&#39;t on <code>PATH</code>, it also prints <code>Computer Use is included and needs Node.js 20 or newer on PATH.</code> The core TUI works without Node, but Computer Use\nand the JavaScript execution tool (<code>js_execution</code>) stay unavailable until Node\nis on <code>PATH</code>.</li>\n<li><code>codewhale doctor</code> behaves as on Linux (exit 0, <code>All checks complete!</code> with no\nkey, file-based secret store under <code>~/.codewhale/secrets/</code>), except that it\nreports <code>✓ sandbox available: macos-seatbelt</code>.</li>\n</ul>\n<h3 id=\"put-it-on-your-path\">Put it on your PATH</h3>\n<p>If the last lines say <code>PATH selects no codewhale command</code>, <code>~/.local/bin</code> isn&#39;t\non your PATH <strong>in this shell</strong>. On Ubuntu and Debian, <code>~/.profile</code> adds\n<code>~/.local/bin</code>, but only if the directory existed when you <em>logged in</em>. So:</p>\n<ul>\n<li>a new SSH or login shell picks it up automatically;</li>\n<li>a new terminal <strong>window</strong> on a desktop (GNOME Terminal, Ghostty, …) usually\ndoesn&#39;t, until you log out and back in. I hit\n<code>bash: codewhale: command not found</code> in Ghostty right after installing.</li>\n</ul>\n<p>Fix it once:</p>\n"
+      "text": "<h3 id=\"macos-notes\">macOS notes</h3>\n<p>Re-checked on macOS 26.1, Apple silicon (<code>macos-arm64</code>), with a fresh <code>HOME</code>:</p>\n<ul>\n<li>The installer printed <code>Installing Codewhale for macos-arm64</code>, verified\nchecksums with the system tools, and installed <code>codewhale</code> and <code>codew</code>\n(64 MiB each, Mach-O arm64) in 4.3 s. Both report\n<code>codewhale 0.10.0 (1be1a703b975)</code>. They ran without a Gatekeeper prompt.</li>\n<li>When Node isn&#39;t on <code>PATH</code>, it also prints <code>Computer Use is included and needs Node.js 20 or newer on PATH.</code> The core TUI works without Node, but Computer Use\nand the JavaScript execution tool (<code>js_execution</code>) stay unavailable until Node\nis on <code>PATH</code>.</li>\n<li><code>codewhale doctor</code> behaves as on Linux (exit 0, <code>All checks complete!</code> with no\nkey, file-based secret store under <code>~/.codewhale/secrets/</code>), except that it\nreports <code>✓ sandbox available: macos-seatbelt</code>.</li>\n</ul>\n<h3 id=\"put-it-on-your-path\">Put it on your PATH</h3>\n<p>If the last lines say <code>PATH selects no codewhale command</code>, <code>~/.local/bin</code> isn&#39;t\non your PATH <strong>in this shell</strong>. On Ubuntu and Debian, <code>~/.profile</code> adds\n<code>~/.local/bin</code>, but only if the directory existed when you <em>logged in</em>. So:</p>\n<ul>\n<li>a new SSH or login shell picks it up automatically;</li>\n<li>a new terminal <strong>window</strong> on a desktop (GNOME Terminal, Ghostty, …) usually\ndoesn&#39;t, until you log out and back in. I hit\n<code>bash: codewhale: command not found</code> in Ghostty right after installing.</li>\n</ul>\n<p>Fix it once:</p>\n"
     },
     {
       "kind": "code",
@@ -342,7 +342,7 @@ export const INSTALL_GUIDE = {
     },
     {
       "kind": "html",
-      "text": "<p><code>--auto</code> auto-approves shell commands, so use it only in a repo or sandbox you\ntrust.</p>\n<h3 id=\"resuming\">Resuming</h3>\n"
+      "text": "<p><code>--auto</code> auto-approves shell commands, so use it only in a repo or sandbox you\ntrust.</p>\n<p>Plain <code>exec</code> offers the model no tools. Only <code>--auto</code>, <code>--yolo</code>,\n<code>--allowed-tools</code> or resuming a session opens a tool surface; limits such as\n<code>--max-turns</code>, <code>--disallowed-tools</code>, <code>--sandbox</code> and the output format never\nadd tools (tool-only flags print a warning). If the provider stops a reply at\nits output limit, the model is asked to continue and the printed answer is the\nwhole reply. A plain run takes at most 8 model steps unless <code>--max-turns</code> sets\nanother limit; a reply still cut off at that limit fails the run.</p>\n<h3 id=\"resuming\">Resuming</h3>\n"
     },
     {
       "kind": "code",

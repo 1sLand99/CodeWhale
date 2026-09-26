@@ -7,7 +7,7 @@ this site's existing light/OS-dark/pinned-dark roles. The portable artifact's
 own generator checks its digest before exporting. Update the entire vendored
 folder from the app's design package; never edit its JSON here.
 
-`crates/palette/src/tokens.rs` still owns the terminal's WHALE, LIGHT and
+`crates/palette/src/rgb.rs` still owns the terminal's WHALE, LIGHT and
 SHORELINE presets. They remain available to terminal-specific illustrations;
 the public site's GPUI aliases no longer copy the Rust palette's mirrors.
 
@@ -30,8 +30,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-TOKENS_RS = REPO / "crates/palette/src/tokens.rs"
-SOURCE_LABEL = "crates/palette/src/tokens.rs + vendor/codewhale-design/tokens.json"
+TOKENS_RS = REPO / "crates/palette/src/rgb.rs"
+SOURCE_LABEL = "crates/palette/src/rgb.rs + vendor/codewhale-design/tokens.json"
 GPUI_DIR = REPO / "vendor/codewhale-design"
 
 CONST_RE = re.compile(
@@ -102,7 +102,8 @@ def gpui_tokens(data):
         "BG": "background", "TEXT": "foreground", "PANEL": "surface",
         "TEXT_MUTED": "muted_foreground", "BORDER": "border", "SIDEBAR": "sidebar",
         "PRIMARY": "primary", "ON_PRIMARY": "primary_foreground", "ACCENT": "hover",
-        "LIST_ACTIVE": "selected",
+        "LIST_ACTIVE": "selected", "ATTENTION": "attention", "LIVE": "live",
+        "DANGER": "danger", "BORDER_STRONG": "border_strong",
     }
     return [
         (f"{prefix}_{name}", tuple(bytes.fromhex(palette[key])))

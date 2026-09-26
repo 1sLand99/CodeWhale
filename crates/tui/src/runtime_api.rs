@@ -1863,7 +1863,11 @@ async fn create_thread(
 
     let thread = state
         .runtime_threads
-        .create_thread(req)
+        .create_thread_with_shell_policy(
+            req,
+            state.config_path.as_deref(),
+            state.config_profile.as_deref(),
+        )
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok((StatusCode::CREATED, Json(thread)))
