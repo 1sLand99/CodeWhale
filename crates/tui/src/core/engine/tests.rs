@@ -20895,6 +20895,22 @@ fn filter_tool_scenario() {
             assert!(visible.contains("after"), "{visible:?}");
         }
     }
+    // DeepSeek's doubled-delimiter DSML form, emitted when the request offers
+    // no tools: one-shot `codewhale exec` printed it verbatim as the answer.
+    {
+        let text = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"read_file\">\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">note.txt</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n";
+        assert!(contains_fake_tool_wrapper(text));
+        for cut in 1..text.len() {
+            if !text.is_char_boundary(cut) {
+                continue;
+            }
+            let mut state = ToolCallDeltaFilterState::default();
+            let mut visible = filter_tool_call_delta_with_state(&text[..cut], &mut state);
+            visible.push_str(&filter_tool_call_delta_with_state(&text[cut..], &mut state));
+            visible.push_str(&flush_tool_call_delta_state(&mut state));
+            assert_eq!(visible.trim(), "", "cut {cut} leaked DSML: {visible:?}");
+        }
+    }
     // from filter_tool_call_delta_strips_deepseek_native_token_split_across_chunks
     {
         // The streaming filter carries a partial marker across chunk boundaries.
