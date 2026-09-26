@@ -33,7 +33,7 @@
 4. [SKILLS.md](../SKILLS.md) —— 技能（skill）的安装、管理与使用
 5. [SUBAGENTS.md](../SUBAGENTS.md) —— 子智能体（Fleet）机制
 6. [HOOKS.md](../HOOKS.md) —— 钩子机制与自动化
-7. [TOOL_SURFACE.md](../TOOL_SURFACE.md) —— 工具面：AI 当前可用的工具契约
+7. [TOOL_SURFACE.md](./TOOL_SURFACE.md) —— 工具面：AI 当前可用的工具契约
 8. [AGENT_RUNTIME.md](../AGENT_RUNTIME.md) —— Agent 运行时：子智能体、exec 与 Fleet 的关系
 9. [WEB.md](WEB.md) —— 本地浏览器客户端：启动方式、会话验证边界与故障排查
 
@@ -41,11 +41,21 @@
 
 为 Codewhale 贡献代码或做集成开发。
 
-1. [ARCHITECTURE.md](../ARCHITECTURE.md) —— 架构总览
+1. [ARCHITECTURE.md](./ARCHITECTURE.md) —— 架构总览
 2. [CONTRIBUTING.md](../../CONTRIBUTING.md) —— 贡献指南：如何提交 Issue 与 PR、代码约定与验证门禁
 3. [CODE_OF_CONDUCT.md](../../.github/CODE_OF_CONDUCT.md) —— 社区行为准则
-4. [RUNTIME_API.md](../RUNTIME_API.md) —— Runtime API 与集成契约（供集成与二次开发）
+4. [RUNTIME_API.md](./RUNTIME_API.md) —— Runtime API 与集成契约（供集成与二次开发）
 5. [PLUGIN_AUTHORING.md](PLUGIN_AUTHORING.md) —— 从最小 Skills 示例开始编写、审查和启用插件
+6. [AGENT_ETHOS.md](./AGENT_ETHOS.md) —— 代理准则：Codewhale 希望代理成为什么样的工作伙伴
+7. [AUTHORIZATION_ORDER.md](./AUTHORIZATION_ORDER.md) —— 授权顺序：工具可用性、钩子、权限规则与审批姿态的判定次序
+8. [AUTOMATIC_WORKFLOWS.md](./AUTOMATIC_WORKFLOWS.md) —— 自动工作流：多代理编排，不必手写 `.workflow.js`
+9. [COMMAND_CONTROL_PLANE.md](./COMMAND_CONTROL_PLANE.md) —— 共享命令/控制平面契约
+10. [ENVIRONMENTS.md](./ENVIRONMENTS.md) —— 特定环境的注意事项（各平台构建/测试差异）
+11. [LEGACY_PATHS.md](./LEGACY_PATHS.md) —— 旧版 `.deepseek/` 兼容路径：审计与迁移状态
+12. [LIVE_SMOKE.md](./LIVE_SMOKE.md) —— 可选的实时冒烟运行（手动、绝不自动化）
+13. [OPERATIONS_RUNBOOK.md](./OPERATIONS_RUNBOOK.md) —— 运维手册：调试与事故响应
+14. [WORKROOM_ARCHITECTURE.md](./WORKROOM_ARCHITECTURE.md) —— 工作间（Workroom）架构
+15. [WORKROOM_SECURITY.md](./WORKROOM_SECURITY.md) —— Workroom 安全模型
 
 > 我们强烈建议，成为 Codewhale 贡献者之前，您需要具备一定的英语阅读能力。如果您在英语方面较为薄弱，当然可以使用 LLM 来翻译。但是在 LLM 翻译完原文之后，建议您强忍着看不懂外文的不适，即使皱着眉头，也要审查一遍 LLM 翻译后的语义是否与你的原文语义相同。LLM 幻觉是会把事情搞砸的。
 
@@ -62,5 +72,5 @@
 - 中文文档回链英文源，并标注 "last synced with English revision" 日期，让过期一目了然。
 - 旧位置的 `.zh-CN.md` 文件保留为重定向占位页，保留一个发布周期后移除。
 
-本文档更新于 2026 年 9 月 22 日
-Last Updated on September 22, 2026
+本文档更新于 2026 年 9 月 27 日
+Last Updated on September 27, 2026

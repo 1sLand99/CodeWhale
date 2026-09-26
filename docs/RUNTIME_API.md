@@ -1,5 +1,7 @@
 # Runtime API & Integration Contract
 
+> 阅读简体中文版：[zh_hans/RUNTIME_API.md](zh_hans/RUNTIME_API.md)。
+
 `codewhale app-server` is the canonical local runtime API and control plane.
 Local SDKs, mobile/remote-control clients, and editor integrations talk to it
 instead of screen-scraping terminal output. It serves the full HTTP/SSE runtime
