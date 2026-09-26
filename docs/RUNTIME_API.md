@@ -1315,6 +1315,25 @@ also how a client sees model-spawned work.
   `hidden` for rows the product does not advertise, and `shadowed_by` /
   `shadowed_aliases` where a user command has taken a builtin's spelling.
 
+  Each entry also carries the composer argument shape, computed the way the
+  TUI composer computes it, so a client does not re-derive it from `usage`
+  (#6230):
+  - `requires_argument` — the usage line mentions any argument, required or
+    optional.
+  - `requires_required_argument` — the usage line has a `<required>` argument
+    outside every `[optional]` group.
+  - `composer_wants_trailing_space` — accepting the command leaves a trailing
+    space for its arguments.
+  - `palette_runs_directly` — the palette runs the command on selection
+    instead of pasting it into the composer.
+  - `show_in_empty_discovery` — the command is listed when the slash menu
+    opens with no filter text.
+
+  User commands derive these from `takes_arguments`: their arguments are
+  never required, a template that takes arguments waits in the composer and
+  one that does not runs directly, and a `hidden` template stays out of empty
+  discovery.
+
   The same registry the TUI palette reads, so a desktop palette can be
   checked against it instead of drifting from it. Two rules a client must
   respect: a `binding: "host"` row is never submitted as a model prompt, and

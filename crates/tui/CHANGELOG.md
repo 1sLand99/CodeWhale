@@ -22,6 +22,7 @@ quieter, and Fleet runs can be checked before they spend anything.
 - **[@Lstarsky0](https://github.com/Lstarsky0)** — moved the docs/work, legal, digest and FAQ pages onto the dictionary spine ([#6405](https://github.com/Hmbown/Codewhale/pull/6405), [#6417](https://github.com/Hmbown/Codewhale/pull/6417), [#6499](https://github.com/Hmbown/Codewhale/pull/6499), [#6574](https://github.com/Hmbown/Codewhale/pull/6574)), tightened the Chinese-branching ceiling to 18 ([#6403](https://github.com/Hmbown/Codewhale/pull/6403)), and made Fleet publish without a two-link window ([#6431](https://github.com/Hmbown/Codewhale/pull/6431)).
 - **[@aboimpinto](https://github.com/aboimpinto)** — restored a green Linux full-workspace test gate without loosening any test ([#6581](https://github.com/Hmbown/Codewhale/pull/6581)).
 - **[@dajiaohuang](https://github.com/dajiaohuang)** — `codewhale config set` checks a known setting's value against its schema type before saving it ([#6568](https://github.com/Hmbown/Codewhale/pull/6568)).
+- **[@Water-Run](https://github.com/Water-Run)** — ingested namespaced model-only catalog entries so models present only in the canonical `models` map reach the offering list ([#6400](https://github.com/Hmbown/Codewhale/pull/6400)), and retired the blanket dead-code allowance with its unused feature stages, tightening the budget to match ([#6402](https://github.com/Hmbown/Codewhale/pull/6402)).
 
 ### Added
 
@@ -249,7 +250,7 @@ v0.9.14 candidate.
 - **[@VincentCorleone](https://github.com/VincentCorleone)** — defined and implemented the weixin-bridge Quick Start so a first run works from the README alone ([#6170](https://github.com/Hmbown/Codewhale/pull/6170), harvested).
 - **[@Serendo](https://github.com/Serendo)** — fixed the `/config` theme editor exiting the panel on an arrow key ([#6336](https://github.com/Hmbown/Codewhale/pull/6336)).
 - **[@yetuge](https://github.com/yetuge)** — dropped the retired `token_budget` field from the subagent documentation ([#6335](https://github.com/Hmbown/Codewhale/pull/6335)).
-- **[@Water-Run](https://github.com/Water-Run)** — ingested namespaced model-only catalog entries so models present only in the canonical `models` map reach the offering list ([#6400](https://github.com/Hmbown/Codewhale/pull/6400)); translated the local browser client guide into Simplified Chinese ([#6401](https://github.com/Hmbown/Codewhale/pull/6401)); and retired the blanket dead-code allowance with its unused feature stages, tightening the budget to match ([#6402](https://github.com/Hmbown/Codewhale/pull/6402)).
+- **[@Water-Run](https://github.com/Water-Run)** — translated the local browser client guide into Simplified Chinese ([#6401](https://github.com/Hmbown/Codewhale/pull/6401)). Water-Run's catalog and dead-code work (#6400, #6402) landed after the v0.10.0 tag and ships in v0.10.1.
 ### Security
 - Children never inherit desktop or computer-control tools. Desktop control is
   the most machine-wide capability in the catalog, and a verifier child
@@ -5836,6 +5837,8 @@ Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
   report that exposed lossy high-bit process-status handling (#4100).
 - [@w1w218](https://github.com/w1w218) — the Windows ARM64 release request and
   real-device motivation (#4267).
+- [@stream2stream](https://github.com/stream2stream) — the legacy-session
+  recovery report that led to the read-only doctor diagnostic (#4032, #4539).
 - [@Angel-Hair](https://github.com/Angel-Hair) — session-owned read-before-edit
   tracking and the explicit, backwards-compatible `apply_patch` replacement
   contract (PRs #4475 and #4476).
