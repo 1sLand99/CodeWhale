@@ -926,6 +926,42 @@ fn session_recovery_projection(messages: &[Message]) -> Vec<Value> {
     projection
 }
 
+/// Whether a source's saved transcript has stopped being a transcript of its
+/// turns.
+///
+/// A context compaction rewrites the model-visible history in place: what
+/// stays verbatim is the user prompts inside a token budget, and everything a
+/// prompt stood for — the answers, the tool calls, their results — is
+/// summarized away. The saved messages are therefore an *abbreviation* of the
+/// turns, and every boundary in them still names a turn while carrying only
+/// its prompt.
+///
+/// That matters to a fork, which is a slice of that history. Copying the
+/// abbreviation into a document that claims, through its checkpoint, to cover
+/// the kept turns hands every reader of that document — the session view,
+/// `restore_thread_messages` — a run of prompts with the agent's
+/// output missing, because nothing is left for it to rebuild the turns from.
+/// The turn store is not rewritten by compaction, so the records can: they are
+/// what the fork rebuilds the kept exchanges from
+/// (`reconstruct_messages_from_turns_with`).
+///
+/// The compaction names the turn it ran for, so the records answer the
+/// question directly. Any compaction in the thread is enough: the turns before
+/// it are the ones whose transcript was replaced, and a cut after them would
+/// still slice an abbreviation.
+fn saved_transcript_is_compacted(
+    turns: &[TurnRecord],
+    items_by_turn: &HashMap<String, Vec<TurnItemRecord>>,
+) -> bool {
+    turns.iter().any(|turn| {
+        items_by_turn.get(&turn.id).is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.kind == TurnItemKind::ContextCompaction)
+        })
+    })
+}
+
 fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> bool {
     left.schema_version == right.schema_version
         && left.id == right.id
@@ -8872,26 +8908,38 @@ impl RuntimeThreadManager {
         forked.archived = false;
 
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
+        // One read for every turn's items — see `prepared_items_for_turns`: a
+        // whole-thread fork visits every turn, and the per-turn scan made that
+        // quadratic over a store that only grows.
+        let mut items_by_turn = self.prepared_items_for_turns(&source_turns)?;
         // The fork's own document holds exactly the prefix its source
         // checkpoint already covers — see `bind_fork_to_own_session`. A source
         // whose checkpoint no longer matches its file has no prefix to copy;
         // the fork then keeps the binding it inherited, which is what it did
         // before this existed, rather than failing the fork outright.
-        let fork_prefix = match self.saved_session_prefix(&source, &source_turns) {
-            Ok(Some(prefix)) => Some(prefix),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    thread_id = %source.id,
-                    "fork source has no usable saved-session prefix: {error:#}"
-                );
-                None
+        //
+        // A compacted source has no transcript to copy at all: its saved
+        // messages are the summary plus the prompts that stayed verbatim, so
+        // the whole conversation is rebuilt from its records instead — see
+        // `saved_transcript_is_compacted`.
+        let fork_prefix = if saved_transcript_is_compacted(&source_turns, &items_by_turn) {
+            Some((
+                self.reconstruct_messages_from_turns_with(&source_turns, &items_by_turn)?,
+                source_turns.len(),
+            ))
+        } else {
+            match self.saved_session_prefix(&source, &source_turns) {
+                Ok(Some(prefix)) => Some(prefix),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %source.id,
+                        "fork source has no usable saved-session prefix: {error:#}"
+                    );
+                    None
+                }
             }
         };
-        // One read for every turn's items — see `prepared_items_for_turns`: a
-        // whole-thread fork visits every turn, and the per-turn scan made that
-        // quadratic over a store that only grows.
-        let mut items_by_turn = self.prepared_items_for_turns(&source_turns)?;
         let mut cloned_records = Vec::with_capacity(source_turns.len());
         for source_turn in source_turns {
             let mut cloned_turn = source_turn.clone();
@@ -9220,8 +9268,18 @@ impl RuntimeThreadManager {
         let mut fork_prefix: Option<(Vec<Message>, usize)> = None;
         if let Some((messages, covered)) = self.saved_session_prefix(&source, &source_turns)? {
             let kept_turns = covered.min(cutoff_turn_idx);
-            let retained_messages = if covered <= cutoff_turn_idx {
-                messages.len()
+            // A compacted source has no transcript to cut — see
+            // `saved_transcript_is_compacted`. Every boundary in its saved
+            // messages names a turn while carrying only that turn's prompt, so
+            // a slice of them would claim coverage of exchanges the fork's own
+            // document does not hold. There is nothing for the boundary search
+            // to find either, so it is skipped rather than risk a refusal for a
+            // trim the fork is not going to take.
+            let compacted = saved_transcript_is_compacted(&source_turns, &items_by_turn);
+            let retained_messages = if compacted {
+                None
+            } else if covered <= cutoff_turn_idx {
+                Some(messages.len())
             } else {
                 let kept_messages = self.reconstruct_messages_from_turns_with(
                     &source_turns[..cutoff_turn_idx],
@@ -9234,23 +9292,24 @@ impl RuntimeThreadManager {
                 // shapes keep their exact boundary.
                 // One walk, not one rebuild per prefix — see
                 // `exact_prefix_boundary`.
-                if let Some(count) = exact_prefix_boundary(&messages, &kept_projection) {
-                    count
-                } else {
-                    // It cannot hold for a real conversation: the model-visible
-                    // transcript carries the per-turn `<turn_meta>` preamble and
-                    // tool results as the route's compaction left them, neither
-                    // of which the records keep. The prompt is recorded
-                    // verbatim, so it still names the message the first dropped
-                    // turn begins at — see `saved_history_boundary`.
-                    //
-                    // That turn is the one the kept history stops *before*: the
-                    // anchor itself for a depth-relative cut, and the turn after
-                    // the anchor for a fork at a named turn, which keeps it.
-                    let dropped_turn = dropped_turn.context(
-                        "A fork that trims saved history has no dropped turn to align it with",
-                    )?;
-                    let dropped_prompt = projected_user_texts(
+                Some(
+                    if let Some(count) = exact_prefix_boundary(&messages, &kept_projection) {
+                        count
+                    } else {
+                        // It cannot hold for a real conversation: the model-visible
+                        // transcript carries the per-turn `<turn_meta>` preamble and
+                        // tool results as the route's compaction left them, neither
+                        // of which the records keep. The prompt is recorded
+                        // verbatim, so it still names the message the first dropped
+                        // turn begins at — see `saved_history_boundary`.
+                        //
+                        // That turn is the one the kept history stops *before*: the
+                        // anchor itself for a depth-relative cut, and the turn after
+                        // the anchor for a fork at a named turn, which keeps it.
+                        let dropped_turn = dropped_turn.context(
+                            "A fork that trims saved history has no dropped turn to align it with",
+                        )?;
+                        let dropped_prompt = projected_user_texts(
                         &self.reconstruct_messages_from_turns_with(
                             std::slice::from_ref(dropped_turn),
                             &items_by_turn,
@@ -9264,25 +9323,44 @@ impl RuntimeThreadManager {
                             dropped_turn.id
                         )
                     })?;
-                    saved_history_boundary(
+                        saved_history_boundary(
                         &messages,
                         &projected_user_texts(&kept_messages),
                         &dropped_prompt,
                     )
                     .context("Cannot identify an exact saved-history boundary for this backtrack; the source thread was preserved")?
-                }
+                    },
+                )
+            };
+            let (prefix, covered_turns) = match retained_messages {
+                Some(retained) => (messages[..retained].to_vec(), kept_turns),
+                None => (
+                    self.reconstruct_messages_from_turns_with(
+                        &source_turns[..cutoff_turn_idx],
+                        &items_by_turn,
+                    )?,
+                    cutoff_turn_idx,
+                ),
             };
             forked.saved_session_checkpoint = Some(SavedSessionCheckpoint {
-                covered_turn_id: kept_turns
+                covered_turn_id: covered_turns
                     .checked_sub(1)
                     .map(|index| source_turns[index].id.clone()),
-                messages_sha256: match &source.saved_session_checkpoint {
-                    Some(checkpoint) => checkpoint.messages_sha256.clone(),
-                    None => session_messages_sha256(&messages)?,
+                // A copy of the source's own slice keeps the source's
+                // fingerprint, which is what an inherited binding (the fork
+                // could not be given a document) is verified against. A
+                // rebuilt prefix describes itself and hashes itself.
+                messages_sha256: if compacted {
+                    session_messages_sha256(&prefix)?
+                } else {
+                    match &source.saved_session_checkpoint {
+                        Some(checkpoint) => checkpoint.messages_sha256.clone(),
+                        None => session_messages_sha256(&messages)?,
+                    }
                 },
-                retained_messages: Some(retained_messages),
+                retained_messages: Some(prefix.len()),
             });
-            fork_prefix = Some((messages[..retained_messages].to_vec(), kept_turns));
+            fork_prefix = Some((prefix, covered_turns));
         }
 
         let mut cloned_records = Vec::with_capacity(cutoff_turn_idx);

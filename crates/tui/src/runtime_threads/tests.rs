@@ -672,6 +672,182 @@ mod recovery {
         Ok(())
     }
 
+    /// A fork of a *compacted* conversation keeps the whole exchange.
+    ///
+    /// Compaction rewrites the model-visible history in place: the prompts stay
+    /// verbatim, the answers and the tool work around them are summarized into
+    /// the session's system prompt. Slicing that abbreviation into a fork's own
+    /// document claims, through its checkpoint, coverage the document does not
+    /// carry — a client then reads a run of prompts with the agent's answers
+    /// missing, and `restore_thread_messages` cannot rebuild them either,
+    /// because the checkpoint tells it the prefix covers those turns already.
+    ///
+    /// The records keep every item of every turn, so the fork rebuilds the kept
+    /// exchanges instead of copying the summary's view of them.
+    #[tokio::test]
+    async fn fork_of_a_compacted_conversation_keeps_the_agent_output() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+
+        let turn_one = "turn_before_compaction";
+        let turn_two = "turn_of_compaction";
+        for item in [
+            text_item(
+                "item_u1",
+                turn_one,
+                0,
+                TurnItemKind::UserMessage,
+                "write test.txt",
+            ),
+            text_item(
+                "item_a1",
+                turn_one,
+                1,
+                TurnItemKind::AgentMessage,
+                "created test.txt",
+            ),
+            text_item(
+                "item_u2",
+                turn_two,
+                2,
+                TurnItemKind::UserMessage,
+                "write test2.txt",
+            ),
+            text_item(
+                "item_a2",
+                turn_two,
+                3,
+                TurnItemKind::AgentMessage,
+                "created test2.txt",
+            ),
+            text_item(
+                "item_c1",
+                turn_two,
+                4,
+                TurnItemKind::ContextCompaction,
+                "Made room: 1383 → 21 messages",
+            ),
+        ] {
+            manager.store.save_item(&item)?;
+        }
+        for (turn_id, order) in [(turn_one, 0), (turn_two, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_two.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // What the engine persisted once compaction had run: the two prompts
+        // verbatim, and none of the work that happened between them. The
+        // summary itself rides in the session's system prompt, which is why the
+        // saved messages read as a bare list of what was asked.
+        let compacted: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"write test.txt"}]},
+            {"role":"user","content":[{"type":"text","text":"write test2.txt"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &compacted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        // Branch at the last turn, the way the transcript's "continue from
+        // here" row does: the whole conversation is kept, and every bit of it
+        // has to survive into the fork's own document.
+        let (fork, _, _, _) = manager.fork_at_user_turn(&thread.id, turn_two).await?;
+        let fork_session_id = fork
+            .session_id
+            .clone()
+            .context("a published fork owns a session document")?;
+        assert_ne!(fork_session_id, saved.metadata.id);
+        let document = sessions.load_session(&fork_session_id)?;
+        let roles: Vec<&str> = document
+            .messages
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "user", "assistant"],
+            "the fork's document is the exchange, not the {} saved prompts: {:#?}",
+            compacted.len(),
+            document.messages
+        );
+        let restored = manager.restore_thread_messages(&fork)?;
+        assert_eq!(
+            document.messages, restored,
+            "the document a client reads is the conversation the engine restores"
+        );
+        let rendered = serde_json::to_string(&document.messages)?;
+        for answer in ["created test.txt", "created test2.txt"] {
+            assert!(
+                rendered.contains(answer),
+                "the agent's answer {answer:?} survives the fork: {:#?}",
+                document.messages
+            );
+        }
+
+        // A depth-relative cut of the same compacted source — the shape undo
+        // and retry use — keeps the exchange it did not drop, likewise whole.
+        let (undo_fork, _, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        let undo_document = sessions.load_session(
+            undo_fork
+                .session_id
+                .as_deref()
+                .context("a published fork owns a session document")?,
+        )?;
+        let undo_roles: Vec<&str> = undo_document
+            .messages
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(
+            undo_roles,
+            ["user", "assistant"],
+            "a depth-relative cut keeps the first turn's exchange: {:#?}",
+            undo_document.messages
+        );
+        Ok(())
+    }
+
     async fn control_case(interrupt: bool, follow_up: bool) -> Result<()> {
         let _env = crate::test_support::lock_test_env();
         let dir = tempfile::tempdir()?;
