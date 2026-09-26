@@ -598,7 +598,6 @@ where
 }
 const RUNTIME_RESTART_REASON: &str = "Interrupted by process restart";
 const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
-const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
 const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[cfg(test)]
@@ -610,10 +609,11 @@ static TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl RuntimeThreadManager {
-    /// Wait for one external approval decision. `[tools]
-    /// user_input_timeout_seconds` governs (#6003): absent uses the built-in
-    /// default, an explicit 0 returns `None` and the decision waits
-    /// indefinitely.
+    /// Wait for one external approval decision. The one approval clock,
+    /// `[approval] timeout_seconds`, governs here as it does for the TUI
+    /// card: absent or `0` returns `None` and the decision waits until the
+    /// person answers or stops the turn (CURRENT_DECISIONS §21). A GPUI or
+    /// web approval is never denied on the user's behalf by default.
     pub(crate) fn approval_decision_timeout(&self) -> Option<Duration> {
         #[cfg(test)]
         {
@@ -622,11 +622,50 @@ impl RuntimeThreadManager {
                 return Some(Duration::from_millis(ms));
             }
         }
-        match self.read_config().user_input_timeout() {
-            Some(wait) if wait.is_zero() => None,
-            Some(wait) => Some(wait),
-            None => Some(APPROVAL_DECISION_TIMEOUT),
-        }
+        self.read_config().approval_timeout()
+    }
+}
+
+/// `tool_call_after` (and `on_error` for a failed call) on a Runtime API
+/// thread, as the TUI fires them (B4). Observer events: their output never
+/// changes the result the model sees, and a full observer queue is logged,
+/// not fatal to the turn.
+fn fire_runtime_tool_completion_hooks(
+    hooks: &crate::hooks::HookExecutor,
+    thread_id: &str,
+    id: &str,
+    name: &str,
+    result: &std::result::Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
+) {
+    use crate::hooks::{HookContext, HookEvent};
+    let wants_after = hooks.has_hooks_for_event(HookEvent::ToolCallAfter);
+    let wants_error = hooks.has_hooks_for_event(HookEvent::OnError);
+    if !wants_after && !wants_error {
+        return;
+    }
+    let (text, success) = match result {
+        Ok(output) => (output.content.clone(), output.success),
+        Err(error) => (error.to_string(), false),
+    };
+    let context = || {
+        HookContext::new()
+            .with_workspace(hooks.default_working_dir().to_path_buf())
+            .with_session_id(thread_id)
+            .with_tool_name(name)
+            .with_tool_call_id(id)
+            .with_tool_result(&text, success, None)
+    };
+    if wants_after && let Err(error) = hooks.submit_observer(HookEvent::ToolCallAfter, context()) {
+        tracing::warn!(target: "hooks", %error, thread_id, "tool_call_after hook was not submitted");
+    }
+    if wants_error
+        && !success
+        && let Err(error) = hooks.submit_observer(
+            HookEvent::OnError,
+            context().with_error(&format!("tool `{name}` failed: {text}")),
+        )
+    {
+        tracing::warn!(target: "hooks", %error, thread_id, "on_error hook was not submitted");
     }
 }
 
@@ -4619,6 +4658,10 @@ struct ActiveThreadState {
     active_turn: Option<ActiveTurnState>,
     route_identity: ProviderIdentity,
     route_model: String,
+    /// The thread's hook executor (B4): global, reviewed plugin and trusted
+    /// project hooks for the thread's workspace. `None` only for injected
+    /// test engines.
+    hook_executor: Option<Arc<crate::hooks::HookExecutor>>,
     /// Real engines client-preflight before an in-progress record is written.
     /// Explicitly injected test engines own their client seam.
     client_preflight_required: bool,
@@ -4750,6 +4793,10 @@ pub struct RuntimeThreadManager {
     recovery_receipts: Arc<parking_lot::Mutex<HashMap<String, Vec<RecoveredTurnReceipt>>>>,
     notices: Arc<parking_lot::Mutex<HashMap<String, Vec<ActiveNotice>>>>,
     recovery_flush: Arc<Mutex<()>>,
+    /// One hook observer pool for the process. Each thread's executor is a
+    /// `rebind` of it, so a thread gets its own hook set and workspace without
+    /// spawning another dispatcher.
+    hook_base: Arc<std::sync::OnceLock<crate::hooks::HookExecutor>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
     #[cfg(test)]
@@ -5031,6 +5078,31 @@ struct DynamicToolSettlementAck {
 
 impl RuntimeThreadManager {
     /// Helper to read the current config under RwLock.
+    /// The hook executor for one workspace: global hooks from `config`,
+    /// reviewed plugin hooks, then trusted and approved project hooks — the
+    /// set the TUI and `exec --hooks` build. It shares this process's observer
+    /// pool instead of spawning its own.
+    pub(crate) fn hook_executor_for_workspace(
+        &self,
+        config: &Config,
+        workspace: &Path,
+        plugins: Option<&crate::plugins::PluginRegistry>,
+    ) -> crate::hooks::HookExecutor {
+        let hooks = crate::hooks::HooksConfig::load_with_project_and_plugins(
+            config.hooks_config(),
+            workspace,
+            plugins,
+        );
+        self.hook_base
+            .get_or_init(|| {
+                crate::hooks::HookExecutor::new(
+                    crate::hooks::HooksConfig::default(),
+                    workspace.to_path_buf(),
+                )
+            })
+            .rebind(hooks, workspace.to_path_buf())
+    }
+
     pub(crate) fn read_config(&self) -> parking_lot::RwLockReadGuard<'_, Config> {
         self.config.read()
     }
@@ -5331,6 +5403,7 @@ impl RuntimeThreadManager {
             recovery_receipts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             notices: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             recovery_flush: Arc::new(Mutex::new(())),
+            hook_base: Arc::new(std::sync::OnceLock::new()),
             #[cfg(test)]
             snapshot_test_hook: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(test)]
@@ -10769,6 +10842,13 @@ impl RuntimeThreadManager {
             })
             .unwrap_or(crate::tools::goal::GoalStatus::Active);
 
+        let turn_hook_executor = self
+            .active
+            .lock()
+            .await
+            .engines
+            .get(thread_id)
+            .and_then(|state| state.hook_executor.clone());
         let op = Op::SendMessage (TurnSpec {
             max_output_tokens,
             content: prompt,
@@ -10789,7 +10869,9 @@ impl RuntimeThreadManager {
             translation_enabled: false,
             allowed_tools,
             dynamic_tools: req.dynamic_tools,
-            hook_executor: None,
+            // The turn op re-installs the executor into the engine, so it
+            // must carry the thread's own, never `None`.
+            hook_executor: turn_hook_executor,
             approval_mode: policy.permission,
             verbosity,
             provenance: input_source.provenance(),
@@ -11450,6 +11532,14 @@ impl RuntimeThreadManager {
                         .map(|registry| registry.rediscover_for_workspace(&thread.workspace))
                 })
                 .flatten();
+            // Hooks fire on Runtime API threads as they do in the TUI and
+            // `exec --hooks` (B4): the same global, reviewed-plugin and
+            // trusted-project set, for this thread's workspace.
+            let thread_hooks = Arc::new(self.hook_executor_for_workspace(
+                &cfg,
+                &thread.workspace,
+                thread_plugin_registry.as_deref(),
+            ));
             // Rehydrate the persisted thread goal into the engine so the
             // goal loop, prompt surface, and `update_goal` tool operate on
             // the durable record from the first turn. Usage and continuation
@@ -11566,7 +11656,7 @@ impl RuntimeThreadManager {
                     work: None,
                     shell_manager: Some(shell_manager),
                     persist_services_enabled: false,
-                    hook_executor: None,
+                    hook_executor: Some(Arc::clone(&thread_hooks)),
                     handle_store: crate::tools::handle::new_shared_handle_store(),
                     rlm_sessions: crate::rlm::session::new_shared_rlm_session_store(),
                     media_originals_dir: crate::media_originals::default_store_dir(),
@@ -11623,7 +11713,7 @@ impl RuntimeThreadManager {
                 allowed_tools: isolated_chat.then(Vec::new),
                 disallowed_tools: None,
                 max_tool_calls: None,
-                hook_executor: None,
+                hook_executor: Some(Arc::clone(&thread_hooks)),
                 locale_tag: codewhale_localization::resolve_locale(&settings.locale)
                     .tag()
                     .to_string(),
@@ -11724,6 +11814,7 @@ impl RuntimeThreadManager {
                     active_turn: None,
                     route_identity,
                     route_model,
+                    hook_executor: Some(Arc::clone(&thread_hooks)),
                     client_preflight_required: true,
                 },
             );
@@ -12212,14 +12303,16 @@ impl RuntimeThreadManager {
         // model's `update_goal` decision (complete/blocked/paused) lands here
         // before TurnComplete, so terminal settlement can mirror it into the
         // durable goal record instead of continuing to spend.
-        let mut admitted_goal_id = {
+        let (mut admitted_goal_id, thread_hooks) = {
             let active = self.active.lock().await;
-            active
-                .engines
-                .get(&thread_id)
-                .and_then(|state| state.active_turn.as_ref())
-                .filter(|turn| turn.turn_id == turn_id)
-                .and_then(|turn| turn.goal_id.clone())
+            let state = active.engines.get(&thread_id);
+            (
+                state
+                    .and_then(|state| state.active_turn.as_ref())
+                    .filter(|turn| turn.turn_id == turn_id)
+                    .and_then(|turn| turn.goal_id.clone()),
+                state.and_then(|state| state.hook_executor.clone()),
+            )
         };
         let mut latest_goal_snapshot: Option<crate::tools::goal::GoalSnapshot> = None;
         // Tool definitions of the finished turn's request surface, from the
@@ -12541,6 +12634,9 @@ impl RuntimeThreadManager {
                     .await?;
                 }
                 EngineEvent::ToolCallComplete { id, name, result } => {
+                    if let Some(hooks) = thread_hooks.as_deref() {
+                        fire_runtime_tool_completion_hooks(hooks, &thread_id, &id, &name, &result);
+                    }
                     // An elevation question is over once its tool call
                     // completes, however it completed. Clear before the
                     // notify raise below: a notify call of its own settles
@@ -13364,8 +13460,10 @@ impl RuntimeThreadManager {
                             let _ = engine.deny_tool_call(id).await;
                         }
                         Ok(Err(_recv_err)) => {
+                            // The decision channel closed with no answer:
+                            // nobody refused the call, it was unavailable.
                             self.cancel_pending_approval(&approval_id);
-                            let _ = engine.deny_tool_call(id).await;
+                            let _ = engine.deny_tool_call_unavailable(id).await;
                         }
                         Err(_timeout) => {
                             self.cancel_pending_approval(&approval_id);
@@ -13397,7 +13495,9 @@ impl RuntimeThreadManager {
                             )
                             .await
                             .ok();
-                            let _ = engine.deny_tool_call(id).await;
+                            // Recorded and reported as a timeout, not the
+                            // operator's denial.
+                            let _ = engine.deny_tool_call_timed_out(id).await;
                         }
                     }
                 }
@@ -14145,6 +14245,7 @@ impl RuntimeThreadManager {
                 active_turn: None,
                 route_identity: route.identity,
                 route_model: route.model,
+                hook_executor: None,
                 client_preflight_required: false,
             },
         );

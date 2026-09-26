@@ -1421,6 +1421,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/skills", get(list_skills))
         .route("/v1/commands", get(list_commands))
+        .route("/v1/hooks", get(list_hooks))
         .route(
             "/v1/skills/{name}",
             post(set_skill_enabled).delete(uninstall_skill_api),
@@ -3512,6 +3513,127 @@ async fn list_commands(
         command_catalog,
     );
     Ok(Json(CommandsResponse { commands }))
+}
+
+#[derive(Debug, Deserialize)]
+struct HooksQuery {
+    /// Report the hooks a thread's engine runs (its workspace); defaults to
+    /// the server workspace.
+    thread_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HooksResponse {
+    workspace: String,
+    enabled: bool,
+    hooks: Vec<HookEntry>,
+    /// Hooks rejected or warned about at load, one redaction-safe line each.
+    problems: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HookEntry {
+    name: Option<String>,
+    event: &'static str,
+    /// The shell command, with credential-shaped values masked.
+    command: String,
+    background: bool,
+    timeout_secs: u64,
+    /// `global` (user config), `plugin` (reviewed plugin) or `project`
+    /// (trusted, approved `.codewhale/hooks.toml`).
+    source: &'static str,
+}
+
+/// Mask a hook command for `GET /v1/hooks`. Keyed and credential-shaped
+/// values go through the shared redactor; every URL additionally keeps only
+/// its scheme and host, because webhook secrets live in the path
+/// (`https://hooks.slack.com/services/T…/B…/<secret>`) where no key names
+/// them.
+fn redact_hook_command_for_listing(command: &str) -> String {
+    let masked = codewhale_config::persistence::redact_secrets(command);
+    masked
+        .split(' ')
+        .map(|word| match word.find("://") {
+            Some(scheme_end) => {
+                let rest = &word[scheme_end + 3..];
+                let host_end = rest.find(['/', '?', '#', '"', '\'']).unwrap_or(rest.len());
+                let host = &rest[..host_end];
+                // Userinfo (`user:pass@host`) is a credential too.
+                let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+                let tail = &rest[host_end..];
+                let quote = tail
+                    .chars()
+                    .last()
+                    .filter(|c| matches!(c, '"' | '\''))
+                    .map(String::from)
+                    .unwrap_or_default();
+                let path = if tail.len() > quote.len() {
+                    "/[redacted]"
+                } else {
+                    ""
+                };
+                format!("{}{host}{path}{quote}", &word[..scheme_end + 3])
+            }
+            None => word.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `GET /v1/hooks` (B4): the hook set Runtime API threads run, from the same
+/// loader their engines use, so clients show one truth instead of keeping a
+/// hook table of their own.
+async fn list_hooks(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<HooksQuery>,
+) -> Result<Json<HooksResponse>, ApiError> {
+    let workspace = match query.thread_id.as_deref() {
+        Some(id) => {
+            state
+                .runtime_threads
+                .get_thread(id)
+                .await
+                .map_err(map_thread_err)?
+                .workspace
+        }
+        None => state.workspace.clone(),
+    };
+    let config = state.config.read().clone();
+    let plugins = state.plugin_discovery.registry_for_workspace(&workspace);
+    let executor = state.runtime_threads.hook_executor_for_workspace(
+        &config,
+        &workspace,
+        Some(plugins.as_ref()),
+    );
+    let hooks_config = executor.config();
+    let hooks = hooks_config
+        .hooks
+        .iter()
+        .map(|hook| HookEntry {
+            name: hook.name.clone(),
+            event: hook.event.as_str(),
+            command: redact_hook_command_for_listing(&hook.command),
+            background: hook.background,
+            timeout_secs: hook.timeout_secs,
+            source: if hook.project_authority.is_some() {
+                "project"
+            } else if hook.plugin_authority.is_some() {
+                "plugin"
+            } else {
+                "global"
+            },
+        })
+        .collect();
+    Ok(Json(HooksResponse {
+        workspace: workspace.display().to_string(),
+        enabled: hooks_config.enabled,
+        hooks,
+        problems: hooks_config
+            .problems
+            .iter()
+            .map(crate::hooks::HookConfigProblem::summary)
+            .collect(),
+    }))
 }
 
 async fn list_skills(

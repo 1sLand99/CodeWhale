@@ -1421,8 +1421,20 @@ fn test_manager(data_dir: PathBuf) -> Result<RuntimeThreadManager> {
     )
 }
 
+/// Serializes tests that set or read the process-wide approval-timeout
+/// override, so a parallel test never sees another test's value.
+static APPROVAL_TIMEOUT_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_approval_timeout_override() -> std::sync::MutexGuard<'static, ()> {
+    APPROVAL_TIMEOUT_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct ApprovalTimeoutGuard {
     previous_ms: u64,
+    // Dropped after `drop` restores the previous value.
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for ApprovalTimeoutGuard {
@@ -1432,8 +1444,10 @@ impl Drop for ApprovalTimeoutGuard {
 }
 
 fn test_approval_timeout_ms(ms: u64) -> ApprovalTimeoutGuard {
+    let lock = lock_approval_timeout_override();
     ApprovalTimeoutGuard {
         previous_ms: set_test_approval_decision_timeout_ms(ms),
+        _lock: lock,
     }
 }
 
@@ -6806,6 +6820,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
+            hook_executor: None,
             client_preflight_required: false,
         },
     );
@@ -6827,6 +6842,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
+            hook_executor: None,
             client_preflight_required: false,
         },
     );
@@ -13959,10 +13975,12 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
 
     let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
         .await
-        .context("approval timeout should deny the engine")?;
+        .context("approval timeout should resolve the engine's wait")?;
+    // The engine hears a timeout, not the user's denial, so the model and the
+    // approval receipt both say "timed out" and the budget slot is refunded.
     assert_eq!(
         decision,
-        Some(MockApprovalEvent::Denied {
+        Some(MockApprovalEvent::TimedOut {
             id: "tool_timeout".to_string(),
         })
     );
@@ -18359,5 +18377,111 @@ async fn canonical_sessions_root_is_resolved_off_the_ui_runtime_and_cached() -> 
     let cached = cached_canonical_sessions_root(&sessions).expect("warmed");
     assert_eq!(cached, sessions.canonicalize()?);
     assert_ne!(cached, sessions, "the fixture spells the root two ways");
+    Ok(())
+}
+
+/// B3: Runtime API approvals (GPUI, web) follow the one approval clock,
+/// `[approval] timeout_seconds`. Unset, nothing denies on the user's behalf;
+/// `[tools] user_input_timeout_seconds` no longer bounds approvals.
+#[test]
+fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Result<()> {
+    let _override = lock_approval_timeout_override();
+    let manager = test_manager(test_runtime_dir())?;
+    assert_eq!(manager.approval_decision_timeout(), None);
+
+    let mut config = Config {
+        tools: Some(crate::config::ToolsConfig {
+            user_input_timeout_seconds: Some(300),
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    assert_eq!(
+        manager.approval_decision_timeout(),
+        None,
+        "the question clock does not bound approvals"
+    );
+
+    config.approval = Some(crate::config::ApprovalConfig {
+        timeout_seconds: Some(45),
+        ..Default::default()
+    });
+    let manager = RuntimeThreadManager::open(
+        config,
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    assert_eq!(
+        manager.approval_decision_timeout(),
+        Some(Duration::from_secs(45))
+    );
+    Ok(())
+}
+
+/// B4: a Runtime thread's tool completion fires `tool_call_after`, and a
+/// failed call also fires `on_error`, through the thread's executor.
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_tool_completion_fires_after_and_error_hooks() -> Result<()> {
+    use crate::hooks::{Hook, HookEvent, HooksConfig};
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("hooks.log");
+    let append = |label: &str| {
+        format!(
+            "printf '%s %s %s\\n' {label} \"$CODEWHALE_TOOL_CALL_ID\" \"$DEEPSEEK_TOOL_SUCCESS\" >> {}",
+            log.display()
+        )
+    };
+    let manager = test_manager(test_runtime_dir())?;
+    let config = Config {
+        hooks: Some(HooksConfig {
+            hooks: vec![
+                Hook::new(HookEvent::ToolCallAfter, &append("after")),
+                Hook::new(HookEvent::OnError, &append("error")),
+            ],
+            enabled: true,
+            ..HooksConfig::default()
+        }),
+        ..Config::default()
+    };
+    let hooks = manager.hook_executor_for_workspace(&config, dir.path(), None);
+    fire_runtime_tool_completion_hooks(
+        &hooks,
+        "thr_1",
+        "call-ok",
+        "exec_command",
+        &Ok(crate::tools::spec::ToolResult::success("fine")),
+    );
+    fire_runtime_tool_completion_hooks(
+        &hooks,
+        "thr_1",
+        "call-bad",
+        "exec_command",
+        &Ok(crate::tools::spec::ToolResult::error("exit 1")),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.lines().count() >= 3 || Instant::now() >= deadline {
+            break text;
+        }
+        sleep(Duration::from_millis(20)).await;
+    };
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            "after call-bad false",
+            "after call-ok true",
+            "error call-bad false"
+        ],
+        "{text}"
+    );
     Ok(())
 }
