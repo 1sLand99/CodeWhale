@@ -77,7 +77,7 @@ Workflow IR 另有默认五层嵌套节点的结构验证限制。该限制约�
 
 fleet 账本持久化的是 worker 自身的事件流，而不是另一套模拟的分类法。`codewhale exec --output-format stream-json` 会发出 `{"type": "content" | "tool_use" | "tool_result" | "sandbox_denied" | "workflow_event" | "session_capture" | "turn_usage" | "metadata" | "done" | "error"}` 行，它们映射到 fleet 账本的 `FleetWorkerEventPayload`（`RunningTool`、`WorkflowEvent`、`Running`、`Completed`、`Failed` 等）。`workflow_event` 在 Workflow 飞行期间携带类型化的 run/phase/task/gate 回执，并作为类型化的 `WorkflowEvent` 保留在 Fleet 账本中；外层 worker 仍然拥有终态 `done` 或 `error`。一套词汇，两个表面。
 
-`session_capture` 在 exec 运行把自己的对话记录持久化为已保存会话时发出一次，并且只在这一个地方携带可恢复的 id：
+`session_capture` 在 exec 运行把自己的转录持久化为已保存会话时发出一次，并且只在这一个地方携带可恢复的 id：
 
 ```json
 {"type": "session_capture", "schema": "codewhale.exec-stream", "schema_version": 1,

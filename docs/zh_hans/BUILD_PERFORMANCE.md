@@ -289,12 +289,12 @@ TUI-DOG-017）——保持原样。
 3. **已落地。** `palette` → `codewhale-palette`；`command_safety` →
    `codewhale-execpolicy`（它本来就拥有 `ApprovalMode`，所以这次迁移是去掉一条
    依赖边，而不是新增）。
-4. `client/`（提供商的线路适配器）→ `codewhale-client`：**被第 1 条卡住，
+4. `client/`（提供商（provider）的线路适配器）→ `codewhale-client`：**被第 1 条卡住，
    不只是排在它后面而已。** 排除文档注释和 `#[cfg(test)]` 块之后，`client` 仍有
    20 条生产代码里的 `crate::` 依赖边。其中三条很难处理：
    - `crate::config`——`Config`、`ProvidersConfig`、`ProviderConfig`、`TuiConfig`、
      `ApiProvider`、`RetryPolicy`、`validate_route`、`wire_model_for_provider_route`，
-     还有约 130 个提供商（provider）base-URL / model-id 常量。`crates/tui/src/config`
+     还有约 130 个提供商 base-URL / model-id 常量。`crates/tui/src/config`
      本身有 2.97 万行，在生产代码里还依赖 `config_persistence`、`oauth`、
      `credentials`、`tui`、`fleet`、`goal_loop`、`sandbox`、`lsp` 等，所以它没法
      跟着 `client` 一起搬出去。
@@ -348,7 +348,7 @@ TUI-DOG-017）——保持原样。
    `cargo test --workspace --all-features --locked` 仍是权威门禁；nextest 是
    本地循环。
 3. **有三个测试依赖执行顺序**，只是因为同一进程里另一个测试先安装了 rustls
-   加密提供商才通过：
+   加密提供器（crypto provider）才通过：
    `codewhale-tui mcp::sse::endpoint_tests::message_before_endpoint_is_rejected_instead_of_buffered`、
    `codewhale-app-server tests::failed_config_set_keeps_the_stdio_bridge`，以及
    `tests::successful_config_set_still_invalidates_the_stdio_bridge`。现在每个
