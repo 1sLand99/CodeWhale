@@ -673,6 +673,13 @@ const cnbTagVersionCheck = cnbTagRelease[1].indexOf(
   "./scripts/release/check-versions.sh --require-dated-release",
 );
 assert.ok(cnbTagVersionCheck >= 0, "CNB publication must reject undated source candidates");
+for (const [label, workflow] of [["release-candidate.yml", candidate], ["release.yml", release]]) {
+  assert.match(
+    workflow,
+    /\.\/scripts\/release\/check-versions\.sh --require-dated-release/,
+    `${label} must reject undated source candidates before building`,
+  );
+}
 assert.ok(cnbTagVersionCheck < cnbTagBuild, "CNB must validate release notes before building public assets");
 assert.match(cnbTagRelease[1], /checkout_sha="\$\(git rev-parse 'HEAD\^\{commit\}'\)"/);
 assert.match(cnbTagRelease[1], /commit_sha="\$\{CNB_COMMIT:-\$\{checkout_sha\}\}"/);

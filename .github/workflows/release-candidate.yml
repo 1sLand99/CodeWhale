@@ -69,8 +69,13 @@ jobs:
           echo "sha=${actual}" >> "${GITHUB_OUTPUT}"
           echo "version=${workspace_version}" >> "${GITHUB_OUTPUT}"
       - name: Check version and OHOS release contracts
+        # --require-dated-release, as auto-tag.yml and release.yml run it:
+        # release.yml only accepts an RC receipt for the exact tag SHA, so an
+        # RC on an undated "Unreleased candidate" changelog could never
+        # authorize a release. Fail here, before the long parity and artifact
+        # builds, instead of at tag time.
         run: |
-          ./scripts/release/check-versions.sh
+          ./scripts/release/check-versions.sh --require-dated-release
           ./scripts/release/check-ohos-deps.sh
       - name: Reconfirm clean source snapshot
         run: git diff --exit-code
