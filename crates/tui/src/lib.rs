@@ -36,9 +36,7 @@ pub mod computer_meter;
 mod config;
 pub mod config_keys;
 mod config_persistence;
-mod context_budget;
 mod context_report;
-mod continual_harness;
 mod core;
 mod cost_status;
 mod credentials;
@@ -47,51 +45,42 @@ pub mod dispatch_runner;
 mod doctor;
 mod doctor_fix;
 mod dsh_credentials;
-mod elapsed;
 mod error_taxonomy;
 mod eval;
 mod external_credentials;
-mod fast_hash;
 mod features;
 mod fleet;
-mod goal_loop;
-mod hashing;
 mod hooks;
 mod image_attach;
 mod import_claude;
 mod integrations;
 mod lane_control;
 mod llm_client;
-mod llm_response_cache;
 mod local_ollama;
 mod logging;
 mod lsp;
 mod mcp;
 mod mcp_server;
-mod media_originals;
-mod model_context;
 mod model_inventory;
 mod model_profile;
 mod model_registry;
 mod model_relevance;
 mod model_routing;
 mod models_dev_live;
-mod native_memory;
 mod network_policy;
+mod notify;
 mod oauth;
 mod operate;
 mod plugins;
 mod pricing;
 mod project_context;
 mod project_context_cache;
-mod prompt_zones;
 mod prompts;
 mod provider_catalog_live;
 mod provider_lake;
 mod provider_readiness;
 mod purge;
 pub mod reasoning_preference;
-mod regex_cache;
 mod remote_control;
 mod remote_setup;
 pub mod repl;
@@ -99,7 +88,6 @@ mod repo_law;
 mod request_manifest;
 mod request_tuning;
 mod resource_telemetry;
-mod retry_status;
 pub mod rlm;
 mod route_billing;
 mod route_budget;
@@ -112,7 +100,6 @@ mod runtime_handoff;
 mod runtime_log;
 mod runtime_policy;
 mod runtime_threads;
-mod safe_label;
 mod sandbox;
 mod scorecard;
 mod session_diagnostics;
@@ -129,12 +116,9 @@ mod session_manager;
 mod session_peek;
 mod session_projection;
 mod session_resume;
-pub mod session_tree;
 mod settings;
 mod shell_dispatcher;
-mod skill_state;
 mod skills;
-mod sleep_guard;
 mod snapshot;
 mod startup_trace;
 mod task_manager;
@@ -144,8 +128,17 @@ mod test_support;
 // TLS bootstrap and platform client builders live in codewhale-release;
 // `crate::tls::*` keeps resolving for every caller.
 use codewhale_release::tls;
+// Runtime split path alias: modules that moved to `crates/runtime` keep
+// resolving as `crate::<module>` inside this crate. One block, no per-item
+// re-exports; the split deletes it by rewriting these paths to
+// `codewhale_runtime::` (docs/design/TUI_DECONSTRUCTION.md).
+use codewhale_runtime::{
+    context_budget, continual_harness, elapsed, fast_hash, goal_loop, hashing, host_terminal,
+    llm_response_cache, media_originals, model_context, native_memory, prompt_zones, regex_cache,
+    retry_status, safe_label, session_tree, skill_state, sleep_guard, tool_history_repair,
+    workspace_discovery,
+};
 mod todo_snapshot;
-mod tool_history_repair;
 mod tool_inspection;
 mod tool_output_receipts;
 mod tools;
@@ -156,10 +149,10 @@ pub use tui::ambient_life::pet_sim as pet;
 mod turn_route_plan;
 mod utils;
 mod vision;
+mod voice;
 mod work_graph;
 mod worker_profile;
 mod working_set;
-mod workspace_discovery;
 mod workspace_trust;
 
 use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS, effective_home_dir};
@@ -1773,6 +1766,10 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     startup_trace::mark_process_start();
     configure_windows_console_utf8();
     install_rustls_crypto_provider();
+    // The TUI is the terminal host for every mode this binary runs
+    // (interactive, exec, serve): runtime code reaches raw mode and
+    // notification delivery only through this port.
+    crate::tui::ui::install_host_terminal();
 
     // ── Process hardening (#2183) ─────────────────────────────────────────
     // MUST run before Tokio is booted and before any threads are spawned.
