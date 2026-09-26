@@ -28,6 +28,7 @@ import type {
   DocsShellDict,
   DocsModesDict,
   DocsReviewDict,
+  DocsVocabularyDict,
   DocsSubagentsDict,
   DocsTroubleshootingDict,
   DocsTrustDict,
@@ -77,6 +78,8 @@ import { docsTrust as enDocsTrust } from "./en/docs-trust";
 import { docsTrust as zhDocsTrust } from "./zh/docs-trust";
 import { docsReview as enDocsReview } from "./en/docs-review";
 import { docsReview as zhDocsReview } from "./zh/docs-review";
+import { docsVocabulary as enDocsVocabulary } from "./en/docs-vocabulary";
+import { docsVocabulary as zhDocsVocabulary } from "./zh/docs-vocabulary";
 import { computerUse as enComputerUse } from "./en/computer-use";
 import { computerUse as zhComputerUse } from "./zh/computer-use";
 import { computerUse as jaComputerUse } from "./ja/computer-use";
@@ -298,6 +301,10 @@ const DOCS_REVIEW: Record<string, DocsReviewDict> = {
   zh: zhDocsReview,
 };
 
+const DOCS_VOCABULARY: Record<string, DocsVocabularyDict> = {
+  zh: zhDocsVocabulary,
+};
+
 /**
  * Shared surface states, the changelog page, the two legal pages, the digest
  * page, the FAQ and the roadmap follow the same optional per-locale rule as
@@ -408,6 +415,10 @@ export function getDocsReview(locale: string): DocsReviewDict {
   return DOCS_REVIEW[locale] ?? enDocsReview;
 }
 
+export function getDocsVocabulary(locale: string): DocsVocabularyDict {
+  return DOCS_VOCABULARY[locale] ?? enDocsVocabulary;
+}
+
 export function getComputerUse(locale: string): ComputerUseDict {
   return COMPUTER_USE[locale] ?? enComputerUse;
 }
@@ -476,6 +487,7 @@ export const EN_DOCS_COMPUTERS = enDocsComputers;
 export const EN_DOCS_AUTH = enDocsAuth;
 export const EN_DOCS_TRUST = enDocsTrust;
 export const EN_DOCS_REVIEW = enDocsReview;
+export const EN_DOCS_VOCABULARY = enDocsVocabulary;
 export const EN_COMPUTER_USE = enComputerUse;
 export const EN_STATES = enStates;
 export const EN_CHANGELOG = enChangelog;
