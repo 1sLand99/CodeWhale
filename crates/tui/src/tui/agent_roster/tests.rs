@@ -35,6 +35,7 @@ fn record(worker_id: &str, created_at_ms: u64) -> AgentWorkerRecord {
         worker_id: worker_id.to_string(),
         run_id: format!("run-{worker_id}"),
         parent_run_id: None,
+        workflow_run_id: None,
         session_name: Some(worker_id.to_string()),
         objective: "do the thing".to_string(),
         role: None,

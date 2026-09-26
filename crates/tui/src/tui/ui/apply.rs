@@ -2542,21 +2542,14 @@ pub(crate) async fn apply_command_result(
                     }
                 }
             }
-            AppAction::ShareSession {
-                history_len: _,
-                model,
-                mode,
-            } => {
-                let status = if app.api_messages.is_empty() {
-                    "No session content to share.".to_string()
-                } else {
-                    let history_json = serde_json::to_string_pretty(&app.api_messages)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    match crate::commands::share::perform_share(&history_json, &model, &mode).await
-                    {
-                        Ok(url) => format!("Session shared! URL: {url}"),
-                        Err(err) => format!("Share failed: {err}"),
+            AppAction::ShareSession { html } => {
+                // The page was rendered and redacted by `/share confirm`
+                // through the `/export` projection; only upload happens here.
+                let status = match crate::commands::share::perform_share(html).await {
+                    Ok(url) => {
+                        format!("Session shared as a secret gist (unlisted, not private): {url}")
                     }
+                    Err(err) => format!("Share failed: {err}"),
                 };
                 app.add_message(HistoryCell::System {
                     content: status.clone(),

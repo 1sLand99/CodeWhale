@@ -5484,12 +5484,17 @@ impl App {
             } => Some(error.clone()),
             _ => None,
         };
+        // A cancelled run stays cancelled (the panel ignores a late
+        // `run_completed`), so it must not raise a failure notice either.
         let existing = self
             .workflow_runs
             .iter()
             .position(|panel| panel.run_id == event_run_id);
         let already_failed = existing.is_some_and(|index| {
-            self.workflow_runs[index].lifecycle == WorkflowPanelLifecycle::Failed
+            matches!(
+                self.workflow_runs[index].lifecycle,
+                WorkflowPanelLifecycle::Failed | WorkflowPanelLifecycle::Cancelled
+            )
         });
         match (existing, &event) {
             (Some(index), _) => self.workflow_runs[index].apply_event(event),

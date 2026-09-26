@@ -786,9 +786,21 @@ accept an empty string to clear a previously-set value. Added in v0.8.10 (#562):
   "model": "deepseek-v4-pro",
   "mode": "agent",
   "title": "User-set thread title",
-  "system_prompt": "You are a useful assistant."
+  "system_prompt": "You are a useful assistant.",
+  "model_provider": "custom",
+  "model_provider_id": "lm-studio"
 }
 ```
+
+`model_provider` switches the provider the thread's future turns use. It
+takes a built-in kind (`deepseek`, `xai`, ...) or a configured route name, as
+`/provider` does. `model_provider_id` names one exact `[providers.<id>]` table
+and wins over a route name. The target route is resolved and its client
+preflighted before anything is saved, so an unknown or credential-less
+provider is refused and nothing changes. Without `model`, the thread takes the
+new provider's default model; an `auto` thread stays `auto`. The loaded
+engine and conversation history are kept, and the next turn installs the new
+route.
 
 **Turns** (within a thread)
 - `POST /v1/threads/{id}/turns`
@@ -811,6 +823,12 @@ accept an empty string to clear a previously-set value. Added in v0.8.10 (#562):
   "allowed_tools": []
 }
 ```
+
+The same `model_provider` / `model_provider_id` fields on a turn route that
+one turn through another provider. The saved thread keeps its provider.
+Without `model`, the turn uses that provider's default model (an `auto` thread
+stays `auto`). The override is always preflighted and is part of the
+`operation_key` fingerprint.
 
 Resolution is deterministic: a turn override wins over the thread default,
 which wins over the Runtime's normal configuration. For tools, reaching normal

@@ -6586,6 +6586,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let mut config_members = 0usize;
     let mut personal_members = 0usize;
     let mut workspace_members = 0usize;
+    let mut claude_members = 0usize;
     for member in roster.members() {
         match member.origin {
             crate::fleet::roster::ProfileOrigin::BuiltIn => built_in_members += 1,
@@ -6593,10 +6594,12 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             crate::fleet::roster::ProfileOrigin::Config => config_members += 1,
             crate::fleet::roster::ProfileOrigin::Personal => personal_members += 1,
             crate::fleet::roster::ProfileOrigin::Workspace => workspace_members += 1,
+            crate::fleet::roster::ProfileOrigin::ClaudeCode => claude_members += 1,
         }
     }
     let roster_members = roster.members().len();
-    let custom_members = plugin_members + config_members + personal_members + workspace_members;
+    let custom_members =
+        plugin_members + config_members + personal_members + workspace_members + claude_members;
     let roster_ready = roster.load_error().is_none() && roster_members > 0;
     let runtime_ready =
         subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
@@ -6654,6 +6657,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             "config": config_members,
             "personal": personal_members,
             "workspace": workspace_members,
+            "claude": claude_members,
             "custom": custom_members,
             "starter_roster_available": built_in_members > 0,
             "readiness_rule": "built-in starter roster or custom roster",

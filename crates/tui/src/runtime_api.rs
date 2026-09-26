@@ -6111,6 +6111,8 @@ async fn retry_thread_turn(
                 auto_approve: None,
                 dynamic_tools: req.dynamic_tools,
                 environment_id: None,
+                model_provider: None,
+                model_provider_id: None,
             },
         )
         .await
@@ -7919,7 +7921,13 @@ fn provider_models_for_api(
     .ok()
     .flatten()
     .is_some_and(|entry| entry.fetched_at > 0);
-    if !config.model_ids_pass_through_for_provider(provider) || exact_catalog {
+    // A pass-through provider normally lists only what its own live catalog
+    // returned. When that catalog cannot exist (an OAuth route), the catalog
+    // lake's next layers (Models.dev, then the bundled snapshot) answer.
+    if !config.model_ids_pass_through_for_provider(provider)
+        || exact_catalog
+        || crate::provider_lake::live_catalog_unavailable(config, provider)
+    {
         for model in crate::provider_lake::models_for_provider(config, active_provider, provider) {
             push_unique_model(&mut models, &model);
         }

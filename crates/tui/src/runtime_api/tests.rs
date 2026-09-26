@@ -2700,6 +2700,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             worker_id: "agent_receipt".to_string(),
             run_id: "run_receipt".to_string(),
             parent_run_id: Some("parent_run".to_string()),
+            workflow_run_id: None,
             session_name: Some("receipt_lane".to_string()),
             objective: "Verify run receipt projection".to_string(),
             role: Some("verifier".to_string()),
@@ -15713,6 +15714,34 @@ vendor = "{vendor}"
     }
     handle.abort();
     Ok(())
+}
+
+#[test]
+fn oauth_pass_through_provider_lists_catalog_models_without_a_live_listing() {
+    let _env = crate::test_support::lock_test_env();
+    let _live = crate::provider_lake::lock_live_snapshot();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+    let mut config = Config {
+        provider: Some("deepseek".into()),
+        ..Default::default()
+    };
+    // Before the OAuth opt-in, a pass-through provider with no live listing
+    // offers only its configured model.
+    assert!(provider_models_for_api(&config, ApiProvider::Deepseek, ApiProvider::Xai).is_empty());
+
+    config.provider_config_for_mut(ApiProvider::Xai).auth_mode = Some("oauth".into());
+    assert!(crate::provider_lake::live_catalog_unavailable(
+        &config,
+        ApiProvider::Xai
+    ));
+    let models = provider_models_for_api(&config, ApiProvider::Deepseek, ApiProvider::Xai);
+    assert!(
+        models.iter().any(|model| model == "grok-4.7"),
+        "OAuth xAI must fall back to the bundled catalog: {models:?}"
+    );
 }
 
 #[test]
