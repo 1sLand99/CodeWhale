@@ -1650,6 +1650,10 @@ impl Engine {
             let stream = match stream_result {
                 Ok(s) => {
                     context_recovery_attempts = 0;
+                    // A model has the question now; a later credential
+                    // failure in this turn (a token expiring mid-turn, say)
+                    // must not take it back (#6566).
+                    turn.unanswered_user_message = None;
                     s
                 }
                 Err(e) => {
@@ -1697,6 +1701,18 @@ impl Engine {
                     );
                     let mut envelope = crate::error_taxonomy::envelope_for_llm_error(e, message);
                     envelope.message = display_message.clone();
+                    // #6566: no model saw the question. Take it back out of
+                    // the session before reporting, so the next request does
+                    // not send it twice and a resumed session does not show
+                    // it twice; the code tells the host to hand the text back.
+                    if envelope.category == ErrorCategory::Authentication
+                        && let Some(mark) = turn.unanswered_user_message.take()
+                        && self.retract_unanswered_user_message(mark)
+                    {
+                        envelope.code =
+                            crate::error_taxonomy::CREDENTIAL_REJECTED_UNSENT_CODE.to_string();
+                        self.emit_session_updated().await;
+                    }
                     turn_error = Some(display_message);
                     let _ = self.tx_event.send(Event::error(envelope)).await;
                     return (TurnOutcomeStatus::Failed, turn_error);
