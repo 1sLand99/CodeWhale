@@ -1110,9 +1110,12 @@ mod snapshot_notice_tests {
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("a.txt"), b"alpha").unwrap();
         assert!(pre_turn_snapshot(&workspace, 1, 0, None, Some("session")).is_some());
-        SnapshotRepo::open_or_init(&workspace)
-            .unwrap()
-            .point_head_at_missing_commit_for_test();
+        let repo = SnapshotRepo::open_or_init(&workspace).unwrap();
+        repo.point_head_at_missing_commit_for_test();
+        // With a reflog the repair recovers the last good commit silently
+        // (restore points survive); without one history restarts, which is
+        // the case the user must be told about.
+        std::fs::remove_dir_all(repo.git_dir().join("logs")).expect("drop reflogs");
 
         std::fs::write(workspace.join("a.txt"), b"beta").unwrap();
         assert!(
