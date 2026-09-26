@@ -485,6 +485,10 @@
   "crates/tui/src/tui/file_tree.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/tui/history.rs": {
+    "path_canonicalize": 2,
+    "std_fs": 1
+  },
   "crates/tui/src/tui/onboarding/mod.rs": {
     "std_fs": 2
   },

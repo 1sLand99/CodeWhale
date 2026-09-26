@@ -1196,21 +1196,6 @@ pub enum SidebarRowAction {
     },
 }
 
-impl SidebarRowAction {
-    #[must_use]
-    pub fn as_command(&self) -> Option<&str> {
-        match self {
-            Self::Command(command) => Some(command.as_str()),
-            Self::PrefillCommand(_)
-            | Self::ShowSubagentsPanel
-            | Self::OpenAgentDetail { .. }
-            | Self::OpenAgentTranscript { .. }
-            | Self::CancelAgent { .. }
-            | Self::InspectWork { .. } => None,
-        }
-    }
-}
-
 /// Per-row metadata for sidebar detail popovers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarHoverRow {

@@ -5943,12 +5943,9 @@ pub(crate) async fn run_event_loop(
                 {
                     let sel = app.selected_text();
                     if !sel.is_empty() {
-                        if app.clipboard.write_text(&sel).is_ok() {
-                            app.push_status_toast(
-                                "Copied to clipboard",
-                                StatusToastLevel::Info,
-                                None,
-                            );
+                        if let Ok(transport) = app.clipboard.write_text_status(&sel) {
+                            let receipt = copy_receipt(app, transport, "Copied to clipboard");
+                            app.push_status_toast(receipt, StatusToastLevel::Info, None);
                             app.clear_selection();
                         } else {
                             app.push_status_toast("Copy failed", StatusToastLevel::Error, None);
@@ -6686,13 +6683,11 @@ pub(crate) async fn run_event_loop(
                     // When the composer is empty (transcript focus) →
                     // copy the focused cell text to the system clipboard.
                     if app.input.is_empty() && app.view_stack.is_empty() {
-                        if copy_focused_cell(app) {
-                            app.push_status_toast(
-                                "Copied to clipboard",
-                                StatusToastLevel::Info,
-                                Some(2_000),
-                            );
-                        } else {
+                        // `copy_focused_cell` leaves its own receipt, which
+                        // names the transport; a toast here said "Copied"
+                        // even when only the terminal was asked to copy.
+                        app.status_message = None;
+                        if !copy_focused_cell(app) && app.status_message.is_none() {
                             app.status_message = Some("No transcript cell to copy".to_string());
                         }
                     } else {
@@ -6700,15 +6695,7 @@ pub(crate) async fn run_event_loop(
                     }
                 }
                 KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let sel = app.selected_text();
-                    if !sel.is_empty() {
-                        if app.clipboard.write_text(&sel).is_ok() {
-                            app.push_status_toast("Cut to clipboard", StatusToastLevel::Info, None);
-                            app.delete_selection();
-                        } else {
-                            app.push_status_toast("Cut failed", StatusToastLevel::Error, None);
-                        }
-                    }
+                    crate::tui::mouse_ui::cut_selection(app);
                 }
                 _ if key_shortcuts::is_paste_shortcut(&key) => {
                     app.paste_from_clipboard();

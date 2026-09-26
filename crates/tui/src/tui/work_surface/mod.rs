@@ -3903,4 +3903,74 @@ mod tests {
             "⌥V opens the selected row's own details: {handled:?}"
         );
     }
+
+    /// T1: a real right-click over an agent row opens that row's menu. The
+    /// work surface's catch-all arm marked every event consumed, so
+    /// `handle_mouse_event` returned before its right-click branch and no
+    /// menu ever opened over the dock.
+    #[test]
+    fn right_click_on_an_agent_row_opens_its_menu() {
+        use crate::tui::views::{ContextMenuAction, ModalKind, ViewEvent};
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        let mut app = app();
+        app.work_surface.panel = super::RailPanel::Agents;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-live",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Running,
+        ));
+        let _ = render_text(&mut app, 100, 6);
+        let row_y = app
+            .work_surface
+            .hitboxes
+            .iter()
+            .find(|hit| hit.id.0 == "worker:agent-live")
+            .expect("the live agent row is painted")
+            .row_y;
+
+        let events = crate::tui::mouse_ui::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: 2,
+                row: row_y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(events.is_empty());
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ContextMenu));
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        app.view_stack.render(area, &mut buf);
+        let text: String = buf.content().iter().map(|cell| cell.symbol()).collect();
+        assert_eq!(text.matches("Focus agent").count(), 1, "{text}");
+        assert!(
+            text.contains("Stop agent…"),
+            "a running agent can be stopped"
+        );
+        assert!(!text.contains("Message agent") && !text.contains("Open transcript"));
+        assert!(
+            !text.contains("Command palette"),
+            "app chrome stays off a row's menu"
+        );
+
+        // Enter runs the primary entry: the same focus a left click runs.
+        let events = app
+            .view_stack
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ViewEvent::ContextMenuSelected {
+                    action: ContextMenuAction::Row(SidebarRowAction::OpenAgentTranscript { agent_id }),
+                }] if agent_id == "agent-live"
+            ),
+            "{events:?}"
+        );
+    }
 }
