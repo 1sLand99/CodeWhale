@@ -107,8 +107,8 @@ fn valid_tool_name(name: &str) -> bool {
 /// so they are refused by probing the classifiers themselves rather than by a
 /// hand-kept list that would drift from them.
 fn core_special_case(name: &str) -> Option<&'static str> {
+    use crate::core::authority::{ToolCategory, get_tool_category_for_call};
     use crate::tools::approval_cache::{build_approval_grouping_key, build_approval_key};
-    use crate::tui::approval::{ToolCategory, get_tool_category_for_call};
     let empty = Value::Object(serde_json::Map::new());
     let spellings = [name.to_string(), name.to_ascii_lowercase()];
     for spelling in &spellings {
