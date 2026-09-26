@@ -209,7 +209,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
       - name: Check version drift
         # Checks 7 and 12 audit the previous-tag..HEAD commit range, not this
         # tree, so a receipt another merge forgot reddens every open PR. They
@@ -278,7 +278,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
       - name: Install data parser
         run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
       - name: Check offline plugin conversion
@@ -972,7 +972,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         with:
-          node-version: 20
+          node-version: 22
       - name: Install Linux system dependencies
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'ubuntu-latest' && (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
         run: |
