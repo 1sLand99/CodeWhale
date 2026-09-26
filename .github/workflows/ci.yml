@@ -623,9 +623,6 @@ jobs:
       - name: Skip Rust lint for light change
         if: needs.changes.outputs.heavy != 'true'
         run: echo "No executable Rust changes detected; preserving required Lint context."
-      - name: Linux clippy location
-        if: needs.changes.outputs.heavy == 'true'
-        run: echo "Linux clippy/test gates run on CNB for mirrored fix/*, rebrand/*, work/v*, and main branches."
 
   msrv:
     # The workspace must build on its minimum supported toolchain. A lint
