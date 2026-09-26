@@ -5,7 +5,7 @@
 
 Fleet 和 Workflow 设计上要配合使用，但解决的是问题的不同部分：
 
-- **Fleet** 负责配置并管理同一批子代理：可复用的角色、模型路由、权限、日志、
+- **Fleet** 负责配置并管理同一批子代理（subagent）：可复用的角色、模型路由、权限、日志、
   产物，以及状态/重启/停止控制。
 - **Workflow** 描述编排：阶段、分支、归约、循环，以及可通过 fleet/子代理运行时
   派发的 agent 叶子节点。
@@ -13,7 +13,7 @@ Fleet 和 Workflow 设计上要配合使用，但解决的是问题的不同部�
 **默认的产品路径：** 用自然语言提需求。规模小或耦合紧密的工作，Operate 会在
 当前姿态下直接处理。多步委派使用一份精简的 Workflow 计划：具名步骤、依赖、
 受限范围和完成检查；结果与证据传递给需要它们的步骤。一个受限的独立任务可以
-直接用后台代理。要继续同一个代理的工作，用 `followup`。后台运行时输入框仍然
+直接用后台代理（agent）。要继续同一个代理的工作，用 `followup`。后台运行时输入框仍然
 可用，普通的多代理工作也不需要工作流文件。详见：
 [Automatic Workflows](../AUTOMATIC_WORKFLOWS.md)。
 
@@ -41,7 +41,7 @@ codewhale fleet init
 /fleet setup
 ```
 
-选一个角色，决定这份配置是继承操作者路由还是固定某个提供方/模型，选择配置
+选一个角色，决定这份配置是继承操作者路由还是固定某个提供商（provider）/模型，选择配置
 放在哪里（**This project** → `.codewhale/agents/<role>.toml`，或
 **Personal** → `$CODEWHALE_HOME/agents/<role>.toml`，跨仓库可用，但同 id 的
 项目配置仍是优先级更高的覆盖项），然后审阅确切的文件、权限/工具/路由姿态，
@@ -132,7 +132,7 @@ codewhale fleet init
 | `worker.role` | 内置或自定义的角色意图，例如 `reviewer`、`builder`、`read-only` 或 `smoke-runner`。 |
 | `worker.profile` / `worker.agent_profile` | 已保存的 fleet 名册配置，从项目 `.codewhale/agents/`、个人 `$CODEWHALE_HOME/agents/` 或 `[fleet.profiles]` 解析。 |
 | `worker.tools` | 该任务期望 worker 使用的工具名。 |
-| `worker.model` | 首选的显式模型固定项。提供方/模型的校验仍由路由解析负责。 |
+| `worker.model` | 首选的显式模型固定项。提供商/模型的校验仍由路由解析负责。 |
 | `worker.model_class`, `worker.loadout` | 面向旧任务规范的兼容路由提示；新规范请优先用 `worker.profile` 加已保存配置里的路由固定项。 |
 | `workspace.required_files` | 任务启动前必须存在的文件。 |
 | `workspace.writable_paths` | 当前生效的运行时姿态允许写入时，该任务可写的路径。 |
@@ -251,5 +251,5 @@ them.
 对工作流，请让 Codewhale 起草一个 `.workflow.js` 文件、展示计划，
 并且只在批准之后再走 workflow 工具路径。
 
-这一步审阅是有意设计的。它让提供方路由、DeepSeek 或其他模型支持、可写路径、
+这一步审阅是有意设计的。它让提供商路由、DeepSeek 或其他模型支持、可写路径、
 网络访问和密钥使用都保持显式，然后才启动持久 worker。

@@ -157,7 +157,7 @@ TUI 会拦截这行输入，并通过模型工具所用的同一条 `NativeMemor
 ## 隐私与作用域
 
 原生存储保存在你自己的机器上，不会自动同步到云端记忆服务。启用记忆后，
-召回的记忆条目会作为提示词上下文发送给所选的模型提供方。不要把机密写进去。
+召回的记忆条目会作为提示词上下文发送给所选的提供商（provider）。不要把机密写进去。
 工作区作用域的记忆以仓库 git origin 的哈希为键，因此一个仓库的笔记永远不会
 泄漏到另一个仓库的提示词里。
 
@@ -195,7 +195,7 @@ enabled = true                    # default false; or set DEEPSEEK_MEMORY=on
 
 ## 相关文档
 
-- `docs/SUBAGENTS.md`——子代理会继承记忆，也可以使用 `remember` 工具。
+- `docs/SUBAGENTS.md`——子代理（subagent）会继承记忆，也可以使用 `remember` 工具。
 - `docs/CONFIGURATION.md`——完整的配置参考。
 - Issue [#489](https://github.com/Hmbown/CodeWhale/issues/489)
   ——跟踪这项工作的第一阶段 EPIC。

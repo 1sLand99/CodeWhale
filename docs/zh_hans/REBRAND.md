@@ -5,7 +5,7 @@
 
 从 **v0.8.41** 起，本项目改用新名字发布：`codewhale`。
 
-本文说明改了什么、没改什么，以及怎么迁移。DeepSeek 提供方集成没有任何变化，
+本文说明改了什么、没改什么，以及怎么迁移。DeepSeek 提供商（provider）集成没有任何变化，
 变的只是本地 CLI / TUI 的品牌。
 
 ## 速览（TL;DR）
@@ -53,7 +53,7 @@ Codewhale 从不自动删除旧目录。
 
 ## 没有改的部分
 
-凡是针对 DeepSeek 提供方 API 的东西，一律保持原样：
+凡是针对 DeepSeek 提供商 API 的东西，一律保持原样：
 
 - **环境变量**：`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、
   `DEEPSEEK_PROVIDER`、`DEEPSEEK_PROFILE`、`DEEPSEEK_LOG_LEVEL`，以及现有的
@@ -85,7 +85,7 @@ v0.8.x 版本都提供了**弃用 shim**：
 - 一个 `deepseek-tui` 二进制文件：对 `codewhale-tui` 做同样的事。
 - 旧的 `deepseek-tui` npm 包已弃用，不再接收新版本。请改用 `codewhale` npm 包。
 
-这些二进制 shim 会在 **v0.9.0** 中移除。DeepSeek 提供方支持、模型 ID、
+这些二进制 shim 会在 **v0.9.0** 中移除。DeepSeek 提供商支持、模型 ID、
 `DEEPSEEK_*` 环境变量，以及旧的 `~/.deepseek/` 状态回退都继续支持。
 
 ## 实际迁移
@@ -212,10 +212,10 @@ tap 的 GitHub 仓库在改名为 `Hmbown/homebrew-codewhale` 之前仍是
 
 ## 为什么改名
 
-Codewhale 是这个终端编码代理更短、也更贴合终端习惯的新名字，同时指向更长期的
-产品方向：一个面向开源与开放权重编码模型的智能体终端；项目起步时的提供方
-DeepSeek，与其他每个提供方一样仍是一等公民。项目名、命令名、包名、发布资产、
-Docker 镜像和 CNB 镜像都改到 Codewhale；官方的 DeepSeek 提供方、模型 ID、
+Codewhale 是这个终端编码代理（agent）更短、也更贴合终端习惯的新名字，同时指向更长期的
+产品方向：一个面向开源与开放权重编码模型的智能体终端；项目起步时的提供商
+DeepSeek，与其他每个提供商一样仍是一等公民。项目名、命令名、包名、发布资产、
+Docker 镜像和 CNB 镜像都改到 Codewhale；官方的 DeepSeek 提供商、模型 ID、
 环境变量和 `~/.deepseek/` 配置表面仍是一等公民。
 
 ## 报告改名相关的问题

@@ -3,16 +3,16 @@
 > 英文原文：[WORKFLOW_AUTHORING.md](../WORKFLOW_AUTHORING.md)。
 > 最后与英文同步日期（last synced with English revision）：2026-09-26。
 
-> **普通的多代理工作不需要看这份文档。** 在 Operate 里，正常发消息就行。
+> **普通的多代理（agent）工作不需要看这份文档。** 在 Operate 里，正常发消息就行。
 > 小活就直接做；多个委派步骤用一份紧凑的 Workflow 计划，带上依赖关系、
-> 受限的范围和完成证据即可。Fleet 管理的是同一批子代理和角色。
+> 受限的范围和完成证据即可。Fleet 管理的是同一批子代理（subagent）和角色。
 > 一个受限且独立的任务可以直接用 agent，需要接着做时用 `followup`。
 > Act/Agent 还可以选用软自动启动（soft-auto launch）。见
 > [Automatic Workflows](../AUTOMATIC_WORKFLOWS.md)。
 
 Workflow 只有一条运行时边界：编写好的源码先转换成类型化的 Rust `WorkflowSpec`，
 再由 Rust 校验 IR，最后由调度器/无头 worker 运行时执行叶子节点。编写语言不会因此
-获得隐藏权限去掌控文件、shell、网络、模型提供方、取消操作或 TUI 状态。
+获得隐藏权限去掌控文件、shell、网络、提供商（provider）、取消操作或 TUI 状态。
 
 `workflow` 工具上保留的兼容启动方式：
 
@@ -122,7 +122,7 @@ export default workflow({
 编排，起草 Workflow 源码，按当前权限模式展示计划，然后交给运行时去编译和监控。
 
 Workflow 负责计划本身：阶段、分支、循环、归约器和中间结果。fleet 负责持久名册、
-成员身份、语义角色，以及保存下来的模型提供方/模型绑定或继承关系。Runtime 负责
+成员身份、语义角色，以及保存下来的提供商/模型绑定或继承关系。Runtime 负责
 工具姿态（tool posture）、启动并发、租约、心跳、日志、回执，以及恢复/停止/重启
 控制。换句话说，工作流负责挑选 fleet 成员并监控它们在 Runtime 上的运行；
 它不是执行者，因为脚本本身没有 shell 也没有文件系统——副作用都发生在 worker 里。

@@ -17,7 +17,7 @@ Codewhale 说话像一件自带章程的仪器：平静、准确，一切以回�
   界面上有可点的入口，不等于事情已经发生。
 - 产品术语必须一字不差：Codewhale；Plan / Work / Operate；Ask /
   Auto-Review / Full Access；Fleet / Workflow / Lane / Runtime；Work。
-- 命令、按键名、路径，以及模型提供方和模型名都照原样写。
+- 命令、按键名、路径，以及提供商（provider）和模型名都照原样写。
   代码里把它们和本地化后的文字拼在一起。
 
 不要定时轮播，不要营销横幅，不要拟人化的闲聊，不要 emoji 庆祝，

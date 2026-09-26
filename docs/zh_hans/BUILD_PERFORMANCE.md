@@ -289,12 +289,12 @@ TUI-DOG-017）——保持原样。
 3. **已落地。** `palette` → `codewhale-palette`；`command_safety` →
    `codewhale-execpolicy`（它本来就拥有 `ApprovalMode`，所以这次迁移是去掉一条
    依赖边，而不是新增）。
-4. `client/`（模型提供方的线路适配器）→ `codewhale-client`：**被第 1 条卡住，
+4. `client/`（提供商的线路适配器）→ `codewhale-client`：**被第 1 条卡住，
    不只是排在它后面而已。** 排除文档注释和 `#[cfg(test)]` 块之后，`client` 仍有
    20 条生产代码里的 `crate::` 依赖边。其中三条很难处理：
    - `crate::config`——`Config`、`ProvidersConfig`、`ProviderConfig`、`TuiConfig`、
      `ApiProvider`、`RetryPolicy`、`validate_route`、`wire_model_for_provider_route`，
-     还有约 130 个模型提供方 base-URL / model-id 常量。`crates/tui/src/config`
+     还有约 130 个提供商（provider）base-URL / model-id 常量。`crates/tui/src/config`
      本身有 2.97 万行，在生产代码里还依赖 `config_persistence`、`oauth`、
      `credentials`、`tui`、`fleet`、`goal_loop`、`sandbox`、`lsp` 等，所以它没法
      跟着 `client` 一起搬出去。
@@ -309,7 +309,7 @@ TUI-DOG-017）——保持原样。
      `core/{engine,engine/preview,engine/dispatch,engine/turn_loop,engine/reviewer,protocol_parity}.rs`
      用 `client::{CodewhaleClient, PreparedOutboundRequest, canonical_json,
      parse_usage, is_reasoning_replay_placeholder, redact_url_for_display}`。
-   所以第 1 条是全部前提：先把 `ApiProvider`、精确路由辅助函数和模型提供方常量
+   所以第 1 条是全部前提：先把 `ApiProvider`、精确路由辅助函数和提供商常量
    移进 codewhale-config，然后再重新测量 `tools` 和 `core` 这两个循环。
 5. **作为第 4 条中可落地的那部分完成。** `models` + `model_catalog` →
    `codewhale-models`（1,835 行，140 个调用方文件）。它们在依赖主干上正好位于
@@ -322,7 +322,7 @@ TUI-DOG-017）——保持原样。
 
 `scripts/dev-cargo.sh` 和 `scripts/dev-test.sh` 在整个 Cargo 调用期间持有机器级
 独占构建锁（`<cache root>/build.lock`，由 `scripts/build-lock.py` 实现）。Cargo
-自带的锁是按 target 目录分的，所以两个代理往不同的 target 目录构建时依然会并发
+自带的锁是按 target 目录分的，所以两个代理（agent）往不同的 target 目录构建时依然会并发
 跑起来，把内存吃光。第二个构建会等待，并打印出锁在谁手里。设置
 `CODEWHALE_BUILD_LOCK=0` 可以跳过锁，设置 `CODEWHALE_BUILD_LOCK_FILE` 可以指定
 锁文件。如果同一台机器上的自托管 CI runner 的 `.env` 把
@@ -348,11 +348,11 @@ TUI-DOG-017）——保持原样。
    `cargo test --workspace --all-features --locked` 仍是权威门禁；nextest 是
    本地循环。
 3. **有三个测试依赖执行顺序**，只是因为同一进程里另一个测试先安装了 rustls
-   加密提供方才通过：
+   加密提供商才通过：
    `codewhale-tui mcp::sse::endpoint_tests::message_before_endpoint_is_rejected_instead_of_buffered`、
    `codewhale-app-server tests::failed_config_set_keeps_the_stdio_bridge`，以及
    `tests::successful_config_set_still_invalidates_the_stdio_bridge`。现在每个
-   测试自己安装提供方，跟生产代码启动时的做法完全一致。运行时代码没有任何改动。
+   测试自己安装提供商，跟生产代码启动时的做法完全一致。运行时代码没有任何改动。
 4. **CONTRIBUTING.md 增加了一节 “Fast local loop”**：先讲
    `scripts/dev-cargo.sh` / `scripts/dev-test.sh`，然后是定向的 `-p` 过滤、
    nextest、每个 worktree 各自的隔离 build 目录，以及下面那些可选的加速项。

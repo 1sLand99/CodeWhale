@@ -77,7 +77,7 @@ Codewhale 的 Termux/原生构建没有受支持的操作系统密钥环后端
 - 通过设置向导、`/provider` 或 `codewhale auth set` 保存的密钥会写进
   `~/.codewhale/config.toml`，并镜像到 `~/.codewhale/secrets/secrets.json`。
   这两个文件都要当作明文敏感文件。
-- `codewhale auth status --provider <id>` 会报告某个模型提供方当前用的是哪个密钥后端。
+- `codewhale auth status --provider <id>` 会报告某个提供商（provider）当前用的是哪个密钥后端。
 
 ### 自更新
 

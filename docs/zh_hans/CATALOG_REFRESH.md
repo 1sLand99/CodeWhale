@@ -43,7 +43,7 @@ policy DENY (final)
 不能重新标注继承来的价格。云价格补丁会替换整个价格块；未指定的 token 类别
 保持未知。
 
-路由解析还会绑定提供方类型、已配置的身份和端点。提供方自己给出的新名单，
+路由解析还会绑定提供商（provider）类型、已配置的身份和端点。提供商自己给出的新名单，
 在其确切范围内就是权威。显式选定的模型依旧保持显式。Codex 的账户观测/原生
 缓存和 Ollama 端点标签各自保留专属的可用性规则；公开目录里的某一行，
 不能证明某个账户可以调用该模型。已安装的 Codex `account/read` 与 `model/list`
@@ -60,7 +60,7 @@ policy DENY (final)
 | 实时抓取 + 缓存 | `crates/tui/src/models_dev_live.rs` | 后台刷新、TTL、原子写入、新鲜度状态 |
 | Schema / 解析 | `crates/config/src/models_dev.rs` | 不联网的 Models.dev JSON 结构 |
 | 编译 + 来源 | `crates/config/src/catalog.rs` | 有序来源、独立的价格来源、policy deny、id 归一化 |
-| provider lake 合并 | `crates/tui/src/provider_lake.rs` | 共享目录投影，提供方权威严格限定在路由范围内 |
+| provider lake 合并 | `crates/tui/src/provider_lake.rs` | 共享目录投影，提供商权威严格限定在路由范围内 |
 | 离线种子资产 | `crates/config/assets/models_dev.bundled.json` | 仅作紧凑的离线兜底（`_meta.role` 已注明） |
 | 校验脚本 | `scripts/catalog_models_dev.py` | 不含密钥的抓取/校验试运行（#4117） |
 | 脚本测试 | `scripts/catalog_models_dev_test.py` | 离线结构/脱敏检查 |
@@ -78,7 +78,7 @@ TUI/运行时启动时（且未被禁用）：
    并把结果行以 `CatalogSource::ModelsDevLive` 发布到 ProviderLake——第 10 层，
    不带端点指纹。Models.dev 是描述模型的公开目录，所以刷新出来的行与被它
    取代的第 0 层种子同等对待，仍然可以被第 15 层修正。`CatalogSource::Live`
-   保留给提供方自己、按凭据范围返回的 `/models` 应答，位于第 20 层。
+   保留给提供商自己、按凭据范围返回的 `/models` 应答，位于第 20 层。
 4. 失败时：保留原有缓存，或退回**内置**种子。Models.dev 宕机
    绝不会让模型选择直接失败。
 
@@ -162,7 +162,7 @@ python3 scripts/catalog_models_dev.py refresh --provider openrouter \
    `CODEWHALE_MODELS_DEV_PATH` 指向已保存的副本。
 2. 清洗成允许列表内的结构（`models`、`providers`，可选的 `_meta`）。
    以脚本的公开文档规则作为检查清单。
-3. 种子要**紧凑**——只放已发布提供方经过验证的默认值，不要整份导出
+3. 种子要**紧凑**——只放已发布提供商经过验证的默认值，不要整份导出
    （见现有资产里的 `_meta`）。
 4. `python3 scripts/catalog_models_dev.py snapshot --check <path>`。
 5. 仔细对比 diff：默认线协议 ID 应与离线的 `DEFAULT_*_MODEL` 保持一致。
@@ -223,8 +223,8 @@ cron (daily or weekly)
 |---|---|
 | 让用户看到的已知模型/窗口/价格跟随 Models.dev 保持新鲜 | 运行时实时抓取（已发布） |
 | 让离线种子和发布资产在 git 中保持最新 | 定时 CI → PR（待建设） |
-| 决定是否上调产品默认模型 | 人（或在 PR 上*审阅*的代理） |
-| 接入全新的提供方类型 / 方言 | 人工 PR + 测试 |
+| 决定是否上调产品默认模型 | 人（或在 PR 上*审阅*的代理（agent）） |
+| 接入全新的提供商类型 / 方言 | 人工 PR + 测试 |
 
 LLM 至多是目录 PR 的可选**审阅者**，不适合当目录 JSON 的**事实源**。
 

@@ -306,7 +306,7 @@ Agent profiles 和 Hooks。每次持久化的状态变更都会在一个稳定�
   这样已入队但被撤销的 Hook 也不会稍后启动。
 - 普通启动、resume、fork、exec 和 serve 都会先构建一份不可变的工作区级注册表，
   再构建各自依赖插件的目录。
-- Constitution、仓库指令、权限规则、沙箱策略和 MCP 工具审批的优先级，
+- 宪章（Constitution）、仓库指令、权限规则、沙箱策略和 MCP 工具审批的优先级，
   始终高于插件指令。
 
 `/plugin list`、`show`、`suggest` 和 `validate` 不发起网络请求、不启动进程、
