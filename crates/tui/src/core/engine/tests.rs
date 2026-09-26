@@ -6482,6 +6482,56 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     assert!(snapshot.delivery_status.starts_with("unknown"));
 }
 
+/// #6510: the inline ```repl kernel runs model-written Python, so it answers
+/// to the `code_execution` gate. A surface that leaves `code_execution` out of
+/// its allowlist (plain `exec`'s zero-tool surface, or a narrowed
+/// `--allowed-tools`) or denies it must not execute a fence: the reply is the
+/// answer, no kernel starts, and no second model call is made.
+#[tokio::test]
+async fn repl_fence_does_not_run_when_code_execution_is_not_allowed() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use codewhale_models::{ContentBlock, Message};
+
+    let fence = "```repl\nprint('fence ran')\n```";
+    for (allowed, disallowed) in [
+        (Some(Vec::new()), None),
+        (Some(vec!["read_file".to_string()]), None),
+        (None, Some(vec!["code_execution".to_string()])),
+    ] {
+        let workspace = tempdir().expect("tempdir");
+        let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(fence)]));
+        let client: crate::core::model_client::SharedModelClient = mock.clone();
+        let config = EngineConfig {
+            allowed_tools: allowed.clone(),
+            disallowed_tools: disallowed.clone(),
+            ..deterministic_engine_config(workspace.path())
+        };
+        let (mut engine, _handle) =
+            Engine::new_with_model_client(config, &Config::default(), client);
+        engine.session.add_message(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Answer.".to_string(),
+                cache_control: None,
+            }],
+        });
+        let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+            workspace.path().to_path_buf(),
+        ));
+        let policy = test_tool_surface(&engine, registry, None, AppMode::Agent);
+        let mut turn = crate::core::turn::TurnContext::new(4);
+        let (status, error) = engine.run_turn(&mut turn, policy, None, None).await;
+
+        let case = format!("allowed={allowed:?} disallowed={disallowed:?}");
+        assert_eq!(status, TurnOutcomeStatus::Completed, "{case}: {error:?}");
+        assert!(
+            engine.repl_kernel.is_none(),
+            "{case}: kernel must not start"
+        );
+        assert_eq!(mock.call_count(), 1, "{case}: no follow-up model call");
+    }
+}
+
 #[tokio::test]
 async fn normal_repl_kernel_persists_across_user_turns() {
     use crate::llm_client::mock::{MockLlmClient, canned};

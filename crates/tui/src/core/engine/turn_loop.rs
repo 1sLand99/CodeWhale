@@ -872,11 +872,17 @@ impl Engine {
             // must see mid-turn (LSP diagnostics, steer input, subagent
             // completions) are appended to history above, never spliced into
             // the frozen prefix.
+            // A zero-tool turn (plain `exec`) spends extra steps only on
+            // output-limit continuations. It has no work to wrap up or report
+            // on, so the agent wrap-up notices below would only bend a
+            // one-shot answer; at the limit it ends honestly instead.
+            let zero_tool_turn = tool_catalog.is_empty();
             // A1 soft landing: with a finite step budget, once ~80% of it is
             // spent tell the model once to stop exploring and write its final
             // report. Savings proved out by the grok-style parity work (ops
             // A1): a step-faithful harness ends mid-report far too often.
-            if !turn.stop_diagnostics.soft_landing_sent
+            if !zero_tool_turn
+                && !turn.stop_diagnostics.soft_landing_sent
                 && let Some(step_limit) = turn.step_limit()
                 && step_limit > 0
                 && turn.steps_used() >= ((step_limit as f32 * 0.8).floor() as u32).max(1)
@@ -900,7 +906,7 @@ impl Engine {
 
             if turn.at_max_steps() {
                 turn.stop_diagnostics.reason = Some(TurnStopReason::StepBudgetExhausted);
-                if step_budget_exhaustion_is_terminal && !final_report_sent {
+                if step_budget_exhaustion_is_terminal && !final_report_sent && !zero_tool_turn {
                     // A2 report-on-exhaustion: the budget died while the model
                     // still owes work. Never finish silently — grant exactly
                     // one final provider turn to write a bounded report, then
@@ -2267,7 +2273,13 @@ impl Engine {
                 // for sustained work instead of forcing the model through a
                 // separate open/eval/configure control surface.
 
+                // The kernel runs model-written Python, so it answers to the
+                // same command gate as `code_execution`: a narrowed tool
+                // surface (`exec --allowed-tools …`, or plain `exec`'s zero-tool
+                // surface, #6510) must not execute code through a fence.
                 if has_sendable_assistant_content
+                    && tool_policy.passes_allow_list(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
+                    && !tool_policy.denies_tool(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
                     && crate::repl::sandbox::has_repl_block(&current_text_visible)
                 {
                     let repl_blocks =
@@ -2321,6 +2333,9 @@ impl Engine {
                             self.session.model.clone(),
                             1,
                         )
+                        // A nested `rlm_query` reports on this turn's stream,
+                        // so its model calls are part of the record (#6511).
+                        .with_events(self.tx_event.clone())
                     });
                     let repl_cost_scope = crate::cost_status::scope_token();
                     let repl_started = Instant::now();
