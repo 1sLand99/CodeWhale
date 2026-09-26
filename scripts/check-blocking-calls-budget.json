@@ -184,9 +184,6 @@
   "crates/tui/src/fleet/artifacts.rs": {
     "std_fs": 1
   },
-  "crates/tui/src/fleet/exact.rs": {
-    "std_fs": 2
-  },
   "crates/tui/src/fleet/executor.rs": {
     "std_fs": 1
   },
@@ -249,6 +246,9 @@
   "crates/tui/src/lib.rs": {
     "path_canonicalize": 2,
     "std_fs": 42
+  },
+  "crates/tui/src/mcp.rs": {
+    "std_fs": 1
   },
   "crates/tui/src/mcp_server.rs": {
     "std_fs": 1

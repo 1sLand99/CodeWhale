@@ -11614,15 +11614,21 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
         for hidden in ["File", "Bash", "read_file", "write_file", "edit_file"] {
             assert!(!full.contains(hidden), "{mode} must hide {hidden}");
         }
+        // #6562: `[features] code_mode` defaults on, so Act/Operate promote
+        // `execute_tools` into the request head. Plan hides it entirely.
+        let mut expected_mode_active = expected_active.clone();
+        if mode != "plan" {
+            expected_mode_active.insert("execute_tools");
+        }
         assert_eq!(
             metric_tool_names(&payload, mode, "active"),
-            expected_active,
+            expected_mode_active,
             "{mode} must keep the same request head including goal controls"
         );
     }
 
     let plan = metric_tool_names(&payload, "plan", "full");
-    for forbidden in ["Run", "fim_edit", "verify"] {
+    for forbidden in ["Run", "fim_edit", "verify", "execute_tools"] {
         assert!(!plan.contains(forbidden), "Plan must exclude {forbidden}");
     }
 

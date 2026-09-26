@@ -4971,6 +4971,7 @@ async fn run_doctor(
                 "·".dimmed(),
                 cfg.servers.len()
             );
+            let duplicate_computer_use = crate::mcp::duplicate_computer_use_servers(&cfg);
             for (name, server) in &cfg.servers {
                 let status = doctor_check_mcp_server(server);
                 let icon = match &status {
@@ -5004,6 +5005,13 @@ async fn run_doctor(
                         "      process/protocol/backend: not checked; `codewhale mcp validate` explicitly starts and initializes configured servers"
                     );
                 }
+            }
+            for (name, _) in &duplicate_computer_use {
+                println!(
+                    "  {} {}",
+                    "!".truecolor(sky_r, sky_g, sky_b),
+                    duplicate_computer_use_warning(name).trim_start()
+                );
             }
             if probes.should_probe_mcp() {
                 println!();
@@ -10095,6 +10103,14 @@ fn read_patch_from_stdin() -> Result<String> {
     Ok(buffer)
 }
 
+/// Warning for a user MCP server that duplicates the enabled built-in
+/// Computer Use bundle. Advisory: the entry is never removed.
+fn duplicate_computer_use_warning(name: &str) -> String {
+    format!(
+        "  warning: `{name}` launches the same Computer Use plugin as the enabled built-in computer-use bundle; every Computer Use tool is advertised twice (~2.5k extra tokens per request) with separate consent state. Remove or disable `{name}` in mcp.json, or disable the built-in bundle, to keep one."
+    )
+}
+
 async fn run_mcp_command(
     config: &Config,
     workspace: &Path,
@@ -10140,6 +10156,7 @@ async fn run_mcp_command(
                 return Ok(());
             }
             println!("MCP servers ({}):", cfg.servers.len());
+            let duplicate_computer_use = crate::mcp::duplicate_computer_use_servers(&cfg);
             for (name, server) in cfg.servers {
                 let status = if server.enabled && !server.disabled {
                     "enabled"
@@ -10177,6 +10194,9 @@ async fn run_mcp_command(
                 };
                 let required = if server.required { " required" } else { "" };
                 println!("  - {name} [{status}{required}{auth}] {cmd_str}");
+            }
+            for (name, _) in &duplicate_computer_use {
+                println!("{}", duplicate_computer_use_warning(name));
             }
             Ok(())
         }
