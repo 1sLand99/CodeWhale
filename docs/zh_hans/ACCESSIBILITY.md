@@ -93,7 +93,7 @@ Tilix 和 Terminator 的会话会自动以低动效模式启动，因为这类�
 * `low_motion` 把空闲重绘循环放慢到每帧约 120ms，并冻结状态标记，既不合成长文本
   也不限流。配合 `calm_mode`，重绘频率足够低，VoiceOver / Orca 的播报会跟随
   模型输出线性推进，而不是每个 tick 都重念整个屏幕。
-* 对话记录是纯文本——没有图片，也没有 canvas 渲染——所以任何与平台无障碍服务
+* 转录（transcript）是纯文本——没有图片，也没有 canvas 渲染——所以任何与平台无障碍服务
   集成的终端（例如 macOS Terminal.app、iTerm2、Ghostty、Windows Terminal）
   都会把渲染后的内容原样透传。
 * 如果 `low_motion = true` 时仍有界面元素产生动效，请针对
