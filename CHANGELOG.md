@@ -193,6 +193,13 @@ quieter, and Fleet runs can be checked before they spend anything.
 - `workflow(fleet:)` runs Fleets saved from the Fleet UI, and finds
   workspace Fleets under `.codewhale/fleets`.
 - The runtime API can stop a delegated agent run from the desktop.
+- A finished agent's answer is no longer cut off. Its row and its completion
+  notification show the first sentence of its result instead of a
+  `## Summary` heading or its last tool, and opening the agent shows the whole
+  result, or the full reason it stopped, even when no transcript was captured.
+  Each agent also has one name: a workflow task's label or its dispatch name
+  appears on the rows, the notification and the runtime API alike, never its
+  internal id ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
 
 ### Plugins
 
