@@ -24,9 +24,21 @@ pub(crate) fn mutate_config_document<F>(path: &Path, mutate: F) -> anyhow::Resul
 where
     F: FnOnce(&mut toml_edit::DocumentMut) -> anyhow::Result<()>,
 {
-    codewhale_config::mutate_config_document(path, |doc| {
+    mutate_config_document_with_migration(path, |doc, _| mutate(doc))
+}
+
+/// [`mutate_config_document`], also handing `mutate` the receipt of the legacy
+/// top-level `base_url` / `api_key` move this same write made (#6394).
+pub(crate) fn mutate_config_document_with_migration<F>(path: &Path, mutate: F) -> anyhow::Result<()>
+where
+    F: FnOnce(
+        &mut toml_edit::DocumentMut,
+        &codewhale_config::legacy_root::LegacyRootMigration,
+    ) -> anyhow::Result<()>,
+{
+    codewhale_config::mutate_config_document_with_migration(path, |doc, moved| {
         migrate_legacy_route_preferences(path, doc)?;
-        mutate(doc)
+        mutate(doc, moved)
     })
 }
 

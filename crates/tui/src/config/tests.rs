@@ -5500,6 +5500,75 @@ api_key = "unrelated-key"
 }
 
 #[test]
+fn clear_active_provider_api_key_deepseek_cn_keeps_deepseek_own_key() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-clear-deepseek-cn-keeps-intl-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+
+    // Each identity holds its own key: signing CN out leaves DeepSeek's.
+    fs::write(
+        &config_path,
+        r#"provider = "deepseek-cn"
+
+[providers.deepseek]
+api_key = "sk-intl"
+
+[providers.deepseek_cn]
+api_key = "sk-cn"
+"#,
+    )?;
+    clear_active_provider_api_key("deepseek-cn")?;
+    let after = fs::read_to_string(&config_path)?;
+    assert!(!after.contains("sk-cn"), "{after}");
+    assert!(after.contains("sk-intl"), "{after}");
+
+    // CN without a key of its own reads DeepSeek's, so that shared key goes.
+    fs::write(
+        &config_path,
+        r#"provider = "deepseek-cn"
+
+[providers.deepseek]
+api_key = "sk-shared"
+"#,
+    )?;
+    clear_active_provider_api_key("deepseek-cn")?;
+    let after = fs::read_to_string(&config_path)?;
+    assert!(!after.contains("sk-shared"), "{after}");
+
+    // A top-level key this write moves beside CN's own key was the shared
+    // one; a DeepSeek key that only merged with it was DeepSeek's own too.
+    fs::write(
+        &config_path,
+        r#"provider = "deepseek-cn"
+api_key = "sk-root"
+
+[providers.deepseek]
+api_key = "sk-root"
+
+[providers.deepseek_cn]
+api_key = "sk-cn"
+"#,
+    )?;
+    clear_active_provider_api_key("deepseek-cn")?;
+    let after = fs::read_to_string(&config_path)?;
+    assert!(!after.contains("sk-cn"), "{after}");
+    assert!(after.contains("[providers.deepseek]"), "{after}");
+    assert!(after.contains("sk-root"), "{after}");
+    Ok(())
+}
+
+#[test]
 fn clear_active_provider_api_key_distinguishes_literal_and_named_custom_routes() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()

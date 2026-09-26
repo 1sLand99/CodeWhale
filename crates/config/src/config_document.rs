@@ -22,6 +22,16 @@ pub fn mutate_config_document<T, F>(path: &Path, mutate: F) -> Result<T>
 where
     F: FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
 {
+    mutate_config_document_with_migration(path, |doc, _| mutate(doc))
+}
+
+/// [`mutate_config_document`], also handing `mutate` the receipt of the legacy
+/// top-level `base_url` / `api_key` move this same write made, so a caller can
+/// tell a value it just moved from one that was already in its table.
+pub fn mutate_config_document_with_migration<T, F>(path: &Path, mutate: F) -> Result<T>
+where
+    F: FnOnce(&mut toml_edit::DocumentMut, &crate::legacy_root::LegacyRootMigration) -> Result<T>,
+{
     with_config_write_lock(path, |path| {
         let original = read_optional_config(path)?;
         let mut document = match original.as_deref() {
@@ -41,7 +51,7 @@ where
         // unless this very write changes the table side.
         let moved = crate::legacy_root::apply_to_document(&mut document, None);
         let conflicts = crate::legacy_root::conflict_snapshot(&document);
-        let result = mutate(&mut document)?;
+        let result = mutate(&mut document, &moved)?;
         crate::legacy_root::settle_conflicts_after_write(&mut document, conflicts);
         let body = document.to_string();
         if original.as_deref() == Some(body.as_str()) || (original.is_none() && body.is_empty()) {

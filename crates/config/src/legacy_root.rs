@@ -166,6 +166,22 @@ impl LegacyRootMigration {
         })
     }
 
+    /// Whether the top-level (not per-profile) `api_key` moved into
+    /// `[providers.<table>]`, where that table had no key of its own.
+    #[must_use]
+    pub fn moved_root_api_key_to(&self, table: &str) -> bool {
+        self.notes.iter().any(|note| {
+            matches!(
+                note,
+                LegacyRootNote::Moved {
+                    scope: None,
+                    field: LegacyRootField::ApiKey,
+                    to,
+                } if to.strip_prefix("providers.") == Some(table)
+            )
+        })
+    }
+
     /// One line per note, suitable for CLI output and doctor.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {

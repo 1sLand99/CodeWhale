@@ -13364,52 +13364,73 @@ fn clear_active_provider_api_key_under_lock(provider: &str) -> Result<()> {
         .context("Failed to resolve config path while clearing API keys.")?;
 
     if config_path.exists() {
-        crate::config_persistence::mutate_config_document(&config_path, |doc| {
-            // The write itself moved any older top-level `api_key` into its
-            // provider table (#6394); clear a conflicting leftover too.
-            let deepseek_family = provider == ApiProvider::Deepseek.as_str()
-                || provider == ApiProvider::DeepseekCN.as_str();
-            if deepseek_family || provider == ApiProvider::Custom.as_str() {
-                crate::config_persistence::unset_document_value(doc, &["api_key"])?;
-            }
-            let table = match ApiProvider::parse(provider).filter(|p| p.as_str() == provider) {
-                Some(ApiProvider::Deepseek) => "deepseek",
-                Some(ApiProvider::DeepseekCN) => "deepseek_cn",
-                Some(parsed) => provider_config_key(parsed).unwrap_or(provider),
-                None => provider,
-            };
-            crate::config_persistence::unset_document_value(doc, &["providers", table, "api_key"])?;
-            if table != provider {
-                // Older writers used the provider id as the table key.
+        crate::config_persistence::mutate_config_document_with_migration(
+            &config_path,
+            |doc, moved| {
+                // The write itself moved any older top-level `api_key` into its
+                // provider table (#6394); clear a conflicting leftover too.
+                let deepseek_family = provider == ApiProvider::Deepseek.as_str()
+                    || provider == ApiProvider::DeepseekCN.as_str();
+                if deepseek_family || provider == ApiProvider::Custom.as_str() {
+                    crate::config_persistence::unset_document_value(doc, &["api_key"])?;
+                }
+                let table = match ApiProvider::parse(provider).filter(|p| p.as_str() == provider) {
+                    Some(ApiProvider::Deepseek) => "deepseek",
+                    Some(ApiProvider::DeepseekCN) => "deepseek_cn",
+                    Some(parsed) => provider_config_key(parsed).unwrap_or(provider),
+                    None => provider,
+                };
+                let has_own_key = |doc: &toml_edit::DocumentMut| {
+                    [table, provider].iter().any(|key| {
+                        doc.get("providers")
+                            .and_then(|providers| providers.get(key))
+                            .and_then(|entry| entry.get("api_key"))
+                            .and_then(toml_edit::Item::as_str)
+                            .is_some_and(|value| !value.trim().is_empty())
+                    })
+                };
+                // DeepSeek-CN reads `[providers.deepseek] api_key` only when it has
+                // no key of its own, and older releases kept both behind one
+                // top-level key. Signing CN out clears the DeepSeek key only when
+                // it is that shared key: CN was reading it, or this write just
+                // moved the top-level key there. A DeepSeek key the user saved
+                // for DeepSeek itself stays.
+                let clears_shared_deepseek_key = provider == ApiProvider::DeepseekCN.as_str()
+                    && (!has_own_key(doc) || moved.moved_root_api_key_to("deepseek"));
                 crate::config_persistence::unset_document_value(
                     doc,
-                    &["providers", provider, "api_key"],
+                    &["providers", table, "api_key"],
                 )?;
-            }
-            // DeepSeek-CN reads DeepSeek's key (they used to share the
-            // top-level key), so signing it out clears that shared key too.
-            if provider == ApiProvider::DeepseekCN.as_str() {
-                crate::config_persistence::unset_document_value(
-                    doc,
-                    &["providers", "deepseek", "api_key"],
-                )?;
-            }
-            if provider == ApiProvider::Xai.as_str() {
-                crate::config_persistence::unset_document_value(
-                    doc,
-                    &["providers", "xai", "oauth_credential_generation"],
-                )?;
-                crate::config_persistence::unset_document_value(
-                    doc,
-                    &["providers", "xai", "auth_mode"],
-                )?;
-                crate::config_persistence::unset_document_value(
-                    doc,
-                    &["providers", "xai", "external_credentials"],
-                )?;
-            }
-            Ok(())
-        })
+                if table != provider {
+                    // Older writers used the provider id as the table key.
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", provider, "api_key"],
+                    )?;
+                }
+                if clears_shared_deepseek_key {
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "deepseek", "api_key"],
+                    )?;
+                }
+                if provider == ApiProvider::Xai.as_str() {
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "xai", "oauth_credential_generation"],
+                    )?;
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "xai", "auth_mode"],
+                    )?;
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "xai", "external_credentials"],
+                    )?;
+                }
+                Ok(())
+            },
+        )
         .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
         log_sensitive_event(
             "credential.clear",
