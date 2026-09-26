@@ -448,6 +448,17 @@ for (const block of rustCacheBlocks) {
 
 // One parity gate, called by the release candidate and the public release,
 // and the release refuses a tag without a green RC receipt for its exact SHA.
+// The release gate must lint at least as strictly as the merge gate.
+function clippyAllows(source, label) {
+  const command = source.match(/cargo clippy --workspace --all-targets --all-features --locked -- \\\n([\s\S]*?)\n(?! +-)/)?.[1];
+  assert.ok(command, `${label} must run workspace all-targets clippy`);
+  return [...command.matchAll(/-A (clippy::\w+)/g)].map((match) => match[1]).sort();
+}
+assert.deepEqual(
+  clippyAllows(parityWorkflow, "release-parity.yml"),
+  clippyAllows(ci, "ci.yml"),
+  "release-parity.yml clippy allowances must match ci.yml",
+);
 const parity = parityWorkflow.match(/\n  parity:\n([\s\S]*)$/);
 assert.ok(parity, "release-parity.yml must define the parity job");
 assert.match(parityWorkflow, /^on:\n  workflow_call:\n/m, "parity must be a reusable workflow");
