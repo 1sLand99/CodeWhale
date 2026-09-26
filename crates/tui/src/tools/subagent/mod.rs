@@ -120,7 +120,12 @@ pub use coord::{
 };
 #[allow(unused_imports)]
 pub use mailbox::{Mailbox, MailboxEnvelope, MailboxMessage, MailboxReceiver};
+pub(crate) use naming::explicit_nickname;
 use naming::generated_whale_name_base;
+pub(crate) use naming::localized_whale_display_names;
+pub(crate) use naming::subagent_display_name;
+pub(crate) use naming::subagent_result_display_name;
+pub(crate) use naming::subagent_role_label;
 #[allow(unused_imports)] // compatibility path; some consumers exist only in test builds today
 pub use naming::{
     WHALE_NICKNAMES, assign_unique_whale_name_in_locale, whale_name_for_id_in_locale,
@@ -131,10 +136,6 @@ use naming::{
     WHALE_NICKNAMES_HI, WHALE_NICKNAMES_ID, WHALE_NICKNAMES_JA, WHALE_NICKNAMES_KO,
     WHALE_NICKNAMES_PT_BR, WHALE_NICKNAMES_RU, WHALE_NICKNAMES_UK, WHALE_NICKNAMES_VI,
     WHALE_NICKNAMES_ZH_HANT,
-};
-pub(crate) use naming::{
-    explicit_nickname, localized_whale_display_names, subagent_display_name,
-    subagent_result_display_name, subagent_role_label,
 };
 
 // === Constants ===
