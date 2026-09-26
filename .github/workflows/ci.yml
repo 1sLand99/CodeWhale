@@ -306,6 +306,20 @@ jobs:
         # platform backends, and the MCP stdio protocol. No GUI input runs.
         run: (cd crates/tui/plugins/computer-use && npm test)
 
+      - name: Run extension host suites and check the committed bundle
+        # The TypeScript extension host (experimental, [features]
+        # extension_host). Its tests import the committed dist/ only, so
+        # `npm test` needs no install; the rebuild then fails if dist/ drifted
+        # from src/ or the lockfile. Node 22 matches the host's engines floor.
+        run: |
+          set -euo pipefail
+          cd crates/tui/extension-host
+          npm test
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm run build
+          git diff --exit-code -- dist
+
   vscode-extension:
     name: VS Code extension
     timeout-minutes: 15
@@ -778,6 +792,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+      - uses: actions/setup-node@v7
+        # The extension-host integration tests spawn the real bundle under
+        # Node >= 22.19; CODEWHALE_EXT_HOST_TESTS below makes a missing Node a
+        # failure instead of a silent skip.
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+        with:
+          node-version: 22
       - name: Hold this machine's build lock (self-hosted)
         # The self-hosted Mac is also a developer machine: local agents build
         # through scripts/dev-cargo.sh, which holds this lock, and two Cargo
@@ -823,6 +844,7 @@ jobs:
         shell: bash
         run: sh scripts/with-hermetic-test-home.sh cargo nextest run --workspace --all-features --locked --profile ci
         env:
+          CODEWHALE_EXT_HOST_TESTS: '1'
           # sccache 0.17 panics resolving its config directory under the
           # isolated Windows home before Cargo can compile or run any test.
           # Bypass only that optional cache; keep the full suite and isolation.

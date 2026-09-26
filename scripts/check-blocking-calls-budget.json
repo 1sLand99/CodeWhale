@@ -179,6 +179,12 @@
   "crates/tui/src/doctor_fix.rs": {
     "std_fs": 6
   },
+  "crates/tui/src/extension_host/mod.rs": {
+    "std_fs": 7
+  },
+  "crates/tui/src/extension_host/supervisor.rs": {
+    "std_fs": 3
+  },
   "crates/tui/src/external_credentials.rs": {
     "std_fs": 2
   },
