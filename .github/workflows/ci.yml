@@ -923,13 +923,17 @@ jobs:
     # ubuntu-only, so the required "npm wrapper smoke (ubuntu-latest)"
     # context is unaffected. Heavy pull requests execute the Ubuntu smoke
     # here; their branches may not be mirrored to CNB.
+    # Pushes to main run Ubuntu (a CNB pointer) and Windows only. The macOS
+    # leg was a ~28-minute hosted-Mac build on every main push while hosted
+    # macOS is capped at 5 concurrent jobs; it stays in the manual
+    # workflow_dispatch (full CI) matrix and in the release pipeline.
     # A cold Windows build can take 29 minutes before the smoke even starts.
     # Leave room for installation; bound the smoke itself independently below.
     timeout-minutes: 45
     runs-on: ${{ needs.changes.outputs.heavy == 'true' && matrix.os || 'ubuntu-latest' }}
     strategy:
       matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || github.event_name == 'workflow_dispatch' && '["ubuntu-latest","macos-latest","windows-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - name: Skip npm wrapper smoke for light change
         if: needs.changes.outputs.heavy != 'true'

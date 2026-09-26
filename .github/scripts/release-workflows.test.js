@@ -82,9 +82,9 @@ const npmSmokeCases = [
   ["light PR", "pull_request", false, "ubuntu-latest", true, true, false, false, false],
   ["manual Ubuntu", "workflow_dispatch", true, "ubuntu-latest", true, true, true, true, false],
   ["main Ubuntu", "push", true, "ubuntu-latest", true, true, false, false, true],
-  ["main macOS", "push", true, "macos-latest", true, true, true, false, false],
+  ["manual macOS", "workflow_dispatch", true, "macos-latest", true, true, true, false, false],
   ["main Windows", "push", true, "windows-latest", true, true, true, false, false],
-  ["main cache failure", "push", true, "macos-latest", true, false, true, false, false],
+  ["main cache failure", "push", true, "windows-latest", true, false, true, false, false],
   ["light main", "push", false, "ubuntu-latest", true, true, false, false, false],
   ["schedule", "schedule", true, "ubuntu-latest", true, true, false, false, false],
 ];
@@ -120,6 +120,22 @@ for (const [label, event, heavy, os, trusted, cache, execute, linuxDeps, cnb] of
       `${label}: ${name} must ${expected ? "execute" : "stay skipped"}`,
     );
   }
+}
+// The matrix itself: pull requests keep the single required Ubuntu context,
+// main pushes skip the hosted-macOS leg (5-job concurrency cap), and a manual
+// full-CI dispatch still covers all three platforms.
+const npmSmokeMatrix = npmSmokeJob.match(/^        os: \$\{\{ fromJSON\((.+)\) \}\}$/m)?.[1];
+assert.ok(npmSmokeMatrix, "the wrapper job must keep an event-keyed OS matrix");
+for (const [event, expected] of [
+  ["pull_request", ["ubuntu-latest"]],
+  ["push", ["ubuntu-latest", "windows-latest"]],
+  ["workflow_dispatch", ["ubuntu-latest", "macos-latest", "windows-latest"]],
+]) {
+  assert.deepEqual(
+    JSON.parse(vm.runInNewContext(npmSmokeMatrix, { github: { event_name: event } })),
+    expected,
+    `npm wrapper smoke matrix for ${event}`,
+  );
 }
 console.log(`Wrapper CI guards OK: ${npmSmokeCases.length} event cases, ${npmSmokeSteps.length} steps each.`);
 
