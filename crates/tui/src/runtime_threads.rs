@@ -825,6 +825,17 @@ fn projected_user_text(message: &Message) -> Option<String> {
     if message.role.as_str() != "user" {
         return None;
     }
+    // An engine-owned compaction checkpoint is not a turn's prompt. No turn
+    // record can reproduce one — the compaction ran in the engine, between
+    // records — so a document that carries it would read as drifted from the
+    // records it was rebuilt from. Every fork of a compacted source inherits
+    // the summary in its system prompt, and the engine installs the checkpoint
+    // into the synced history on the fork's first load, so leaving it in took
+    // the cut away from the fork itself: `/undo`, retry and fork-again each
+    // refused with "cannot identify an exact saved-history boundary".
+    if crate::compaction::is_wire_compaction_checkpoint_message(message) {
+        return None;
+    }
     let text = message
         .content
         .iter()
@@ -999,6 +1010,53 @@ fn saved_transcript_is_compacted(
                 .any(|item| item.kind == TurnItemKind::ContextCompaction)
         })
     })
+}
+
+/// The result a rebuilt history must give a tool call whose outcome the turn
+/// store never recorded, or `None` when nothing is missing.
+///
+/// A call that failed, was interrupted, or was canceled can be persisted as a
+/// single `tool_call` item that carries the call alone: the failure text lives
+/// on the item's own `detail`, and no `tool_result_for` item follows. Rebuilding
+/// only the call leaves it unanswered, which a provider rejects outright —
+/// `No tool output found for tool call …`. The missing result is also what
+/// stopped the first of two responses from flushing, so the rebuild glued them
+/// into one assistant message (`thinking`, `call`, `thinking`, `call`) and the
+/// provider read *that* as the first call never being answered, even after the
+/// request-time repair had answered it.
+///
+/// Both are cured by answering the call where its own outcome is known: the
+/// item's failure text for a failure, and the repository's interrupted-call
+/// notice for a call the process never finished.
+///
+/// An answer is only ever paired with a call the rebuild actually emits, so the
+/// identity required here is the one the caller needs before it emits the call
+/// at all (#5823): a snapshot with no tool name is skipped rather than replayed
+/// as an empty shell, and answering it would leave the result on its own.
+///
+/// A call still running is deliberately left alone. A rebuild of a live turn
+/// must not invent an outcome the engine is still waiting for — the result is
+/// coming — so this answers only the terminal failures.
+fn unanswered_call_result(
+    item: &TurnItemRecord,
+    call_id: &str,
+    call_name: &str,
+    recorded_results: &HashSet<String>,
+) -> Option<String> {
+    if call_id.is_empty() || call_name.is_empty() || recorded_results.contains(call_id) {
+        return None;
+    }
+    match item.status {
+        TurnItemLifecycleStatus::Failed => {
+            Some(item.detail.clone().unwrap_or_else(|| item.summary.clone()))
+        }
+        TurnItemLifecycleStatus::Interrupted | TurnItemLifecycleStatus::Canceled => {
+            Some(crate::tool_history_repair::CRASH_REPAIR_CONTENT.to_string())
+        }
+        TurnItemLifecycleStatus::Queued
+        | TurnItemLifecycleStatus::InProgress
+        | TurnItemLifecycleStatus::Completed => None,
+    }
 }
 
 fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> bool {
@@ -12575,6 +12633,26 @@ impl RuntimeThreadManager {
                 ordered
             };
 
+            // The calls this turn already answers with a result item of their
+            // own. Only a `tool_call` item is rebuilt into a result — a
+            // `file_change` item records its own call and result, and the
+            // rebuild reads neither — so this set names exactly the answers a
+            // rebuild will emit, and a call in it must not be answered twice.
+            // A call item may carry its result (the completed live shape) or a
+            // sibling `tool_result_for` item may (seeded history, and the
+            // repair's own notice); both are `tool_call` items.
+            let recorded_results: HashSet<String> = items
+                .iter()
+                .filter(|item| item.kind == TurnItemKind::ToolCall)
+                .filter_map(|item| {
+                    item.metadata
+                        .as_ref()?
+                        .get("tool_result_for")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .collect();
+
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
             let mut user_blocks: Vec<ContentBlock> = Vec::new();
             let flush_assistant = |blocks: &mut Vec<ContentBlock>, msgs: &mut Vec<Message>| {
@@ -12642,6 +12720,17 @@ impl RuntimeThreadManager {
                         let tool_use_id = meta_str("tool_use_id");
                         let tool_name = meta_str("tool_name");
                         let tool_result_for = meta_str("tool_result_for");
+                        // A call whose own outcome the store never recorded is
+                        // answered with the outcome it does hold, decided while
+                        // the id is still borrowed — see
+                        // `unanswered_call_result`.
+                        let unanswered = unanswered_call_result(
+                            &item,
+                            &tool_use_id,
+                            &tool_name,
+                            &recorded_results,
+                        )
+                        .map(|content| (tool_use_id.clone(), content));
                         // Completed live turns persist the call and its result
                         // on one item; seeded history persists them as two.
                         // Both shapes must rebuild the paired tool_call /
@@ -12683,6 +12772,17 @@ impl RuntimeThreadManager {
                                 content,
                                 is_error: if is_error { Some(true) } else { None },
                                 content_blocks,
+                            });
+                        } else if let Some((call_id, content)) = unanswered {
+                            // The call above had no recorded outcome: pair it
+                            // here, in the position the live transcript held
+                            // its result, so the rebuilt turn is complete.
+                            flush_assistant(&mut assistant_blocks, &mut messages);
+                            user_blocks.push(ContentBlock::ToolResult {
+                                tool_use_id: call_id,
+                                content,
+                                is_error: Some(true),
+                                content_blocks: None,
                             });
                         }
                     }

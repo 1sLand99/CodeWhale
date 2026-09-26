@@ -184,7 +184,11 @@ from earlier turns.";
 /// Preamble for the one conversation-history checkpoint created by compaction.
 /// This intentionally follows Codex's `templates/compact/summary_prefix.md`:
 /// the checkpoint is a user-history item, never standing system-prompt prose.
-const SUMMARY_HEADER: &str = "Another language model started to solve this problem and produced \
+///
+/// A history rebuilt from turn records has to recognise the checkpoint
+/// messages a document carries, so the preamble itself is crate-visible
+/// (`runtime_threads`' recovery projection and its tests).
+pub(crate) const SUMMARY_HEADER: &str = "Another language model started to solve this problem and produced \
 a summary of its thinking process. You also have access to the state of the tools that were used \
 by that language model. Use this to build on the work that has already been done and avoid \
 duplicating work. Here is the summary produced by the other language model, use the information \

@@ -1054,6 +1054,304 @@ mod recovery {
         Ok(())
     }
 
+    /// A tool call whose outcome never reached the turn store — the tool
+    /// failed, so the item carries the failure text and no result item follows
+    /// — used to rebuild as a call with no answer. Two things then went wrong
+    /// on a fork of that conversation: the response *after* the lost call was
+    /// glued into the same assistant message (no result had flushed it), and
+    /// the request-time repair answered the call by inserting a result next to
+    /// a message that now held two responses. DeepSeek's Responses API reads
+    /// that history as `400 No tool output found for tool call …` on every
+    /// turn the fork ran, and the repaired document no longer matched the
+    /// records, so retrying the fork refused with "cannot identify an exact
+    /// saved-history boundary".
+    #[tokio::test]
+    async fn a_rebuilt_turn_answers_a_tool_call_whose_outcome_the_store_lost() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+
+        // Two responses in one turn: the first asked for a build that the tool
+        // reported as failed without recording a result, the second answered
+        // and ran the tests, which did.
+        let turn_lost = "turn_lost_the_call";
+        let mut lost = sample_item(turn_lost, "item_call_lost", TurnItemLifecycleStatus::Failed);
+        lost.kind = TurnItemKind::ToolCall;
+        lost.started_at = at(2);
+        lost.ended_at = lost.started_at;
+        lost.summary = "bash failed: Failed to execute tool: boom".to_string();
+        lost.detail = Some("Failed to execute tool: boom".to_string());
+        lost.metadata = Some(json!({
+            "tool_use_id": "call_lost",
+            "tool_name": "bash",
+            "tool_input": "{\"command\":\"cargo build\"}",
+        }));
+        let mut kept = sample_item(
+            turn_lost,
+            "item_call_kept",
+            TurnItemLifecycleStatus::Completed,
+        );
+        kept.kind = TurnItemKind::ToolCall;
+        kept.started_at = at(5);
+        kept.ended_at = kept.started_at;
+        kept.summary = "bash: 12 passed".to_string();
+        kept.detail = Some("12 passed".to_string());
+        kept.metadata = Some(json!({
+            "tool_use_id": "call_kept",
+            "tool_result_for": "call_kept",
+            "tool_name": "bash",
+            "tool_input": "{\"command\":\"cargo test\"}",
+        }));
+
+        let turn_after = "turn_of_compaction";
+        for record in [
+            text_item(
+                "item_u1",
+                turn_lost,
+                0,
+                TurnItemKind::UserMessage,
+                "run the build",
+            ),
+            text_item(
+                "item_r1",
+                turn_lost,
+                1,
+                TurnItemKind::AgentReasoning,
+                "the compiler will tell us what is missing",
+            ),
+            lost,
+            text_item(
+                "item_s1",
+                turn_lost,
+                3,
+                TurnItemKind::Status,
+                "Continuing — tool results",
+            ),
+            text_item(
+                "item_r2",
+                turn_lost,
+                4,
+                TurnItemKind::AgentReasoning,
+                "the build failed; the tests still say something",
+            ),
+            kept,
+            text_item(
+                "item_a1",
+                turn_lost,
+                6,
+                TurnItemKind::AgentMessage,
+                "the build failed, the tests passed",
+            ),
+            text_item(
+                "item_u2",
+                turn_after,
+                7,
+                TurnItemKind::UserMessage,
+                "and now the next thing",
+            ),
+            text_item(
+                "item_c1",
+                turn_after,
+                8,
+                TurnItemKind::ContextCompaction,
+                "Made room: 40 → 21 messages",
+            ),
+        ] {
+            manager.store.save_item(&record)?;
+        }
+        for (turn_id, order) in [(turn_lost, 0), (turn_after, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_after.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // The engine's transcript for that conversation once compaction ran:
+        // the prompts verbatim, nothing that happened between them. A cut has
+        // to rebuild the exchange from the records — the path this covers.
+        let compacted: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"run the build"}]},
+            {"role":"user","content":[{"type":"text","text":"and now the next thing"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &compacted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        let (fork, _, _, _) = manager.fork_at_user_turn(&thread.id, turn_lost).await?;
+        let fork_session_id = fork
+            .session_id
+            .clone()
+            .context("a published fork owns a session document")?;
+        let document = sessions.load_session(&fork_session_id)?;
+        let shape = |messages: &[Message]| -> Vec<(String, Vec<&'static str>)> {
+            messages
+                .iter()
+                .map(|message| {
+                    let blocks = message
+                        .content
+                        .iter()
+                        .map(|block| match block {
+                            ContentBlock::Text { .. } => "text",
+                            ContentBlock::Thinking { .. } => "thinking",
+                            ContentBlock::ToolUse { .. } => "tool_use",
+                            ContentBlock::ToolResult { .. } => "tool_result",
+                            _ => "other",
+                        })
+                        .collect();
+                    (message.role.as_str().to_string(), blocks)
+                })
+                .collect()
+        };
+        assert_eq!(
+            shape(&document.messages),
+            vec![
+                ("user".to_string(), vec!["text"]),
+                ("assistant".to_string(), vec!["thinking", "tool_use"]),
+                ("user".to_string(), vec!["tool_result"]),
+                ("assistant".to_string(), vec!["thinking", "tool_use"]),
+                ("user".to_string(), vec!["tool_result"]),
+                ("assistant".to_string(), vec!["text"]),
+            ],
+            "each response keeps its own call and its own answer: {:#?}",
+            document.messages
+        );
+        let calls: Vec<&str> = document
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let answers: Vec<(&str, &str)> = document
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => Some((tool_use_id.as_str(), content.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, ["call_lost", "call_kept"]);
+        assert_eq!(
+            answers
+                .iter()
+                .map(|(tool_use_id, _)| *tool_use_id)
+                .collect::<Vec<_>>(),
+            ["call_lost", "call_kept"],
+            "no call is left unanswered: {:#?}",
+            document.messages
+        );
+        assert!(
+            answers[0].1.contains("Failed to execute tool: boom"),
+            "the lost call keeps the failure the turn recorded: {:#?}",
+            answers
+        );
+
+        // Now the fork's own life: the engine loads it with the source's
+        // compaction summary as its system prompt, so the synced history grows
+        // the checkpoint message *before* the fork's first turn, and two turns
+        // follow it. Retrying the fork — a depth-relative cut of its last turn
+        // — walks a document whose middle holds a message no record produced.
+        let mut extended = document.messages.clone();
+        extended.push(crate::compaction::compaction_checkpoint_message(
+            &SystemPrompt::Text(format!(
+                "{} the work so far",
+                crate::compaction::SUMMARY_HEADER
+            )),
+        ));
+        let first_prompt = "and now?";
+        let second_prompt = "keep going";
+        let tail: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":first_prompt}]},
+            {"role":"user","content":[{"type":"text","text":second_prompt}]}
+        ]))?;
+        extended.extend(tail.clone());
+        let mut rebound = sessions.load_session(&fork_session_id)?;
+        rebound.messages = extended;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&rebound)?;
+            manager.seed_thread_from_messages(&fork.id, &tail).await?;
+            manager
+                .set_thread_session_checkpoint(&fork.id, &rebound)
+                .await?;
+        }
+
+        let (undo, _, _, _) = manager.fork_at_user_message(&fork.id, 0).await?;
+        let undo_document = sessions.load_session(
+            undo.session_id
+                .as_deref()
+                .context("a published fork owns a session document")?,
+        )?;
+        assert_eq!(
+            projected_user_texts(&undo_document.messages),
+            ["run the build".to_string(), first_prompt.to_string()],
+            "the cut keeps the exchange and the first post-fork turn, and reads \
+             past the engine's checkpoint: {:#?}",
+            undo_document.messages
+        );
+        assert_eq!(
+            undo_document
+                .messages
+                .iter()
+                .flat_map(|message| message.content.iter())
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["call_lost", "call_kept"],
+            "the successor keeps the answered calls whole: {:#?}",
+            undo_document.messages
+        );
+        Ok(())
+    }
+
     async fn control_case(interrupt: bool, follow_up: bool) -> Result<()> {
         let _env = crate::test_support::lock_test_env();
         let dir = tempfile::tempdir()?;
@@ -19226,6 +19524,141 @@ fn saved_history_boundary_refuses_until_every_kept_prompt_is_seen() {
     assert_eq!(
         saved_history_boundary(&repeated, &["same".to_string()], "same"),
         Some(1)
+    );
+}
+
+/// The engine installs a compaction checkpoint into a synced history, and no
+/// turn record reproduces one: the compaction ran in the engine, between
+/// records. A fork of a compacted source keeps the summary in its system
+/// prompt, so the engine writes that checkpoint into the fork's own document
+/// on its first load — and `/undo`, retry and fork-again then run these walks
+/// over it. It is the engine's message, not a turn's prompt, so it must not
+/// read as a kept prompt the records never saw.
+#[test]
+fn a_compaction_checkpoint_is_not_a_kept_prompt() {
+    let user = |text: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    };
+    let checkpoint = crate::compaction::compaction_checkpoint_message(&SystemPrompt::Text(
+        format!("{} the work so far", crate::compaction::SUMMARY_HEADER),
+    ));
+    assert!(
+        crate::compaction::is_wire_compaction_checkpoint_message(&checkpoint),
+        "the fixture is the engine's own checkpoint message"
+    );
+    let messages = vec![user("first"), checkpoint, user("undo me")];
+    assert_eq!(
+        saved_history_boundary(&messages, &["first".to_string()], "undo me"),
+        Some(2)
+    );
+    assert_eq!(
+        exact_prefix_boundary(
+            &messages,
+            &session_recovery_projection(&[user("first"), user("undo me")])
+        ),
+        Some(3)
+    );
+}
+
+/// The decision a rebuild makes about a call the turn store left unanswered:
+/// which outcome the item itself holds, and which calls it must leave alone.
+#[test]
+fn a_lost_call_is_answered_only_where_its_own_outcome_is_known() {
+    let item = |status: TurnItemLifecycleStatus, detail: Option<&str>| {
+        let mut item = sample_item("turn_lost", "item_call", status);
+        item.kind = TurnItemKind::ToolCall;
+        item.summary = "bash failed: no output".to_string();
+        item.detail = detail.map(str::to_string);
+        item
+    };
+    let none = HashSet::new();
+
+    // A failure keeps the text the tool reported, and falls back to the
+    // item's summary when the record holds no detail of its own.
+    assert_eq!(
+        unanswered_call_result(
+            &item(
+                TurnItemLifecycleStatus::Failed,
+                Some("Failed to execute tool: boom")
+            ),
+            "call-1",
+            "bash",
+            &none
+        ),
+        Some("Failed to execute tool: boom".to_string())
+    );
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "call-1",
+            "bash",
+            &none
+        ),
+        Some("bash failed: no output".to_string())
+    );
+
+    // A call the process never finished says so in the repository's one
+    // spelling, whichever way it was left behind.
+    for status in [
+        TurnItemLifecycleStatus::Interrupted,
+        TurnItemLifecycleStatus::Canceled,
+    ] {
+        assert_eq!(
+            unanswered_call_result(&item(status, None), "call-1", "bash", &none),
+            Some(crate::tool_history_repair::CRASH_REPAIR_CONTENT.to_string()),
+            "{status:?} is terminal: no result is coming"
+        );
+    }
+
+    // The engine is still waiting for a running call; a completed one already
+    // has its result; a queued one was never delivered. A snapshot without a
+    // call identity is not rebuilt at all, so answering it would leave the
+    // result on its own.
+    for status in [
+        TurnItemLifecycleStatus::InProgress,
+        TurnItemLifecycleStatus::Queued,
+        TurnItemLifecycleStatus::Completed,
+    ] {
+        assert_eq!(
+            unanswered_call_result(&item(status, None), "call-1", "bash", &none),
+            None,
+            "{status:?} is not a lost outcome"
+        );
+    }
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "call-1",
+            "",
+            &none
+        ),
+        None,
+        "a call the rebuild would not emit is not answered"
+    );
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "",
+            "bash",
+            &none
+        ),
+        None
+    );
+
+    // A result the turn records on its own item is that call's answer.
+    let recorded: HashSet<String> = ["call-1".to_string()].into_iter().collect();
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "call-1",
+            "bash",
+            &recorded
+        ),
+        None
     );
 }
 
