@@ -12116,8 +12116,49 @@ fn exec_sandbox_elevation_authorized(
 }
 
 fn emit_exec_stream_event(event: &ExecStreamEvent) -> Result<()> {
-    println!("{}", serde_json::to_string(&exec_stream_value(event)?)?);
-    Ok(())
+    let mut line = serde_json::to_string(&exec_stream_value(event)?)?;
+    line.push('\n');
+    write_exec_stdout(&line)
+}
+
+/// Headless `exec` ignores SIGPIPE while it runs, because it writes to pipes
+/// it does not own: a stdio MCP server, LSP, hook or shell child that exits
+/// early must fail that one write with `EPIPE`, not kill the run with no
+/// output. Under the default disposition, an MCP server whose interpreter
+/// could not start (a broken `node` on PATH for the built-in Computer Use
+/// plugin) made `exec --auto` exit 141 before printing anything.
+fn ignore_sigpipe_for_headless_exec() {
+    // SAFETY: a plain disposition change with no handler. Children still start
+    // with SIGPIPE at SIG_DFL: the standard library resets it before exec.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+/// Write exec output to stdout. SIGPIPE is ignored during exec (see
+/// [`ignore_sigpipe_for_headless_exec`]), so a reader that closed stdout
+/// (`codewhale exec ... | head -1`) surfaces here as `BrokenPipe`. End the
+/// process the way the default disposition would have (#4030) instead of
+/// panicking inside `print!`.
+fn write_exec_stdout(text: &str) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+            // SAFETY: restores the default disposition and re-raises the
+            // signal the write would have delivered without SIG_IGN.
+            #[cfg(unix)]
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                libc::raise(libc::SIGPIPE);
+            }
+            std::process::exit(141);
+        }
+        result => result.map_err(Into::into),
+    }
 }
 
 /// Process exit code `codewhale exec` uses when a turn ends on a retryable

@@ -43,6 +43,14 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- `codewhale exec --auto` no longer exits 141 with no output when a child
+  it writes to, such as a stdio MCP server, closes its pipe early. Headless
+  exec now ignores SIGPIPE while it runs, as the interactive TUI already did,
+  and `exec ... | head` still ends quietly. One-shot `codewhale exec` no
+  longer prints DeepSeek's raw `<｜｜DSML｜｜ calls>` tool-call markup as its
+  answer: the markup is removed, and an answer that was only a tool call
+  fails at once with the reason and a pointer to `--auto`, instead of asking
+  the model again and blaming an incomplete provider response.
 - The installation page is generated from `docs/INSTALL.md`, so the website
   and the guide can no longer disagree; broken anchors and unsafe links fail
   the build ([#6450](https://github.com/Hmbown/Codewhale/pull/6450)).
