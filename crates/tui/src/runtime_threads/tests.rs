@@ -1940,6 +1940,7 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         item_ids: Vec::new(),
         steer_count: 0,
         agent_mail_message_id: None,
+        workspace_snapshots: Vec::new(),
     }
 }
 
@@ -16161,6 +16162,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         item_ids: vec![completed_item.id.clone(), in_progress_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        workspace_snapshots: Vec::new(),
     })?;
     manager.store.save_turn(&TurnRecord {
         max_output_tokens: None,
@@ -16196,6 +16198,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         item_ids: vec![queued_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        workspace_snapshots: Vec::new(),
     })?;
     drop(manager);
 
@@ -16387,6 +16390,7 @@ fn seed_turns_with_user_messages(
             item_ids: vec![user_item_id, asst_item_id],
             steer_count: 0,
             agent_mail_message_id: None,
+            workspace_snapshots: Vec::new(),
         })?;
         turn_ids.push(turn_id);
     }
@@ -17200,6 +17204,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
         item_ids: vec![user_item.id.clone(), call_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -17301,6 +17306,7 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
         item_ids: vec![call_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -17397,6 +17403,7 @@ fn restart_rebuild_skips_steers_the_engine_never_delivered() -> Result<()> {
         item_ids: vec![delivered.id.clone(), dropped.id.clone(), pending.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -17493,6 +17500,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         item_ids: vec![user_item.id.clone(), legacy_tool_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
