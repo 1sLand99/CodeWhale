@@ -672,6 +672,212 @@ mod recovery {
         Ok(())
     }
 
+    /// A fork's checkpoint has to describe the document as a reader sees it.
+    ///
+    /// A saved session is repaired on the way out, and `resume_session` writes
+    /// that repair back: tool calls and results are re-paired, and a prefix
+    /// written from turn records can hold a shape the repair changes. A
+    /// fingerprint taken over the written shape then describes bytes no reader
+    /// sees — `thread_holding_session` rejects the fork's own thread, resuming
+    /// the session starts a second one, and that second thread's save leaves
+    /// the first stale, so the branch's next message fails with "Saved session
+    /// … changed after this thread's checkpoint".
+    #[tokio::test]
+    async fn a_fork_fingerprints_the_document_its_readers_see() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        fn tool_metadata(call: &str, name: &str, input: &str) -> Value {
+            json!({
+                "tool_use_id": call,
+                "tool_name": name,
+                "tool_input": input,
+                "tool_result_for": call,
+                "is_error": false,
+            })
+        }
+        let write_call = "call_write_fingerprint";
+        let bash_call = "call_bash_fingerprint";
+        let turn_one = "turn_fingerprint_one";
+        let turn_two = "turn_fingerprint_two";
+
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+        // Two tool calls in one turn: the shapes a reconstruction and the
+        // session repair do not have to agree on.
+        let mut write_item = sample_item(turn_one, "item_f1", TurnItemLifecycleStatus::Completed);
+        write_item.kind = TurnItemKind::FileChange;
+        write_item.started_at = at(2);
+        write_item.ended_at = write_item.started_at;
+        write_item.detail = Some("Successfully wrote 5 bytes to test.txt".to_string());
+        write_item.metadata = Some(tool_metadata(
+            write_call,
+            "write",
+            "{\"path\":\"test.txt\",\"content\":\"x\\n\"}",
+        ));
+        let mut bash_item = sample_item(turn_one, "item_t1", TurnItemLifecycleStatus::Completed);
+        bash_item.kind = TurnItemKind::ToolCall;
+        bash_item.started_at = at(3);
+        bash_item.ended_at = bash_item.started_at;
+        bash_item.detail = Some("test.txt\n".to_string());
+        bash_item.metadata = Some(tool_metadata(
+            bash_call,
+            "bash",
+            "{\"command\":\"ls -l test.txt\"}",
+        ));
+        // A third call whose result never arrived — an interrupted turn. The
+        // records keep the call, and the session repair pairs it on the way
+        // out, so what a reader sees is not what was written.
+        let mut interrupted = sample_item(turn_one, "item_t2", TurnItemLifecycleStatus::Failed);
+        interrupted.kind = TurnItemKind::ToolCall;
+        interrupted.started_at = at(4);
+        interrupted.ended_at = interrupted.started_at;
+        interrupted.summary = "bash (interrupted)".to_string();
+        interrupted.metadata = Some(json!({
+            "tool_use_id": "call_interrupted",
+            "tool_name": "bash",
+            "tool_input": "{\"command\":\"sleep 30\"}",
+        }));
+
+        for item in [
+            text_item(
+                "item_u1",
+                turn_one,
+                0,
+                TurnItemKind::UserMessage,
+                "write test.txt",
+            ),
+            text_item(
+                "item_r1",
+                turn_one,
+                1,
+                TurnItemKind::AgentReasoning,
+                "I will write it.",
+            ),
+            write_item,
+            bash_item,
+            interrupted,
+            text_item(
+                "item_a1",
+                turn_one,
+                5,
+                TurnItemKind::AgentMessage,
+                "created test.txt",
+            ),
+            text_item(
+                "item_u2",
+                turn_two,
+                5,
+                TurnItemKind::UserMessage,
+                "now read it",
+            ),
+            text_item(
+                "item_a2",
+                turn_two,
+                6,
+                TurnItemKind::AgentMessage,
+                "read it",
+            ),
+            text_item(
+                "item_c1",
+                turn_two,
+                7,
+                TurnItemKind::ContextCompaction,
+                "Made room: 1383 → 21 messages",
+            ),
+        ] {
+            manager.store.save_item(&item)?;
+        }
+        for (turn_id, order) in [(turn_one, 0), (turn_two, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_two.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // The compacted source's document: the prompts verbatim, the work
+        // between them summarized away — what a branch rebuilds from the
+        // records instead of slicing.
+        let compacted: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"write test.txt"}]},
+            {"role":"user","content":[{"type":"text","text":"now read it"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &compacted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        // Undo the last turn: the fork keeps the first one, tool calls and all.
+        let (fork, _, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        let session_id = fork
+            .session_id
+            .clone()
+            .context("a published fork owns a session document")?;
+        let checkpoint = fork
+            .saved_session_checkpoint
+            .as_ref()
+            .context("a published fork carries a checkpoint")?;
+
+        // What every reader sees: `resume_session` repairs the document and
+        // writes the repair back, which is the shape the fingerprint must name.
+        let read_back = sessions.resume_session(&session_id)?.session;
+        assert_eq!(
+            checkpoint.messages_sha256,
+            session_messages_sha256(&read_back.messages)?,
+            "the fork's checkpoint must describe the document as readers see it: {:#?}",
+            read_back.messages
+        );
+
+        // And the thread that holds the session is recognised, so opening the
+        // session again reuses it instead of adding a second thread whose save
+        // would leave this one stale.
+        assert_eq!(
+            manager
+                .thread_holding_session(&session_id, &read_back)
+                .map(|held| held.id),
+            Some(fork.id.clone()),
+            "resuming the fork's session must find the fork's own thread"
+        );
+        Ok(())
+    }
+    ///
+    /// Compaction rewrites the model-visible history in place: the prompts stay
     /// A fork of a *compacted* conversation keeps the whole exchange.
     ///
     /// Compaction rewrites the model-visible history in place: the prompts stay

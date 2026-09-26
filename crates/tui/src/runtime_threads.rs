@@ -8885,8 +8885,20 @@ impl RuntimeThreadManager {
         session.metadata.copy_cost_from(&source.metadata);
 
         let session_id = session.metadata.id.clone();
-        let messages_sha256 = session_messages_sha256(prefix)?;
         manager.save_session(&session)?;
+
+        // Fingerprint the document the way every reader sees it. A saved
+        // session is repaired on the way out — `resume_session` re-pairs the
+        // tool calls with their results and writes the repair back — so a
+        // prefix rebuilt from turn records can be stored in one shape and read
+        // in another: a tool call whose result never arrived arrives here as
+        // the repair's notice message. Fingerprinting the written shape names
+        // bytes no reader sees, and every reader then rejects the fork — its
+        // own hydration refuses the document, and resuming the session does
+        // not recognise the thread that holds it, so it opens a second one and
+        // the first is left stale.
+        let stored = manager.resume_session(&session_id)?.session.messages;
+        let messages_sha256 = session_messages_sha256(&stored)?;
 
         forked.session_id = Some(session_id);
         forked.saved_session_checkpoint = Some(SavedSessionCheckpoint {
