@@ -2572,6 +2572,7 @@ impl CodewhaleClient {
                     chat_shape_provider,
                     &self.base_url,
                     stream,
+                    request_route_limits,
                 )?;
                 if let Some(model) = &declared_wire_model {
                     wire.model.clone_from(model);

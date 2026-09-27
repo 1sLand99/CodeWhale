@@ -29,15 +29,21 @@ pub(super) fn notepad_has_text(app: &App) -> bool {
     !app.workspace_notes.is_empty()
 }
 
-/// Each edited file once, newest receipt last, with the receipt it came from.
+/// Each edited file once, newest receipt last. Direct writes without a
+/// mutation receipt have no diff to inspect.
 fn edited_files(
     activity: &super::model::SettledFileActivity,
-) -> Vec<(String, &crate::tui::history::FileMutationReceipt)> {
-    let mut files: Vec<(String, &crate::tui::history::FileMutationReceipt)> = Vec::new();
+) -> Vec<(String, Option<&crate::tui::history::FileMutationReceipt>)> {
+    let mut files = Vec::new();
+    for path in &activity.write {
+        if !files.iter().any(|(existing, _)| existing == path) {
+            files.push((path.clone(), None));
+        }
+    }
     for receipt in &activity.mutations {
         for file in &receipt.files {
             files.retain(|(path, _)| path != &file.path);
-            files.push((file.path.clone(), receipt));
+            files.push((file.path.clone(), Some(receipt)));
         }
     }
     files
@@ -52,6 +58,14 @@ pub(super) fn files_rows(app: &mut App) -> Vec<WorkRow> {
     if !edited.is_empty() {
         out.push(heading("files:edited", format!("Edited {}", edited.len())));
         for (path, receipt) in &edited {
+            let Some(receipt) = receipt else {
+                out.push(WorkRow {
+                    mark: "✎",
+                    tone: WorkTone::Success,
+                    ..note_row(&format!("files:edit:{path}"), path)
+                });
+                continue;
+            };
             let across = if receipt.files.len() > 1 {
                 format!(" across {} files", receipt.files.len())
             } else {
@@ -355,17 +369,13 @@ fn git_state_rows(snap: &crate::tui::git_status::GitStatusSnapshot) -> Vec<WorkR
     let body = if snap.changed_paths.is_empty() {
         "Working tree clean.".to_string()
     } else {
-        let more = snap.changes.staged
-            + snap.changes.modified
-            + snap.changes.untracked
-            + snap.changes.conflicts;
         let listed = snap
             .changed_paths
             .iter()
             .map(|path| format!("{} {}", path.code, path.path))
             .collect::<Vec<_>>()
             .join("\n");
-        let tail = if more > snap.changed_paths.len() {
+        let tail = if snap.changed_path_count > snap.changed_paths.len() {
             "\n… and more; /diff for everything".to_string()
         } else {
             String::new()
@@ -605,6 +615,7 @@ mod tests {
                 untracked: 0,
                 conflicts: 0,
             },
+            changed_path_count: 2,
             changed_paths: vec![
                 ChangedPath {
                     code: "M ".to_string(),
@@ -680,6 +691,88 @@ mod tests {
         assert_eq!(
             git_rows_for(&detached, workspace)[0].label,
             "detached at abc1234"
+        );
+    }
+
+    #[test]
+    fn git_more_means_unlisted_paths() {
+        use crate::tui::git_status::{MAX_CHANGED_PATHS, parse_porcelain_v2};
+        for count in [1, MAX_CHANGED_PATHS, MAX_CHANGED_PATHS + 1] {
+            let mut raw = "# branch.head main\0".to_string();
+            for index in 0..count {
+                raw.push_str(&format!(
+                    "1 MM N... 100644 100644 100644 aaa bbb file-{index}\0"
+                ));
+            }
+            let status = parse_porcelain_v2(&raw).unwrap();
+            let rows = git_state_rows(&GitStatusSnapshot {
+                changes: status.changes,
+                changed_paths: status.changed_paths,
+                changed_path_count: status.changed_path_count,
+                ..GitStatusSnapshot::default()
+            });
+            let Some(SidebarRowAction::InspectWork { body, .. }) = &rows[1].primary_action else {
+                panic!("changes opens path details");
+            };
+            assert_eq!(
+                body.contains("and more"),
+                count > MAX_CHANGED_PATHS,
+                "{count}"
+            );
+        }
+    }
+
+    #[test]
+    fn files_include_successful_writes_without_receipts() {
+        use crate::tools::spec::ToolResult;
+        use crate::tui::history::{FileMutationFile, FileMutationOutcome, FileMutationReceipt};
+        use crate::tui::tool_routing::{handle_tool_call_complete, handle_tool_call_started};
+        let mut app = app();
+        for (id, action, path) in [("write", "write", "new.rs"), ("edit", "edit", "edited.rs")] {
+            let input = serde_json::json!({"action": action, "path": path, "content": "new"});
+            handle_tool_call_started(&mut app, id, "File", &input);
+            handle_tool_call_complete(&mut app, id, "File", &Ok(ToolResult::success("ok")));
+            app.flush_active_cell();
+        }
+        app.work_surface.file_activity = super::super::model::settled_file_activity(&app);
+        assert!(app.work_surface.file_activity.mutations.is_empty());
+        assert_eq!(files_touched_count(&mut app), 2);
+        let rows = files_rows(&mut app);
+        for path in ["new.rs", "edited.rs"] {
+            let row = rows
+                .iter()
+                .find(|row| row.label == path)
+                .expect("write row");
+            assert!(!row.selectable);
+            assert!(row.primary_action.is_none());
+            assert!(row.detail.is_empty());
+        }
+        // A receipt for an already-listed write adds its diff, not a second row.
+        app.work_surface
+            .file_activity
+            .mutations
+            .push(FileMutationReceipt {
+                exact_diff: String::new(),
+                display_diff: String::new(),
+                files: vec![FileMutationFile {
+                    path: "edited.rs".into(),
+                    previous_path: None,
+                    outcome: FileMutationOutcome::Updated,
+                }],
+                added: 1,
+                deleted: 0,
+            });
+        let rows = files_rows(&mut app);
+        assert_eq!(files_touched_count(&mut app), 2);
+        assert_eq!(
+            rows.iter().filter(|row| row.label == "edited.rs").count(),
+            1
+        );
+        assert!(
+            rows.iter()
+                .find(|row| row.label == "edited.rs")
+                .unwrap()
+                .selectable
         );
     }
 

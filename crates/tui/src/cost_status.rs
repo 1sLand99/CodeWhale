@@ -2057,7 +2057,10 @@ fn fold_audit_into_pending(
     if let Some(cost) = audit.estimate {
         pending.estimate = pending.estimate.saturating_add(cost);
     }
-    if usage.prompt_cache_hit_tokens.is_some() || usage.prompt_cache_miss_tokens.is_some() {
+    if usage.prompt_cache_hit_tokens.is_some()
+        || usage.prompt_cache_miss_tokens.is_some()
+        || usage.prompt_cache_write_tokens.is_some()
+    {
         let classes = crate::pricing::token_usage_for_pricing(usage);
         let add = |slot: &mut Option<u64>, tokens: u64| {
             *slot = Some(slot.unwrap_or(0).saturating_add(tokens));
@@ -3103,6 +3106,26 @@ mod tests {
         });
         assert_eq!(silent.cache_hit_tokens, None, "no report is not 0%");
         assert_eq!(silent.cache_miss_tokens, None);
+    }
+
+    #[test]
+    fn background_cache_write_only_telemetry_is_recorded() {
+        for written in [0, 400] {
+            let pending = background_cost_for_runtime_usage(&RuntimeUsageRecord {
+                source_id: "child-cache-write-only".into(),
+                usage: EffectiveRouteUsage {
+                    route: deepseek_envelope(),
+                    usage: Usage {
+                        input_tokens: 1_000,
+                        prompt_cache_write_tokens: Some(written),
+                        ..Usage::default()
+                    },
+                },
+            });
+            assert_eq!(pending.cache_hit_tokens, Some(0));
+            assert_eq!(pending.cache_miss_tokens, Some(u64::from(1_000 - written)));
+            assert_eq!(pending.cache_write_tokens, Some(u64::from(written)));
+        }
     }
 
     #[test]

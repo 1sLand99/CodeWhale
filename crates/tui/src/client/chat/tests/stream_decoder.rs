@@ -1254,9 +1254,8 @@ fn request_builder_truncates_large_tool_result_for_wire() {
         "got: {sent}"
     );
     assert!(!sent.contains("retrieve_tool_result"), "got: {sent}");
-    // The wire backstop is the ceiling of the one inline budget (#6508):
-    // a result the engine kept whole is never cut here.
-    let budget = tool_result_sent_char_budget();
+    // The model catalog supplies the window when no explicit route is available.
+    let budget = tool_result_sent_char_budget("deepseek-v4-flash");
     assert!(budget >= 100_000);
     let excerpt = budget - TOOL_RESULT_EXCERPT_FRAME_CHARS;
     let head = excerpt * 2 / 3;
@@ -1270,6 +1269,70 @@ fn request_builder_truncates_large_tool_result_for_wire() {
         "omitted count"
     );
     assert_ne!(sent, long_output);
+}
+
+#[test]
+fn restored_tool_results_obey_the_active_route_budget() {
+    let output = "x".repeat(20_000);
+    let recovery = format!(
+        "{output}\n{}",
+        crate::tools::truncate::SPILLOVER_RECOVERY_HINT
+    );
+    let request = MessageRequest {
+        model: "trinity-mini".into(),
+        messages: vec![
+            tool_use_message("raw", "read_file", json!({"path": "a.rs"})),
+            tool_result_message("raw", &output),
+            tool_use_message("repeat", "read_file", json!({"path": "a.rs"})),
+            tool_result_message("repeat", &output),
+            tool_use_message("saved", "read_file", json!({"path": "b.rs"})),
+            tool_result_message("saved", &recovery),
+        ],
+        max_tokens: 1_024,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        metadata: None,
+        thinking: None,
+        reasoning_effort: None,
+        stream: None,
+        temperature: None,
+        top_p: None,
+    };
+    // The bundled 128K route and an explicit smaller offering both beat
+    // the old unknown-route 100K ceiling. Streaming and blocking share it.
+    for (limits, expected_budget) in [
+        (None, 15_360),
+        (
+            Some(RouteLimits {
+                context_tokens: Some(32_000),
+                ..RouteLimits::default()
+            }),
+            3_840,
+        ),
+    ] {
+        for stream in [false, true] {
+            let wire = build_chat_wire_body(
+                &request,
+                ApiProvider::Arcee,
+                "https://api.arcee.ai/api/v1",
+                stream,
+                limits,
+            )
+            .unwrap();
+            let messages = wire.body["messages"].as_array().unwrap();
+            for index in [0, 1] {
+                let sent = tool_message_content(messages, index);
+                assert!(sent.contains("[TOOL_RESULT_TRUNCATED]"));
+                assert!(sent.chars().count() <= expected_budget);
+                assert!(!sent.contains("<TOOL_RESULT_REF"));
+                assert!(sent.contains("exact_detail: unavailable"));
+            }
+            assert_eq!(tool_message_content(messages, 2), recovery);
+        }
+    }
+    assert!(matches!(&request.messages[1].content[0],
+        ContentBlock::ToolResult { content, .. } if content == &output));
 }
 
 #[test]
@@ -1297,7 +1360,7 @@ fn request_builder_keeps_unowned_extreme_tool_output_bounded_without_false_hint(
         assert!(sent.contains("exact_detail: unavailable"), "got: {sent}");
         assert!(!sent.contains("retrieve_tool_result"), "got: {sent}");
         assert!(
-            sent.chars().count() <= tool_result_sent_char_budget(),
+            sent.chars().count() <= tool_result_sent_char_budget("deepseek-v4-flash"),
             "truncated result should stay bounded, sent {} chars",
             sent.chars().count()
         );

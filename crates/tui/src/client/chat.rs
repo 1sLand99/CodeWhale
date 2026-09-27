@@ -45,6 +45,7 @@ use super::{
     apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
     release_stream_buffer, system_to_instructions, to_api_tool_name,
 };
+use codewhale_config::route::RouteLimits;
 use codewhale_models::Role;
 
 fn apply_provider_token_limit(
@@ -1129,9 +1130,13 @@ pub(crate) fn build_chat_wire_body(
     provider: ApiProvider,
     base_url: &str,
     stream: bool,
+    route_limits: Option<RouteLimits>,
 ) -> Result<ChatWireBody> {
-    let messages =
-        build_chat_messages_for_request_and_provider_and_route(request, provider, base_url);
+    let messages = PromptBuilder::for_request(request).build_for_provider_and_route(
+        provider,
+        base_url,
+        route_limits,
+    );
     let model = {
         let wire = wire_model_for_provider_route(provider, base_url, &request.model);
         codewhale_models::effective_muse_wire_id(&wire).to_string()
@@ -1725,7 +1730,7 @@ pub(super) fn build_chat_messages(
     build_chat_messages_with_reasoning(
         system,
         messages,
-        model,
+        tool_result_sent_char_budget(model),
         should_replay_reasoning_content(model, None),
         false,
     )
@@ -1750,12 +1755,13 @@ pub(super) fn build_chat_messages_for_request_and_provider(
 /// Code K3 is deliberately narrower: the bare `k3` model owns reasoning
 /// replay only on its official membership-plan endpoint, so callers that have
 /// a concrete base URL must retain it through prompt construction.
+#[cfg(test)]
 pub(super) fn build_chat_messages_for_request_and_provider_and_route(
     request: &MessageRequest,
     provider: ApiProvider,
     base_url: &str,
 ) -> Vec<Value> {
-    PromptBuilder::for_request(request).build_for_provider_and_route(provider, base_url)
+    PromptBuilder::for_request(request).build_for_provider_and_route(provider, base_url, None)
 }
 
 pub(crate) fn inspect_prompt_for_request(request: &MessageRequest) -> PromptInspection {
@@ -1790,17 +1796,26 @@ impl<'a> PromptBuilder<'a> {
         build_chat_messages_with_reasoning(
             self.system,
             self.messages,
-            self.model,
+            tool_result_sent_char_budget(self.model),
             should_replay_reasoning_content(self.model, self.reasoning_effort),
             false,
         )
     }
 
-    fn build_for_provider_and_route(self, provider: ApiProvider, base_url: &str) -> Vec<Value> {
+    fn build_for_provider_and_route(
+        self,
+        provider: ApiProvider,
+        base_url: &str,
+        route_limits: Option<RouteLimits>,
+    ) -> Vec<Value> {
         let mut messages = build_chat_messages_with_reasoning(
             self.system,
             self.messages,
-            self.model,
+            crate::route_budget::route_inline_char_budget_for_route(
+                provider,
+                self.model,
+                route_limits,
+            ),
             should_replay_reasoning_content_for_provider_on_route(
                 provider,
                 base_url,
@@ -1841,7 +1856,7 @@ impl<'a> PromptBuilder<'a> {
         let messages = build_chat_messages_with_reasoning(
             self.system,
             self.messages,
-            self.model,
+            tool_result_sent_char_budget(self.model),
             should_replay_reasoning_content(self.model, self.reasoning_effort),
             true,
         );
@@ -1985,11 +2000,11 @@ pub(crate) const CACHE_WARMUP_MAX_TOKENS: u32 = 8;
 /// Wire backstop for tool results (#6508). The engine already fits every
 /// result it gives the model to the route's inline budget, and marks any cut
 /// with a recovery footer. This pass only catches history that never went
-/// through the engine (legacy or restored raw results), so it uses the
-/// largest value that budget can take — it never cuts a result the engine
-/// kept whole.
-fn tool_result_sent_char_budget() -> usize {
-    crate::route_budget::route_inline_char_budget(None)
+/// through the engine (legacy or restored raw results). Model-only inspection
+/// uses the catalog window; outbound requests pass their resolved route budget.
+/// Results with an engine recovery footer remain intact.
+fn tool_result_sent_char_budget(model: &str) -> usize {
+    crate::route_budget::route_inline_char_budget(codewhale_models::context_window_for_model(model))
 }
 /// Characters of an excerpted wire result spent on its labelled header.
 const TOOL_RESULT_EXCERPT_FRAME_CHARS: usize = 1_024;
@@ -2500,6 +2515,7 @@ fn compact_tool_result_for_wire(
     input: &Value,
     content: &str,
     message_label: &str,
+    sent_budget: usize,
     seen_tool_results: &mut HashMap<String, SeenToolResult>,
 ) -> WireToolResult {
     let original_chars = content.chars().count();
@@ -2508,7 +2524,6 @@ fn compact_tool_result_for_wire(
     // Only medium, non-mutation results can point back to a full earlier
     // message in this one request. Oversized results are already excerpts, so
     // a back-reference would falsely imply the exact bytes remain available.
-    let sent_budget = tool_result_sent_char_budget();
     let dedup_eligible = (TOOL_RESULT_DEDUP_MIN_CHARS..=sent_budget).contains(&original_chars)
         && !is_mutation_tool(tool_name);
 
@@ -2667,7 +2682,7 @@ fn merge_adjacent_user_content(previous: Value, current: Value) -> Value {
 fn build_chat_messages_with_reasoning(
     system: Option<&SystemPrompt>,
     messages: &[Message],
-    _model: &str,
+    tool_result_budget: usize,
     include_reasoning: bool,
     include_tool_budget_metadata: bool,
 ) -> Vec<Value> {
@@ -2988,6 +3003,7 @@ fn build_chat_messages_with_reasoning(
                             &tool_info.input,
                             &content,
                             &message_label,
+                            tool_result_budget,
                             &mut seen_tool_results,
                         );
                         let mut tool_msg = json!({
@@ -6832,6 +6848,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
 
@@ -6873,6 +6890,7 @@ mod image_block_wire_tests {
             ApiProvider::Deepseek,
             "https://api.deepseek.com/beta",
             false,
+            None,
         )
         .expect("DeepSeek vision wire body");
 
@@ -6911,6 +6929,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
 
@@ -6959,6 +6978,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
         let messages = body.body["messages"].as_array().expect("messages");
@@ -7040,6 +7060,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
         let messages = body.body["messages"].as_array().expect("messages");
@@ -7600,6 +7621,7 @@ mod mistral_reasoning_tests {
             ApiProvider::Mistral,
             crate::config::DEFAULT_MISTRAL_BASE_URL,
             true,
+            None,
         )
         .expect("Mistral stream wire body");
         let assistant = &wire.body["messages"][0];
@@ -7847,6 +7869,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             false,
+            None,
         )
         .err()
         .expect("missing signature must fail closed before transport");
@@ -7869,6 +7892,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             false,
+            None,
         )
         .err()
         .expect("a models/-prefixed thinking id must fail closed like its bare spelling");
@@ -7889,6 +7913,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             false,
+            None,
         )
         .expect("flash-lite replay must not require a signature");
     }
@@ -7924,6 +7949,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             "https://gateway.example.com/v1",
             false,
+            None,
         )
         .expect("non-official Google base URL must not require signatures");
         let messages = build_chat_messages_for_request_and_provider_and_route(
@@ -7987,7 +8013,7 @@ mod google_thought_signature_tests {
             ] {
                 let mut request = google_request_with_signed_tool(Some("SIG-abc123"));
                 request.reasoning_effort = effort.map(str::to_string);
-                let body = build_chat_wire_body(&request, provider, base_url, true)
+                let body = build_chat_wire_body(&request, provider, base_url, true, None)
                     .expect("signed replay builds on a signature-bearing route");
                 let assistant = body.body["messages"]
                     .as_array()
@@ -8016,6 +8042,7 @@ mod google_thought_signature_tests {
             ApiProvider::Custom,
             "https://generativelanguage.googleapis.com/v1beta/openai",
             false,
+            None,
         )
         .err()
         .expect("missing signature must fail closed before transport");
@@ -8087,6 +8114,7 @@ mod google_thought_signature_tests {
                         provider,
                         DEFAULT_GOOGLE_BASE_URL,
                         streaming,
+                        None,
                     )
                     .expect("valid signed Google request");
                     assert_eq!(
@@ -8106,9 +8134,14 @@ mod google_thought_signature_tests {
     fn google_reasoning_control_does_not_rewrite_other_endpoints() {
         for provider in [ApiProvider::Google, ApiProvider::Custom] {
             let request = google_request_with_signed_tool(Some("SIG"));
-            let wire =
-                build_chat_wire_body(&request, provider, "https://gateway.example.com/v1", false)
-                    .expect("valid gateway request");
+            let wire = build_chat_wire_body(
+                &request,
+                provider,
+                "https://gateway.example.com/v1",
+                false,
+                None,
+            )
+            .expect("valid gateway request");
             assert!(wire.body.get("reasoning_effort").is_none());
             assert!(wire.body.get("google").is_none());
             assert!(wire.body.get("extra_body").is_none());
@@ -8280,9 +8313,14 @@ mod google_thought_signature_tests {
                 "https://generativelanguage.googleapis.com/v1beta/openai",
             ),
         ] {
-            let body =
-                build_chat_wire_body(&request_from(restored.clone()), provider, base_url, true)
-                    .expect("a resumed signed history must build, not fail closed");
+            let body = build_chat_wire_body(
+                &request_from(restored.clone()),
+                provider,
+                base_url,
+                true,
+                None,
+            )
+            .expect("a resumed signed history must build, not fail closed");
             assert_eq!(
                 replayed_signature(&body.body).as_deref(),
                 Some("SIG-abc123"),
@@ -8323,6 +8361,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             true,
+            None,
         )
         .expect("a crash-repaired signed history must build, not fail closed");
         assert_eq!(

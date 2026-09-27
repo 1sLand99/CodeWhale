@@ -54,6 +54,8 @@ pub struct GitStatusSnapshot {
     /// `branch` holds a short commit id because HEAD is detached.
     pub detached: bool,
     pub changes: ChangeCounts,
+    /// Total changed paths before the display list is capped.
+    pub changed_path_count: usize,
     /// The first [`MAX_CHANGED_PATHS`] changed paths, in git's order.
     pub changed_paths: Vec<ChangedPath>,
     pub recent_commits: Vec<RecentCommit>,
@@ -106,12 +108,12 @@ impl ChangeCounts {
         }
     }
 
-    fn record(&mut self, x: char, y: char) {
+    fn record(&mut self, x: char, y: char, unmerged: bool) {
         if x == '?' && y == '?' {
             self.untracked = self.untracked.saturating_add(1);
             return;
         }
-        if x == 'U' || y == 'U' {
+        if unmerged {
             self.conflicts = self.conflicts.saturating_add(1);
         }
         if x != ' ' && x != '?' {
@@ -154,6 +156,7 @@ pub struct PorcelainStatus {
     pub ahead: u32,
     pub behind: u32,
     pub changes: ChangeCounts,
+    pub changed_path_count: usize,
     pub changed_paths: Vec<ChangedPath>,
 }
 
@@ -222,7 +225,8 @@ pub fn parse_porcelain_v2(raw: &str) -> Option<PorcelainStatus> {
         let mut letters = code.chars().map(|c| if c == '.' { ' ' } else { c });
         let x = letters.next().unwrap_or(' ');
         let y = letters.next().unwrap_or(' ');
-        status.changes.record(x, y);
+        status.changes.record(x, y, kind == "u ");
+        status.changed_path_count += 1;
         if status.changed_paths.len() < MAX_CHANGED_PATHS {
             status.changed_paths.push(ChangedPath {
                 code: format!("{x}{y}"),
@@ -235,9 +239,10 @@ pub fn parse_porcelain_v2(raw: &str) -> Option<PorcelainStatus> {
 
 /// Porcelain v1 (`git status --porcelain`) for git older than 2.11: counts
 /// and paths only; the branch comes from separate calls.
-fn parse_porcelain_v1(raw: &str) -> (ChangeCounts, Vec<ChangedPath>) {
+fn parse_porcelain_v1(raw: &str) -> (ChangeCounts, Vec<ChangedPath>, usize) {
     let mut counts = ChangeCounts::default();
     let mut paths = Vec::new();
+    let mut path_count = 0;
     for line in raw.lines() {
         let mut chars = line.chars();
         let (Some(x), Some(y)) = (chars.next(), chars.next()) else {
@@ -246,7 +251,12 @@ fn parse_porcelain_v1(raw: &str) -> (ChangeCounts, Vec<ChangedPath>) {
         if x == ' ' && y == ' ' {
             continue;
         }
-        counts.record(x, y);
+        counts.record(
+            x,
+            y,
+            x == 'U' || y == 'U' || matches!((x, y), ('A', 'A') | ('D', 'D')),
+        );
+        path_count += 1;
         if paths.len() < MAX_CHANGED_PATHS {
             paths.push(ChangedPath {
                 code: format!("{x}{y}"),
@@ -254,7 +264,7 @@ fn parse_porcelain_v1(raw: &str) -> (ChangeCounts, Vec<ChangedPath>) {
             });
         }
     }
-    (counts, paths)
+    (counts, paths, path_count)
 }
 
 /// Branch, upstream and changes for `workspace` from one git call (two on a
@@ -287,7 +297,7 @@ fn legacy_workspace_status(workspace: &Path) -> Option<PorcelainStatus> {
         &["status", "--porcelain", "--untracked-files=normal"],
     )
     .ok()?;
-    let (changes, changed_paths) = parse_porcelain_v1(&raw);
+    let (changes, changed_paths, changed_path_count) = parse_porcelain_v1(&raw);
     let head = git_output(workspace, &["symbolic-ref", "--short", "HEAD"])
         .ok()
         .map(|s| s.trim().to_string())
@@ -301,6 +311,7 @@ fn legacy_workspace_status(workspace: &Path) -> Option<PorcelainStatus> {
         oid,
         changes,
         changed_paths,
+        changed_path_count,
         ..PorcelainStatus::default()
     };
     if let Ok(counts) = git_output(
@@ -465,6 +476,7 @@ pub(crate) fn probe_status(workspace: &Path) -> GitStatusSnapshot {
         snap.dirty = !status.changes.is_clean();
         snap.changes = status.changes;
         snap.changed_paths = status.changed_paths;
+        snap.changed_path_count = status.changed_path_count;
     }
 
     // The forge slug (`owner/name`), reusing the remote-control probe rather
@@ -855,6 +867,40 @@ locked
     }
 
     #[test]
+    fn all_unmerged_records_are_conflicts() {
+        for code in ["AA", "DD", "AU", "UA", "DU", "UD", "UU"] {
+            let raw = format!(
+                "# branch.head main\0u {code} N... 100644 100644 100644 100644 aaa bbb ccc conflict.rs\0"
+            );
+            let status = parse_porcelain_v2(&raw).unwrap();
+            assert_eq!(status.changes.conflicts, 1, "{code}");
+            assert!(status_line(&status).unwrap().contains("1 conflicts"));
+            let (legacy, _, _) = parse_porcelain_v1(&format!("{code} conflict.rs\n"));
+            assert_eq!(legacy.conflicts, 1, "legacy {code}");
+        }
+    }
+
+    #[test]
+    fn changed_path_count_survives_the_display_cap() {
+        for count in [1, MAX_CHANGED_PATHS, MAX_CHANGED_PATHS + 1] {
+            let mut raw = "# branch.head main\0".to_string();
+            let mut legacy = String::new();
+            for index in 0..count {
+                raw.push_str(&format!(
+                    "1 MM N... 100644 100644 100644 aaa bbb file-{index}\0"
+                ));
+                legacy.push_str(&format!("MM file-{index}\n"));
+            }
+            let status = parse_porcelain_v2(&raw).unwrap();
+            assert_eq!(status.changed_path_count, count);
+            assert_eq!(status.changed_paths.len(), count.min(MAX_CHANGED_PATHS));
+            let (_, paths, path_count) = parse_porcelain_v1(&legacy);
+            assert_eq!(path_count, count);
+            assert_eq!(paths.len(), count.min(MAX_CHANGED_PATHS));
+        }
+    }
+
+    #[test]
     fn porcelain_v2_detached_and_unborn_heads() {
         let detached =
             parse_porcelain_v2("# branch.oid 1234567890abcdef\0# branch.head (detached)\0")
@@ -871,7 +917,7 @@ locked
         // Porcelain v1 (a git too old for v2) has no branch header: the
         // caller falls back to the old calls.
         assert_eq!(parse_porcelain_v2(" M src/lib.rs\n?? new.rs\n"), None);
-        let (counts, paths) = parse_porcelain_v1(" M src/lib.rs\n?? new.rs\n");
+        let (counts, paths, _) = parse_porcelain_v1(" M src/lib.rs\n?? new.rs\n");
         assert_eq!((counts.modified, counts.untracked), (1, 1));
         assert_eq!(paths[1].path, "new.rs");
     }
@@ -921,6 +967,7 @@ locked
         assert!(!snap.detached && !snap.has_upstream && !snap.is_linked_worktree);
         assert_eq!((snap.changes.modified, snap.changes.untracked), (1, 1));
         assert!(snap.dirty);
+        assert_eq!(snap.changed_path_count, 2);
         assert_eq!(snap.recent_commits.len(), 1);
         assert_eq!(snap.recent_commits[0].subject, "first commit");
         assert_eq!(

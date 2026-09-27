@@ -86,8 +86,10 @@ quieter, and Fleet runs can be checked before they spend anything.
 - Tool output is no longer cut off where you can't get it back. Search
   answers, test runs, git, verifier and web results reach the model whole up
   to one budget sized to the model's context window, and anything beyond it
-  can be read back with `retrieve_tool_result`. Native search now asks for
-  answers up to 8,192 tokens (was 2,048–4,096) and waits long enough for
+  can be read back with `retrieve_tool_result`. Restored raw results use the
+  active route's same inline budget; existing recovery receipts stay intact.
+  Native search now asks for answers up to 8,192 tokens (was 2,048–4,096)
+  and waits long enough for
   them to arrive, and an answer the provider still cuts short is marked as
   cut ([#6508](https://github.com/Hmbown/Codewhale/issues/6508)).
 - The installation page is generated from `docs/INSTALL.md`, so the website
@@ -274,16 +276,20 @@ quieter, and Fleet runs can be checked before they spend anything.
   internal id ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
 - The mobile page shows the thread's agents: a strip naming each one, its
   state, and what it is doing or what it found, rebuilt when the page
-  reconnects. Sub-agent prompt caching now counts toward the session. PRICE
-  and `/cache` show the parent, agents and combined hit rates, each labelled,
+  reconnects. Sub-agent prompt caching now counts toward the session, including
+  cache-write-only reports. PRICE and `/cache` show the parent, agents and
+  combined hit rates, each labelled,
   and the footer `cache N%` still means this conversation's own requests
   ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
 - The dock's GIT, FILES and NOTES views are real. GIT shows the branch and
   where it stands against its upstream, the changes (with their paths one
   Enter away), linked worktrees and the last five commits, and it keeps
   updating during a turn while it is open. It says "not a git repository"
-  only when that is true. FILES lists the files this session edited, with
-  their size, and the files it read. NOTES lists your `/note` notes. The git
+  only when that is true, counts every unmerged path as a conflict, and only
+  says there are more changed paths when the list is capped. FILES lists the
+  files this session edited, including writes without diff receipts, and the
+  files it read. Edits with receipts show their size and open their diff.
+  NOTES lists your `/note` notes. The git
   badge, the Git view and the model's git line now share one
   `git status --porcelain=v2` call, so there are fewer git processes than
   before ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
