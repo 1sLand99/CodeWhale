@@ -1922,6 +1922,7 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
         )
         .await?
     else {
+        tracing::warn!("needs socket run: loopback listener is unavailable");
         return Ok(());
     };
     let client = crate::tls::reqwest_client_builder()
@@ -1968,13 +1969,13 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
         .send()
         .await?;
     assert_eq!(exchange.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
-        exchange
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok()),
-        Some("/")
-    );
+    let proof = exchange
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|location| location.strip_prefix("/#p="))
+        .context("missing bootstrap request proof")?
+        .to_string();
     let set_cookie = exchange
         .headers()
         .get(header::SET_COOKIE)
@@ -1984,6 +1985,7 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
     assert!(set_cookie.starts_with("codewhale_web_session=cwws_"));
     assert!(set_cookie.ends_with("; HttpOnly; SameSite=Strict; Path=/"));
     assert!(!set_cookie.contains(&token));
+    assert!(!set_cookie.contains(&proof));
 
     let unauthorized = client
         .get(format!("http://{addr}/v1/threads/summary"))
@@ -1995,9 +1997,40 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
         .split(';')
         .next()
         .context("missing web session cookie pair")?;
+    for site in ["same-origin", "none"] {
+        let reloaded = client
+            .get(format!("http://{addr}/"))
+            .header(header::COOKIE, cookie_pair)
+            .header("sec-fetch-site", site)
+            .send()
+            .await?;
+        assert_eq!(reloaded.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(reloaded.text().await?.contains(&format!(
+            "name=\"codewhale-web-request\" content=\"{proof}\""
+        )));
+    }
+    for method in [reqwest::Method::GET, reqwest::Method::POST] {
+        for metadata in [false, true] {
+            for presented in [None, Some("wrong-proof")] {
+                let mut request = client
+                    .request(method.clone(), format!("http://{addr}/v1/threads"))
+                    .header(header::COOKIE, cookie_pair);
+                if metadata {
+                    request = request
+                        .header(header::ORIGIN, format!("http://{addr}"))
+                        .header("sec-fetch-site", "same-origin");
+                }
+                if let Some(proof) = presented {
+                    request = request.header(web::WEB_REQUEST_HEADER, proof);
+                }
+                assert_eq!(request.send().await?.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
     let authorized = client
         .get(format!("http://{addr}/v1/threads/summary"))
         .header(header::COOKIE, cookie_pair)
+        .header(web::WEB_REQUEST_HEADER, &proof)
         .send()
         .await?;
     assert_eq!(authorized.status(), StatusCode::OK);
@@ -2005,6 +2038,7 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
     let same_origin_cookie_post = client
         .post(format!("http://{addr}/v1/threads"))
         .header(header::COOKIE, cookie_pair)
+        .header(web::WEB_REQUEST_HEADER, &proof)
         .header(header::ORIGIN, format!("http://{addr}"))
         .header("sec-fetch-site", "same-origin")
         .json(&json!({}))
@@ -2012,9 +2046,33 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
         .await?;
     assert_eq!(same_origin_cookie_post.status(), StatusCode::CREATED);
 
+    let created: Value = same_origin_cookie_post.json().await?;
+    let thread_id = created["id"].as_str().context("thread id")?;
+    let ticket_response = client
+        .post(format!("http://{addr}/__codewhale/web/stream-ticket"))
+        .header(header::COOKIE, cookie_pair)
+        .header(web::WEB_REQUEST_HEADER, &proof)
+        .header(header::ORIGIN, format!("http://{addr}"))
+        .send()
+        .await?;
+    assert_eq!(ticket_response.status(), StatusCode::OK);
+    let ticket: Value = ticket_response.json().await?;
+    let ticket = ticket["stream_ticket"].as_str().context("stream ticket")?;
+    let stream_url =
+        format!("http://{addr}/v1/threads/{thread_id}/events?web_stream_ticket={ticket}");
+    for expected in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
+        let stream = client
+            .get(&stream_url)
+            .header(header::COOKIE, cookie_pair)
+            .send()
+            .await?;
+        assert_eq!(stream.status(), expected);
+    }
+
     let cross_origin_cookie_post = client
         .post(format!("http://{addr}/v1/threads"))
         .header(header::COOKIE, cookie_pair)
+        .header(web::WEB_REQUEST_HEADER, &proof)
         .header(header::ORIGIN, "http://127.0.0.1:3000")
         .header("sec-fetch-site", "same-site")
         .json(&json!({}))

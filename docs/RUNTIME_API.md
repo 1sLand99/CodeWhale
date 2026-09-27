@@ -692,11 +692,20 @@ local terminal and transits the OS browser launcher's argument list. A same-user
 process could race the browser to the exchange, which is why the capability is
 single-use, loopback-only, and expires after ten minutes — and why a same-user
 attacker has strictly easier local avenues than this race.
-Existing bearer/header/cookie authorization for `/v1/*` is unchanged outside
-web mode. In web mode, cookie-authenticated unsafe requests must also carry the
-exact local web origin, and Fetch Metadata identifying a cross-origin cookie
-request is rejected. Explicit bearer and Runtime-token header clients keep
-their existing behavior.
+Web fetches require the session cookie plus an origin-scoped request proof;
+streams use a fresh single-use ticket. The initial redirect carries the proof
+in a fragment, which the client removes and saves in origin-scoped
+`sessionStorage`. On reload or in a second tab, an authenticated `GET /` also
+embeds the proof in a meta tag when `Sec-Fetch-Site` is `same-origin` or `none`
+(direct navigation). The page uses `no-store`, disallows framing, and grants no
+cross-origin read access. This lets a new tab recover without reusing the
+bootstrap URL, including when storage is unavailable. Clients without Fetch
+Metadata can only reuse the fragment or their existing stored proof; recovery
+does not extend the server session or replace an expired cookie.
+Cross-origin Fetch Metadata or a mismatched Origin is rejected on web API
+requests. Explicit bearer and Runtime-token header clients keep their existing
+behavior. Transient stream-ticket failures retry with capped backoff; HTTP
+401/403 stops ticket retries until a fresh session is opened.
 
 The embedded client provides a responsive thread/search rail, Runtime-owned
 session facts, transcript and tool receipts, and a bottom composer. It can

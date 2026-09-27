@@ -16,6 +16,16 @@ Planned for Codewhale v0.10.1: a reliability and first-run release. Turns that
 stall now say so, approvals keep what you approved, plugin suggestions are
 quieter, and Fleet runs can be checked before they spend anything.
 
+### Security
+
+- Harden local runtime browser sessions, fleet SSH trust, agent continuation
+  ownership, task gate approval, plugin tool registration, bridge action tokens,
+  and release metadata credential forwarding. Browser sessions recover across
+  reloads and new tabs, and stream tickets retry after transient failures.
+  Fleet SSH known-host checks support OpenSSH 7.x and later. SSH host configs
+  using `host_key_fingerprint` must migrate to `known_hosts` with verified host
+  keys; the unsupported fingerprint field now fails at configuration load.
+
 ### Contributors
 
 - **[@gaord](https://github.com/gaord)** — let a client fork a thread at a named turn ([#6580](https://github.com/Hmbown/Codewhale/pull/6580)), let undo roll back files for the turn it is undoing ([#6483](https://github.com/Hmbown/Codewhale/pull/6483)), stopped resume and fork from duplicating threads and sessions ([#6406](https://github.com/Hmbown/Codewhale/pull/6406)), and exposed user-defined provider routes to native clients ([#6404](https://github.com/Hmbown/Codewhale/pull/6404)).

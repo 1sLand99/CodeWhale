@@ -1000,11 +1000,26 @@ impl ToolSpec for TaskShellWaitTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::ReadOnly]
+        vec![
+            ToolCapability::WritesFiles,
+            ToolCapability::RequiresApproval,
+        ]
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
+        ApprovalRequirement::Required
+    }
+
+    fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
+        if self.is_read_only_for(input) {
+            ApprovalRequirement::Auto
+        } else {
+            ApprovalRequirement::Required
+        }
+    }
+
+    fn is_read_only_for(&self, input: &Value) -> bool {
+        input.get("gate").is_none_or(Value::is_null)
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
@@ -1580,6 +1595,31 @@ mod tests {
         let wait_schema = TaskShellWaitTool.input_schema();
         assert_eq!(wait_schema["required"][0], "task_id");
         assert!(wait_schema["properties"]["gate"].is_object());
+    }
+
+    #[test]
+    fn runtime_surface_hardening_task_gate_recording_requires_approval() {
+        let tool = TaskShellWaitTool;
+        for input in [
+            json!({"task_id": "shell_1"}),
+            json!({"task_id": "shell_1", "gate": null}),
+        ] {
+            assert_eq!(
+                tool.approval_requirement_for(&input),
+                ApprovalRequirement::Auto
+            );
+            assert!(tool.is_read_only_for(&input));
+        }
+        for gate in ["fmt", "check", "clippy", "test", "custom"] {
+            let input = json!({"task_id": "shell_1", "gate": gate, "command": "cargo check"});
+            assert_eq!(
+                tool.approval_requirement_for(&input),
+                ApprovalRequirement::Required
+            );
+            assert!(!tool.is_read_only_for(&input));
+        }
+        assert!(tool.capabilities().contains(&ToolCapability::WritesFiles));
+        assert!(!tool.is_read_only());
     }
 
     #[test]

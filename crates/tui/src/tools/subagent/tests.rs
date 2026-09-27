@@ -21715,6 +21715,42 @@ fn parse_spawn_request_resume_from_with_fork_context_false_is_parseable() {
     assert_eq!(parsed.fork_context, Some(false));
 }
 
+#[tokio::test]
+async fn runtime_surface_hardening_resume_from_requires_descendant_control() {
+    let tmp = tempdir().unwrap();
+    let source_workspace = tempdir().unwrap();
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let (caller, source) = {
+        let mut guard = manager.write().await;
+        let caller = guard.insert_test_running_agent("caller", tmp.path());
+        let source = guard.insert_test_running_agent("source", source_workspace.path());
+        guard.agents.get_mut(&source).unwrap().status = SubAgentStatus::Completed;
+        for id in [&caller, &source] {
+            assign_test_session_owner(&mut guard, id, &runtime.context.state_namespace);
+        }
+        (caller, source)
+    };
+    runtime.parent_agent_id = Some(caller);
+    let input = json!({"prompt": "Continue the completed work", "resume_from": source});
+    let err =
+        spawn_subagent_from_input(input.clone(), manager.clone(), runtime.clone(), false, None)
+            .await
+            .expect_err("a sibling is not a continuation source");
+    assert!(
+        err.to_string().contains("only its own descendants"),
+        "{err}"
+    );
+
+    runtime.parent_agent_id = None;
+    let err = spawn_subagent_from_input(input, manager.clone(), runtime, false, None)
+        .await
+        .expect_err("root still observes the workspace boundary");
+    assert!(err.to_string().contains("different workspace"), "{err}");
+    assert_eq!(manager.read().await.agents.len(), 2);
+}
+
 #[test]
 fn resume_from_rejects_running_source() {
     let tmp = tempdir().expect("tempdir");
