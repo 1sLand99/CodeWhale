@@ -656,6 +656,14 @@ async fn sync_one_skill(
     cache_dir: &Path,
     max_size: u64,
 ) -> SkillSyncOutcome {
+    // The registry key names the cache directory joined below; it gets the
+    // same single-segment check as an installed skill name.
+    if let Err(err) = validate_skill_name_segment(name) {
+        return SkillSyncOutcome::Failed {
+            name: name.to_string(),
+            reason: format!("{err:#}"),
+        };
+    }
     // Resolve the source to a concrete URL list.
     let source = match InstallSource::parse(&entry.source) {
         Ok(s) => s,
@@ -1667,6 +1675,29 @@ fn hex_bytes(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn registry_sync_refuses_a_key_that_is_not_a_single_segment() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache_dir = root.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("cache dir");
+        let entry = RegistryEntry {
+            source: "https://example.invalid/skill.tar.gz".to_string(),
+            description: None,
+            keywords: Vec::new(),
+            domains: Vec::new(),
+        };
+        for name in ["../escape", "..", "a/b", "/abs"] {
+            let outcome =
+                sync_one_skill(name, &entry, &NetworkPolicy::default(), &cache_dir, 1024).await;
+            assert!(
+                matches!(outcome, SkillSyncOutcome::Failed { ref reason, .. }
+                    if reason.contains("single path-safe segment")),
+                "{name}: {outcome:?}"
+            );
+        }
+        assert!(!root.path().join("escape").exists());
+    }
 
     #[test]
     fn parse_github_source() {

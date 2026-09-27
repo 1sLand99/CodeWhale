@@ -178,6 +178,9 @@ quieter, and Fleet runs can be checked before they spend anything.
 - Computer Use: screenshot and zoom output paths must be `.png`/`.jpg`/`.jpeg`
   files inside the recordings directory, and zoom always crops the last
   captured raster instead of a caller-named source file.
+- Skill registry sync refuses an index key that is not a single path-safe
+  name before it is used as a cache directory, the same check an installed
+  skill name already gets.
 
 ### Removed
 
