@@ -11293,6 +11293,14 @@ async fn spawn_subagent_from_input(
                      Use agent action=status to list available agents."
                         ))
                     })?;
+                manager_read
+                    .ensure_caller_controls_descendant_for_session(
+                        &runtime.context.state_namespace,
+                        &source_id,
+                        runtime.parent_agent_id.as_deref(),
+                        "agent/resume_from",
+                    )
+                    .map_err(|err| ToolError::invalid_input(err.to_string()))?;
                 let source = manager_read.agents.get(&source_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("resume_from: agent '{source_id}' not found"))
                 })?;

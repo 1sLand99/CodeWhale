@@ -415,8 +415,8 @@ impl ToolRegistry {
     /// Load and register plugin tools from a directory.
     ///
     /// Each script with valid frontmatter (`# name:`, `# description:`, etc.)
-    /// becomes a registered `ScriptPluginTool`. Tools whose name matches an
-    /// already-registered tool will overwrite it.
+    /// becomes a registered `ScriptPluginTool`. Name collisions are refused;
+    /// replacing a registered tool requires an explicit config override.
     pub fn load_plugins(&mut self, plugin_dir: &Path) {
         if !plugin_dir.exists() {
             tracing::debug!(
@@ -426,9 +426,19 @@ impl ToolRegistry {
             return;
         }
         let plugins = crate::tools::plugin::load_plugin_tools(plugin_dir);
-        let count = plugins.len();
+        let mut count = 0;
         for tool in plugins {
+            if let Some(previous) = self.get(tool.name()) {
+                tracing::error!(
+                    previous_origin = ?previous.registration_origin(),
+                    plugin_origin = ?tool.registration_origin(),
+                    "Cannot load plugin tool '{}': name is already registered; use an explicit tool override",
+                    crate::safe_label::SafeLabel::identifier(tool.name())
+                );
+                continue;
+            }
             self.register(tool);
+            count += 1;
         }
         if count > 0 {
             tracing::info!(

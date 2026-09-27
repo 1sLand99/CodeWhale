@@ -4,8 +4,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::Json;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
@@ -23,6 +24,8 @@ pub(super) const BOOTSTRAP_TTL: Duration = Duration::from_secs(10 * 60);
 const WEB_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const BOOTSTRAP_PREFIX: &str = "cwwb_";
 const WEB_SESSION_PREFIX: &str = "cwws_";
+pub(super) const WEB_REQUEST_HEADER: &str = "x-codewhale-web-request";
+pub(super) const WEB_STREAM_TICKET_QUERY: &str = "web_stream_ticket";
 const WEB_SESSION_COOKIE_NAME: &str = "codewhale_web_session";
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
 
@@ -30,6 +33,8 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; st
 pub(super) struct RuntimeWebState {
     bootstrap: Arc<Mutex<Option<BootstrapCapability>>>,
     session_token: Arc<str>,
+    request_proof: Arc<Mutex<Option<String>>>,
+    stream_ticket: Arc<Mutex<Option<BootstrapCapability>>>,
     session_expires_at: Instant,
 }
 
@@ -39,7 +44,7 @@ struct BootstrapCapability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BootstrapError {
+pub(super) enum BootstrapError {
     Invalid,
     Expired,
     NonLoopback,
@@ -63,12 +68,18 @@ impl RuntimeWebState {
                 expires_at: Instant::now() + bootstrap_ttl,
             }))),
             session_token: session_token.into(),
+            request_proof: Arc::new(Mutex::new(None)),
+            stream_ticket: Arc::new(Mutex::new(None)),
             session_expires_at: Instant::now() + session_ttl,
         };
         (state, nonce)
     }
 
-    fn consume(&self, nonce: &str, peer_ip: IpAddr) -> Result<String, BootstrapError> {
+    pub(super) fn consume(
+        &self,
+        nonce: &str,
+        peer_ip: IpAddr,
+    ) -> Result<(String, String), BootstrapError> {
         if !peer_ip.is_loopback() {
             return Err(BootstrapError::NonLoopback);
         }
@@ -92,7 +103,67 @@ impl RuntimeWebState {
         }
 
         let _capability = slot.take().expect("bootstrap capability checked above");
-        Ok(self.session_token.to_string())
+        let proof = format!(
+            "cwwr_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        *self.request_proof.lock().unwrap_or_else(|p| p.into_inner()) = Some(proof.clone());
+        Ok((self.session_token.to_string(), proof))
+    }
+
+    pub(super) fn matches_request(&self, cookie_header: Option<&str>, proof: Option<&str>) -> bool {
+        self.matches_session_cookie(cookie_header)
+            && proof.is_some_and(|proof| {
+                self.request_proof
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_ref()
+                    .is_some_and(|expected| constant_time_eq(proof.as_bytes(), expected.as_bytes()))
+            })
+    }
+
+    // Like mobile streams, reconnects consume a new short-lived ticket. Only
+    // one pending ticket is retained for this single browser session.
+    pub(super) fn refresh_stream_ticket(
+        &self,
+        cookie_header: Option<&str>,
+        proof: Option<&str>,
+    ) -> Option<String> {
+        if !self.matches_request(cookie_header, proof) {
+            return None;
+        }
+        let ticket = format!(
+            "cwwt_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        *self.stream_ticket.lock().unwrap_or_else(|p| p.into_inner()) = Some(BootstrapCapability {
+            nonce: ticket.clone(),
+            expires_at: Instant::now() + super::mobile::STREAM_TICKET_TTL,
+        });
+        Some(ticket)
+    }
+
+    pub(super) fn consume_stream_ticket(
+        &self,
+        cookie_header: Option<&str>,
+        ticket: Option<&str>,
+    ) -> bool {
+        if !self.matches_session_cookie(cookie_header) {
+            return false;
+        }
+        let mut slot = self.stream_ticket.lock().unwrap_or_else(|p| p.into_inner());
+        let matches = slot.as_ref().is_some_and(|issued| {
+            Instant::now() < issued.expires_at
+                && ticket.is_some_and(|ticket| {
+                    constant_time_eq(ticket.as_bytes(), issued.nonce.as_bytes())
+                })
+        });
+        if matches {
+            *slot = None;
+        }
+        matches
     }
 
     pub(super) fn matches_session_cookie(&self, cookie_header: Option<&str>) -> bool {
@@ -114,7 +185,7 @@ pub(super) async fn exchange_bootstrap(
     let Some(web) = state.web.as_ref() else {
         return not_found();
     };
-    let session_token = match web.consume(&nonce, peer.ip()) {
+    let (session_token, request_proof) = match web.consume(&nonce, peer.ip()) {
         Ok(token) => token,
         Err(BootstrapError::NonLoopback) => {
             return secured_text(StatusCode::FORBIDDEN, "bootstrap unavailable");
@@ -126,14 +197,41 @@ pub(super) async fn exchange_bootstrap(
 
     let cookie = web_session_cookie(&session_token);
     let mut response = (StatusCode::SEE_OTHER, "").into_response();
-    response
-        .headers_mut()
-        .insert(header::LOCATION, HeaderValue::from_static("/"));
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&format!("/#p={request_proof}")).expect("hex request proof"),
+    );
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).expect("percent-encoded Runtime cookie is a valid header"),
     );
     secure_headers(&mut response, "text/plain; charset=utf-8");
+    response
+}
+
+pub(super) async fn refresh_stream_ticket(
+    State(state): State<RuntimeApiState>,
+    req: Request,
+) -> Response {
+    let Some(web) = state.web.as_ref() else {
+        return not_found();
+    };
+    if !super::auth::web_session_request_is_authorized(&req, &state, web) {
+        return super::auth::runtime_token_required_response();
+    }
+    let ticket = web.refresh_stream_ticket(
+        req.headers()
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok()),
+        req.headers()
+            .get(WEB_REQUEST_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
+    let Some(ticket) = ticket else {
+        return super::auth::runtime_token_required_response();
+    };
+    let mut response = Json(serde_json::json!({"stream_ticket": ticket})).into_response();
+    secure_headers(&mut response, "application/json");
     response
 }
 
@@ -241,6 +339,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_surface_hardening_web_proof_and_ticket_expiry() {
+        let (web, nonce) = RuntimeWebState::new();
+        let (token, proof) = web.consume(&nonce, "127.0.0.1".parse().unwrap()).unwrap();
+        let cookie = web_session_cookie(&token);
+        assert!(!cookie.contains(&proof));
+        assert!(!web.matches_request(None, Some(&proof)));
+        assert!(!web.matches_request(Some(&cookie), Some(&token)));
+        assert!(web.matches_request(Some(&cookie), Some(&proof)));
+        let ticket = web
+            .refresh_stream_ticket(Some(&cookie), Some(&proof))
+            .unwrap();
+        assert!(!web.consume_stream_ticket(None, Some(&ticket)));
+        assert!(!web.consume_stream_ticket(Some(&cookie), Some("wrong-ticket")));
+        web.stream_ticket
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .expires_at = Instant::now();
+        assert!(!web.consume_stream_ticket(Some(&cookie), Some(&ticket)));
+        let ticket = web
+            .refresh_stream_ticket(Some(&cookie), Some(&proof))
+            .unwrap();
+        let mut expired = web.clone();
+        expired.session_expires_at = Instant::now();
+        assert!(!expired.matches_request(Some(&cookie), Some(&proof)));
+        assert!(!expired.consume_stream_ticket(Some(&cookie), Some(&ticket)));
+    }
+
+    #[test]
     fn bootstrap_is_loopback_only_one_time_and_expires() {
         let (state, nonce) =
             RuntimeWebState::new_with_ttls(Duration::from_secs(60), Duration::from_secs(60));
@@ -248,7 +376,7 @@ mod tests {
             state.consume(&nonce, "192.0.2.4".parse().unwrap()),
             Err(BootstrapError::NonLoopback)
         );
-        let session_token = state
+        let (session_token, _) = state
             .consume(&nonce, "127.0.0.1".parse().unwrap())
             .expect("valid loopback bootstrap");
         assert!(session_token.starts_with(WEB_SESSION_PREFIX));
@@ -272,7 +400,7 @@ mod tests {
     fn web_session_survives_reload_then_expires_and_rejects_wrong_tokens() {
         let (state, nonce) =
             RuntimeWebState::new_with_ttls(Duration::from_secs(60), Duration::from_secs(60));
-        let session_token = state
+        let (session_token, _) = state
             .consume(&nonce, "127.0.0.1".parse().unwrap())
             .expect("valid loopback bootstrap");
         let cookie = format!("{WEB_SESSION_COOKIE_NAME}={session_token}");
@@ -316,6 +444,7 @@ mod tests {
             state
                 .consume(&nonce, "127.0.0.1".parse().unwrap())
                 .expect("valid bootstrap remains available")
+                .0
                 .starts_with(WEB_SESSION_PREFIX)
         );
     }
@@ -345,10 +474,9 @@ mod tests {
     }
 
     #[test]
-    fn embedded_client_has_no_secret_storage_or_unsafe_dynamic_html_sink() {
+    fn embedded_client_keeps_runtime_bearer_private_and_has_no_unsafe_html_sink() {
         for asset in [WEB_HTML, WEB_JS] {
             assert!(!asset.contains("localStorage"));
-            assert!(!asset.contains("sessionStorage"));
             assert!(!asset.contains("codewhale_runtime_token"));
             assert!(!asset.contains("innerHTML"));
             assert!(!asset.contains("http://"));

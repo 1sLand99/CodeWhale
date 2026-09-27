@@ -11,6 +11,7 @@ import {
   buildCreateThreadRequest,
   claimInFlight,
   createThreadState,
+  createWebSessionFetch,
   eventStreamUrl,
   formatRuntimeProvenance,
   imageInputPresentation,
@@ -1057,5 +1058,37 @@ test("renders hostile Runtime text only through the textContent sink", async () 
   assert.equal(source.includes("inner" + "HTML"), false);
   assert.equal(source.includes("insertAdjacent" + "HTML"), false);
   assert.equal(source.includes("local" + "Storage"), false);
-  assert.equal(source.includes("session" + "Storage"), false);
+  assert.equal(source.includes("codewhale_runtime_token"), false);
+});
+
+test("web session fetch keeps request proof outside cookies and strips bootstrap fragments", async () => {
+  const stored = new Map();
+  const storage = () => ({ setItem: (key, value) => stored.set(key, value), getItem: (key) => stored.get(key) });
+  const paths = [];
+  const calls = [];
+  const history = { replaceState: (_state, _title, path) => paths.push(path) };
+  const fetch = async (path, options) => { calls.push({ path, options }); return { ok: true }; };
+  const request = createWebSessionFetch({
+    location: { hash: "#p=proof-one", pathname: "/", search: "?view=threads" }, history, storage, fetch,
+  });
+  assert.deepEqual(paths, ["/?view=threads"]);
+  await request("/v1/threads", { method: "POST", body: "{}" });
+  await request("/__codewhale/web/stream-ticket", { method: "POST" });
+  const reloaded = createWebSessionFetch({ location: { hash: "" }, history, storage, fetch });
+  await reloaded("/v1/threads");
+  for (const { options } of calls) {
+    assert.equal(options.headers.get("x-codewhale-web-request"), "proof-one");
+    assert.equal(options.headers.has("cookie"), false);
+    assert.equal(options.credentials, "same-origin");
+    assert.equal(options.cache, "no-store");
+  }
+  assert.equal(calls[0].options.headers.get("content-type"), "application/json");
+  assert.equal(eventStreamUrl("thread-a", 4, "ticket-one"), "/v1/threads/thread-a/events?since_seq=4&web_stream_ticket=ticket-one");
+
+  const memoryOnly = createWebSessionFetch({
+    location: { hash: "#p=memory-proof", pathname: "/", search: "" }, history,
+    storage: () => { throw new Error("storage unavailable"); }, fetch,
+  });
+  await memoryOnly("/v1/threads");
+  assert.equal(calls.at(-1).options.headers.get("x-codewhale-web-request"), "memory-proof");
 });

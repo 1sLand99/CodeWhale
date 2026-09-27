@@ -571,6 +571,31 @@ impl SshFleetHostConfig {
                 "SSH Fleet host requires an explicit working directory",
             ));
         }
+        // Fingerprint-only verification is not implemented by the OpenSSH adapter.
+        // Refuse a configured pin rather than silently substituting another trust source.
+        if self.host_key_fingerprint.is_some() {
+            return Err(FleetHostError::configuration(
+                "SSH Fleet host_key_fingerprint is unsupported; configure known_hosts instead",
+            ));
+        }
+        if self
+            .known_hosts
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(FleetHostError::configuration(
+                "SSH Fleet known_hosts must not be empty",
+            ));
+        }
+        if self
+            .known_hosts
+            .as_ref()
+            .is_some_and(|path| path.to_string_lossy().contains(['"', '\n', '\r']))
+        {
+            return Err(FleetHostError::configuration(
+                "SSH Fleet known_hosts contains unsupported characters",
+            ));
+        }
         validate_env_allowlist(&self.env_allowlist)
     }
 
@@ -608,8 +633,20 @@ impl SshFleetHostAdapter {
             "-o".to_string(),
             "BatchMode=yes".to_string(),
             "-o".to_string(),
+            "StrictHostKeyChecking=yes".to_string(),
+            "-o".to_string(),
             format!("ConnectTimeout={}", self.config.connect_timeout_seconds),
         ];
+        if let Some(known_hosts) = &self.config.known_hosts {
+            args.push("-o".to_string());
+            args.push(format!("UserKnownHostsFile=\"{}\"", known_hosts.display()));
+            args.push("-o".to_string());
+            args.push("GlobalKnownHostsFile=none".to_string());
+            args.push("-o".to_string());
+            args.push("KnownHostsCommand=none".to_string());
+            args.push("-o".to_string());
+            args.push("VerifyHostKeyDNS=no".to_string());
+        }
         for key in env.keys() {
             args.push("-o".to_string());
             args.push(format!("SendEnv={key}"));
@@ -2062,6 +2099,45 @@ mod tests {
         assert!(argv.contains("/usr/local/bin/codewhale"));
         assert!(argv.contains("fleet-worker"));
         assert!(!argv.contains("super-secret-profile-value"));
+    }
+
+    #[test]
+    fn runtime_surface_hardening_ssh_requires_known_host_verification() {
+        let tmp = TempDir::new().unwrap();
+        let request = FleetWorkerStartRequest::new(
+            "ssh-1",
+            FleetWorkerCommand::new("codewhale", ["fleet-worker"]),
+        );
+        for known_hosts in [None, Some(PathBuf::from("/tmp/fleet keys/known_hosts"))] {
+            let mut config = SshFleetHostConfig::new("builder.example.test", "/srv/codewhale");
+            config.known_hosts = known_hosts.clone();
+            let adapter = SshFleetHostAdapter::new(tmp.path(), config).unwrap();
+            let command = adapter.build_ssh_command(&request).unwrap();
+            assert!(
+                command
+                    .args
+                    .contains(&"StrictHostKeyChecking=yes".to_string())
+            );
+            if let Some(path) = known_hosts {
+                assert!(
+                    command
+                        .args
+                        .contains(&format!("UserKnownHostsFile=\"{}\"", path.display()))
+                );
+                assert!(
+                    command
+                        .args
+                        .contains(&"GlobalKnownHostsFile=none".to_string())
+                );
+                assert!(command.args.contains(&"KnownHostsCommand=none".to_string()));
+                assert!(command.args.contains(&"VerifyHostKeyDNS=no".to_string()));
+            }
+        }
+        let mut config = SshFleetHostConfig::new("builder.example.test", "/srv/codewhale");
+        config.host_key_fingerprint = Some("SHA256:configured-pin".to_string());
+        let err = SshFleetHostAdapter::new(tmp.path(), config).unwrap_err();
+        assert_eq!(err.kind, FleetHostErrorKind::Configuration);
+        assert!(err.message.contains("configure known_hosts"));
     }
 
     #[test]

@@ -1586,6 +1586,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             get(web::exchange_bootstrap),
         )
         .route(
+            "/__codewhale/web/stream-ticket",
+            post(web::refresh_stream_ticket),
+        )
+        .route(
             "/__codewhale/mobile/bootstrap/{nonce}",
             get(exchange_mobile_bootstrap),
         )

@@ -478,8 +478,28 @@ export function workflowReceiptPresentation(item, detail, raw) {
   };
 }
 
-export function eventStreamUrl(threadId, latestSeq) {
-  return `/v1/threads/${encodeURIComponent(threadId)}/events?since_seq=${normalizedSequence(latestSeq)}`;
+export function eventStreamUrl(threadId, latestSeq, ticket = "") {
+  const url = `/v1/threads/${encodeURIComponent(threadId)}/events?since_seq=${normalizedSequence(latestSeq)}`;
+  return ticket ? `${url}&web_stream_ticket=${encodeURIComponent(ticket)}` : url;
+}
+
+export function createWebSessionFetch({ location, history, storage, fetch }) {
+  const key = "codewhale_web_request_proof";
+  let proof = new URLSearchParams(location.hash.slice(1)).get("p") || "";
+  if (proof) {
+    history.replaceState(null, "", location.pathname + location.search);
+    try { storage().setItem(key, proof); } catch (_) { /* Memory-only session. */ }
+  } else {
+    try { proof = storage().getItem(key) || ""; } catch (_) { /* Storage unavailable. */ }
+  }
+  return (path, options = {}) => {
+    const headers = new Headers(options.headers || {});
+    headers.set("x-codewhale-web-request", proof);
+    if (options.body != null && !headers.has("content-type")) {
+      headers.set("content-type", "application/json");
+    }
+    return fetch(path, { ...options, headers, credentials: "same-origin", cache: "no-store" });
+  };
 }
 
 export function saveDraft(drafts, threadId, value) {
@@ -933,17 +953,15 @@ function startBrowserClient() {
     dom.status.hidden = !message;
   }
 
+  const sessionFetch = createWebSessionFetch({
+    location: window.location,
+    history: window.history,
+    storage: () => window.sessionStorage,
+    fetch: (...args) => fetch(...args),
+  });
+
   async function api(path, options = {}) {
-    const headers = new Headers(options.headers || {});
-    if (options.body != null && !headers.has("content-type")) {
-      headers.set("content-type", "application/json");
-    }
-    const response = await fetch(path, {
-      ...options,
-      headers,
-      credentials: "same-origin",
-      cache: "no-store",
-    });
+    const response = await sessionFetch(path, options);
     if (!response.ok) {
       let message = `${response.status} ${response.statusText}`.trim();
       try {
@@ -1205,7 +1223,7 @@ function startBrowserClient() {
         threadId,
         loadSnapshot: (id) => api(`/v1/threads/${encodeURIComponent(id)}`),
         subscribe: (id, sequence) => {
-          connectStream(id, sequence, generation);
+          return connectStream(id, sequence, generation);
         },
         isCurrent: () => generation === app.generation && threadId === app.selectedThreadId,
       });
@@ -1219,12 +1237,14 @@ function startBrowserClient() {
     }
   }
 
-  function connectStream(threadId, sequence, generation, waitForOpen = false) {
+  async function connectStream(threadId, sequence, generation, waitForOpen = false) {
     if (generation !== app.generation || threadId !== app.selectedThreadId) return;
     if (app.streamOpenCancel) app.streamOpenCancel();
     app.streamOpenCancel = null;
     if (app.stream) app.stream.close();
-    const stream = new EventSource(eventStreamUrl(threadId, sequence), { withCredentials: true });
+    const { stream_ticket: ticket } = await api("/__codewhale/web/stream-ticket", { method: "POST" });
+    if (generation !== app.generation || threadId !== app.selectedThreadId) return;
+    const stream = new EventSource(eventStreamUrl(threadId, sequence, ticket), { withCredentials: true });
     app.stream = stream;
     let opened = false;
     let resolveOpen;
@@ -1306,7 +1326,10 @@ function startBrowserClient() {
       }
       setConnection("", "Reconnecting to local runtime…");
       app.reconnectTimer = setTimeout(
-        () => connectStream(threadId, app.threadState.latestSeq, generation),
+        () => connectStream(threadId, app.threadState.latestSeq, generation).catch((error) => {
+          showStatus(error.message);
+          setConnection("error", "Runtime connection failed");
+        }),
         900,
       );
     };
