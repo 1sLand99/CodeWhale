@@ -545,60 +545,69 @@ fn install_parent_death_signal(cmd: &mut Command) {
     }
 }
 
-/// Spawn a background (`Managed`) child that must die with the TUI (#6654).
+/// Watcher script for [`watch_process_group_for_parent_death`]. `$1` is the
+/// process group id. The outer `sh` only forks the watcher and exits, so the
+/// watcher is reparented away from the TUI and never needs reaping. The
+/// watcher blocks reading the pipe the TUI holds the other end of: the read
+/// ends at EOF when every write end closes, which happens however the TUI
+/// dies. It then SIGTERMs the group, waits briefly and SIGKILLs it. It sits in
+/// the job's own process group, so the group id cannot be reused while it
+/// waits, and the TUI's normal group kills take it down with the job.
+#[cfg(unix)]
+const PROCESS_GROUP_WATCHER_SCRIPT: &str = r#"exec 3<&0
+(
+  trap '' TERM
+  read -r _ <&3 || {
+    kill -TERM -"$1" 2>/dev/null
+    sleep 2
+    kill -KILL -"$1" 2>/dev/null
+  }
+) >/dev/null 2>&1 &"#;
+
+/// Kill a `Managed` background shell's whole process group when the TUI dies
+/// (#6654).
 ///
-/// `PR_SET_PDEATHSIG` fires when the *thread* that forked the child exits,
-/// not when the process does. Foreground shells are safe because the
-/// spawning thread blocks until the child finishes, but a background spawn
-/// returns immediately — and its caller is often a thread that does not live
-/// as long as the TUI: `runtime_api/jobs.rs` spawns from
-/// `tokio::task::spawn_blocking`, whose pool threads retire after ~10 s idle,
-/// and tool calls run on runtime worker threads that `block_in_place` or a
-/// runtime shutdown can retire. Arming the signal there would SIGTERM a
-/// healthy background job seconds after it started. So on Linux the fork
-/// happens on one process-lifetime spawner thread, which only exits when the
-/// whole process does — exactly the moment the signal should fire.
+/// `PR_SET_PDEATHSIG` is not enough here: it signals only the direct child
+/// (the `sh -c` wrapper), a fork clears it in grandchildren, so a command that
+/// does not `exec` its last step (`cd app && npm run dev; echo done`,
+/// `a | b`) keeps its real workload alive; it also fires when the forking
+/// *thread* exits, and background spawns run on threads that retire. So a
+/// small watcher joins the job's process group and blocks on a pipe whose
+/// write end only the TUI holds (it is close-on-exec, so no child inherits
+/// it). The returned write end lives in the `BackgroundShell`; closing it —
+/// by dropping the shell or by the TUI dying in any way, SIGKILL included —
+/// makes the watcher terminate the group. This works on Linux and macOS alike.
 ///
-/// Elsewhere this is a plain `spawn`: Windows already ties `Managed`
-/// background children to the TUI with a `KILL_ON_JOB_CLOSE` job object
-/// (`attach_windows_job`), and macOS has no kernel equivalent (see the stub
-/// `install_parent_death_signal`).
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-fn spawn_background_child(mut cmd: Command) -> std::io::Result<Child> {
-    type SpawnRequest = (Command, std::sync::mpsc::SyncSender<std::io::Result<Child>>);
-    static SPAWNER: std::sync::OnceLock<std::io::Result<std::sync::mpsc::Sender<SpawnRequest>>> =
-        std::sync::OnceLock::new();
-
-    let spawner = SPAWNER.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<SpawnRequest>();
-        std::thread::Builder::new()
-            .name("codewhale-bg-spawner".to_string())
-            .spawn(move || {
-                // `tx` lives in a static, so this loop runs for the process
-                // lifetime and the thread never retires.
-                for (mut cmd, reply) in rx {
-                    let _ = reply.send(cmd.spawn());
-                }
-            })
-            .map(|_| tx)
-    });
-    let spawner = spawner
-        .as_ref()
-        .map_err(|err| std::io::Error::new(err.kind(), err.to_string()))?;
-
-    install_parent_death_signal(&mut cmd);
-    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-    spawner
-        .send((cmd, reply_tx))
-        .map_err(|_| std::io::Error::other("background spawner thread is gone"))?;
-    reply_rx
-        .recv()
-        .map_err(|_| std::io::Error::other("background spawner thread dropped the request"))?
-}
-
-#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-fn spawn_background_child(mut cmd: Command) -> std::io::Result<Child> {
-    cmd.spawn()
+/// Best effort: if the watcher cannot start, the job still runs, just
+/// without this cleanup. A TUI that dies between the job spawn and the
+/// watcher spawn also leaves the job running.
+#[cfg(unix)]
+fn watch_process_group_for_parent_death(
+    process_group_id: u32,
+) -> std::io::Result<std::io::PipeWriter> {
+    let (reader, writer) = std::io::pipe()?;
+    let pgid = i32::try_from(process_group_id)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        PROCESS_GROUP_WATCHER_SCRIPT,
+        "codewhale-bg-watch",
+        &process_group_id.to_string(),
+    ])
+    .stdin(Stdio::from(reader))
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .process_group(pgid);
+    // The outer `sh` exits as soon as it has forked the watcher.
+    let status = cmd.spawn()?.wait()?;
+    if status.success() {
+        Ok(writer)
+    } else {
+        Err(std::io::Error::other(format!(
+            "process-group watcher exited with {status}"
+        )))
+    }
 }
 
 /// Attach `args` to a `std::process::Command`, honoring shell-quoting on
@@ -647,16 +656,16 @@ fn install_parent_death_signal(_cmd: &mut Command) {
     // No kernel-level equivalent on macOS / Windows. The cooperative
     // cancellation + process_group SIGKILL path covers normal shutdown;
     // abnormal exit (panic without unwind, SIGKILL of the TUI) can still
-    // leak children on those platforms — tracked as a follow-up. Windows
-    // pipe-backed background shells are covered by their KILL_ON_JOB_CLOSE
-    // job object; macOS has nothing equivalent.
+    // leak children on those platforms — tracked as a follow-up. Pipe-backed
+    // background shells are covered on every platform: Unix by the
+    // process-group watcher (`watch_process_group_for_parent_death`), Windows
+    // by their KILL_ON_JOB_CLOSE job object.
     //
     // Known limitations on every platform (#6654): `tty: true` background
     // shells spawn through `portable_pty`, which never goes through
-    // `std::process::Command`, so they get no parent-death signal (or job
-    // object); and staged persistent services (`persist_pending`) stay
-    // deliberately unarmed because the signal cannot be cleared once the
-    // user takes ownership of the service.
+    // `std::process::Command`, so they get no watcher (or job object); and
+    // staged persistent services (`persist_pending`) stay deliberately
+    // unwatched because the user can take ownership of the service.
 }
 
 #[cfg(windows)]
@@ -1099,6 +1108,11 @@ pub struct BackgroundShell {
     child: Option<ShellChild>,
     #[cfg(windows)]
     windows_job: Option<WindowsJob>,
+    /// Write end of the process-group watcher's pipe for `Managed` shells;
+    /// closing it (drop, or the TUI dying) kills the job's group (#6654).
+    #[cfg(unix)]
+    #[allow(dead_code, reason = "held only so its Drop closes the pipe")]
+    parent_death_watch: Option<std::io::PipeWriter>,
     stdout_thread: Option<std::thread::JoinHandle<()>>,
     stderr_thread: Option<std::thread::JoinHandle<()>>,
     work_lifecycle: Option<ShellWorkLifecycle>,
@@ -1988,6 +2002,8 @@ impl ShellManager {
                 child: None,
                 #[cfg(windows)]
                 windows_job: None,
+                #[cfg(unix)]
+                parent_death_watch: None,
                 stdout_thread: None,
                 stderr_thread: None,
                 work_lifecycle: None,
@@ -2635,6 +2651,8 @@ impl ShellManager {
 
         #[cfg(windows)]
         let mut windows_job = None;
+        #[cfg(unix)]
+        let mut parent_death_watch = None;
 
         #[cfg(not(target_env = "ohos"))]
         let mut pty_master = None;
@@ -2705,9 +2723,9 @@ impl ShellManager {
             {
                 cmd.process_group(0);
             }
-            // Deliberately no parent-death signal: a staged service can be
+            // Deliberately no parent-death cleanup: a staged service can be
             // handed to the user (`ShellOwnership::Released`) and must then
-            // outlive the TUI; PR_SET_PDEATHSIG cannot be disarmed (#6654).
+            // outlive the TUI (#6654).
 
             child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
             remove_readonly_redirect_env(&mut cmd, &exec_env.env);
@@ -2738,10 +2756,21 @@ impl ShellManager {
             child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
             remove_readonly_redirect_env(&mut cmd, &exec_env.env);
 
+            let mut child = cmd
+                .spawn()
+                .with_context(|| format!("Failed to spawn background: {original_command}"))?;
             // Managed children die with the TUI (#6654); unlike the
             // persistent branch above, nobody can take ownership of them.
-            let mut child = spawn_background_child(cmd)
-                .with_context(|| format!("Failed to spawn background: {original_command}"))?;
+            #[cfg(unix)]
+            {
+                parent_death_watch = watch_process_group_for_parent_death(child.id())
+                    .inspect_err(|err| {
+                        tracing::warn!(
+                            "background shell {task_id} has no parent-death cleanup: {err}"
+                        );
+                    })
+                    .ok();
+            }
             #[cfg(windows)]
             {
                 windows_job = attach_windows_job(&child, original_command);
@@ -2824,6 +2853,8 @@ impl ShellManager {
             child: Some(child),
             #[cfg(windows)]
             windows_job,
+            #[cfg(unix)]
+            parent_death_watch,
             stdout_thread,
             stderr_thread,
             work_lifecycle,
