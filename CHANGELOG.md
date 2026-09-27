@@ -51,6 +51,12 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- On Linux, a `background: true` shell no longer outlives a TUI that dies
+  without cleaning up (SIGKILL, a crash, or the signal exit path). It used
+  to keep running as an orphan, holding its ports, files and locks. Staged
+  services you choose to keep still survive, and `tty: true` background
+  shells and macOS are not covered yet
+  ([#6654](https://github.com/Hmbown/Codewhale/issues/6654)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you

@@ -519,22 +519,86 @@ fn terminate_child_process_group(child: &mut Child) -> std::io::Result<()> {
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 fn install_parent_death_signal(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
+    // Captured before the fork so the child can tell whether the TUI already
+    // died in the fork→prctl window, where the signal would never arrive.
+    let parent_pid = std::process::id() as libc::pid_t;
     // SAFETY: `pre_exec` runs in the child between fork and exec. The closure
-    // only calls `libc::prctl` with stack-allocated constant arguments and
-    // does not touch heap memory or the parent's locks. Both requirements
-    // (async-signal-safe + no allocation in the post-fork window) are met.
+    // only calls `libc::prctl` / `libc::getppid` with stack-allocated
+    // arguments and does not touch heap memory or the parent's locks. Both
+    // requirements (async-signal-safe + no allocation in the post-fork
+    // window) are met.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             let result = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
             if result == -1 {
                 // Surface the errno but do not abort the spawn — the child
                 // will simply lose the parent-death cleanup safety net.
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
+                return Err(std::io::Error::last_os_error());
             }
+            if libc::getppid() != parent_pid {
+                // The TUI exited before the signal was armed: do not exec an
+                // orphan nobody will ever reap.
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
         });
     }
+}
+
+/// Spawn a background (`Managed`) child that must die with the TUI (#6654).
+///
+/// `PR_SET_PDEATHSIG` fires when the *thread* that forked the child exits,
+/// not when the process does. Foreground shells are safe because the
+/// spawning thread blocks until the child finishes, but a background spawn
+/// returns immediately — and its caller is often a thread that does not live
+/// as long as the TUI: `runtime_api/jobs.rs` spawns from
+/// `tokio::task::spawn_blocking`, whose pool threads retire after ~10 s idle,
+/// and tool calls run on runtime worker threads that `block_in_place` or a
+/// runtime shutdown can retire. Arming the signal there would SIGTERM a
+/// healthy background job seconds after it started. So on Linux the fork
+/// happens on one process-lifetime spawner thread, which only exits when the
+/// whole process does — exactly the moment the signal should fire.
+///
+/// Elsewhere this is a plain `spawn`: Windows already ties `Managed`
+/// background children to the TUI with a `KILL_ON_JOB_CLOSE` job object
+/// (`attach_windows_job`), and macOS has no kernel equivalent (see the stub
+/// `install_parent_death_signal`).
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn spawn_background_child(mut cmd: Command) -> std::io::Result<Child> {
+    type SpawnRequest = (Command, std::sync::mpsc::SyncSender<std::io::Result<Child>>);
+    static SPAWNER: std::sync::OnceLock<std::io::Result<std::sync::mpsc::Sender<SpawnRequest>>> =
+        std::sync::OnceLock::new();
+
+    let spawner = SPAWNER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<SpawnRequest>();
+        std::thread::Builder::new()
+            .name("codewhale-bg-spawner".to_string())
+            .spawn(move || {
+                // `tx` lives in a static, so this loop runs for the process
+                // lifetime and the thread never retires.
+                for (mut cmd, reply) in rx {
+                    let _ = reply.send(cmd.spawn());
+                }
+            })
+            .map(|_| tx)
+    });
+    let spawner = spawner
+        .as_ref()
+        .map_err(|err| std::io::Error::new(err.kind(), err.to_string()))?;
+
+    install_parent_death_signal(&mut cmd);
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    spawner
+        .send((cmd, reply_tx))
+        .map_err(|_| std::io::Error::other("background spawner thread is gone"))?;
+    reply_rx
+        .recv()
+        .map_err(|_| std::io::Error::other("background spawner thread dropped the request"))?
+}
+
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+fn spawn_background_child(mut cmd: Command) -> std::io::Result<Child> {
+    cmd.spawn()
 }
 
 /// Attach `args` to a `std::process::Command`, honoring shell-quoting on
@@ -583,7 +647,16 @@ fn install_parent_death_signal(_cmd: &mut Command) {
     // No kernel-level equivalent on macOS / Windows. The cooperative
     // cancellation + process_group SIGKILL path covers normal shutdown;
     // abnormal exit (panic without unwind, SIGKILL of the TUI) can still
-    // leak children on those platforms — tracked as a follow-up.
+    // leak children on those platforms — tracked as a follow-up. Windows
+    // pipe-backed background shells are covered by their KILL_ON_JOB_CLOSE
+    // job object; macOS has nothing equivalent.
+    //
+    // Known limitations on every platform (#6654): `tty: true` background
+    // shells spawn through `portable_pty`, which never goes through
+    // `std::process::Command`, so they get no parent-death signal (or job
+    // object); and staged persistent services (`persist_pending`) stay
+    // deliberately unarmed because the signal cannot be cleared once the
+    // user takes ownership of the service.
 }
 
 #[cfg(windows)]
@@ -2632,6 +2705,9 @@ impl ShellManager {
             {
                 cmd.process_group(0);
             }
+            // Deliberately no parent-death signal: a staged service can be
+            // handed to the user (`ShellOwnership::Released`) and must then
+            // outlive the TUI; PR_SET_PDEATHSIG cannot be disarmed (#6654).
 
             child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
             remove_readonly_redirect_env(&mut cmd, &exec_env.env);
@@ -2662,8 +2738,9 @@ impl ShellManager {
             child_env::apply_to_command(&mut cmd, child_env::string_map_env(&exec_env.env));
             remove_readonly_redirect_env(&mut cmd, &exec_env.env);
 
-            let mut child = cmd
-                .spawn()
+            // Managed children die with the TUI (#6654); unlike the
+            // persistent branch above, nobody can take ownership of them.
+            let mut child = spawn_background_child(cmd)
                 .with_context(|| format!("Failed to spawn background: {original_command}"))?;
             #[cfg(windows)]
             {
