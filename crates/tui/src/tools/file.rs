@@ -421,21 +421,6 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
     candidate == config_path || candidate == backup_path
 }
 
-/// Return whether `read_file` must refuse a CodeWhale-owned credential file.
-///
-/// This is deliberately scoped to the active config, the two conventional
-/// config locations (including one-time backups), and CodeWhale's file-backed
-/// secret-store directories. Other dotfiles remain readable. Model-bound
-/// redaction is still required because shell tools can read these files and
-/// arbitrary commands can print credentials without reading a file at all.
-/// Refuse a read the sandbox read deny-list blocks (S1).
-///
-/// `read_file`, `read`, and `read_media` all run *in-process*: they call
-/// `std::fs` inside the harness, so `sandbox-exec` and `bwrap` never see them
-/// and the OS-level deny rules do not apply. This is the enforcement point for
-/// those tools, and the refusal is always an explicit error — never an empty
-/// result, which would read as "the file is empty" and invite the model to
-/// probe siblings.
 /// Resolve a model-supplied path for an in-process read, applying every read
 /// guard in the one safe order: the deny-list on the caller's raw spelling
 /// (so a denial never names a symlink target), then `resolve_path`, then the
@@ -459,6 +444,14 @@ pub(crate) fn resolve_guarded_read_path(
     Ok(path)
 }
 
+/// Refuse a read the sandbox read deny-list blocks (S1).
+///
+/// `read_file`, `read`, and `read_media` all run *in-process*: they call
+/// `std::fs` inside the harness, so `sandbox-exec` and `bwrap` never see them
+/// and the OS-level deny rules do not apply. This is the enforcement point for
+/// those tools, and the refusal is always an explicit error — never an empty
+/// result, which would read as "the file is empty" and invite the model to
+/// probe siblings.
 pub(crate) fn enforce_read_denylist(path: &Path, tool: &str) -> Result<(), ToolError> {
     // Expand the user's home before authorization, retaining the spelling they
     // supplied in every denial. This shares the file tools' path resolution;
@@ -493,6 +486,13 @@ pub(crate) fn enforce_read_denylist(path: &Path, tool: &str) -> Result<(), ToolE
     }
 }
 
+/// Return whether `read_file` must refuse a CodeWhale-owned credential file.
+///
+/// This is deliberately scoped to the active config, the two conventional
+/// config locations (including one-time backups), and CodeWhale's file-backed
+/// secret-store directories. Other dotfiles remain readable. Model-bound
+/// redaction is still required because shell tools can read these files and
+/// arbitrary commands can print credentials without reading a file at all.
 pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
     let candidate = canonical_path_for_credential_guard(path);
 

@@ -173,8 +173,8 @@ quieter, and Fleet runs can be checked before they spend anything.
   file is looked up, through one shared check in the workflow crate.
 - `pandoc_convert` and `image_ocr` apply the same read deny-list and
   credential-store checks as `read`, through one shared helper, and pandoc
-  always runs with `--sandbox`, so include directives and embedded resources
-  cannot pull in other files.
+  always runs with `--sandbox`. This needs pandoc 2.15 or newer; an older
+  pandoc gets an upgrade message instead of a conversion.
 - Computer Use: screenshot and zoom output paths must be `.png`/`.jpg`/`.jpeg`
   files inside the recordings directory, and zoom always crops the last
   captured raster instead of a caller-named source file.
