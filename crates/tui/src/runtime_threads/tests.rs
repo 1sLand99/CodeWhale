@@ -19257,9 +19257,11 @@ async fn canonical_sessions_root_is_resolved_off_the_ui_runtime_and_cached() -> 
 /// the event log built from it) on Runtime API threads, as it is in the
 /// engine transcript.
 #[tokio::test]
-async fn runtime_tool_items_store_tool_output_with_credentials_masked() -> Result<()> {
+async fn runtime_receipts_mask_configured_secrets() -> Result<()> {
     const TOKEN: &str = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij";
+    const EXACT: &str = "abcdefghijklmnopqrst";
     let manager = test_manager(test_runtime_dir())?;
+    manager.config.write().sandbox_api_key = Some(EXACT.to_string());
     let thread = manager
         .create_thread(CreateThreadRequest {
             trust_mode: Some(true),
@@ -19305,7 +19307,7 @@ async fn runtime_tool_items_store_tool_output_with_credentials_masked() -> Resul
             // Real `exec_shell` metadata shape: the summaries carry the
             // first stdout line, here compact JSON as `jq -c` prints it.
             result: Ok(crate::tools::spec::ToolResult::success(format!(
-                "{{\n  \"access_token\": \"{TOKEN}\",\n  \"note\": \"keep me\"\n}}\n"
+                "{{\n  \"access_token\": \"{TOKEN}\",\n  \"note\": \"keep me {EXACT}\"\n}}\n"
             ))
             .with_metadata(json!({
                 "exit_code": 0,
@@ -19313,7 +19315,27 @@ async fn runtime_tool_items_store_tool_output_with_credentials_masked() -> Resul
                 "stdout_summary": format!("{{\"tokens\":{{\"access_token\":\"{TOKEN}\"}}}}"),
                 "stderr_summary": format!("export OPENAI_API_KEY={TOKEN}"),
                 "stdout_len": 120,
+                "nested": {"output": [EXACT]},
+                "api_key": "tiny",
             }))),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallStarted {
+            id: "tool-error".into(),
+            name: "exec_command".into(),
+            input: json!({"cmd": "false"}),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool-error".into(),
+            name: "exec_command".into(),
+            result: Err(crate::tools::spec::ToolError::execution_failed(format!(
+                "failed with {EXACT}"
+            ))),
         })
         .await?;
     harness
@@ -19341,11 +19363,20 @@ async fn runtime_tool_items_store_tool_output_with_credentials_masked() -> Resul
         .context("the tool item keeps its ordinary output")?;
     let stored = serde_json::to_string(tool_item)?;
     assert!(!stored.contains(TOKEN), "{stored}");
+    assert!(
+        !serde_json::to_string(&items)?.contains(EXACT),
+        "exact configured secret survived in a receipt"
+    );
     let metadata = tool_item.metadata.as_ref().context("tool metadata kept")?;
     assert_eq!(metadata["stdout_len"], 120, "ordinary metadata survives");
     assert_eq!(metadata["exit_code"], 0);
+    assert_eq!(metadata["api_key"], codewhale_config::persistence::REDACTED);
     let events = serde_json::to_string(&manager.events_since(&thread.id, None)?)?;
     assert!(!events.contains(TOKEN), "the event log holds no live token");
+    assert!(
+        !events.contains(EXACT),
+        "the event log holds no exact configured secret"
+    );
     Ok(())
 }
 

@@ -8352,6 +8352,10 @@ pub(crate) fn is_workspace_trusted(workspace: &Path) -> bool {
 }
 
 pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
+    set_workspace_trust(workspace, true)
+}
+
+pub(crate) fn set_workspace_trust(workspace: &Path, trusted: bool) -> Result<PathBuf> {
     let config_path =
         try_default_config_path().context("Failed to resolve config path for workspace trust.")?;
     ensure_parent_dir(&config_path)?;
@@ -8361,7 +8365,7 @@ pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
         crate::config_persistence::set_document_value(
             doc,
             &["projects", project_key.as_str(), "trust_level"],
-            "trusted",
+            if trusted { "trusted" } else { "untrusted" },
         )
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;

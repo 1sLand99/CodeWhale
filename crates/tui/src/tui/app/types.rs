@@ -519,6 +519,7 @@ impl ScreenMode {
 /// Actions emitted by the UI event loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
+    SetWorkspaceTrust(bool),
     Quit,
     #[allow(dead_code)] // For explicit /load command
     LoadSession(PathBuf),

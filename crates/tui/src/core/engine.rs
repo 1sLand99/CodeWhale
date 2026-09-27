@@ -7278,6 +7278,25 @@ impl Engine {
         self.refresh_system_prompt_from_context_with_reason(&context, reason);
     }
 
+    // KV-cache effect: append-only user history. SessionUpdated persists this
+    // warning even when an explicit prompt rebuild replaces the system prefix.
+    fn record_project_trust_warning(&mut self) {
+        if let Some(warning) =
+            crate::skills::untrusted_project_skills_warning(&self.session.workspace)
+        {
+            let message = Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: format!("<workspace_trust>\n{warning}\n</workspace_trust>"),
+                    cache_control: None,
+                }],
+            };
+            if !self.session.messages.contains(&message) {
+                self.session.add_message(message);
+            }
+        }
+    }
+
     /// Recompose the stable system prompt from current context. When the bytes
     /// actually change (hash differs), record `reason` as the declared cause
     /// so the turn loop's prefix check re-pins the KV-cache prefix under a
@@ -7290,6 +7309,7 @@ impl Engine {
         context: &NextTurnPromptContext,
         reason: &str,
     ) {
+        self.record_project_trust_warning();
         let stable_prompt = self.compose_stable_system_prompt(context);
 
         let stable_hash = system_prompt_hash(stable_prompt.as_ref());
@@ -7323,6 +7343,7 @@ impl Engine {
         &mut self,
         context: &NextTurnPromptContext,
     ) -> Option<String> {
+        self.record_project_trust_warning();
         if self.session.system_prompt_override {
             return None;
         }

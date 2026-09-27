@@ -48,6 +48,7 @@ mod session_lifecycle_regression_tests;
 
 use std::sync::OnceLock;
 
+pub(crate) use groups::config::config::set_workspace_trust;
 pub use traits::CommandInfo;
 
 // Long-standing public paths that predate the group layout.

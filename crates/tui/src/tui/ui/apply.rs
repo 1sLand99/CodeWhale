@@ -1566,6 +1566,36 @@ async fn apply_command_result_inner(
                     persist_full_reset_snapshot(app);
                 }
             }
+            AppAction::SetWorkspaceTrust(trusted) => {
+                let result = crate::commands::set_workspace_trust(app, trusted).await;
+                sync_mode_update(app, engine_handle).await;
+                match result {
+                    Ok(()) => {
+                        app.push_status_toast(
+                            format!(
+                                "/trust: {} ({})",
+                                tr(
+                                    app.ui_locale,
+                                    if trusted {
+                                        MessageId::ConfigValueOn
+                                    } else {
+                                        MessageId::ConfigValueOff
+                                    }
+                                ),
+                                tr(app.ui_locale, MessageId::ConfigScopeSaved),
+                            ),
+                            StatusToastLevel::Info,
+                            None,
+                        );
+                    }
+                    Err(error) => app.push_status_toast(
+                        tr(app.ui_locale, MessageId::AutomationEditorSaveFailed)
+                            .replace("{error}", &format!("/trust: {error:#}")),
+                        StatusToastLevel::Error,
+                        None,
+                    ),
+                }
+            }
             AppAction::ModeChanged(_mode) => {
                 sync_mode_update(app, engine_handle).await;
             }

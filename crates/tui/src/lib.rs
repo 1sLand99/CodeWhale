@@ -2357,7 +2357,9 @@ async fn run_async_main_dispatch(
             } => match command {
                 None => list_sessions(limit, search),
                 Some(SessionsCommand::List { limit, search }) => list_sessions(limit, search),
-                Some(SessionsCommand::ScrubSecrets { apply }) => run_sessions_scrub_secrets(apply),
+                Some(SessionsCommand::ScrubSecrets { apply }) => {
+                    run_sessions_scrub_secrets(apply).await
+                }
                 Some(SessionsCommand::Export {
                     id,
                     output,
@@ -8208,53 +8210,87 @@ const DOCTOR_SECRET_SCAN_FILES: usize = 50;
 async fn print_doctor_stored_secrets_report() {
     use colored::Colorize;
 
-    let scan = tokio::task::spawn_blocking(|| {
-        let sessions_dir = codewhale_config::resolve_state_dir("sessions").ok()?;
-        let files = session_secret_scrub::session_files(&sessions_dir);
+    let scan = tokio::task::spawn_blocking(|| -> Result<_> {
+        let sessions_dir = codewhale_config::resolve_state_dir("sessions")?;
+        let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+            task_manager::default_tasks_dir(),
+        );
+        let files = session_secret_scrub::session_files(&sessions_dir, &runtime.data_dir)?;
         let total = files.len();
         let checked: Vec<PathBuf> = files.into_iter().take(DOCTOR_SECRET_SCAN_FILES).collect();
-        session_secret_scrub::scrub_files(&checked, None)
-            .ok()
-            .map(|report| (report, total))
+        Ok((session_secret_scrub::scrub_files(&checked, None)?, total))
     })
-    .await
-    .ok()
-    .flatten();
-    let Some((report, total)) = scan else {
-        return;
-    };
+    .await;
     println!();
     println!("{}", "Stored Sessions:".bold());
+    match scan {
+        Ok(Ok((report, total))) => println!("{}", doctor_stored_secrets_summary(&report, total)),
+        _ => println!("  ! stored credential scan could not be completed"),
+    }
+}
+
+fn doctor_stored_secrets_summary(
+    report: &session_secret_scrub::ScrubReport,
+    total: usize,
+) -> String {
     let scope = if total > report.files_scanned {
         format!("newest {} of {total}", report.files_scanned)
     } else {
         format!("{total}")
     };
-    if report.flagged_files.is_empty() {
-        println!("  ✓ no credentials found in stored tool output ({scope} session files)");
-        return;
+    let mut lines = Vec::new();
+    if report.flagged_files.is_empty() && report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ✓ no credentials found in stored tool output ({scope} files)"
+        ));
     }
-    println!(
-        "  ✗ {} session files hold credentials in stored tool output ({scope} checked)",
-        report.flagged_files.len()
-    );
-    println!(
-        "    fix: `{}` to review, then `--apply` to mask them; rotate any exposed credential",
-        session_secret_scrub::SCRUB_COMMAND
-    );
+    if !report.flagged_files.is_empty() {
+        lines.push(format!(
+            "  ✗ {} files hold credentials in stored tool output ({scope} checked)",
+            report.flagged_files.len()
+        ));
+        lines.push(format!(
+            "    fix: `{}` to review, then `--apply` to mask them; rotate any exposed credential",
+            session_secret_scrub::SCRUB_COMMAND
+        ));
+    }
+    if !report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ! scan incomplete: {} files could not be read or parsed ({scope} checked)",
+            report.unreadable.len()
+        ));
+        for path in &report.unreadable {
+            lines.push(format!("    {}", path.display()));
+        }
+    }
+    lines.join("\n")
 }
 
-fn run_sessions_scrub_secrets(apply: bool) -> Result<()> {
+async fn run_sessions_scrub_secrets(apply: bool) -> Result<()> {
+    #[cfg(test)]
+    let ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(ticket);
+        run_sessions_scrub_secrets_blocking(apply)
+    })
+    .await?
+}
+
+fn run_sessions_scrub_secrets_blocking(apply: bool) -> Result<()> {
     let manager = session_manager::SessionManager::default_location()?;
-    let files = session_secret_scrub::session_files(manager.sessions_dir());
+    let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+        task_manager::default_tasks_dir(),
+    );
+    let files = session_secret_scrub::session_files(manager.sessions_dir(), &runtime.data_dir)?;
     let report = session_secret_scrub::scrub_files(&files, apply.then_some(&manager))?;
     let affected = report.flagged_files.len();
-    if affected == 0 {
+    if affected == 0 && report.unreadable.is_empty() {
         println!(
-            "No stored credentials found in tool output across {} session files.",
+            "No stored credentials found in tool output across {} files.",
             report.files_scanned
         );
-    } else {
+    } else if affected > 0 {
         let verb = if apply { "Scrubbed" } else { "Found" };
         println!(
             "{verb} {} credential-bearing tool results in {affected} of {} session files:",
@@ -13330,6 +13366,61 @@ mod doctor_legacy_state_tests {
     use std::ffi::OsString;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn doctor_reports_unreadable_files_without_clean_marker() {
+        let tmp = TempDir::new().unwrap();
+        let broken = tmp.path().join("broken.json");
+        fs::write(&broken, "{\"access_token\": unfinished").unwrap();
+        let mut report =
+            session_secret_scrub::scrub_files(std::slice::from_ref(&broken), None).unwrap();
+        let summary = doctor_stored_secrets_summary(&report, 1);
+        assert!(summary.contains("scan incomplete") && summary.contains("broken.json"));
+        assert!(!summary.contains('✓') && !summary.contains("no credentials found"));
+        report.flagged_files.push(tmp.path().join("dirty.json"));
+        let summary = doctor_stored_secrets_summary(&report, 2);
+        assert!(summary.contains("hold credentials") && summary.contains("scan incomplete"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scrub_does_not_block_tokio_worker() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let _env = lock_test_env();
+        let tmp = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let _runtime = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", tmp.path().join("runtime"));
+        let manager = session_manager::SessionManager::default_location().unwrap();
+        fs::write(manager.sessions_dir().join("dirty.json"), serde_json::json!({"type":"tool_result", "content":"sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij"}).to_string()).unwrap();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let progressed = Arc::new(AtomicBool::new(false));
+        let progress_for_lock = progressed.clone();
+        let holder = std::thread::spawn(move || {
+            manager
+                .with_session_file_lock("dirty", || {
+                    locked_tx.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    Ok(progress_for_lock.load(Ordering::SeqCst))
+                })
+                .unwrap()
+                .unwrap()
+        });
+        locked_rx.recv().unwrap();
+        let tick = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            progressed.store(true, Ordering::SeqCst);
+        });
+        run_sessions_scrub_secrets(true).await.unwrap();
+        assert!(
+            holder.join().unwrap(),
+            "the timer must run while the scrub waits on the file lock"
+        );
+        tick.await.unwrap();
+    }
 
     struct EnvVarRestore {
         key: &'static str,
