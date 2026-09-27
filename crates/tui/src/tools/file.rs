@@ -436,6 +436,29 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
 /// those tools, and the refusal is always an explicit error — never an empty
 /// result, which would read as "the file is empty" and invite the model to
 /// probe siblings.
+/// Resolve a model-supplied path for an in-process read, applying every read
+/// guard in the one safe order: the deny-list on the caller's raw spelling
+/// (so a denial never names a symlink target), then `resolve_path`, then the
+/// credential-store check and the deny-list again on the resolved path.
+///
+/// Every tool that reads a file's content in-process and hands it (or a
+/// derivative) to the model goes through this.
+pub(crate) fn resolve_guarded_read_path(
+    context: &ToolContext,
+    raw: &str,
+    tool: &str,
+) -> Result<PathBuf, ToolError> {
+    enforce_read_denylist(Path::new(raw), tool)?;
+    let path = context.resolve_path(raw)?;
+    if is_codewhale_credential_path(&path) {
+        return Err(ToolError::permission_denied(format!(
+            "{tool} cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection"
+        )));
+    }
+    enforce_read_denylist(&path, tool)?;
+    Ok(path)
+}
+
 pub(crate) fn enforce_read_denylist(path: &Path, tool: &str) -> Result<(), ToolError> {
     // Expand the user's home before authorization, retaining the spelling they
     // supplied in every denial. This shares the file tools' path resolution;
@@ -763,14 +786,7 @@ impl ReadFileTool {
         // raw spelling still matches by its target; the resolved check after
         // `resolve_path` stays as defense in depth for callers whose process
         // cwd is not the workspace.
-        enforce_read_denylist(Path::new(path_str), "read")?;
-        let file_path = context.resolve_path(path_str)?;
-        if is_codewhale_credential_path(&file_path) {
-            return Err(ToolError::permission_denied(
-                "read cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
-            ));
-        }
-        enforce_read_denylist(&file_path, "read")?;
+        let file_path = resolve_guarded_read_path(context, path_str, "read")?;
         check_file_operation_cancelled(context)?;
         let bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Failed to read {}: {error}", file_path.display()))
@@ -941,14 +957,7 @@ impl ToolSpec for ReadFileTool {
         // S1/F2: raw spelling first, resolved path after — see the matching
         // comment in `execute_contract_read`. Only the raw-spelling denial can
         // promise an error that never names the symlink target's location.
-        enforce_read_denylist(Path::new(path_str), "read_file")?;
-        let file_path = context.resolve_path(path_str)?;
-        if is_codewhale_credential_path(&file_path) {
-            return Err(ToolError::permission_denied(
-                "File `read` cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
-            ));
-        }
-        enforce_read_denylist(&file_path, "read_file")?;
+        let file_path = resolve_guarded_read_path(context, path_str, "read_file")?;
         let pages = optional_str(&input, "pages")?;
 
         if let Some(result) = read_pdf_if_detected(

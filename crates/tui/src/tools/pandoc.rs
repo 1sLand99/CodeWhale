@@ -119,7 +119,13 @@ impl ToolSpec for PandocConvertTool {
             )));
         }
 
-        let source_path = context.resolve_path(source_path_str)?;
+        // pandoc reads the source in full and its output goes to the model,
+        // so it takes the same read guards as `read`.
+        let source_path = crate::tools::file::resolve_guarded_read_path(
+            context,
+            source_path_str,
+            "pandoc_convert",
+        )?;
         if !source_path.exists() {
             return Err(ToolError::execution_failed(format!(
                 "source_path does not exist: {}",
@@ -155,6 +161,12 @@ impl ToolSpec for PandocConvertTool {
         })?;
 
         let mut cmd = Command::new(&pandoc);
+        // `--sandbox` stops readers and writers from touching any file but
+        // the named source and output: no include directives, no embedded
+        // images or other resources fetched from disk or the network. A
+        // pandoc too old to know the flag fails the call instead of running
+        // without it.
+        cmd.arg("--sandbox");
         cmd.arg(&source_path);
         cmd.arg("--to").arg(&target_format);
         if let Some(out) = resolved_output_path.as_ref() {
@@ -259,6 +271,70 @@ mod tests {
             "commonmark",
         ] {
             assert!(!format_is_binary(fmt));
+        }
+    }
+
+    #[tokio::test]
+    async fn pandoc_convert_refuses_deny_listed_sources() {
+        // `.env` is on the default read deny-list; the refusal comes before
+        // pandoc would run, so this holds with or without pandoc installed.
+        let tmp = tempdir().expect("tempdir");
+        fs::write(tmp.path().join(".env"), "TOKEN=SECRET_PANDOC_VALUE\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.path().join(".env"), tmp.path().join("notes.md")).unwrap();
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let mut sources = vec![".env"];
+        if cfg!(unix) {
+            sources.push("notes.md");
+        }
+        for source in sources {
+            let err = PandocConvertTool
+                .execute(
+                    json!({"source_path": source, "target_format": "plain"}),
+                    &ctx,
+                )
+                .await
+                .expect_err("a deny-listed source must be refused");
+            assert!(
+                matches!(err, ToolError::PermissionDenied { .. }),
+                "{source}: {err:?}"
+            );
+            assert!(!err.to_string().contains("SECRET_PANDOC_VALUE"));
+        }
+    }
+
+    #[tokio::test]
+    async fn pandoc_convert_does_not_follow_include_directives() {
+        if !pandoc_present() {
+            return;
+        }
+        let outside = tempdir().expect("outside");
+        let secret = outside.path().join("outside.txt");
+        fs::write(&secret, "SECRET_INCLUDED_VALUE\n").unwrap();
+        let tmp = tempdir().expect("tempdir");
+        fs::write(
+            tmp.path().join("p.rst"),
+            format!("Intro\n\n.. include:: {}\n", secret.display()),
+        )
+        .unwrap();
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let result = PandocConvertTool
+            .execute(
+                json!({"source_path": "p.rst", "target_format": "plain"}),
+                &ctx,
+            )
+            .await;
+        if let Err(err) = &result
+            && pandoc_environment_unavailable(err)
+        {
+            return;
+        }
+        if let Ok(result) = result {
+            assert!(
+                !result.content.contains("SECRET_INCLUDED_VALUE"),
+                "include directive must not pull in outside files: {}",
+                result.content
+            );
         }
     }
 
