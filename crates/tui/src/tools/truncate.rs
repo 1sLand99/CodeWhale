@@ -788,10 +788,23 @@ fn preview_footer(
     }
 }
 
+/// Drop the path and preview before sacrificing the retrieval reference.
+/// Budgets smaller than this complete instruction cannot contain a usable
+/// receipt: keep it intact and let the wire's recovery-marker guard preserve it.
+fn compact_recovery_footer(retrieval_ref: Option<&str>) -> String {
+    match retrieval_ref {
+        Some(reference) => {
+            format!("{SPILLOVER_RECOVERY_HINT} retrieve_tool_result ref=\"{reference}\"")
+        }
+        None => format!("{SPILLOVER_RECOVERY_HINT} re-run with narrower output"),
+    }
+}
+
 /// Fit `content` into `budget` characters for the model: nothing changes when
 /// it already fits; otherwise a head (two thirds) and a tail (one third)
 /// around one recovery footer. The cut is measured in bytes, so the result
-/// never exceeds `budget` characters either.
+/// never exceeds `budget` characters either, unless the budget cannot hold
+/// even a compact recovery instruction (which must remain intact).
 pub(crate) fn fit_to_inline_budget(
     content: &str,
     budget: usize,
@@ -807,6 +820,9 @@ pub(crate) fn fit_to_inline_budget(
         recovery_path,
         retrieval_ref,
     );
+    if footer.len() + PREVIEW_FRAME_BYTES > budget {
+        return compact_recovery_footer(retrieval_ref);
+    }
     let room = budget.saturating_sub(footer.len() + PREVIEW_FRAME_BYTES);
     let head_bytes = room * 2 / 3;
     let (head, tail) = head_tail_windows(content, head_bytes, room - head_bytes);
@@ -861,6 +877,9 @@ pub(crate) fn refit_spilled_preview(
         recovery_path,
         retrieval_ref,
     );
+    if footer.len() + PREVIEW_FRAME_BYTES > budget {
+        return Some(compact_recovery_footer(retrieval_ref));
+    }
     let room = budget.saturating_sub(footer.len() + PREVIEW_FRAME_BYTES);
     let head_bytes = (room * 2 / 3).min(head_len);
     let tail_bytes = (room - head_bytes).min(tail_len);
@@ -1111,6 +1130,48 @@ where
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn tiny_inline_budgets_keep_the_complete_retrieval_reference() {
+        let content = "你好 output\n".repeat(500);
+        let path = format!(
+            "/very-long-workspace/{}/art_call-1.txt",
+            "nested/".repeat(100)
+        );
+        let reference = "art_12345678-1234-1234-1234-123456789abc";
+        let metadata = serde_json::json!({
+            "retained_head_bytes": 1000,
+            "retained_tail_bytes": 1000,
+            "original_byte_count": content.len(),
+            "original_line_count": content.lines().count(),
+        });
+        let preview = format!(
+            "{}\n\n{}\n\n…\n{}",
+            "h".repeat(1000),
+            spillover_preview_footer(content.len() - 2000, 300, &path, Some(reference)),
+            "t".repeat(1000),
+        );
+        for budget in [120, 160, 200, 1200] {
+            for fitted in [
+                fit_to_inline_budget(&content, budget, Some(&path), Some(reference)),
+                refit_spilled_preview(&preview, &metadata, budget, Some(&path), Some(reference))
+                    .unwrap(),
+            ] {
+                assert!(fitted.len() <= budget, "{budget}: {fitted}");
+                assert!(fitted.contains(&format!("ref=\"{reference}\"")), "{fitted}");
+                assert!(fitted.contains("retrieve_tool_result"), "{fitted}");
+                assert!(fitted.contains(SPILLOVER_RECOVERY_HINT), "{fitted}");
+            }
+        }
+        // Even an impossible allowance must not amputate a reference. The
+        // marker tells the wire backstop to preserve this complete receipt.
+        let fitted = fit_to_inline_budget(&content, 1, Some(&path), Some(reference));
+        assert!(fitted.contains(reference));
+        assert!(fitted.contains(SPILLOVER_RECOVERY_HINT));
+        let unsaved = fit_to_inline_budget(&content, 120, None, None);
+        assert!(unsaved.len() <= 120);
+        assert!(!unsaved.contains("retrieve_tool_result"));
+    }
 
     /// Tests in this module serialize through this guard because they mutate
     /// process-global test storage roots. Without it, cargo's parallel runner

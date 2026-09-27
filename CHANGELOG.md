@@ -285,6 +285,9 @@ quieter, and Fleet runs can be checked before they spend anything.
   can be read back with `retrieve_tool_result`, including read-only tools
   executed alone or in parallel. Restored raw results use the
   active route's same inline budget; existing recovery receipts stay intact.
+  Tiny budgets use a compact retrieval reference instead of a long artifact
+  path and instructions; a complete reference is kept even when it alone
+  exceeds the allowance.
   Native search now asks for answers up to 8,192 tokens (was 2,048–4,096)
   and waits long enough for
   them to arrive, and an answer the provider still cuts short is marked as
@@ -416,7 +419,9 @@ quieter, and Fleet runs can be checked before they spend anything.
   Model Studio plans (quota or credits, not per-token) and StepFun. DeepSeek's output limit stays at its
   published 384K instead of the refreshed 393,216, and the reasoning controls
   Codewhale records for Grok, MiniMax, Qwen 3.8 Max, Muse Spark and Step 3.5
-  (defaults, always-on thinking, extra effort tiers) survive the refresh
+  (defaults, always-on thinking, extra effort tiers) survive the refresh.
+  Committed corrections now fail at load if their provider or model is missing
+  from the bundled seed; partial live refreshes may still omit those rows
   ([#6396](https://github.com/Hmbown/Codewhale/issues/6396)).
 - The offline model list is now generated from Models.dev instead of edited by
   hand, so a fresh install without network sees the same limits, image
@@ -680,11 +685,13 @@ quieter, and Fleet runs can be checked before they spend anything.
   where it stands against its upstream, the changes (with their paths one
   Enter away), linked worktrees and the last five commits, and it keeps
   updating during a turn while it is open. It says "not a git repository"
-  only when that is true, counts every unmerged path as a conflict, and only
+  only when that is true, reports failed status probes in the view and composer
+  instead of claiming a clean tree, counts every unmerged path as a conflict, and only
   says there are more changed paths when the list is capped. FILES lists the
   files this session edited, including writes without diff receipts, and the
   files it read, with every unique path retained beyond the activity summary's
-  twelve-path preview. Edits with receipts show their size and open their diff.
+  twelve-path preview. FILES and its badge refresh from the current session
+  even before TASKS opens. Edits with receipts show their size and open their diff.
   NOTES lists your `/note` notes. The git
   badge, the Git view and the model's git line now share one
   `git status --porcelain=v2` call, so there are fewer git processes than

@@ -126,11 +126,37 @@ impl CatalogCorrections {
         Ok(())
     }
 
+    /// Validate committed referents against the seed, not a partial live refresh.
+    fn validate_targets(&self, seed: &[CatalogOffering]) -> Result<(), String> {
+        for rule in &self.providers {
+            if !seed.iter().any(|row| row.provider == rule.provider) {
+                return Err(format!(
+                    "{}: correction provider missing from bundled seed",
+                    rule.provider
+                ));
+            }
+        }
+        for correction in &self.models {
+            let fact = &correction.fact;
+            if !seed
+                .iter()
+                .any(|row| row.provider == fact.provider && row.wire_model_id == fact.id)
+            {
+                return Err(format!(
+                    "{}/{}: correction model missing from bundled seed",
+                    fact.provider, fact.id
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Apply every correction to the rows it names, in place.
     ///
     /// Provider rules run first, then per-row patches, so a row patch can add
     /// to a provider rule (a DeepSeek output limit on top of its withheld
-    /// price). Rows no rule names are untouched.
+    /// price). Rows no rule names are untouched. Live refreshes may omit
+    /// correction targets; only the committed seed must contain every target.
     pub fn apply_to(&self, rows: &mut [CatalogOffering]) {
         let mut patches: BTreeMap<(String, String), Vec<ModelFact>> = BTreeMap::new();
         for rule in &self.providers {
@@ -190,14 +216,58 @@ fn owns_price(fact: &ModelFact) -> bool {
 /// The committed corrections, parsed once.
 ///
 /// # Panics
-/// Panics only if the committed asset is invalid; the
-/// `committed_corrections_parse_and_validate` test makes that a build-time
-/// failure.
+/// Panics if the committed asset is invalid or names a missing seed target.
 #[must_use]
 pub fn bundled_corrections() -> &'static CatalogCorrections {
     static CORRECTIONS: OnceLock<CatalogCorrections> = OnceLock::new();
     CORRECTIONS.get_or_init(|| {
-        CatalogCorrections::parse(CATALOG_CORRECTIONS_JSON)
-            .expect("committed catalog corrections must be valid")
+        let corrections = CatalogCorrections::parse(CATALOG_CORRECTIONS_JSON)
+            .expect("committed catalog corrections must be valid");
+        let seed = super::bundled_offerings_from_models_dev(super::bundled_models_dev_catalog());
+        corrections
+            .validate_targets(&seed)
+            .expect("committed catalog correction targets must exist");
+        corrections
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_seed_targets_fail_validation_but_partial_live_refreshes_are_allowed() {
+        let corrections = bundled_corrections();
+        let seed = super::super::bundled_offerings_from_models_dev(
+            super::super::bundled_models_dev_catalog(),
+        );
+        let provider = &corrections.providers[0].provider;
+        let without_provider: Vec<_> = seed
+            .iter()
+            .filter(|row| &row.provider != provider)
+            .cloned()
+            .collect();
+        let error = corrections.validate_targets(&without_provider).unwrap_err();
+        assert!(error.contains(provider), "{error}");
+
+        let target = &corrections.models[0].fact;
+        let mut without_model = seed;
+        without_model
+            .retain(|row| row.provider != target.provider || row.wire_model_id != target.id);
+        let error = corrections.validate_targets(&without_model).unwrap_err();
+        assert!(
+            error.contains(&format!("{}/{}", target.provider, target.id)),
+            "{error}"
+        );
+
+        // Absence from a live refresh does not invalidate committed corrections
+        // or invent a row to patch.
+        corrections.apply_to(&mut without_model);
+        assert!(
+            !without_model
+                .iter()
+                .any(|row| row.provider == target.provider && row.wire_model_id == target.id)
+        );
+        corrections.apply_to(&mut []);
+    }
 }

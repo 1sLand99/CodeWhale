@@ -268,11 +268,13 @@ fn parse_porcelain_v1(raw: &str) -> (ChangeCounts, Vec<ChangedPath>, usize) {
 }
 
 /// Branch, upstream and changes for `workspace` from one git call (two on a
-/// git without porcelain v2). `None` outside a repository or without git.
+/// git without porcelain v2). Errors outside a repository or when status fails.
 /// This is the whole cost of the engine's per-turn git line.
-#[must_use]
-pub fn probe_workspace_status(workspace: &Path) -> Option<PorcelainStatus> {
-    crate::project_context::find_git_root(workspace)?;
+///
+/// # Errors
+/// Returns the Git diagnostic if status cannot be read.
+pub fn probe_workspace_status(workspace: &Path) -> Result<PorcelainStatus, String> {
+    crate::project_context::find_git_root(workspace).ok_or("not a git repository")?;
     let raw = git_output(
         workspace,
         &[
@@ -285,18 +287,17 @@ pub fn probe_workspace_status(workspace: &Path) -> Option<PorcelainStatus> {
     )
     .ok();
     if let Some(status) = raw.as_deref().and_then(parse_porcelain_v2) {
-        return Some(status);
+        return Ok(status);
     }
     legacy_workspace_status(workspace)
 }
 
 /// The pre-2.11 path: the three calls porcelain v2 replaced.
-fn legacy_workspace_status(workspace: &Path) -> Option<PorcelainStatus> {
+fn legacy_workspace_status(workspace: &Path) -> Result<PorcelainStatus, String> {
     let raw = git_output(
         workspace,
         &["status", "--porcelain", "--untracked-files=normal"],
-    )
-    .ok()?;
+    )?;
     let (changes, changed_paths, changed_path_count) = parse_porcelain_v1(&raw);
     let head = git_output(workspace, &["symbolic-ref", "--short", "HEAD"])
         .ok()
@@ -325,7 +326,7 @@ fn legacy_workspace_status(workspace: &Path) -> Option<PorcelainStatus> {
             status.upstream = Some("@{upstream}".to_string());
         }
     }
-    Some(status)
+    Ok(status)
 }
 
 /// `branch | 2 staged, 1 modified` — the composer badge and the engine's
@@ -343,8 +344,11 @@ pub fn status_line(status: &PorcelainStatus) -> Option<String> {
 /// found a repository.
 #[must_use]
 pub fn context_line(snap: &GitStatusSnapshot) -> Option<String> {
-    let branch = snap.branch.as_deref()?;
     snap.root.as_ref()?;
+    if let Some(error) = &snap.error {
+        return Some(error.clone());
+    }
+    let branch = snap.branch.as_deref()?;
     let branch = if snap.detached {
         format!("detached:{branch}")
     } else {
@@ -464,19 +468,25 @@ pub(crate) fn probe_status(workspace: &Path) -> GitStatusSnapshot {
     snap.is_linked_worktree = is_linked_worktree;
 
     // Branch, upstream, ahead/behind and every changed path: one call.
-    if let Some(status) = probe_workspace_status(&root) {
-        snap.detached = status.head.is_none();
-        snap.branch = status
-            .head
-            .clone()
-            .or_else(|| status.oid.as_deref().map(|oid| short_oid(oid).to_string()));
-        snap.has_upstream = status.upstream.is_some();
-        snap.ahead = status.ahead;
-        snap.behind = status.behind;
-        snap.dirty = !status.changes.is_clean();
-        snap.changes = status.changes;
-        snap.changed_paths = status.changed_paths;
-        snap.changed_path_count = status.changed_path_count;
+    match probe_workspace_status(&root) {
+        Ok(status) => {
+            snap.detached = status.head.is_none();
+            snap.branch = status
+                .head
+                .clone()
+                .or_else(|| status.oid.as_deref().map(|oid| short_oid(oid).to_string()));
+            snap.has_upstream = status.upstream.is_some();
+            snap.ahead = status.ahead;
+            snap.behind = status.behind;
+            snap.dirty = !status.changes.is_clean();
+            snap.changes = status.changes;
+            snap.changed_paths = status.changed_paths;
+            snap.changed_path_count = status.changed_path_count;
+        }
+        Err(error) => {
+            snap.error = Some(format!("git status failed: {}", error.trim()));
+            return snap;
+        }
     }
 
     // The forge slug (`owner/name`), reusing the remote-control probe rather

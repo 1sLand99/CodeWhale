@@ -175,6 +175,7 @@ pub(super) fn refresh_now(app: &mut App, now: Instant) {
 /// git line reads this.
 pub(crate) fn collect(workspace: &Path) -> Option<String> {
     crate::tui::git_status::probe_workspace_status(workspace)
+        .ok()
         .as_ref()
         .and_then(crate::tui::git_status::status_line)
 }

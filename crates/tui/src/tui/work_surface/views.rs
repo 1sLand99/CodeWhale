@@ -18,9 +18,9 @@ pub(super) const fn view_always_has_content(panel: RailPanel) -> bool {
     )
 }
 
-/// Files this session edited or read, from the settled activity the TASKS
-/// projection already computed this frame (no second history scan).
+/// Files this session edited or read, even before TASKS has been projected.
 pub(super) fn files_touched_count(app: &mut App) -> usize {
+    app.work_surface.file_activity = super::model::settled_file_activity(app);
     let activity = &app.work_surface.file_activity;
     edited_files(activity).len() + activity.read.len()
 }
@@ -52,6 +52,7 @@ fn edited_files(
 /// The FILES view: what this session changed (with each change's size and
 /// its evidence one Enter away), then what it read (#6565).
 pub(super) fn files_rows(app: &mut App) -> Vec<WorkRow> {
+    app.work_surface.file_activity = super::model::settled_file_activity(app);
     let activity = app.work_surface.file_activity.clone();
     let mut out = Vec::new();
     let edited = edited_files(&activity);
@@ -314,7 +315,7 @@ fn git_rows_for(
     let probed_here = snap.probed_workspace.as_deref() == Some(workspace);
     if !probed_here || snap.fetched_at.is_none() {
         vec![note_row("git:state", "reading git status…")]
-    } else if let Some(error) = snap.error.as_deref().filter(|_| snap.root.is_none()) {
+    } else if let Some(error) = snap.error.as_deref() {
         vec![note_row("git:state", error)]
     } else {
         git_state_rows(snap)
@@ -722,10 +723,93 @@ mod tests {
         }
     }
 
+    fn record_file(app: &mut App, id: &str, action: &str, path: &str, diff: Option<String>) {
+        use crate::tools::spec::ToolResult;
+        use crate::tui::tool_routing::{handle_tool_call_complete, handle_tool_call_started};
+        let input = serde_json::json!({"action": action, "path": path, "content": "new"});
+        handle_tool_call_started(app, id, "File", &input);
+        let mut result = ToolResult::success("ok");
+        if let Some(diff) = diff {
+            result = result.with_metadata(serde_json::json!({"mutation": {
+                "diff": diff, "files": [{"path": path, "outcome": "updated"}],
+            }}));
+        }
+        handle_tool_call_complete(app, id, "File", &Ok(result));
+        app.flush_active_cell();
+    }
+
+    #[test]
+    fn files_and_badge_follow_current_history_without_opening_tasks() {
+        for badge_first in [false, true] {
+            let mut app = app();
+            app.current_session_id = Some("session-a".into());
+            record_file(&mut app, "first", "write", "first.rs", None);
+            if badge_first {
+                assert_eq!(files_touched_count(&mut app), 1);
+            } else {
+                assert!(
+                    files_rows(&mut app)
+                        .iter()
+                        .any(|row| row.label == "first.rs")
+                );
+            }
+            record_file(&mut app, "second", "read", "second.rs", None);
+            if badge_first {
+                assert_eq!(files_touched_count(&mut app), 2);
+            } else {
+                assert!(
+                    files_rows(&mut app)
+                        .iter()
+                        .any(|row| row.label == "second.rs")
+                );
+            }
+            // Keep the old projection, as a session switch can, but replace
+            // the transcript that owns the next session's activity.
+            app.history.clear();
+            app.current_session_id = Some("session-b".into());
+            if badge_first {
+                assert_eq!(files_touched_count(&mut app), 0);
+                assert!(files_rows(&mut app).is_empty());
+            } else {
+                assert!(files_rows(&mut app).is_empty());
+                assert_eq!(files_touched_count(&mut app), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_git_status_reports_the_error_in_the_view_and_composer() {
+        use crate::tui::git_status::{context_line, probe_status};
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path();
+        let init = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(workspace)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let clean = probe_status(workspace);
+        assert!(clean.error.is_none(), "{clean:?}");
+        assert!(context_line(&clean).unwrap().contains("clean"));
+        std::fs::write(workspace.join(".git/index"), b"broken index").unwrap();
+        let failed = probe_status(workspace);
+        assert!(failed.root.is_some(), "root discovery still succeeds");
+        let error = failed
+            .error
+            .as_deref()
+            .expect("status failure must be recorded");
+        assert!(error.contains("git status failed"), "{error}");
+        assert!(error.contains("index"), "{error}");
+        assert_eq!(context_line(&failed).as_deref(), Some(error));
+        let rows = git_rows_for(&failed, workspace);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, error);
+        assert!(!rows[0].label.contains("clean"));
+    }
+
     #[test]
     fn files_include_successful_writes_without_receipts() {
         use crate::tools::spec::ToolResult;
-        use crate::tui::history::{FileMutationFile, FileMutationOutcome, FileMutationReceipt};
         use crate::tui::tool_routing::{handle_tool_call_complete, handle_tool_call_started};
         let mut app = app();
         for (id, action, path) in [("write", "write", "new.rs"), ("edit", "edit", "edited.rs")] {
@@ -734,8 +818,6 @@ mod tests {
             handle_tool_call_complete(&mut app, id, "File", &Ok(ToolResult::success("ok")));
             app.flush_active_cell();
         }
-        app.work_surface.file_activity = super::super::model::settled_file_activity(&app);
-        assert!(app.work_surface.file_activity.mutations.is_empty());
         assert_eq!(files_touched_count(&mut app), 2);
         let rows = files_rows(&mut app);
         for path in ["new.rs", "edited.rs"] {
@@ -748,20 +830,13 @@ mod tests {
             assert!(row.detail.is_empty());
         }
         // A receipt for an already-listed write adds its diff, not a second row.
-        app.work_surface
-            .file_activity
-            .mutations
-            .push(FileMutationReceipt {
-                exact_diff: String::new(),
-                display_diff: String::new(),
-                files: vec![FileMutationFile {
-                    path: "edited.rs".into(),
-                    previous_path: None,
-                    outcome: FileMutationOutcome::Updated,
-                }],
-                added: 1,
-                deleted: 0,
-            });
+        record_file(
+            &mut app,
+            "receipt",
+            "edit",
+            "edited.rs",
+            Some("--- a/edited.rs\n+++ b/edited.rs\n@@ -0,0 +1 @@\n+new\n".into()),
+        );
         let rows = files_rows(&mut app);
         assert_eq!(files_touched_count(&mut app), 2);
         assert_eq!(
@@ -778,26 +853,16 @@ mod tests {
 
     #[test]
     fn the_files_view_lists_edits_with_their_size_then_reads() {
-        use crate::tui::history::{FileMutationFile, FileMutationOutcome};
         let mut app = app();
         assert!(files_rows(&mut app).is_empty());
         assert_eq!(files_touched_count(&mut app), 0);
-        let receipt = crate::tui::history::FileMutationReceipt {
-            exact_diff: String::new(),
-            display_diff: String::new(),
-            files: vec![FileMutationFile {
-                path: "src/lib.rs".to_string(),
-                previous_path: None,
-                outcome: FileMutationOutcome::Updated,
-            }],
-            added: 12,
-            deleted: 3,
-        };
-        app.work_surface.file_activity.mutations.push(receipt);
-        app.work_surface
-            .file_activity
-            .read
-            .push("Cargo.toml".to_string());
+        let diff = format!(
+            "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,12 @@\n{}{}",
+            "-old\n".repeat(3),
+            "+new\n".repeat(12),
+        );
+        record_file(&mut app, "edit", "edit", "src/lib.rs", Some(diff));
+        record_file(&mut app, "read", "read", "Cargo.toml", None);
         let rows = files_rows(&mut app);
         let labels = rows
             .iter()
