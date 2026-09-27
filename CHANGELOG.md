@@ -200,6 +200,37 @@ quieter, and Fleet runs can be checked before they spend anything.
   (a word for an on/off switch, text for a number, a choice outside the list)
   instead of saving it ([#6568](https://github.com/Hmbown/Codewhale/pull/6568),
   thanks @dajiaohuang).
+- Receipts: `/receipts`, `codewhale receipts [ID|--last] [--format md|json]`,
+  and `GET /v1/threads/{id}/receipt` (plus a per-turn form) list what a session
+  did, one line per action: files changed with line counts, commands with exit
+  codes, web and MCP calls, agents, approvals and who gave them, and failures.
+  They also count what ran without asking and name the posture each turn ran
+  under, read from the turn's own record. A call Codewhale blocked before it
+  started (Auto-Review or guardian, a tool policy, a refused sandbox
+  escalation, invalid input, a missing tool) is listed as blocked, with the
+  reason, and is not counted as run or as ran without asking. Only
+  Codewhale's own refusal text counts: an MCP server, a fetched page, or a
+  program cannot make a call that ran read as blocked. A terminal
+  session's receipt also lists the files a command changed in each turn,
+  from the workspace snapshots taken before and after it (not ignored files
+  or anything outside the workspace), with control characters in paths
+  escaped so a file name cannot forge a receipt line. All three read the
+  records Codewhale already keeps and say what those records do not hold
+  ([docs/RECEIPTS.md](docs/RECEIPTS.md)). `audit.log` is not that record: it
+  logs security events, and it logs an approval only when one is requested,
+  which under Full Access is almost never.
+
+### Fixed
+
+- Approvals now record who decided: you, a session rule, or the posture. An
+  automatic approval used to be saved exactly like one you gave, and an app
+  approval that expired was saved as your denial. `GET /v1/approvals` now
+  returns `decided_by`.
+- Network audit lines now go to the same `audit.log` as every other audit
+  event (`$CODEWHALE_HOME` included), and test runs no longer append to your
+  real one.
+- Auto-Review verdicts now reach `audit.log`, as `/permissions` said they
+  did. They were written only when `CODEWHALE_TOOL_AUDIT_LOG` was set.
 - A turn that stops producing output now reports itself: the turn loop records
   its phase and last progress, and an overdue phase surfaces instead of
   hanging silently until the stream idle timeout. A delegated agent's final result is

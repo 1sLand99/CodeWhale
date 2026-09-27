@@ -2849,6 +2849,19 @@ fn connect_backoff_delay(failures: u32) -> std::time::Duration {
 type McpPendingConnect = (String, McpServerConfig);
 type McpConnectError = (String, anyhow::Error);
 
+/// The connected-app server named by an `mcp_<server>_<tool>` tool name.
+/// Presentation only: server names may themselves hold `_`, so this is never
+/// a policy input.
+#[must_use]
+pub fn connected_app_server(tool_name: &str) -> Option<&str> {
+    let rest = tool_name.strip_prefix("mcp_")?;
+    match rest.split_once('_') {
+        Some((server, _)) if !server.is_empty() => Some(server),
+        _ if !rest.is_empty() => Some(rest),
+        _ => None,
+    }
+}
+
 /// Whether an explicit tool selection (`tools_always_load`, a turn's
 /// `allowed_tools`) covers `server`: either an exact `mcp_<server>_<tool>`
 /// name or an `mcp_<prefix>*` glob whose prefix reaches the server name.
