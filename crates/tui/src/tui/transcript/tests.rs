@@ -1716,6 +1716,117 @@ fn reasoning_target_transfer_rewrites_same_revision_cells() {
     assert!(hint_cells(&cache).is_empty());
 }
 
+/// Scrolling moves the Space owner to the newest visible cell. On a long
+/// transcript that must repaint the two affordance rows, not re-flatten the
+/// whole tail below the previous owner (#6652).
+fn long_reasoning_transcript(pairs: usize) -> (Vec<HistoryCell>, Vec<u64>) {
+    let cells = (0..pairs)
+        .flat_map(|turn| {
+            [
+                reasoning_cell(false),
+                assistant_cell(&format!("answer {turn}\n\nmore prose for {turn}"), false),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let revisions = vec![1; cells.len()];
+    (cells, revisions)
+}
+
+fn assert_same_flat_output(cache: &TranscriptViewCache, cold: &TranscriptViewCache) {
+    assert_eq!(cache.lines(), cold.lines());
+    assert_eq!(cache.line_links(), cold.line_links());
+    assert_eq!(cache.line_meta(), cold.line_meta());
+    assert_eq!(cache.rail_prefix_widths, cold.rail_prefix_widths);
+    assert_eq!(cache.cell_line_starts, cold.cell_line_starts);
+}
+
+#[test]
+fn retargeting_a_long_transcript_repaints_only_the_hint_rows() {
+    let (cells, revisions) = long_reasoning_transcript(100);
+    let options = TranscriptRenderOptions::default();
+    let ensure = |cache: &mut TranscriptViewCache, owner: usize| {
+        cache.ensure_split(
+            &[&cells],
+            &revisions,
+            80,
+            options,
+            &HashMap::new(),
+            None,
+            Some(reasoning_owner(owner)),
+        );
+    };
+    let mut cache = TranscriptViewCache::new();
+    ensure(&mut cache, 0);
+    assert!(cache.total_lines() > 800, "{}", cache.total_lines());
+
+    // Scroll-frame path: `retarget` after layout.
+    for owner in [2, 100, 198, 0] {
+        let before = cache.streaming_lines_reflattened();
+        cache.retarget(Some(reasoning_owner(owner)), None);
+        assert!(
+            cache.streaming_lines_reflattened() - before <= 2,
+            "retarget to {owner} re-flattened {} rows",
+            cache.streaming_lines_reflattened() - before
+        );
+        let mut cold = TranscriptViewCache::new();
+        ensure(&mut cold, owner);
+        assert_same_flat_output(&cache, &cold);
+    }
+
+    // Provisional-owner path: `ensure_split` with only the owner moved.
+    for owner in [4, 150, 0] {
+        let before = cache.streaming_lines_reflattened();
+        ensure(&mut cache, owner);
+        assert!(
+            cache.streaming_lines_reflattened() - before <= 2,
+            "ensure with owner {owner} re-flattened {} rows",
+            cache.streaming_lines_reflattened() - before
+        );
+        let mut cold = TranscriptViewCache::new();
+        ensure(&mut cold, owner);
+        assert_same_flat_output(&cache, &cold);
+    }
+
+    // An answer cell owns no hint: moving there only clears the old row.
+    let before = cache.streaming_lines_reflattened();
+    cache.retarget(Some(reasoning_owner(1)), None);
+    assert_eq!(cache.streaming_lines_reflattened() - before, 1);
+    assert!(!plain_lines(&cache).join("\n").contains("Space:expand"));
+}
+
+/// Synthetic scroll benchmark for #6652; run with `--ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark, not a correctness gate"]
+#[allow(clippy::print_stderr)]
+fn bench_retarget_scroll_over_long_transcript() {
+    let (cells, revisions) = long_reasoning_transcript(2_000);
+    let mut cache = TranscriptViewCache::new();
+    cache.ensure_split(
+        &[&cells],
+        &revisions,
+        120,
+        TranscriptRenderOptions::default(),
+        &HashMap::new(),
+        None,
+        Some(reasoning_owner(0)),
+    );
+    let before = cache.streaming_lines_reflattened();
+    let started = std::time::Instant::now();
+    let frames = 400;
+    for frame in 0..frames {
+        // Walk the owner between early reasoning cells as a scroll would.
+        cache.retarget(Some(reasoning_owner((frame % 20) * 2)), None);
+    }
+    let elapsed = started.elapsed();
+    eprintln!(
+        "#6652 bench: {} lines, {frames} retargets, {:?} total, {:?}/frame, {} rows re-flattened",
+        cache.total_lines(),
+        elapsed,
+        elapsed / frames as u32,
+        cache.streaming_lines_reflattened() - before
+    );
+}
+
 #[test]
 fn layout_aware_reasoning_budget_applies_only_to_the_newest_cell() {
     let cells = vec![reasoning_cell(false), reasoning_cell(false)];
