@@ -70,7 +70,7 @@ Runtime 端点、持久状态、移动端渲染，以及模型可见的链接解
 ```
 
 每个 `.json` 文件会包含工作间元数据（`Workroom` 结构体）、一组 `WorkroomThread` 描述符，
-以及一组有界的最新媒体 `WorkroomEvent` 记录。这个状态存储尚未实现。
+以及一组有界的最近 `WorkroomEvent` 记录。这个状态存储尚未实现。
 
 ## Crate 职责
 
