@@ -19,11 +19,10 @@ fn text(role: Role, text: &str) -> Message {
 }
 
 fn fixture_config() -> Config {
-    let mut config = Config {
-        api_key: Some("local-reconcile-fixture".into()),
-        base_url: Some("http://127.0.0.1:1/v1".into()),
-        ..Config::default()
-    };
+    let mut config = Config::default().with_legacy_root(
+        Some("local-reconcile-fixture".into()),
+        Some("http://127.0.0.1:1/v1".into()),
+    );
     config.set_feature("mcp", false).unwrap();
     config.set_feature("subagents", false).unwrap();
     config
