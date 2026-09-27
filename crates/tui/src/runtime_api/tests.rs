@@ -8798,11 +8798,19 @@ fn cors_layer_skips_invalid_origins() {
 }
 
 #[tokio::test]
-async fn cors_layer_exposes_stream_end_for_allowed_origins() -> Result<()> {
+async fn cors_layer_exposes_stream_capabilities_for_allowed_origins() -> Result<()> {
     use axum::handler::Handler;
 
-    let handler = (|| async { ([("x-codewhale-stream-end", "1")], "event: stream.end\n\n") })
-        .layer(cors_layer(&["http://localhost:5173".to_string()]));
+    let handler = (|| async {
+        (
+            [
+                ("x-codewhale-stream-end", "1"),
+                ("x-codewhale-event-progress", "1"),
+            ],
+            "event: stream.end\n\n",
+        )
+    })
+    .layer(cors_layer(&["http://localhost:5173".to_string()]));
     for origin in ["http://localhost:1420", "http://localhost:5173"] {
         let request = Request::builder()
             .uri("/events")
@@ -8810,13 +8818,16 @@ async fn cors_layer_exposes_stream_end_for_allowed_origins() -> Result<()> {
             .body(axum::body::Body::empty())?;
         let response = handler.clone().call(request, ()).await;
         assert_eq!(response.headers()["access-control-allow-origin"], origin);
-        assert_eq!(response.headers()["x-codewhale-stream-end"], "1");
-        assert!(
-            response.headers()["access-control-expose-headers"]
-                .to_str()?
-                .split(',')
-                .any(|name| name.trim().eq_ignore_ascii_case("x-codewhale-stream-end"))
-        );
+        for capability in ["x-codewhale-stream-end", "x-codewhale-event-progress"] {
+            assert_eq!(response.headers()[capability], "1");
+            assert!(
+                response.headers()["access-control-expose-headers"]
+                    .to_str()?
+                    .split(',')
+                    .any(|name| name.trim().eq_ignore_ascii_case(capability)),
+                "{capability} must be readable cross-origin"
+            );
+        }
     }
     let request = Request::builder()
         .uri("/events")

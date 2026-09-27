@@ -295,6 +295,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Run Runtime SDK runtime and type tests
+        run: |
+          npm ci --ignore-scripts --workspace @codewhale/runtime-sdk
+          npm test --workspace @codewhale/runtime-sdk
       - name: Run chat-bridge suites
         # All four bridges + bridge-core ship dependency-free node --test
         # suites that no workflow ran. weixin has no lockfile by design

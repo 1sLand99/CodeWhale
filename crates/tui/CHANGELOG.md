@@ -267,8 +267,8 @@ quieter, and Fleet runs can be checked before they spend anything.
   history early and skips events without a detectable gap, and the mobile
   page resumes from its last event instead of replaying from zero, with stream
   statuses in the configured UI language. Cross-origin clients can read the
-  stream-end capability header, and the SDK exports `isThreadStreamEnd` for
-  TypeScript narrowing.
+  stream-end and replay-progress capability headers, and the SDK exports
+  `isThreadStreamEnd` for TypeScript narrowing.
 - `codewhale exec --auto` no longer exits 141 with no output when a child
   it writes to, such as a stdio MCP server, closes its pipe early. Headless
   exec now ignores SIGPIPE while it runs, as the interactive TUI already did,
