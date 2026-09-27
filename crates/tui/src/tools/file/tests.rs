@@ -694,6 +694,33 @@ async fn cancelled_queued_pi_write_never_starts() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn contract_write_preserves_unreadable_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("write-only.txt");
+    std::fs::write(&path, "original\n").expect("fixture");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200))
+        .expect("make unreadable");
+    let context = ToolContext::new(temporary.path());
+    let result = WriteFileTool::execute_contract_write(
+        json!({"path": "write-only.txt", "content": "replacement\n"}),
+        &context,
+    )
+    .await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("restore permissions");
+
+    let error = result.expect_err("cannot overwrite without the prior contents");
+    assert!(error.to_string().contains("Failed to read"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(path).expect("unchanged"),
+        "original\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn contract_edit_rejects_read_only_target_before_atomic_replace() {
     use std::os::unix::fs::PermissionsExt;
 

@@ -11714,10 +11714,12 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
         )
     })?;
 
-    if !requirements.allowed_approval_policies.is_empty()
-        && let Some(policy) = config.approval_policy.as_ref()
-    {
-        let policy = policy.to_ascii_lowercase();
+    if !requirements.allowed_approval_policies.is_empty() {
+        let policy = config
+            .approval_policy
+            .as_deref()
+            .unwrap_or("on-request")
+            .to_ascii_lowercase();
         if !requirements
             .allowed_approval_policies
             .iter()
@@ -11729,10 +11731,47 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
             );
         }
     }
-    if !requirements.allowed_sandbox_modes.is_empty()
-        && let Some(mode) = config.sandbox_mode.as_ref()
-    {
-        let mode = mode.to_ascii_lowercase();
+    if !requirements.allowed_sandbox_modes.is_empty() {
+        // At config load there is no live turn mode yet. Check the Agent
+        // baseline with the engine's resolver; Plan can narrow it later.
+        // Explicit settings retain their existing allow-list check.
+        let mode = config
+            .sandbox_mode
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| {
+                use crate::core::authority::{SandboxNetworkAccess, sandbox_policy_for_turn};
+                use crate::sandbox::SandboxPolicy;
+                use codewhale_execpolicy::ApprovalMode;
+
+                // A configured or requirements-managed approval policy
+                // prevents the interactive YOLO override at startup.
+                let approval = if config.yolo.unwrap_or(false)
+                    && config.approval_policy.is_none()
+                    && requirements.allowed_approval_policies.is_empty()
+                {
+                    ApprovalMode::Bypass
+                } else {
+                    config
+                        .approval_policy
+                        .as_deref()
+                        .and_then(ApprovalMode::from_config_value)
+                        .unwrap_or_default()
+                };
+                match sandbox_policy_for_turn(
+                    codewhale_config::AppMode::Agent,
+                    approval,
+                    None,
+                    Path::new("."),
+                    SandboxNetworkAccess::from_config(config.sandbox_network_access),
+                ) {
+                    SandboxPolicy::ReadOnly => "read-only",
+                    SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
+                    SandboxPolicy::DangerFullAccess => "danger-full-access",
+                    SandboxPolicy::ExternalSandbox { .. } => "external-sandbox",
+                }
+                .to_string()
+            });
         if !requirements
             .allowed_sandbox_modes
             .iter()

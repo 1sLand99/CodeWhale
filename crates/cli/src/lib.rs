@@ -2688,7 +2688,7 @@ fn run_logout_command_with_secrets_unlocked(
             "failed to delete stored credentials for: {}",
             keyring_failures.join(", ")
         );
-        println!("logged out (some stored credentials could not be deleted)");
+        anyhow::bail!("logout incomplete: some stored credentials could not be deleted");
     }
     Ok(())
 }
@@ -5802,6 +5802,7 @@ mod tests {
     struct RecordingKeyringStore {
         gets: Mutex<Vec<String>>,
         values: Mutex<std::collections::BTreeMap<String, String>>,
+        fail_deletes: bool,
     }
 
     impl RecordingKeyringStore {
@@ -5844,6 +5845,11 @@ mod tests {
         }
 
         fn delete(&self, key: &str) -> std::result::Result<(), codewhale_secrets::SecretsError> {
+            if self.fail_deletes {
+                return Err(codewhale_secrets::SecretsError::Keyring(
+                    "test delete failure".into(),
+                ));
+            }
             self.values
                 .lock()
                 .expect("recording values lock")
@@ -10250,6 +10256,33 @@ verbosity = "project-imported"
         assert!(credentials.join("other-provider.json").exists());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn logout_returns_error_when_keyring_deletion_fails() {
+        let _lock = env_lock();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("codewhale-home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
+        let mut store = ConfigStore::load(Some(home.join("config.toml"))).expect("load config");
+        let keyring = RecordingKeyringStore {
+            fail_deletes: true,
+            ..RecordingKeyringStore::default()
+        };
+        for provider in [ProviderKind::Deepseek, ProviderKind::Fireworks] {
+            keyring.set_value(provider_slot(provider), "test-credential");
+        }
+        let secrets = Secrets::new(std::sync::Arc::new(keyring));
+        let error = run_logout_command_with_secrets(&mut store, &secrets, None)
+            .expect_err("partial logout must fail");
+        assert!(error.to_string().contains("logout incomplete"));
+        for provider in [ProviderKind::Deepseek, ProviderKind::Fireworks] {
+            assert!(secrets.get(provider_slot(provider)).unwrap().is_some());
+        }
     }
 
     #[test]

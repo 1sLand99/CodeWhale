@@ -1496,7 +1496,12 @@ impl WriteFileTool {
 
         let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_bytes = if existed_before {
-            tokio::fs::read(&file_path).await.unwrap_or_default()
+            tokio::fs::read(&file_path).await.map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "Failed to read {}: {error}",
+                    file_path.display()
+                ))
+            })?
         } else {
             Vec::new()
         };

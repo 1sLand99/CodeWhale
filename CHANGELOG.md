@@ -51,6 +51,13 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- File writes stop if the original contents cannot be read, keeping undo and
+  diffs from recording an empty original file.
+- Resuming a session preserves user messages that quote a compaction marker.
+- Requirements allow-lists now check unset approval and sandbox defaults.
+- Logout returns an error when stored credentials could not be deleted.
+- `doctor --fix` keeps temporary files modified within the last hour.
+- Provider streams stop with a clear error if an SSE line exceeds 8 MiB.
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you
