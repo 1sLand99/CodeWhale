@@ -5316,6 +5316,8 @@ fn shell_denial_filters_search_catalog_without_expanding_allow_grants() {
         "code_execution",
         "js_execution",
         "rlm_eval",
+        "start_mcp_server",
+        "start_registry_mcp_server",
     ];
     for rule in ["Bash", "eXeC_sHeLl", "baSH*", "exec_shell*"] {
         let surface = policy_for_catalog(
