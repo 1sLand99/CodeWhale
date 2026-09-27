@@ -124,6 +124,9 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- First-run TUI startup keeps explicitly configured providers and models,
+  including environment overrides, instead of adopting a detected local Ollama
+  model. Empty sessions no longer show a full context window from the startup prompt.
 - `/trust on|off` changes file-tool trust for this session. Add `--save` to
   persist workspace trust for project skills, commands, hooks, MCP servers,
   and project context. Skipped-skill notices stay out of conversation titles

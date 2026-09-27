@@ -10370,6 +10370,122 @@ async fn adopting_a_local_model_closes_the_connect_picker_and_names_it() {
     );
 }
 
+#[test]
+fn first_run_route_starts_with_configured_provider_and_model() {
+    use crate::test_support::EnvVarGuard;
+
+    for from_env in [false, true] {
+        let _home = SettingsHomeGuard::new();
+        let _env: Vec<_> = [
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "CODEWHALE_BASE_URL",
+            "DEEPSEEK_BASE_URL",
+            "OPENAI_BASE_URL",
+            "OPENAI_MODEL",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect();
+        let path = crate::config::home_config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let route = if from_env {
+            ""
+        } else {
+            "provider = 'openai'\ndefault_text_model = 'gpui-fixture'\n"
+        };
+        std::fs::write(&path, format!("{route}[providers.openai]\napi_key = 'fixture-key'\nbase_url = 'http://127.0.0.1:9/v1'\n")).unwrap();
+        let _provider = from_env.then(|| EnvVarGuard::set("CODEWHALE_PROVIDER", "openai"));
+        let _model = from_env.then(|| EnvVarGuard::set("CODEWHALE_MODEL", "gpui-fixture"));
+        let config = Config::load(None, None).expect("load fresh home config");
+        assert_eq!(config.api_provider(), ApiProvider::Openai);
+        assert_eq!(config.default_model(), "gpui-fixture");
+
+        // An options default must not replace the resolved config's model.
+        let mut options = create_test_options();
+        options.model = DEFAULT_TEXT_MODEL.to_string();
+        let mut app = App::new(options, &config);
+        assert_eq!(app.api_provider, ApiProvider::Openai);
+        assert_eq!(app.model, "gpui-fixture");
+        assert!(!crate::local_ollama::should_adopt_live_local_ollama(
+            &mut app
+        ));
+        assert!(codewhale_config::SetupState::load().unwrap().is_none());
+        assert_eq!(
+            Config::load(None, None).unwrap().default_model(),
+            "gpui-fixture"
+        );
+    }
+}
+
+#[tokio::test]
+async fn first_run_route_keeps_explicit_choice_when_credentials_are_missing() {
+    let _home = SettingsHomeGuard::new();
+    for document in [
+        "provider = 'openai'\ndefault_text_model = 'gpui-fixture'\n",
+        "provider = 'openai'\n",
+        "default_text_model = 'deepseek-v4-flash'\n",
+        "[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n",
+    ] {
+        let mut config = Config::from_saved_document(document, None).unwrap();
+        let provider = config.api_provider();
+        let model = config.default_model();
+        let mut options = create_test_options();
+        options.model = model.clone();
+        let mut app = App::new(options, &config);
+        // A missing/rejected key can enter recovery after construction too.
+        app.onboarding_needs_api_key = true;
+        app.onboarding_missing_key_recovery = true;
+        sync_config_provider_from_app(&mut config, &app);
+        assert!(!crate::local_ollama::should_adopt_live_local_ollama(
+            &mut app
+        ));
+
+        let mut engine = mock_engine_handle();
+        super::event_loop::adopt_live_local_ollama_catalog(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            crate::local_ollama::LiveLocalOllamaCatalog {
+                endpoint_v1: "http://127.0.0.1:11434/v1".into(),
+                tags: vec!["qwen3:4b".into()],
+                chat_tag: Some("qwen3:4b".into()),
+            },
+        )
+        .await;
+
+        assert_eq!(app.api_provider, provider);
+        assert_eq!(app.model, model);
+        assert_eq!(config.api_provider(), provider);
+        assert!(codewhale_config::SetupState::load().unwrap().is_none());
+    }
+}
+
+#[test]
+fn first_run_route_context_is_empty_until_conversation_starts() {
+    let mut app = create_test_app();
+    app.set_provider_identity(ApiProvider::Ollama, "ollama");
+    app.set_model_selection("qwen3:4b".into());
+    app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+        context_tokens: Some(8192),
+        ..Default::default()
+    });
+    app.system_prompt = Some(SystemPrompt::Text("startup instructions ".repeat(8192)));
+    assert!(app.api_messages.is_empty());
+    assert_eq!(context_usage_snapshot(&app), Some((0, 8192, 0.0)));
+    assert_eq!(crate::tui::phase_strip::context_percent_from_app(&app), 0);
+
+    // A real conversation still exposes pressure; the fix must not cap it.
+    app.api_messages_mut().push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".into(),
+            cache_control: None,
+        }],
+    });
+    assert_eq!(context_usage_snapshot(&app), Some((8192, 8192, 100.0)));
+}
+
 #[tokio::test]
 async fn provider_switch_to_deepseek_canonicalizes_openrouter_default_model() {
     let _home = SettingsHomeGuard::new();

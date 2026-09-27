@@ -132,7 +132,15 @@ impl App {
         }
         let selected = startup_config.apply_saved_selection(&settings);
         let config = &startup_config;
-        let model = if selected {
+        let startup_route_configured = config.provider.is_some()
+            || config.default_text_model.is_some()
+            || config.legacy_model.is_some()
+            || config
+                .provider_config_for(config.api_provider())
+                .is_some_and(|entry| entry.model.is_some());
+        // Provider and model come from the same resolved config, even on the
+        // first run. An options default must not replace a configured model.
+        let model = if selected || startup_route_configured {
             config.default_model()
         } else {
             model
@@ -965,6 +973,7 @@ impl App {
             redaction_gate_confirming: false,
             redaction_gate_scroll: std::cell::Cell::new(0),
             onboarding_needs_api_key: needs_api_key,
+            startup_route_configured,
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
             onboarding_missing_key_recovery,

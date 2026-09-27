@@ -1762,10 +1762,7 @@ pub(crate) async fn run_event_loop(
         if let Some(ref handle) = local_ollama_probe {
             local_done = handle.is_finished();
         }
-        if local_done
-            && let Ok(Some(catalog)) = local_ollama_probe.take().unwrap().await
-            && crate::local_ollama::should_adopt_live_local_ollama(app)
-        {
+        if local_done && let Ok(Some(catalog)) = local_ollama_probe.take().unwrap().await {
             adopt_live_local_ollama_catalog(app, &mut engine_handle, config, catalog).await;
         }
 
@@ -6934,6 +6931,9 @@ pub(super) async fn adopt_live_local_ollama_catalog(
     config: &mut Config,
     catalog: crate::local_ollama::LiveLocalOllamaCatalog,
 ) {
+    if !crate::local_ollama::should_adopt_live_local_ollama(app) {
+        return;
+    }
     let Some(tag) = catalog.preferred_tag().map(str::to_string) else {
         return;
     };

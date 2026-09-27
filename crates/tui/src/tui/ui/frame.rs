@@ -2173,6 +2173,15 @@ pub(crate) fn context_usage_snapshot(app: &App) -> Option<(i64, u32, f64)> {
 }
 
 pub(crate) fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(i64, u32, f64)> {
+    // Before a conversation starts, the assembled startup prompt alone is not
+    // conversation usage, and compacting an empty session cannot reclaim it.
+    // Once messages or provider usage exist, retain the real pressure reading.
+    if app.api_messages.is_empty()
+        && app.session.last_prompt_tokens.unwrap_or(0) == 0
+        && app.last_billed_input_tokens.unwrap_or(0) == 0
+    {
+        return Some((0, max, 0.0));
+    }
     let max_i64 = i64::from(max);
     let reported = app
         .session
