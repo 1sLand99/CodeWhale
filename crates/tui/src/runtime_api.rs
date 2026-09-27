@@ -1696,18 +1696,22 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .with_state(state)
 }
 
-async fn mobile_page(State(state): State<RuntimeApiState>, req: Request) -> Response {
+async fn mobile_page(State(state): State<RuntimeApiState>) -> Result<Response, ApiError> {
     if !state.mobile_enabled {
-        return (
+        return Ok((
             StatusCode::NOT_FOUND,
             "mobile control is disabled; start with `codewhale serve --mobile`",
         )
-            .into_response();
+            .into_response());
     }
-    let _ = req;
-    let mut response = Html(MOBILE_HTML).into_response();
+    let settings = tokio::task::spawn_blocking(crate::settings::Settings::load_read_only)
+        .await
+        .map_err(|err| ApiError::internal(format!("mobile settings task failed: {err}")))?
+        .map_err(|err| ApiError::internal(format!("mobile settings unavailable: {err}")))?;
+    let locale = codewhale_localization::resolve_locale(&settings.locale);
+    let mut response = Html(mobile_html(locale)).into_response();
     secure_mobile_response(&mut response);
-    response
+    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -10234,6 +10238,28 @@ async fn clear_memory(
 
 const MOBILE_HTML: &str = include_str!("runtime_mobile.html");
 
+// Only stream statuses are localized here; the rest of the mobile shell is
+// still English. Reload the page after changing the Runtime's UI locale.
+fn mobile_html(locale: codewhale_localization::Locale) -> String {
+    use codewhale_localization::{MessageId, tr};
+
+    let messages = json!({
+        "replay_failed": tr(locale, MessageId::MobileStreamReplayFailed),
+        "catch_up_failed": tr(locale, MessageId::MobileStreamCatchUpFailed),
+        "runtime_shutdown": tr(locale, MessageId::MobileStreamRuntimeShutdown),
+        "ended": tr(locale, MessageId::MobileStreamEnded),
+        "closed": tr(locale, MessageId::MobileStreamClosed),
+        "reconnecting": tr(locale, MessageId::MobileStreamReconnecting),
+        "connected": tr(locale, MessageId::MobileStreamConnected),
+    });
+    // JSON quoting protects JS strings; escaping '<' also prevents a catalog
+    // value from closing the enclosing script element.
+    MOBILE_HTML.replace(
+        "__CODEWHALE_STREAM_MESSAGES__",
+        &messages.to_string().replace('<', "\\u003c"),
+    )
+}
+
 /// Built-in dev origins always allowed by the runtime API (whalescale#255).
 const DEFAULT_CORS_ORIGINS: &[&str] = &[
     "http://localhost:3000",
@@ -10278,6 +10304,7 @@ fn cors_layer(extra_origins: &[String]) -> CorsLayer {
             HeaderName::from_static("x-codewhale-runtime-token"),
             HeaderName::from_static("x-deepseek-runtime-token"),
         ])
+        .expose_headers([HeaderName::from_static("x-codewhale-stream-end")])
 }
 
 fn map_task_err(err: anyhow::Error) -> ApiError {

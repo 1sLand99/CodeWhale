@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime 无法读取此对话的历史记录 — 正在重试",
+  "MobileStreamCatchUpFailed": "Runtime 处理落后且无法追赶 — 正在重试",
+  "MobileStreamRuntimeShutdown": "Runtime 正在关闭 — 正在重新连接",
+  "MobileStreamEnded": "Runtime 已结束事件流 — 正在重新连接",
+  "MobileStreamClosed": "Runtime 已关闭此对话的事件流；请重新打开会话",
+  "MobileStreamReconnecting": "连接已断开；正在重新连接",
+  "MobileStreamConnected": "已连接",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · 共享栖息地",
   "PetHabitatHints": "{back} 返回 · {sound} 声音 · {browser} 外观 · {window} 窗口",
   "PetHabitatQueued": "已发送到共享栖息地。使用 /pet on 打开全屏视图。",

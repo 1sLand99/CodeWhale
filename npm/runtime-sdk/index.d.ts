@@ -337,6 +337,11 @@ export interface ThreadStreamEnd {
   retryable: boolean;
 }
 
+/** Narrow an item yielded by threadEvents; journal event names are open-ended. */
+export function isThreadStreamEnd(
+  event: ThreadRuntimeEvent | ThreadStreamProgress | ThreadStreamEnd,
+): event is ThreadStreamEnd;
+
 export interface ThreadEventOptions {
   sinceSeq?: number;
   replayLimit?: number;

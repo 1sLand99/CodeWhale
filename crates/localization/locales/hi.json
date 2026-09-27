@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime इस बातचीत का इतिहास नहीं पढ़ सका — फिर से कोशिश हो रही है",
+  "MobileStreamCatchUpFailed": "Runtime पीछे रह गया और छूटी हुई घटनाएँ प्राप्त नहीं कर सका — फिर से कोशिश हो रही है",
+  "MobileStreamRuntimeShutdown": "Runtime बंद हो रहा है — फिर से कनेक्ट हो रहा है",
+  "MobileStreamEnded": "Runtime ने इवेंट स्ट्रीम समाप्त कर दी — फिर से कनेक्ट हो रहा है",
+  "MobileStreamClosed": "Runtime ने इस बातचीत की इवेंट स्ट्रीम बंद कर दी; बातचीत फिर से खोलें",
+  "MobileStreamReconnecting": "कनेक्शन टूट गया; फिर से कनेक्ट हो रहा है",
+  "MobileStreamConnected": "कनेक्ट हो गया",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · एक साझा आवास",
   "PetHabitatHints": "{back} वापस · {sound} ध्वनि · {browser} रूप · {window} विंडो",
   "PetHabitatQueued": "साझा आवास को भेजा गया। /pet on से पूरा दृश्य खुलता है।",

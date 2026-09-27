@@ -260,6 +260,7 @@
   </main>
 
   <script>
+    const streamMessages = __CODEWHALE_STREAM_MESSAGES__;
     const $ = (id) => document.getElementById(id);
     const MAX_VISIBLE_EVENTS = 100;
     const LEGACY_RUNTIME_TOKEN_STORAGE_KEY = "codewhale_runtime_token";
@@ -584,13 +585,13 @@
     function streamEndStatus(reason) {
       switch (reason) {
         case "replay_failed":
-          return "Runtime could not read this conversation's history \u2014 retrying";
+          return streamMessages.replay_failed;
         case "catch_up_failed":
-          return "Runtime fell behind and could not catch up \u2014 retrying";
+          return streamMessages.catch_up_failed;
         case "runtime_shutdown":
-          return "Runtime is shutting down \u2014 reconnecting";
+          return streamMessages.runtime_shutdown;
         default:
-          return "Runtime ended the event stream \u2014 reconnecting";
+          return streamMessages.ended;
       }
     }
 
@@ -610,7 +611,7 @@
         openThreadEvents(id, cursor).catch((err) => {
           if (state.threadId !== id) return;
           if (err instanceof TypeError) {
-            setStatus("Connection lost; reconnecting", "warn");
+            setStatus(streamMessages.reconnecting, "warn");
             scheduleResume(id, cursor);
           } else {
             setStatus(err.message, "bad");
@@ -672,7 +673,7 @@
           state.lastSeq = Math.max(state.lastSeq, data.last_seq);
         }
         if (data.retryable !== true) {
-          setStatus("Runtime closed this conversation's event stream; reopen the thread", "bad");
+          setStatus(streamMessages.closed, "bad");
           return;
         }
         setStatus(streamEndStatus(data.reason), "warn");
@@ -684,7 +685,7 @@
         state.openedAt = Date.now();
         window.setTimeout(() => {
           if (state.source === source && source.readyState === EventSource.OPEN) {
-            setStatus("Connected", "ok");
+            setStatus(streamMessages.connected, "ok");
           }
         }, 400);
       };
@@ -693,7 +694,7 @@
       source.onerror = () => {
         if (state.source !== source || state.threadId !== id) return;
         source.close();
-        setStatus("Connection lost; reconnecting", "warn");
+        setStatus(streamMessages.reconnecting, "warn");
         scheduleResume(id, state.lastSeq > 0 ? state.lastSeq : resumeFrom);
       };
     }
@@ -751,7 +752,7 @@
       $("steer").onclick = () => steerTurn().catch((err) => setStatus(err.message, "bad"));
       $("interrupt").onclick = () => interruptTurn().catch((err) => setStatus(err.message, "bad"));
       await loadThreads();
-      setStatus("Connected", "ok");
+      setStatus(streamMessages.connected, "ok");
     }
 
     boot().catch((err) => setStatus(err.message, "bad"));

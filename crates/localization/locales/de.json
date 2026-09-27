@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime konnte den Verlauf dieser Unterhaltung nicht lesen — erneuter Versuch",
+  "MobileStreamCatchUpFailed": "Runtime ist zurückgefallen und konnte nicht aufholen — erneuter Versuch",
+  "MobileStreamRuntimeShutdown": "Runtime wird heruntergefahren — Verbindung wird wiederhergestellt",
+  "MobileStreamEnded": "Runtime hat den Ereignisstrom beendet — Verbindung wird wiederhergestellt",
+  "MobileStreamClosed": "Runtime hat den Ereignisstrom dieser Unterhaltung geschlossen; öffne die Unterhaltung erneut",
+  "MobileStreamReconnecting": "Verbindung verloren; Verbindung wird wiederhergestellt",
+  "MobileStreamConnected": "Verbunden",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · Ein gemeinsamer Lebensraum",
   "PetHabitatHints": "{back} zurück · {sound} Ton · {browser} Aussehen · {window} Fenster",
   "PetHabitatQueued": "An den gemeinsamen Lebensraum gesendet. /pet on öffnet die Vollansicht.",

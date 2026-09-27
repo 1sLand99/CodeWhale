@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime не вдалося прочитати історію цієї розмови — повторна спроба",
+  "MobileStreamCatchUpFailed": "Runtime відстав і не зміг отримати пропущені події — повторна спроба",
+  "MobileStreamRuntimeShutdown": "Runtime завершує роботу — повторне підключення",
+  "MobileStreamEnded": "Runtime завершив потік подій — повторне підключення",
+  "MobileStreamClosed": "Runtime закрив потік подій цієї розмови; відкрийте її знову",
+  "MobileStreamReconnecting": "З’єднання втрачено; повторне підключення",
+  "MobileStreamConnected": "Підключено",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · Спільне середовище",
   "PetHabitatHints": "{back} назад · {sound} звук · {browser} вигляд · {window} вікно",
   "PetHabitatQueued": "Надіслано до спільного середовища. /pet on відкриває повний вигляд.",

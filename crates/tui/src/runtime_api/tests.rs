@@ -7878,6 +7878,41 @@ fn cors_layer_skips_invalid_origins() {
     let _ = cors_layer(&extras);
 }
 
+#[tokio::test]
+async fn cors_layer_exposes_stream_end_for_allowed_origins() -> Result<()> {
+    use axum::handler::Handler;
+
+    let handler = (|| async { ([("x-codewhale-stream-end", "1")], "event: stream.end\n\n") })
+        .layer(cors_layer(&["http://localhost:5173".to_string()]));
+    for origin in ["http://localhost:1420", "http://localhost:5173"] {
+        let request = Request::builder()
+            .uri("/events")
+            .header("Origin", origin)
+            .body(axum::body::Body::empty())?;
+        let response = handler.clone().call(request, ()).await;
+        assert_eq!(response.headers()["access-control-allow-origin"], origin);
+        assert_eq!(response.headers()["x-codewhale-stream-end"], "1");
+        assert!(
+            response.headers()["access-control-expose-headers"]
+                .to_str()?
+                .split(',')
+                .any(|name| name.trim().eq_ignore_ascii_case("x-codewhale-stream-end"))
+        );
+    }
+    let request = Request::builder()
+        .uri("/events")
+        .header("Origin", "http://malicious.example")
+        .body(axum::body::Body::empty())?;
+    let rejected = handler.call(request, ()).await;
+    assert!(
+        rejected
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+    Ok(())
+}
+
 /// #562 / whalescale#256 — `PATCH /v1/threads/{id}` accepts the new
 /// fields (allow_shell, trust_mode, auto_approve, model, mode, title,
 /// system_prompt). Legacy mode aliases remain accepted as one-way inputs and
@@ -8938,6 +8973,64 @@ async fn mobile_runtime_router_starts_without_duplicate_method_routes() -> Resul
     // Axum panics during `build_router` when a method/path pair is registered
     // twice, so reaching the running server is the regression assertion.
     handle.abort();
+    Ok(())
+}
+
+#[test]
+fn mobile_stream_statuses_use_selected_locale() -> Result<()> {
+    use codewhale_localization::{Locale, MessageId, tr};
+
+    for &locale in Locale::shipped_complete() {
+        let html = mobile_html(locale);
+        let script = html
+            .split_once("<script>")
+            .context("mobile script")?
+            .1
+            .split_once("boot().catch")
+            .context("mobile startup")?
+            .0;
+        let runtime = rquickjs::Runtime::new()?;
+        let context = rquickjs::Context::full(&runtime)?;
+        context.with(|ctx| -> Result<()> {
+            ctx.eval::<(), _>(script)?;
+            for (expression, message) in [
+                (
+                    "streamEndStatus('replay_failed')",
+                    MessageId::MobileStreamReplayFailed,
+                ),
+                (
+                    "streamEndStatus('catch_up_failed')",
+                    MessageId::MobileStreamCatchUpFailed,
+                ),
+                (
+                    "streamEndStatus('runtime_shutdown')",
+                    MessageId::MobileStreamRuntimeShutdown,
+                ),
+                (
+                    "streamEndStatus('future_reason')",
+                    MessageId::MobileStreamEnded,
+                ),
+                ("streamMessages.closed", MessageId::MobileStreamClosed),
+                (
+                    "streamMessages.reconnecting",
+                    MessageId::MobileStreamReconnecting,
+                ),
+                ("streamMessages.connected", MessageId::MobileStreamConnected),
+            ] {
+                let actual: String = ctx.eval(expression)?;
+                assert_eq!(actual, tr(locale, message), "{}: {message:?}", locale.tag());
+                if locale != Locale::En {
+                    assert_ne!(
+                        actual,
+                        tr(Locale::En, message),
+                        "{}: {message:?}",
+                        locale.tag()
+                    );
+                }
+            }
+            Ok(())
+        })?;
+    }
     Ok(())
 }
 

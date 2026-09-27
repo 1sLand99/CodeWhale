@@ -108,3 +108,19 @@ Runtimes that send it advertise `x-codewhale-stream-end: 1`. If the iterator
 ends without it, the connection was lost: resume from the last `seq` you
 accepted. The full client rule is in
 [`docs/RUNTIME_API.md`](../../docs/RUNTIME_API.md#ending-and-resuming-a-thread-stream).
+
+Use `isThreadStreamEnd` to narrow iterator items in TypeScript. Journal event
+names remain open-ended, so checking `event === "stream.end"` alone cannot
+narrow the union:
+
+```ts
+import { isThreadStreamEnd } from "@codewhale/runtime-sdk";
+
+for await (const item of client.threadEvents(threadId)) {
+  if (isThreadStreamEnd(item)) {
+    console.log(item.reason, item.last_seq, item.retryable);
+  } else {
+    console.log(item.seq, item.payload);
+  }
+}
+```

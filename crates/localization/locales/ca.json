@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "El Runtime no ha pogut llegir l'historial d'aquesta conversa — tornant-ho a provar",
+  "MobileStreamCatchUpFailed": "El Runtime s'ha endarrerit i no s'ha pogut posar al dia — tornant-ho a provar",
+  "MobileStreamRuntimeShutdown": "El Runtime s'està tancant — reconnectant",
+  "MobileStreamEnded": "El Runtime ha finalitzat el flux d'esdeveniments — reconnectant",
+  "MobileStreamClosed": "El Runtime ha tancat el flux d'esdeveniments d'aquesta conversa; torna a obrir-la",
+  "MobileStreamReconnecting": "Connexió perduda; reconnectant",
+  "MobileStreamConnected": "Connectat",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · Un hàbitat compartit",
   "PetHabitatHints": "{back} enrere · {sound} so · {browser} aparença · {window} finestra",
   "PetHabitatQueued": "Enviat a l’hàbitat compartit. /pet on obre la vista completa.",

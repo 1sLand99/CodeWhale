@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime tidak dapat membaca riwayat percakapan ini — mencoba lagi",
+  "MobileStreamCatchUpFailed": "Runtime tertinggal dan tidak dapat mengejar — mencoba lagi",
+  "MobileStreamRuntimeShutdown": "Runtime sedang dimatikan — menghubungkan kembali",
+  "MobileStreamEnded": "Runtime mengakhiri aliran peristiwa — menghubungkan kembali",
+  "MobileStreamClosed": "Runtime menutup aliran peristiwa percakapan ini; buka kembali percakapan",
+  "MobileStreamReconnecting": "Koneksi terputus; menghubungkan kembali",
+  "MobileStreamConnected": "Terhubung",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · Satu habitat bersama",
   "PetHabitatHints": "{back} kembali · {sound} suara · {browser} tampilan · {window} jendela",
   "PetHabitatQueued": "Dikirim ke habitat bersama. /pet on membuka tampilan penuh.",

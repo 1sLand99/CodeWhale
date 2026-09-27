@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime не удалось прочитать историю этой беседы — повторная попытка",
+  "MobileStreamCatchUpFailed": "Runtime отстал и не смог получить пропущенные события — повторная попытка",
+  "MobileStreamRuntimeShutdown": "Runtime завершает работу — переподключение",
+  "MobileStreamEnded": "Runtime завершил поток событий — переподключение",
+  "MobileStreamClosed": "Runtime закрыл поток событий этой беседы; откройте её заново",
+  "MobileStreamReconnecting": "Соединение потеряно; переподключение",
+  "MobileStreamConnected": "Подключено",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · Общая среда обитания",
   "PetHabitatHints": "{back} назад · {sound} звук · {browser} внешний вид · {window} окно",
   "PetHabitatQueued": "Отправлено в общую среду обитания. /pet on открывает полный вид.",
