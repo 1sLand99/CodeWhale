@@ -8,6 +8,7 @@ export const STREAM_EVENT_NAMES = [
   "turn.steered",
   "turn.steer_dropped",
   "turn.interrupt_requested",
+  "turn.artifacts",
   "turn.completed",
   "item.started",
   "item.delta",

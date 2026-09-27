@@ -19777,7 +19777,19 @@ async fn turn_workspace_delta_settles_shell_writes_into_the_aggregate() -> Resul
     );
     assert_eq!(notes.tool_call_id.as_deref(), Some("call_patch"));
 
-    let events = fixture.manager.events_since(&fixture.thread.id, None)?;
+    // The settled turn is saved before `turn.artifacts` is emitted, so the
+    // event can trail the state this test just observed.
+    let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
+    let events = loop {
+        let events = fixture.manager.events_since(&fixture.thread.id, None)?;
+        if events.iter().any(|event| event.event == "turn.artifacts") {
+            break events;
+        }
+        if Instant::now() >= deadline {
+            bail!("turn.artifacts was never published");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
     let published = events
         .iter()
         .find(|event| event.event == "turn.artifacts")
