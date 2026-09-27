@@ -24714,8 +24714,6 @@ mod readonly_shell_6015 {
             axum::serve(listener, app).await.ok();
         });
         let config = crate::config::Config {
-            api_key: Some("test-key".to_string()),
-            base_url: Some(format!("http://{addr}/v1")),
             retry: Some(crate::config::RetryConfig {
                 enabled: Some(false),
                 max_retries: Some(0),
@@ -24724,7 +24722,11 @@ mod readonly_shell_6015 {
                 exponential_base: Some(1.0),
             }),
             ..crate::config::Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("test-key".to_string()),
+            Some(format!("http://{addr}/v1")),
+        );
         (
             CodewhaleClient::new(&config).expect("scripted chat client"),
             calls,
@@ -25053,18 +25055,22 @@ async fn late_launch_permit_still_gets_the_full_work_budget() {
     tokio::spawn(async move {
         axum::serve(listener, app).await.ok();
     });
-    let client = CodewhaleClient::new(&crate::config::Config {
-        api_key: Some("test-key".to_string()),
-        base_url: Some(format!("http://{addr}/v1")),
-        retry: Some(crate::config::RetryConfig {
-            enabled: Some(false),
-            max_retries: Some(0),
-            initial_delay: Some(0.0),
-            max_delay: Some(0.0),
-            exponential_base: Some(1.0),
-        }),
-        ..crate::config::Config::default()
-    })
+    let client = CodewhaleClient::new(
+        &crate::config::Config {
+            retry: Some(crate::config::RetryConfig {
+                enabled: Some(false),
+                max_retries: Some(0),
+                initial_delay: Some(0.0),
+                max_delay: Some(0.0),
+                exponential_base: Some(1.0),
+            }),
+            ..crate::config::Config::default()
+        }
+        .with_legacy_root(
+            Some("test-key".to_string()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    )
     .expect("delayed chat client");
 
     let tmp = tempdir().expect("tempdir");
