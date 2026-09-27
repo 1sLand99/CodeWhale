@@ -51,6 +51,13 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- Several idle TUIs sharing one data directory no longer spin the CPU or
+  report "Task store is busy". Each task worker used to take the shared store
+  lock and reload every task record every 200ms; an idle worker now skips the
+  reload while the store's files are unchanged, re-checks every 2 seconds, and
+  backs off up to 8 seconds after a failed claim. Tasks submitted in the same
+  process still start immediately
+  ([#6573](https://github.com/Hmbown/Codewhale/issues/6573)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you

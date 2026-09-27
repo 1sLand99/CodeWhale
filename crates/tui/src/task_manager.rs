@@ -43,6 +43,12 @@ const EVENT_CATCHUP_POLL: Duration = Duration::from_millis(200);
 // ignore its eligibility or generation fence.
 const CURRENT_TASK_SCHEMA_VERSION: u32 = 4;
 const STORE_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
+/// An idle worker re-reads an unchanged store at most this often. In-process
+/// submissions wake workers immediately through `notify`; this fallback only
+/// bounds how long a write the fingerprint cannot see may wait (#6573).
+const STORE_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Ceiling for the retry delay after a claim fails (e.g. "Task store is busy").
+const STORE_BUSY_BACKOFF_MAX: Duration = Duration::from_secs(8);
 
 const fn default_task_schema_version() -> u32 {
     CURRENT_TASK_SCHEMA_VERSION
@@ -1381,6 +1387,37 @@ pub struct TaskManager {
     execution_lease: Arc<TaskExecutionLease>,
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     shutdown_drain: Mutex<()>,
+    /// Full store loads performed by this manager (tests only, #6573).
+    #[cfg(test)]
+    store_loads: std::sync::atomic::AtomicUsize,
+}
+
+/// Cheap stat-only view of the shared store. Every durable write goes through
+/// an atomic rename, which replaces the queue file or bumps the tasks
+/// directory's mtime, so an unchanged fingerprint means there is nothing new
+/// to claim and the cross-process lock plus a full `load_state` can be
+/// skipped. Unreadable metadata compares as `None`; the idle fallback poll
+/// still covers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreFingerprint {
+    queue: Option<(std::time::SystemTime, u64, u64)>,
+    tasks_dir: Option<std::time::SystemTime>,
+}
+
+impl StoreFingerprint {
+    fn read(queue_path: &Path, tasks_dir: &Path) -> Self {
+        let queue = fs::metadata(queue_path).ok().and_then(|meta| {
+            #[cfg(unix)]
+            let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+            #[cfg(not(unix))]
+            let inode = 0;
+            Some((meta.modified().ok()?, meta.len(), inode))
+        });
+        let tasks_dir = fs::metadata(tasks_dir)
+            .ok()
+            .and_then(|meta| meta.modified().ok());
+        Self { queue, tasks_dir }
+    }
 }
 
 struct ManagerState {
@@ -1513,6 +1550,8 @@ impl TaskManager {
             execution_lease: execution_lease.clone(),
             workers: Mutex::new(Vec::new()),
             shutdown_drain: Mutex::new(()),
+            #[cfg(test)]
+            store_loads: std::sync::atomic::AtomicUsize::new(0),
         });
 
         {
@@ -2208,7 +2247,13 @@ impl TaskManager {
     async fn claim_next_task(&self) -> Result<Option<(String, ExecutionTask, CancellationToken)>> {
         let mut state = self.state.lock().await;
         let _transaction = self.lock_store().await?;
-        self.refresh_locked(&mut state)?;
+        // The worker loop runs this repeatedly; keep the directory scan and
+        // JSON parsing off the async runtime threads (#6573).
+        let (tasks_dir, queue_path) = (self.tasks_dir.clone(), self.queue_path.clone());
+        let loaded = tokio::task::spawn_blocking(move || load_state(&tasks_dir, &queue_path))
+            .await
+            .context("Task store load was interrupted")??;
+        self.apply_loaded_locked(&mut state, loaded)?;
         if self.cancel_token.is_cancelled() {
             return Ok(None);
         }
@@ -2257,25 +2302,56 @@ impl TaskManager {
         Ok(Some((id, request, cancel)))
     }
 
+    /// Claim and run queued work.
+    ///
+    /// Several processes can share one data dir, and every claim takes the
+    /// cross-process store lock and reloads the whole store. An idle worker
+    /// therefore only claims when it was notified in-process, when the store
+    /// fingerprint changed, or when the idle fallback poll is due; a failed
+    /// claim backs off exponentially instead of retrying every tick (#6573).
     async fn worker_loop(self: Arc<Self>) {
+        let mut last_idle: Option<StoreFingerprint> = None;
+        let mut next_fallback_poll = Instant::now();
+        let mut failure_backoff = STORE_REFRESH_INTERVAL;
+        let mut woken = true;
         loop {
             if self.cancel_token.is_cancelled() {
                 break;
             }
-            match self.claim_next_task().await {
-                Ok(Some((id, request, cancel))) => {
-                    self.run_task(id, request, cancel).await;
-                    continue;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::error!(%error, "Task claim unavailable; executor was not polled")
+            // Read before claiming so a write racing the claim changes the
+            // fingerprint and is picked up on the next pass.
+            let fingerprint = StoreFingerprint::read(&self.queue_path, &self.tasks_dir);
+            let unchanged = !woken
+                && last_idle.as_ref() == Some(&fingerprint)
+                && Instant::now() < next_fallback_poll;
+            let mut wait = STORE_REFRESH_INTERVAL;
+            if !unchanged {
+                match self.claim_next_task().await {
+                    Ok(Some((id, request, cancel))) => {
+                        failure_backoff = STORE_REFRESH_INTERVAL;
+                        last_idle = None;
+                        self.run_task(id, request, cancel).await;
+                        woken = true;
+                        continue;
+                    }
+                    Ok(None) => {
+                        failure_backoff = STORE_REFRESH_INTERVAL;
+                        last_idle = Some(fingerprint);
+                        next_fallback_poll = Instant::now() + STORE_IDLE_POLL_INTERVAL;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "Task claim unavailable; executor was not polled");
+                        last_idle = None;
+                        wait = failure_backoff;
+                        failure_backoff = (failure_backoff * 2).min(STORE_BUSY_BACKOFF_MAX);
+                    }
                 }
             }
+            woken = false;
             tokio::select! {
                 _ = self.cancel_token.cancelled() => break,
-                _ = self.notify.notified() => {},
-                _ = sleep(STORE_REFRESH_INTERVAL) => {},
+                _ = self.notify.notified() => woken = true,
+                _ = sleep(wait) => {},
             }
         }
     }
@@ -2993,6 +3069,13 @@ impl TaskManager {
 
     fn refresh_locked(&self, state: &mut ManagerState) -> Result<()> {
         let loaded = load_state(&self.tasks_dir, &self.queue_path)?;
+        self.apply_loaded_locked(state, loaded)
+    }
+
+    fn apply_loaded_locked(&self, state: &mut ManagerState, loaded: LoadedTaskState) -> Result<()> {
+        #[cfg(test)]
+        self.store_loads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         state.tasks = loaded.tasks;
         state.queue = loaded.queue;
         for (id, events) in &state.pending_events {
@@ -3677,6 +3760,49 @@ mod tests {
             .wall_time
             .saturating_add(config.execution_limits.cancel_grace);
         config
+    }
+
+    /// #6573: idle managers sharing one data dir must not reload the store
+    /// (and take its cross-process lock) every 200ms per worker.
+    #[tokio::test]
+    async fn idle_managers_sharing_a_store_do_not_poll_it_continuously() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = || TaskManagerConfig {
+            worker_count: 2,
+            ..test_config(root.path().to_path_buf())
+        };
+        let first =
+            TaskManager::start_with_executor_in_scope(config(), Arc::new(MockExecutor), "first")
+                .await?;
+        let second =
+            TaskManager::start_with_executor_in_scope(config(), Arc::new(MockExecutor), "second")
+                .await?;
+        sleep(Duration::from_millis(300)).await;
+        for manager in [&first, &second] {
+            manager.store_loads.store(0, Ordering::Relaxed);
+        }
+
+        let window = Duration::from_secs(2);
+        sleep(window).await;
+        let loads =
+            first.store_loads.load(Ordering::Relaxed) + second.store_loads.load(Ordering::Relaxed);
+        // Four idle workers polling every 200ms would load ~40 times here;
+        // the idle fallback allows at most one reload per worker per window.
+        assert!(
+            loads <= 8,
+            "idle workers reloaded the shared store {loads} times in {window:?}"
+        );
+
+        // An in-process submission still wakes a worker immediately.
+        let task = first
+            .add_task(NewTaskRequest::from_prompt("wake an idle worker"))
+            .await?;
+        let finished = wait_for_terminal_state(&first, &task.id, Duration::from_secs(1)).await?;
+        assert_eq!(finished.status, TaskStatus::Completed);
+
+        first.shutdown_and_wait().await?;
+        second.shutdown_and_wait().await?;
+        Ok(())
     }
 
     #[tokio::test]
