@@ -2,12 +2,13 @@
 //!
 //! One authority: these routes run `git` against the server's configured
 //! workspace through the same hardened primitives the agent tools use —
-//! reads go through [`Git::review_command`] (filters, fsmonitor, hooks,
-//! lazy fetches and replace-objects neutralized), writes run through
+//! diffs and token reads go through [`Git::review_command`] (filters,
+//! fsmonitor, hooks, lazy fetches and replace-objects neutralized), writes run through
 //! [`Git::tokio_command`] with interactive prompts disabled so a credential
 //! or host-key prompt can never hang an HTTP request. There is no second
 //! index, cache, or diff store here; every response is computed live from
-//! the repository.
+//! the repository. Status uses normal Git filters and untracked settings,
+//! matching the workspace counts and operator writes.
 //!
 //! Routes (workspace-scoped, matching the client contract):
 //!   GET  /v1/git           — branch/head/ahead-behind, per-file porcelain
@@ -35,7 +36,9 @@
 //! `git_state_changed` with the current detail and writes nothing. Every
 //! path in this module — request paths, `files[].path`, `expect.files`
 //! keys — is workspace-relative; the one translation from git's
-//! repository-root frame is [`workspace_frame_path`].
+//! repository-root frame is [`workspace_frame_path`]. Status is best-effort:
+//! unreadable rows have no token, and incomplete reads have no whole-tree
+//! revision. These guards do not authorize content the read could not hash.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path as FsPath, PathBuf};
@@ -180,8 +183,8 @@ fn require_repo(workspace: &FsPath) -> Result<(), ApiError> {
     }
 }
 
-/// Cheap one-shot read used only for repo probes where the hardened review
-/// command's filter dance would be wasted work.
+/// Normal Git reads for repository chrome and filter-aware status, matching
+/// the workspace counts and operator writes.
 fn run_git_sync(workspace: &FsPath, args: &[&str]) -> Result<String, ApiError> {
     let output = Git::output(args, workspace)
         .map_err(|error| ApiError::internal(format!("failed to run git: {error}")))?;
@@ -209,7 +212,7 @@ struct GitFileEntry {
     /// True when the index column records a change.
     staged: bool,
     /// Leading human state: modified / added / deleted / renamed /
-    /// typechange / untracked / conflicted / ignored.
+    /// typechange / untracked / conflicted / ignored / unknown (unreadable submodule).
     status: &'static str,
     /// Rename/copy source, when it lies inside the workspace.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,7 +220,6 @@ struct GitFileEntry {
     /// Opaque per-row precondition token: this row's index entries plus the
     /// working-tree state of every file it covers (a rename's source and
     /// every file under a collapsed untracked directory included).
-    #[serde(skip_serializing_if = "Option::is_none")]
     rev: Option<String>,
 }
 
@@ -284,20 +286,6 @@ fn collect_git_status_detail(workspace: &FsPath) -> Result<GitStatusDetailRespon
             .as_deref()
             .is_some_and(|branch| branch.starts_with("detached@"));
 
-    let frame = RepoFrame::read(workspace)?;
-    // `-z` keeps paths verbatim: one NUL-terminated `XY <path>` record each,
-    // with renames/copies carrying the source path in the following record.
-    // Expand untracked directories so a row equal to the workspace prefix
-    // still exposes addressable children.
-    let porcelain = review_sync_ok(
-        workspace,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
-    let (inside, outside) = split_by_workspace(
-        parse_porcelain(&String::from_utf8_lossy(&porcelain)),
-        &frame.prefix,
-    );
-    detail.files = inside;
     if let Ok(branches) = run_git_sync(workspace, &["branch", "--format=%(refname:short)"]) {
         detail.branches = branches
             .lines()
@@ -314,11 +302,112 @@ fn collect_git_status_detail(workspace: &FsPath) -> Result<GitStatusDetailRespon
             .map(str::to_string)
             .collect();
     }
-    let tokens = compute_tokens(workspace, &frame, &mut detail.files, &outside)?;
-    detail.head_oid = tokens.head_oid;
-    detail.index_token = Some(tokens.index_token);
-    detail.revision = tokens.revision;
+    detail.head_oid = head_oid(workspace).ok().flatten();
+    if let Ok(frame) = RepoFrame::read(workspace)
+        && let Ok((rows, complete)) = status_rows(workspace, &frame)
+    {
+        let (inside, outside) = split_by_workspace(rows, &frame.prefix);
+        detail.files = inside;
+        if let Ok(tokens) = compute_tokens(workspace, &frame, &mut detail.files, &outside) {
+            detail.head_oid = tokens.head_oid;
+            detail.index_token = Some(tokens.index_token);
+            detail.revision = tokens.revision.filter(|_| complete);
+        }
+    }
     Ok(detail)
+}
+
+/// Preserve normal filters and untracked mode. Only a collapsed row naming
+/// the workspace itself needs expansion to give clients addressable paths.
+fn status_rows(
+    workspace: &FsPath,
+    frame: &RepoFrame,
+) -> Result<(Vec<GitFileEntry>, bool), ApiError> {
+    let mut complete = true;
+    let mut rows = match run_git_sync(workspace, &["status", "--porcelain=v1", "-z"]) {
+        Ok(porcelain) => parse_porcelain(&porcelain),
+        Err(_) => {
+            // One broken submodule can abort all of Git's porcelain output.
+            // Recover ordinary rows, then inspect gitlinks individually so
+            // only the unreadable submodule is shown as unknown/unguardable.
+            let porcelain = run_git_sync(
+                workspace,
+                &["status", "--porcelain=v1", "-z", "--ignore-submodules=all"],
+            )?;
+            let mut rows = parse_porcelain(&porcelain);
+            for (path, records) in IndexSnapshot::read(frame)?.by_path {
+                if !records
+                    .split(|byte| *byte == 0)
+                    .any(|record| record.starts_with(b"160000 "))
+                {
+                    continue;
+                }
+                rows.retain(|row| normalized_row_path(&row.path) != path);
+                match run_git_sync(
+                    &frame.toplevel,
+                    &[
+                        "--literal-pathspecs",
+                        "status",
+                        "--porcelain=v1",
+                        "-z",
+                        "--",
+                        &path,
+                    ],
+                ) {
+                    Ok(porcelain) => rows.extend(parse_porcelain(&porcelain)),
+                    Err(_) => {
+                        complete = false;
+                        rows.push(GitFileEntry {
+                            path,
+                            index: " ".to_string(),
+                            worktree: "?".to_string(),
+                            staged: false,
+                            status: "unknown",
+                            old_path: None,
+                            rev: None,
+                        });
+                    }
+                }
+            }
+            rows
+        }
+    };
+    if let Some(position) = rows
+        .iter()
+        .position(|row| row.status == "untracked" && row.path == frame.prefix)
+    {
+        match untracked_paths(&frame.toplevel, &[frame.prefix.as_str()]) {
+            Ok(paths) => {
+                rows.remove(position);
+                for path in paths {
+                    rows.extend(parse_porcelain(&format!("?? {path}\0")));
+                }
+            }
+            Err(_) => complete = false,
+        }
+    }
+    Ok((rows, complete))
+}
+
+fn untracked_paths(workspace: &FsPath, members: &[&str]) -> Result<BTreeSet<String>, ApiError> {
+    if members.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let mut args = vec![
+        "--literal-pathspecs",
+        "ls-files",
+        "-z",
+        "--others",
+        "--exclude-standard",
+        "--",
+    ];
+    args.extend_from_slice(members);
+    let others = review_sync_ok(workspace, &args)?;
+    Ok(others
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
 }
 
 /// Porcelain rows in git's frame: paths are relative to the repository root.
@@ -512,8 +601,9 @@ struct IndexSnapshot {
     token: String,
     /// Repository-root path → that path's raw `ls-files --stage` records.
     by_path: BTreeMap<String, Vec<u8>>,
-    /// One inventory for all row and directory-path tokens in this read.
-    untracked: BTreeSet<String>,
+    /// One scoped inventory, loaded only for directory members. None means
+    /// enumeration failed or was not requested; directory tokens fail closed.
+    untracked: Option<BTreeSet<String>>,
 }
 
 impl IndexSnapshot {
@@ -529,20 +619,25 @@ impl IndexSnapshot {
             slot.extend_from_slice(record);
             slot.push(0);
         }
-        let others = review_sync_ok(
-            &frame.toplevel,
-            &["ls-files", "-z", "--others", "--exclude-standard"],
-        )?;
-        let untracked = others
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect();
         Ok(Self {
             token: content_revision(&raw),
             by_path,
-            untracked,
+            untracked: None,
         })
+    }
+
+    fn load_untracked(&mut self, workspace: &FsPath, members: &[String]) {
+        let directories: Vec<&str> = members
+            .iter()
+            .filter(|member| {
+                !has_linked_ancestor(workspace, member)
+                    && std::fs::symlink_metadata(workspace.join(member))
+                        .is_ok_and(|metadata| metadata.is_dir())
+                    && !workspace.join(member).join(".git").exists()
+            })
+            .map(String::as_str)
+            .collect();
+        self.untracked = untracked_paths(workspace, &directories).ok();
     }
 
     /// Records at `member` or anywhere below it, in path order.
@@ -609,26 +704,40 @@ fn list_member(
     // A path beyond a symlinked directory is not part of this repository's
     // worktree; never read through the link.
     if has_linked_ancestor(workspace, member) {
-        return Ok(listing);
+        return Err(ApiError::internal(
+            "cannot fingerprint through a symlinked directory",
+        ));
     }
     match std::fs::symlink_metadata(workspace.join(member)) {
+        Ok(metadata) if metadata.is_dir() && workspace.join(member).join(".git").exists() => {
+            listing.files.insert(member.to_string());
+        }
         Ok(metadata) if metadata.is_dir() => {
             // Untracked files below a directory (a collapsed `dir/` row, or a
             // directory named in a request): exactly what `git add dir`
             // would pick up, with the same ignore rules.
-            for path in index.untracked.range(member.to_string()..) {
+            let untracked = index
+                .untracked
+                .as_ref()
+                .ok_or_else(|| ApiError::internal("cannot enumerate untracked directory"))?;
+            for path in untracked.range(member.to_string()..) {
                 if !path.starts_with(member) {
                     break;
                 }
                 if is_at_or_under(path, member) {
-                    listing.files.insert(path.clone());
+                    listing.files.insert(normalized_row_path(path).to_string());
                 }
             }
         }
         Ok(_) => {
             listing.files.insert(member.to_string());
         }
-        Err(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ApiError::internal(format!(
+                "cannot inspect {member}: {error}"
+            )));
+        }
     }
     Ok(listing)
 }
@@ -687,13 +796,7 @@ fn worktree_fingerprint(workspace: &FsPath, path: &str, mode: RevMode) -> Result
             let head = head_oid(&full)?;
             let status = review_sync_ok(
                 &full,
-                &[
-                    "status",
-                    "--porcelain=v1",
-                    "-z",
-                    "--untracked-files=all",
-                    "--ignore-submodules=none",
-                ],
+                &["status", "--porcelain=v1", "-z", "--ignore-submodules=none"],
             )?;
             return Ok(format!(
                 "gitlink:{}:{}",
@@ -791,7 +894,8 @@ impl RevBudget {
         let mut bytes = 0u64;
         let mut files = 0usize;
         for file in listings.iter().flat_map(|listing| listing.files.iter()) {
-            if let Ok(metadata) = std::fs::symlink_metadata(workspace.join(file))
+            if !has_linked_ancestor(workspace, file)
+                && let Ok(metadata) = std::fs::symlink_metadata(workspace.join(file))
                 && metadata.is_file()
             {
                 if metadata.len() > FILE_SERVE_MAX_BYTES {
@@ -825,22 +929,56 @@ fn compute_tokens(
     files: &mut [GitFileEntry],
     outside: &[GitFileEntry],
 ) -> Result<GitTokens, ApiError> {
-    let head_oid = head_oid(workspace)?;
-    let index = IndexSnapshot::read(frame)?;
+    let head = head_oid(workspace);
+    let mut index = IndexSnapshot::read(frame)?;
+    let members: Vec<String> = files
+        .iter()
+        .flat_map(|entry| {
+            members_of(&entry.path, entry.old_path.as_deref())
+                .into_iter()
+                .map(|member| format!("{}{member}", frame.prefix))
+        })
+        .chain(
+            outside
+                .iter()
+                .flat_map(|entry| members_of(&entry.path, entry.old_path.as_deref())),
+        )
+        .collect();
+    index.load_untracked(&frame.toplevel, &members);
     let mut budget = RevBudget::default();
-    let mut content_safe = true;
-    let mut row_token = |entry: &GitFileEntry, prefix: &str| -> Result<String, ApiError> {
-        let listings = members_of(&entry.path, entry.old_path.as_deref())
-            .iter()
-            .map(|member| list_member(&frame.toplevel, &index, &format!("{prefix}{member}")))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mode = budget.choose(&frame.toplevel, &listings);
-        let rev = row_rev(&frame.toplevel, &listings, mode)?;
-        content_safe &= rev.starts_with("c-");
-        Ok(rev)
+    // Hidden untracked paths are deliberately not enumerated, so the read
+    // cannot authorize a repository-wide add that would include them.
+    let mut content_safe = head.is_ok()
+        && review_sync_ok(
+            workspace,
+            &[
+                "config",
+                "--default",
+                "normal",
+                "--get",
+                "status.showUntrackedFiles",
+            ],
+        )
+        .is_ok_and(|mode| String::from_utf8_lossy(&mode).trim() != "no");
+    let head_oid = head.ok().flatten();
+    let mut row_token = |entry: &GitFileEntry, prefix: &str| -> Option<String> {
+        let result = (|| {
+            if entry.status == "unknown" {
+                return Err(ApiError::internal("submodule status is unavailable"));
+            }
+            let listings = members_of(&entry.path, entry.old_path.as_deref())
+                .iter()
+                .map(|member| list_member(&frame.toplevel, &index, &format!("{prefix}{member}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mode = budget.choose(&frame.toplevel, &listings);
+            row_rev(&frame.toplevel, &listings, mode)
+        })();
+        let rev = result.ok();
+        content_safe &= rev.as_deref().is_some_and(|rev| rev.starts_with("c-"));
+        rev
     };
     for entry in files.iter_mut() {
-        entry.rev = Some(row_token(entry, &frame.prefix)?);
+        entry.rev = row_token(entry, &frame.prefix);
     }
     let mut hasher = Sha256::new();
     hasher.update(b"cw-git-revision-1\0");
@@ -862,7 +1000,7 @@ fn compute_tokens(
         hasher.update(b"outside\0");
         hasher.update(row.path.as_bytes());
         hasher.update(b"\0");
-        hasher.update(row_token(row, "")?.as_bytes());
+        hasher.update(row_token(row, "").as_deref().unwrap_or("").as_bytes());
         hasher.update(b"\0");
     }
     Ok(GitTokens {
@@ -1431,17 +1569,11 @@ fn check_preconditions(
         stale.push("index");
         parts.push("the index changed".to_string());
     }
-    if let (Some(files), Some(index)) = (&expect.files, &index) {
+    if let (Some(files), Some(mut index)) = (&expect.files, index) {
         // A rename row's token also covers its source path; recover that
         // pairing from the current status, as the read did.
-        let porcelain = review_sync_ok(
-            workspace,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        )?;
-        let (rows, _) = split_by_workspace(
-            parse_porcelain(&String::from_utf8_lossy(&porcelain)),
-            &frame.prefix,
-        );
+        let (rows, _) = status_rows(workspace, &frame)?;
+        let (rows, _) = split_by_workspace(rows, &frame.prefix);
         let sources: BTreeMap<String, String> = rows
             .iter()
             .filter_map(|row| {
@@ -1450,15 +1582,29 @@ fn check_preconditions(
                     .map(|old| (normalized_row_path(&row.path).to_string(), old.to_string()))
             })
             .collect();
+        let members: Vec<String> = files
+            .keys()
+            .flat_map(|path| members_of(path, sources.get(path).map(String::as_str)))
+            .map(|member| format!("{}{member}", frame.prefix))
+            .collect();
+        index.load_untracked(&frame.toplevel, &members);
         for (path, expected) in files {
-            let listings = members_of(path, sources.get(path).map(String::as_str))
+            let current = members_of(path, sources.get(path).map(String::as_str))
                 .iter()
                 .map(|member| {
-                    list_member(&frame.toplevel, index, &format!("{}{member}", frame.prefix))
+                    list_member(
+                        &frame.toplevel,
+                        &index,
+                        &format!("{}{member}", frame.prefix),
+                    )
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            let current = row_rev(&frame.toplevel, &listings, RevMode::Content)?;
-            if &current != expected {
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|listings| row_rev(&frame.toplevel, &listings, RevMode::Content));
+            if current.as_ref().ok() != Some(expected)
+                || rows
+                    .iter()
+                    .any(|row| row.status == "unknown" && is_at_or_under(&row.path, path))
+            {
                 stale_paths.push(path.clone());
             }
         }
@@ -1792,7 +1938,11 @@ mod tests {
 
     fn rev(workspace: &FsPath, path: &str) -> String {
         let frame = RepoFrame::read(workspace).unwrap();
-        let index = IndexSnapshot::read(&frame).unwrap();
+        let mut index = IndexSnapshot::read(&frame).unwrap();
+        index.load_untracked(
+            &frame.toplevel,
+            &[format!("{}{}", frame.prefix, normalized_row_path(path))],
+        );
         let listings: Vec<_> = members_of(path, None)
             .iter()
             .map(|member| {
@@ -2127,14 +2277,14 @@ mod tests {
         )
         .unwrap();
         assert!(head_oid(ws).is_err());
-        assert!(collect_git_status_detail(ws).is_err());
+        assert!(collect_git_status_detail(ws).unwrap().revision.is_none());
         assert!(check_preconditions(ws, &expect).is_err());
         fs::write(ws.join(".git/refs/heads/main"), "broken\n").unwrap();
         assert!(
             head_oid(ws).is_err(),
             "a malformed ref is not an absent ref"
         );
-        assert!(collect_git_status_detail(ws).is_err());
+        assert!(collect_git_status_detail(ws).unwrap().revision.is_none());
         // The same failure in detached HEAD must also propagate.
         fs::write(ws.join(".git/HEAD"), format!("{}\n", "1".repeat(40))).unwrap();
         assert!(head_oid(ws).is_err());
@@ -2223,6 +2373,187 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn assert_unguardable_row(workspace: &FsPath, bad_path: &str) {
+        let detail = collect_git_status_detail(workspace).unwrap();
+        assert_eq!(detail.branch.as_deref(), Some("main"));
+        assert!(detail.head_oid.is_some());
+        assert!(detail.index_token.is_some());
+        assert!(detail.revision.is_none());
+        let bad = detail
+            .files
+            .iter()
+            .find(|row| normalized_row_path(&row.path) == bad_path)
+            .unwrap();
+        assert!(bad.rev.is_none());
+        assert_eq!(
+            serde_json::to_value(bad).unwrap().get("rev"),
+            Some(&Value::Null)
+        );
+        let healthy = detail
+            .files
+            .iter()
+            .find(|row| row.path == "healthy.txt")
+            .unwrap();
+        let expect = expect_file("healthy.txt", healthy.rev.clone().unwrap());
+        assert!(check_preconditions(workspace, &expect).unwrap().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_ancestor_only_withholds_affected_row() {
+        let tmp = repo();
+        let ws = tmp.path();
+        fs::create_dir(ws.join("vendor")).unwrap();
+        fs::write(ws.join("vendor/a.txt"), "tracked\n").unwrap();
+        git(ws, &["add", "vendor"]);
+        git(ws, &["commit", "-q", "-m", "vendor"]);
+        let expect = expect_file("vendor/a.txt", rev(ws, "vendor/a.txt"));
+        fs::remove_dir_all(ws.join("vendor")).unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        fs::write(shared.path().join("a.txt"), "outside\n").unwrap();
+        std::os::unix::fs::symlink(shared.path(), ws.join("vendor")).unwrap();
+        fs::write(ws.join("healthy.txt"), "healthy\n").unwrap();
+        assert_unguardable_row(ws, "vendor/a.txt");
+        assert_conflict(ws, &expect);
+        assert_eq!(
+            fs::read_to_string(shared.path().join("a.txt")).unwrap(),
+            "outside\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_only_withholds_affected_row() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = repo();
+        let ws = tmp.path();
+        fs::write(ws.join("private.txt"), "private\n").unwrap();
+        fs::write(ws.join("healthy.txt"), "healthy\n").unwrap();
+        let expect = expect_file("private.txt", rev(ws, "private.txt"));
+        fs::set_permissions(ws.join("private.txt"), fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            fs::File::open(ws.join("private.txt")).is_err(),
+            "fixture must be unreadable"
+        );
+        assert_unguardable_row(ws, "private.txt");
+        assert_conflict(ws, &expect);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_file_only_withholds_affected_row() {
+        let tmp = repo();
+        let ws = tmp.path();
+        let expect = expect_file("a.txt", rev(ws, "a.txt"));
+        fs::remove_file(ws.join("a.txt")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(ws.join("a.txt"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(ws.join("healthy.txt"), "healthy\n").unwrap();
+        assert_unguardable_row(ws, "a.txt");
+        assert_conflict(ws, &expect);
+    }
+
+    #[test]
+    fn broken_nested_repo_only_withholds_affected_row() {
+        for tracked in [false, true] {
+            let tmp = repo();
+            let ws = tmp.path();
+            let nested = ws.join("vendor");
+            fs::create_dir(&nested).unwrap();
+            git(&nested, &["init", "-q", "-b", "main"]);
+            git(&nested, &["config", "user.email", "git-rev@example.test"]);
+            git(&nested, &["config", "user.name", "Git Rev Test"]);
+            fs::write(nested.join("lib.txt"), "library\n").unwrap();
+            git(&nested, &["add", "lib.txt"]);
+            git(&nested, &["commit", "-q", "-m", "nested"]);
+            if tracked {
+                git(ws, &["add", "vendor"]);
+                git(ws, &["commit", "-q", "-m", "gitlink"]);
+            }
+            fs::write(
+                nested.join(".git/refs/heads/main"),
+                format!("{}\n", "1".repeat(40)),
+            )
+            .unwrap();
+            fs::write(ws.join("healthy.txt"), "healthy\n").unwrap();
+            assert_unguardable_row(ws, "vendor");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_and_guards_respect_clean_filters() {
+        let tmp = repo();
+        let ws = tmp.path();
+        git(ws, &["config", "filter.up.clean", "tr a-z A-Z"]);
+        fs::write(ws.join(".gitattributes"), "*.txt filter=up\n").unwrap();
+        git(ws, &["add", ".gitattributes", "a.txt"]);
+        git(ws, &["commit", "-q", "-m", "filtered"]);
+        fs::File::options()
+            .write(true)
+            .open(ws.join("a.txt"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(90))
+            .unwrap();
+        let detail = collect_git_status_detail(ws).unwrap();
+        assert_eq!(detail.unstaged, 0);
+        assert!(
+            detail.files.is_empty(),
+            "clean filtered files must not appear modified"
+        );
+        fs::write(ws.join("a.txt"), "two\n").unwrap();
+        let detail = collect_git_status_detail(ws).unwrap();
+        let expect = expect_file("a.txt", detail.files[0].rev.clone().unwrap());
+        assert!(check_preconditions(ws, &expect).unwrap().is_ok());
+        git(ws, &["add", "a.txt"]);
+        assert_eq!(run_git_sync(ws, &["show", ":a.txt"]).unwrap(), "TWO\n");
+        assert_conflict(ws, &expect);
+    }
+
+    #[test]
+    fn status_respects_collapsed_and_hidden_untracked_modes() {
+        let tmp = repo();
+        let ws = tmp.path();
+        fs::create_dir_all(ws.join("build/deep")).unwrap();
+        fs::write(ws.join("build/one.txt"), "one\n").unwrap();
+        fs::write(ws.join("build/deep/two.txt"), "two\n").unwrap();
+        let detail = collect_git_status_detail(ws).unwrap();
+        assert_eq!(detail.files.len(), 1);
+        assert_eq!(detail.files[0].path, "build/");
+        let expect = expect_file("build", detail.files[0].rev.clone().unwrap());
+        assert!(check_preconditions(ws, &expect).unwrap().is_ok());
+        fs::write(ws.join("build/deep/two.txt"), "changed\n").unwrap();
+        assert_conflict(ws, &expect);
+        git(ws, &["config", "status.showUntrackedFiles", "no"]);
+        let detail = collect_git_status_detail(ws).unwrap();
+        assert!(detail.files.is_empty());
+        assert_eq!(detail.untracked, 0);
+        assert!(
+            detail.revision.is_none(),
+            "hidden untracked content cannot guard add --all"
+        );
+        assert!(
+            collect_git_status_detail(&ws.join("build"))
+                .unwrap()
+                .files
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn index_token_does_not_enumerate_untracked_tree() {
+        let tmp = repo();
+        GIT_READS.with(|reads| reads.set(0));
+        index_token(tmp.path());
+        // One rev-parse for the frame and one ls-files --stage for the index.
+        assert_eq!(GIT_READS.with(|reads| reads.get()), 2);
     }
 
     #[test]

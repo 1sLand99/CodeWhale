@@ -1397,13 +1397,16 @@ also how a client sees model-spawned work.
   frame the write routes take; in a workspace that is a subdirectory of its
   repository, rows outside the workspace are not listed (the counts stay
   repository-wide). A rename out of the workspace appears as its source
-  deletion. Untracked directories are expanded to individually addressable
-  files. The precondition tokens are opaque:
-  - `head_oid` — the full HEAD commit id; `null` on an unborn branch
+  deletion. Normal Git filters and untracked settings apply. Untracked
+  directories stay collapsed; only a row naming the workspace itself is
+  expanded to individually addressable files. The precondition tokens are
+  opaque:
+  - `head_oid` — the full HEAD commit id; `null` on an unborn branch or when
+    HEAD cannot be read
   - `index_token` — the whole index (mode, blob, stage and path of every
     entry, repository-wide). A stat-only refresh by `git status` does not
-    change it. Repository read failures, including a broken HEAD, return an
-    error rather than unchecked tokens
+    change it. Status remains best-effort on repository read failures;
+    unavailable tokens are `null`, and broken HEADs cannot satisfy guards
   - `files[].rev` — one row: its index entries plus the working-tree state
     of every file it covers (including a rename's in-workspace source).
     Content tokens (`c-…`) include file bytes, the executable bit on Unix,
@@ -1412,11 +1415,16 @@ also how a client sees model-spawned work.
     stage/discard do not write those contents. A read hashes at most
     64 MiB / 4,096 files; rows past that budget or containing a file over
     16 MiB carry a display-only size-and-mtime token (`s-…`). Those tokens
-    cannot guard writes
+    cannot guard writes. Unreadable paths, paths beneath symlinked
+    directories, special files and broken nested repositories have `rev: null`;
+    other rows retain their tokens. If a broken tracked submodule aborts
+    porcelain, ordinary rows are recovered without submodule recursion and
+    the unreadable submodule is shown with `status: "unknown"`, `worktree: "?"`
   - `revision` — the whole tree: `head_oid`, `index_token`, every row's
     `rev`, including the working-tree state of rows outside a subdirectory
-    workspace. `null` when any row is stat-only; whole-tree guarded writes
-    are unavailable in that case. Clients must not silently omit a guard
+    workspace. `null` when any row is stat-only or unreadable, a repository
+    read is incomplete, or untracked paths are hidden; whole-tree guarded
+    writes are unavailable in that case. Clients must not silently omit a guard
 - `GET /v1/changes` — the same porcelain `files[]` projection plus
   `head_oid`, `index_token` and `revision`, minus repo chrome
   (branches/remotes): one authority, so the change list can never disagree
@@ -1442,9 +1450,10 @@ also how a client sees model-spawned work.
   `{ "remote"?, "set_upstream"? }`; `POST /v1/git/branch`
   `{ "name", "create"? }`
 
-Reads run through the hardened review command (filters, fsmonitor, hooks,
-lazy fetches and replace-objects neutralized), and so do the precondition
-token reads; writes run through the non-interactive command path
+Diffs and precondition token reads run through the hardened review command
+(filters, fsmonitor, hooks, lazy fetches and replace-objects neutralized).
+Porcelain status uses normal Git, matching the workspace counts and filters;
+writes run through the non-interactive command path
 (`GIT_TERMINAL_PROMPT=0`, BatchMode ssh) so a credential or host-key prompt
 can never hang a request. Path lists are workspace-relative under the same
 confinement as the file routes (traversal → 400, `.git` → 403), passed after
