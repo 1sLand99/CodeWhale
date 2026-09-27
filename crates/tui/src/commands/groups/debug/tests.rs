@@ -2170,3 +2170,215 @@ fn test_undo_reports_that_files_were_not_reverted_when_the_repo_is_unavailable()
         "the reason must travel with the fallback: {message}"
     );
 }
+
+/// Isolated HOME + workspace for the `/undo` restore tests (#6644).
+// Fields drop in order: the env guards restore before the lock releases.
+struct UndoFixture {
+    workspace: PathBuf,
+    repo: crate::snapshot::SnapshotRepo,
+    _tmp: tempfile::TempDir,
+    _codewhale_home: crate::test_support::EnvVarGuard,
+    _profile: crate::test_support::EnvVarGuard,
+    _home: crate::test_support::EnvVarGuard,
+    _lock: crate::test_support::TestEnvLock,
+}
+
+impl UndoFixture {
+    fn new() -> Self {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = EnvVarGuard::set("HOME", tmp.path());
+        let profile = EnvVarGuard::set("USERPROFILE", tmp.path());
+        let codewhale_home = EnvVarGuard::remove("CODEWHALE_HOME");
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace).unwrap();
+        Self {
+            workspace,
+            repo,
+            _tmp: tmp,
+            _codewhale_home: codewhale_home,
+            _profile: profile,
+            _home: home,
+            _lock: lock,
+        }
+    }
+
+    fn write(&self, name: &str, body: &str) {
+        std::fs::write(self.workspace.join(name), body).unwrap();
+    }
+
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.workspace.join(name)).unwrap()
+    }
+
+    fn snapshot(&self, label: &str, session: &str) {
+        self.repo.take_snapshot(label, Some(session)).unwrap();
+    }
+
+    fn app(&self, session: &str) -> App {
+        let mut app = create_test_app();
+        app.workspace = self.workspace.clone();
+        app.yolo = true;
+        app.current_session_id = Some(session.to_string());
+        app
+    }
+}
+
+/// `/undo` restores only the paths the undone turn changed: an edit the user
+/// made to another file after the turn survives. The whole-tree restore
+/// reverted it too.
+#[test]
+fn patch_undo_restores_only_the_paths_the_undone_step_changed() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.write("b.txt", "b0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.write("new.txt", "created by the turn");
+    fx.snapshot("post-turn:1", "s1");
+    // The user's own edit after the turn, and a file they created.
+    fx.write("b.txt", "b-user");
+    fx.write("mine.txt", "user file");
+
+    let mut app = fx.app("s1");
+    let result = patch_undo(&mut app);
+
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0");
+    assert!(!fx.workspace.join("new.txt").exists());
+    assert_eq!(fx.read("b.txt"), "b-user");
+    assert_eq!(fx.read("mine.txt"), "user file");
+    let message = result.message.unwrap_or_default();
+    assert!(
+        message.contains("modified a.txt") && message.contains("removed new.txt"),
+        "{message}"
+    );
+}
+
+/// A path the undone step changed that changed again since is refused, not
+/// overwritten, and nothing else is touched.
+#[test]
+fn patch_undo_refuses_when_a_changed_path_changed_since() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.write("b.txt", "b0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.write("b.txt", "b1");
+    fx.snapshot("post-turn:1", "s1");
+    fx.write("a.txt", "a-user");
+
+    let mut app = fx.app("s1");
+    let result = super::dispatch(&mut app, "undo", None).expect("registered command");
+
+    let message = result.message.unwrap_or_default();
+    assert!(
+        message.contains("Refusing to undo snapshot") && message.contains("a.txt"),
+        "{message}"
+    );
+    assert_eq!(fx.read("a.txt"), "a-user");
+    assert_eq!(fx.read("b.txt"), "b1");
+}
+
+/// `/undo` keeps stepping back one tool call at a time (#384), each step
+/// restoring only what that call changed.
+#[test]
+fn patch_undo_steps_back_one_tool_call_at_a_time() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.snapshot("tool:call-1", "s1");
+    fx.write("a.txt", "a1");
+    fx.snapshot("tool:call-2", "s1");
+    fx.write("a.txt", "a2");
+    fx.write("b.txt", "b2");
+    fx.snapshot("post-turn:1", "s1");
+
+    let mut app = fx.app("s1");
+    let first = patch_undo(&mut app);
+    assert!(!first.is_error, "{:?}", first.message);
+    assert_eq!(fx.read("a.txt"), "a1");
+    assert!(!fx.workspace.join("b.txt").exists());
+
+    let second = patch_undo(&mut app);
+    assert!(!second.is_error, "{:?}", second.message);
+    assert_eq!(fx.read("a.txt"), "a0");
+
+    let third = patch_undo(&mut app);
+    assert!(
+        third
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("No undoable snapshot")),
+        "{:?}",
+        third.message
+    );
+}
+
+/// Restore points older than the newest 100 snapshots are still found.
+#[test]
+fn patch_undo_finds_restore_points_beyond_the_newest_hundred_snapshots() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.snapshot("post-turn:1", "s1");
+    for i in 0..101 {
+        fx.repo
+            .take_snapshot(&format!("tool:other-{i}"), Some("other-session"))
+            .unwrap();
+    }
+
+    let mut app = fx.app("s1");
+    let result = patch_undo(&mut app);
+
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", result.message);
+}
+
+/// A fork owns the restore points of the turns it inherited, up to the fork,
+/// and none its source took afterwards.
+#[test]
+fn patch_undo_restores_turns_a_fork_inherited() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "source");
+    fx.write("a.txt", "a1");
+    fx.snapshot("post-turn:1", "source");
+
+    let fork = |created_at: chrono::DateTime<chrono::Utc>| {
+        let mut app = fx.app("fork");
+        let mut metadata =
+            crate::session_manager::create_saved_session(&[], "model", &fx.workspace, 0, None)
+                .metadata;
+        metadata.id = "fork".to_string();
+        metadata.parent_session_id = Some("source".to_string());
+        metadata.created_at = created_at;
+        app.current_session_metadata = Some(metadata);
+        app
+    };
+
+    let owners = super::undo::snapshot_owners(&fork(chrono::Utc::now()));
+    assert_eq!(owners.len(), 2);
+    assert_eq!(owners[1].session_id, "source");
+
+    // Forked before the source took these snapshots: they are not the fork's.
+    let mut early = fork(chrono::Utc::now() - chrono::Duration::hours(1));
+    let refused = patch_undo(&mut early);
+    assert!(
+        refused
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("No undoable snapshot")),
+        "{:?}",
+        refused.message
+    );
+    assert_eq!(fx.read("a.txt"), "a1");
+
+    let mut app = fork(chrono::Utc::now() + chrono::Duration::seconds(5));
+    let result = patch_undo(&mut app);
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", result.message);
+}
