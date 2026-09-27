@@ -721,6 +721,58 @@ async fn contract_write_preserves_unreadable_existing_file() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn compatibility_write_preserves_unreadable_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("write-only.txt");
+    let context = ToolContext::new(temporary.path());
+    let file_tool = crate::tools::file_tool::FileTool::new("File");
+    for tool in [&WriteFileTool as &dyn ToolSpec, &file_tool] {
+        std::fs::write(&path, "original\n").expect("fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200))
+            .expect("make unreadable");
+        let mut input = json!({"path": "write-only.txt", "content": "replacement\n"});
+        if tool.name() == "File" {
+            input["action"] = json!("write");
+        }
+        let result = tool.execute(input, &context).await;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore permissions");
+
+        let error = result.expect_err("cannot overwrite without the prior contents");
+        assert!(error.to_string().contains("Failed to read"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("unchanged"),
+            "original\n"
+        );
+    }
+}
+
+#[tokio::test]
+async fn compatibility_write_preserves_non_utf8_existing_file() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("latin1.txt");
+    let original = b"caf\xe9\n";
+    std::fs::write(&path, original).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    let file_tool = crate::tools::file_tool::FileTool::new("File");
+    for tool in [&WriteFileTool as &dyn ToolSpec, &file_tool] {
+        let mut input = json!({"path": "latin1.txt", "content": "replacement\n"});
+        if tool.name() == "File" {
+            input["action"] = json!("write");
+        }
+        let error = tool
+            .execute(input, &context)
+            .await
+            .expect_err("must decode original");
+        assert!(error.to_string().contains("Failed to read"), "{error}");
+        assert_eq!(std::fs::read(&path).expect("unchanged"), original);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn contract_edit_rejects_read_only_target_before_atomic_replace() {
     use std::os::unix::fs::PermissionsExt;
 

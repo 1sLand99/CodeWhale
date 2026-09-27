@@ -51,11 +51,15 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
-- File writes stop if the original contents cannot be read, keeping undo and
-  diffs from recording an empty original file.
+- File writes, including legacy `File` and `write_file` calls, stop if the
+  original contents cannot be read; legacy writers also reject non-UTF-8
+  originals, keeping undo and diffs from recording an empty original file.
 - Resuming a session preserves user messages that quote a compaction marker.
-- Requirements allow-lists now check unset approval and sandbox defaults.
-- Logout returns an error when stored credentials could not be deleted.
+- Requirements allow-lists now check unset approval and sandbox defaults,
+  accept equivalent approval aliases, and lock permission posture when sandbox
+  modes are constrained so saved Full Access and YOLO cannot bypass them.
+- Logout completes xAI OAuth revocation and attempts every credential deletion
+  before reporting remaining credentials with a non-zero exit status.
 - `doctor --fix` keeps temporary files modified within the last hour.
 - Provider streams stop with a clear error if an SSE line exceeds 8 MiB.
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held

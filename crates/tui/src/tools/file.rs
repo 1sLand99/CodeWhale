@@ -1615,7 +1615,12 @@ impl ToolSpec for WriteFileTool {
         let prior_contents = if existed_before {
             tokio::fs::read_to_string(&file_path)
                 .await
-                .unwrap_or_default()
+                .map_err(|error| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {error}",
+                        file_path.display()
+                    ))
+                })?
         } else {
             String::new()
         };

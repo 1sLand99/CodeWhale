@@ -4146,6 +4146,53 @@ fn managed_requirements_ignore_saved_full_access_and_lock_changes() {
 }
 
 #[test]
+fn sandbox_requirements_prevent_full_access_overrides() {
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let requirements_path = tmp.path().join("requirements.toml");
+    std::fs::write(
+        &requirements_path,
+        "allowed_sandbox_modes = [\"workspace-write\"]\n",
+    )
+    .expect("requirements");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+    let _config_env = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let config = Config {
+        requirements_path: Some(requirements_path.to_string_lossy().into_owned()),
+        ..Config::default()
+    };
+
+    for (settings, cli_yolo) in [
+        ("permission_posture = \"full-access\"\n", false),
+        ("", true),
+        ("default_mode = \"yolo\"\n", false),
+    ] {
+        std::fs::write(tmp.path().join("settings.toml"), settings).expect("settings");
+        let mut options = test_options(cli_yolo);
+        options.workspace = tmp.path().to_path_buf();
+        let mut app = App::new(options, &config);
+
+        assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+        assert!(!app.trust_mode);
+        assert!(!app.yolo);
+        assert!(app.approval_policy_requirements_managed());
+        assert!(!app.cycle_approval_posture());
+        assert_eq!(app.select_yolo_compat(), SettingSelection::Refused);
+        assert!(matches!(
+            crate::core::authority::sandbox_policy_for_turn(
+                app.mode,
+                app.approval_mode,
+                config.sandbox_mode.as_deref(),
+                &app.workspace,
+                crate::core::authority::SandboxNetworkAccess::Restricted,
+            ),
+            crate::sandbox::SandboxPolicy::WorkspaceWrite { .. }
+        ));
+    }
+}
+
+#[test]
 fn yolo_entry_points_honor_a_locked_approval_policy() {
     let _env_lock = lock_test_env();
     let tmp = tempfile::tempdir().expect("tempdir");

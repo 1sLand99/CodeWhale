@@ -4707,6 +4707,8 @@ impl Config {
     /// Whether organization requirements, rather than a user-editable config
     /// key, own approval posture. User config still outranks TUI settings, but
     /// `/config approval_mode ... --save` may edit that user-owned key.
+    /// Sandbox requirements also lock posture: Full Access changes the implicit
+    /// sandbox. This conservatively locks even posture changes that would fit.
     #[must_use]
     pub fn approval_policy_is_requirements_managed(&self) -> bool {
         let path = self
@@ -4725,7 +4727,10 @@ impl Config {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|contents| toml::from_str::<RequirementsFile>(&contents).ok())
-            .is_none_or(|requirements| !requirements.allowed_approval_policies.is_empty())
+            .is_none_or(|requirements| {
+                !requirements.allowed_approval_policies.is_empty()
+                    || !requirements.allowed_sandbox_modes.is_empty()
+            })
     }
 
     #[must_use]
@@ -11715,16 +11720,22 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
     })?;
 
     if !requirements.allowed_approval_policies.is_empty() {
+        use codewhale_execpolicy::ApprovalMode;
+
         let policy = config
             .approval_policy
             .as_deref()
             .unwrap_or("on-request")
             .to_ascii_lowercase();
-        if !requirements
-            .allowed_approval_policies
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case(&policy))
-        {
+        if !requirements.allowed_approval_policies.iter().any(|p| {
+            match (
+                ApprovalMode::from_config_value(p),
+                ApprovalMode::from_config_value(&policy),
+            ) {
+                (Some(allowed), Some(effective)) => allowed == effective,
+                _ => p.eq_ignore_ascii_case(&policy),
+            }
+        }) {
             anyhow::bail!(
                 "approval_policy '{policy}' is not allowed by requirements ({})",
                 requirements.allowed_approval_policies.join(", ")
@@ -11744,20 +11755,13 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
                 use crate::sandbox::SandboxPolicy;
                 use codewhale_execpolicy::ApprovalMode;
 
-                // A configured or requirements-managed approval policy
-                // prevents the interactive YOLO override at startup.
-                let approval = if config.yolo.unwrap_or(false)
-                    && config.approval_policy.is_none()
-                    && requirements.allowed_approval_policies.is_empty()
-                {
-                    ApprovalMode::Bypass
-                } else {
-                    config
-                        .approval_policy
-                        .as_deref()
-                        .and_then(ApprovalMode::from_config_value)
-                        .unwrap_or_default()
-                };
+                // Sandbox requirements lock approval posture at startup,
+                // excluding saved preferences and every YOLO override.
+                let approval = config
+                    .approval_policy
+                    .as_deref()
+                    .and_then(ApprovalMode::from_config_value)
+                    .unwrap_or_default();
                 match sandbox_policy_for_turn(
                     codewhale_config::AppMode::Agent,
                     approval,

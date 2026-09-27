@@ -41,6 +41,8 @@ fn requirements_check_implicit_approval_and_sandbox_defaults() {
     config.yolo = Some(true);
     apply_requirements(&mut config).expect("managed approvals prevent the YOLO override");
     fs::write(&path, "allowed_sandbox_modes = ['workspace-write']\n").unwrap();
+    apply_requirements(&mut config).expect("managed sandbox prevents the YOLO override");
+    config.approval_policy = Some("full-access".into());
     let error =
         apply_requirements(&mut config).expect_err("full access changes the sandbox default");
     assert!(
@@ -48,6 +50,41 @@ fn requirements_check_implicit_approval_and_sandbox_defaults() {
             .to_string()
             .contains("sandbox_mode 'danger-full-access'")
     );
+}
+
+#[test]
+fn requirements_accept_equivalent_approval_aliases() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("requirements.toml");
+    let mut config = Config {
+        requirements_path: Some(path.display().to_string()),
+        ..Config::default()
+    };
+    for alias in ["untrusted", "ask", "suggest", "ON-REQUEST"] {
+        fs::write(&path, format!("allowed_approval_policies = ['{alias}']\n")).unwrap();
+        for policy in [None, Some("on-request"), Some("ask")] {
+            config.approval_policy = policy.map(str::to_string);
+            apply_requirements(&mut config).expect("equivalent approval mode is allowed");
+        }
+        config.approval_policy = Some("full-access".into());
+        assert!(
+            apply_requirements(&mut config).is_err(),
+            "{alias} must not allow bypass"
+        );
+    }
+    fs::write(&path, "allowed_approval_policies = ['unknown']\n").unwrap();
+    config.approval_policy = None;
+    assert!(
+        apply_requirements(&mut config).is_err(),
+        "unknown is not the default"
+    );
+    config.approval_policy = Some("other-unknown".into());
+    assert!(
+        apply_requirements(&mut config).is_err(),
+        "unknown modes must not compare equal"
+    );
+    config.approval_policy = Some("UNKNOWN".into());
+    apply_requirements(&mut config).expect("unparsed policies retain literal comparison");
 }
 
 #[test]

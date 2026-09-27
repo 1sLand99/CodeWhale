@@ -2625,16 +2625,24 @@ fn run_logout_command_with_secrets(
     secrets: &Secrets,
     profile: Option<&str>,
 ) -> Result<()> {
-    codewhale_config::with_xai_oauth_revocation_transaction(|| {
+    let failures = codewhale_config::with_xai_oauth_revocation_transaction(|| {
         run_logout_command_with_secrets_unlocked(store, secrets, profile)
-    })
+    })?;
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "logout incomplete: failed to delete stored credentials for: {}",
+            failures.join(", ")
+        );
+    }
+    println!("logged out");
+    Ok(())
 }
 
 fn run_logout_command_with_secrets_unlocked(
     store: &mut ConfigStore,
     secrets: &Secrets,
     profile: Option<&str>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let original_config = store.config.clone();
     for provider in ProviderKind::ALL {
         clear_provider_api_key_from_config(store, provider);
@@ -2681,16 +2689,9 @@ fn run_logout_command_with_secrets_unlocked(
     if let Err(error) = clear_account_session(profile) {
         keyring_failures.push(format!("account session: {error}"));
     }
-    if keyring_failures.is_empty() {
-        println!("logged out");
-    } else {
-        eprintln!(
-            "failed to delete stored credentials for: {}",
-            keyring_failures.join(", ")
-        );
-        anyhow::bail!("logout incomplete: some stored credentials could not be deleted");
-    }
-    Ok(())
+    // The config save committed the authority change. Partial deletions must
+    // not roll back xAI revocation; report them after its transaction commits.
+    Ok(keyring_failures)
 }
 
 fn clear_daytona_slot(secrets: &Secrets) -> Result<(), codewhale_secrets::SecretsError> {
@@ -5802,7 +5803,7 @@ mod tests {
     struct RecordingKeyringStore {
         gets: Mutex<Vec<String>>,
         values: Mutex<std::collections::BTreeMap<String, String>>,
-        fail_deletes: bool,
+        fail_delete_slot: Option<&'static str>,
     }
 
     impl RecordingKeyringStore {
@@ -5845,7 +5846,7 @@ mod tests {
         }
 
         fn delete(&self, key: &str) -> std::result::Result<(), codewhale_secrets::SecretsError> {
-            if self.fail_deletes {
+            if self.fail_delete_slot == Some(key) {
                 return Err(codewhale_secrets::SecretsError::Keyring(
                     "test delete failure".into(),
                 ));
@@ -10259,7 +10260,12 @@ verbosity = "project-imported"
     }
 
     #[test]
-    fn logout_returns_error_when_keyring_deletion_fails() {
+    fn logout_finishes_revocation_and_other_deletions_before_reporting_failures() {
+        use codewhale_secrets::account::{
+            ACCOUNT_API_BASE_ENV, AccountAuthBundle, AccountSessionStore, DEFAULT_ACCOUNT_API_BASE,
+            secure_account_session_secrets,
+        };
+
         let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
         let home = dir
@@ -10268,21 +10274,82 @@ verbosity = "project-imported"
             .expect("canonical temp root")
             .join("codewhale-home");
         let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
+        let _api_base = ScopedEnvVar::remove(ACCOUNT_API_BASE_ENV);
         let mut store = ConfigStore::load(Some(home.join("config.toml"))).expect("load config");
+        let generation = "xai-auth-0123456789abcdef0123456789abcdef.json";
+        store.config.providers.xai.auth_mode = Some("oauth".into());
+        store.config.providers.xai.oauth_credential_generation = Some(generation.into());
+        store.save().expect("save xAI authority");
+        let owned_files = [
+            generation,
+            codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME,
+            codewhale_config::LEGACY_CHATGPT_OAUTH_FILE_NAME,
+        ];
+        codewhale_config::with_xai_oauth_lifecycle_lock(|owned| {
+            for name in owned_files {
+                owned.write(name, b"test-oauth-credential", false)?;
+            }
+            Ok(())
+        })
+        .expect("seed OAuth credentials");
+        let account = AccountSessionStore::new(
+            secure_account_session_secrets().expect("account store"),
+            None,
+            DEFAULT_ACCOUNT_API_BASE,
+        );
+        account
+            .save(AccountAuthBundle {
+                token_type: "Bearer".into(),
+                access_token: "test-access".into(),
+                refresh_token: "test-refresh".into(),
+                session: None,
+                user: None,
+            })
+            .expect("seed account session");
+        let failing_slot = provider_slot(ProviderKind::Deepseek);
         let keyring = RecordingKeyringStore {
-            fail_deletes: true,
+            fail_delete_slot: Some(failing_slot),
             ..RecordingKeyringStore::default()
         };
         for provider in [ProviderKind::Deepseek, ProviderKind::Fireworks] {
             keyring.set_value(provider_slot(provider), "test-credential");
         }
+        keyring.set_value(codewhale_secrets::DAYTONA_TOKEN_SLOT, "test-daytona");
         let secrets = Secrets::new(std::sync::Arc::new(keyring));
         let error = run_logout_command_with_secrets(&mut store, &secrets, None)
             .expect_err("partial logout must fail");
         assert!(error.to_string().contains("logout incomplete"));
-        for provider in [ProviderKind::Deepseek, ProviderKind::Fireworks] {
-            assert!(secrets.get(provider_slot(provider)).unwrap().is_some());
+        for name in owned_files {
+            assert!(
+                !home.join("credentials").join(name).exists(),
+                "{name} survived"
+            );
         }
+        assert!(error.to_string().contains(failing_slot));
+        assert!(secrets.get(failing_slot).unwrap().is_some());
+        assert!(
+            secrets
+                .get(provider_slot(ProviderKind::Fireworks))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            secrets
+                .get(codewhale_secrets::DAYTONA_TOKEN_SLOT)
+                .unwrap()
+                .is_none()
+        );
+        assert!(account.load().expect("load cleared account").is_none());
+        let saved = ConfigStore::load(Some(home.join("config.toml"))).expect("reload config");
+        assert!(saved.config.providers.xai.auth_mode.is_none());
+        assert!(
+            saved
+                .config
+                .providers
+                .xai
+                .oauth_credential_generation
+                .is_none()
+        );
     }
 
     #[test]
