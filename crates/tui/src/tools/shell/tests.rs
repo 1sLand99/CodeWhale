@@ -957,9 +957,75 @@ fn readonly_argv_is_shell_free_and_disables_git_helpers() {
     );
     assert_eq!(args.last().map(String::as_str), Some("HEAD"));
 
+    let (_, args) = hardened_readonly_argv("git -C sub blame f.txt").expect("blame argv");
+    assert_eq!(args, ["-C", "sub", "blame", "--no-textconv", "f.txt"]);
+    assert_eq!(
+        readonly_git_dirs(
+            "git -C sub diff | git --no-pager -C /abs status | cat",
+            std::path::Path::new("/ws")
+        ),
+        [
+            std::path::PathBuf::from("/ws/sub"),
+            std::path::PathBuf::from("/abs")
+        ]
+    );
+
     let (program, args) = hardened_readonly_argv("rg $PATTERN .").expect("literal argv");
     assert_eq!(program, "rg");
     assert_eq!(args, ["$PATTERN", "."]);
+}
+
+/// Classifier-approved working-tree reads must not run the repository's clean
+/// filter or textconv driver. The helpers print a sentinel instead of the
+/// content, so this holds whether or not a kernel sandbox blocks their writes.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_git_reads_run_no_clean_filter_or_textconv() {
+    use crate::dependencies::ExternalTool as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let helper = outside.path().join("helper.sh");
+    std::fs::write(&helper, "#!/bin/sh\necho HELPER-RAN\n").expect("helper");
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let helper = helper.display().to_string();
+    let repo = workspace.path();
+    let git = |args: &[&str]| {
+        let status = crate::dependencies::Git::status(args, repo).expect("git should spawn");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join(".gitattributes"), "c.txt filter=x diff=conv\n").expect("attrs");
+    std::fs::write(repo.join("c.txt"), "c1\n").expect("write");
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+    git(&["config", "filter.x.clean", &helper]);
+    git(&["config", "diff.conv.textconv", &helper]);
+    std::fs::write(repo.join("c.txt"), "c2\n").expect("modify");
+
+    let ctx =
+        ToolContext::new(repo).with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let tool = BashTool::new("Bash");
+    for command in ["git diff", "git blame c.txt"] {
+        let result = tool
+            .execute(json!({"command": command}), &ctx)
+            .await
+            .expect(command);
+        assert!(result.success, "{command}: {}", result.content);
+        assert!(
+            !result.content.contains("HELPER-RAN"),
+            "{command} ran a repository-configured command: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("c2"),
+            "{command}: {}",
+            result.content
+        );
+    }
 }
 
 #[cfg(any(unix, windows))]

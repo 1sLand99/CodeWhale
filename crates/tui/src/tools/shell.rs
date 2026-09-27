@@ -4200,7 +4200,11 @@ fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
                         .map(String::from),
                 );
             }
-            "status" | "ls-files" | "blame" | "grep" => {}
+            "blame" => {
+                let at = subcommand_index + 1;
+                argv.insert(at, "--no-textconv".to_string());
+            }
+            "status" | "ls-files" | "grep" => {}
             _ => {
                 return Err(anyhow!(
                     "classifier-approved Git read did not keep its subcommand in argv[1]"
@@ -4211,6 +4215,31 @@ fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
 
     let program = argv.remove(0);
     Ok((program, argv))
+}
+
+/// The directory each `git` segment of a read-only command runs in: `cwd`
+/// followed through any leading `-C` hops, as git itself resolves them.
+fn readonly_git_dirs(command: &str, cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
+    command
+        .split('|')
+        .filter_map(|segment| shell_words::split(&normalize_windows_command_paths(segment)).ok())
+        .filter(|argv| argv.first().is_some_and(|program| program == "git"))
+        .map(|argv| {
+            let mut dir = cwd.to_path_buf();
+            let mut args = argv.iter().skip(1);
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--no-pager" => {}
+                    "-C" => match args.next() {
+                        Some(target) => dir = dir.join(target),
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+            dir
+        })
+        .collect()
 }
 
 fn enforce_readonly_workspace_operands(
@@ -5436,7 +5465,6 @@ impl ToolSpec for BashTool {
             if let Some(path) = readonly_sanitized_path(&context.workspace) {
                 extra_env.insert("PATH".to_string(), path);
             }
-            extra_env.insert("GIT_CONFIG_COUNT".to_string(), "3".to_string());
             extra_env.insert("GIT_CONFIG_KEY_0".to_string(), "core.fsmonitor".to_string());
             extra_env.insert("GIT_CONFIG_VALUE_0".to_string(), "false".to_string());
             extra_env.insert("GIT_CONFIG_KEY_1".to_string(), "core.hooksPath".to_string());
@@ -5446,6 +5474,35 @@ impl ToolSpec for BashTool {
                 "log.showSignature".to_string(),
             );
             extra_env.insert("GIT_CONFIG_VALUE_2".to_string(), "false".to_string());
+            // A working-tree read (diff, status, blame) runs the repository's
+            // clean filters, which no command-line flag disables.
+            let git_dirs = readonly_git_dirs(
+                command,
+                working_dir
+                    .as_deref()
+                    .map_or(context.workspace.as_path(), std::path::Path::new),
+            );
+            let overrides = tokio::task::spawn_blocking(move || {
+                let mut overrides = std::collections::BTreeSet::new();
+                for dir in git_dirs {
+                    overrides.extend(crate::dependencies::Git::review_filter_overrides(&dir)?);
+                }
+                anyhow::Ok(overrides)
+            })
+            .await
+            .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))?
+            .map_err(|e| {
+                ToolError::permission_denied(format!(
+                    "Read-only shell could not inspect the repository's Git filters: {e:#}"
+                ))
+            })?;
+            let mut count = 3;
+            for (key, value) in overrides {
+                extra_env.insert(format!("GIT_CONFIG_KEY_{count}"), key);
+                extra_env.insert(format!("GIT_CONFIG_VALUE_{count}"), value.to_string());
+                count += 1;
+            }
+            extra_env.insert("GIT_CONFIG_COUNT".to_string(), count.to_string());
             extra_env.insert(READONLY_ENV_MARKER.to_string(), "1".to_string());
         }
 

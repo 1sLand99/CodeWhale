@@ -167,13 +167,18 @@ quieter, and Fleet runs can be checked before they spend anything.
   notes file that is a symlink or whose directory resolves outside the
   workspace, and a note is flushed to disk before the tool reports success.
 - Diffs and shows that read repository content (`codewhale review`, the
-  `git_diff`/`git_show` tools, verification, delivery and the runtime API diff
-  routes) share one flag set: no external diff, no textconv, and submodules
-  compared by commit only, so a submodule's configured filters and diff
-  drivers never run. `git_diff`, `git_show` and commit planning also read
-  through the hardened review command.
-- `git_fetch` accepts a `src:dst` refspec only when the destination is under
-  `refs/remotes/`; local branches and tags are never written.
+  `git_diff`/`git_show` tools, verification, delivery, task attempt records,
+  `@diff` and the runtime API diff routes) share one flag set: no external
+  diff, no textconv, and submodules compared by commit only, so a submodule's
+  configured filters and diff drivers never run. Reads of the working tree
+  (`git_diff`, `git_show`, `git_blame`, commit planning, verification, task
+  attempt records, `@diff`/`@git`) also run through the hardened review
+  command, so the repository's clean filters do not run either. `git_blame`
+  and read-only shell `git blame` skip textconv, and read-only shell `git`
+  reads neutralize the repository's clean filters.
+- `git_fetch` refuses refspecs that would write a local branch or tag: a
+  `src:dst` destination must be under `refs/remotes/`, and the two-word
+  `tag <name>` form is rejected.
 - Opening a URL on Windows goes through the URL protocol handler instead of
   `cmd /C start`, so characters in the URL are not interpreted by the shell.
 - Skill downloads and the skills registry index are read through a streaming

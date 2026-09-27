@@ -761,18 +761,12 @@ impl TasksTool {
         let branch = git_output(&context.workspace, &["rev-parse", "--abbrev-ref", "HEAD"])
             .await
             .ok();
-        let diff = git_output(&context.workspace, &["diff", "--binary", "--no-color"]).await?;
+        let (diff, changed_files) = attempt_diff(&context.workspace).await?;
         if diff.trim().is_empty() {
             return Ok(ToolResult::error(
                 "No working-tree diff to record as an attempt.",
             ));
         }
-        let changed_files = git_output(&context.workspace, &["diff", "--name-only"])
-            .await?
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
         let patch_path = write_task_artifact_for(context, &task_id, "attempt_patch", &diff).await?;
         let attempt = TaskAttemptRecord {
             id: format!("attempt_{}", &Uuid::new_v4().to_string()[..8]),
@@ -1252,12 +1246,37 @@ fn task_id_schema() -> Value {
     })
 }
 
+/// The working-tree patch and changed paths an attempt records, read without
+/// running repository-configured diff drivers or filters.
+async fn attempt_diff(workspace: &Path) -> Result<(String, Vec<String>), ToolError> {
+    let review = crate::dependencies::Git::REVIEW_DIFF_ARGS;
+    let diff = git_output(
+        workspace,
+        &[&["diff", "--binary", "--no-color"][..], &review[..]].concat(),
+    )
+    .await?;
+    let changed_files = git_output(
+        workspace,
+        &[&["diff", "--name-only"][..], &review[..]].concat(),
+    )
+    .await?
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .map(ToString::to_string)
+    .collect();
+    Ok((diff, changed_files))
+}
+
 async fn git_output(workspace: &Path, args: &[&str]) -> Result<String, ToolError> {
     let args_owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
     let cwd = workspace.to_path_buf();
+    // Reads repository content, so repository-configured filters, fsmonitor
+    // and hooks stay off.
     let out = tokio::task::spawn_blocking(move || {
-        let arg_refs: Vec<&str> = args_owned.iter().map(String::as_str).collect();
-        crate::dependencies::Git::output(&arg_refs, &cwd)
+        crate::dependencies::Git::review_command(&cwd)
+            .map_err(|e| std::io::Error::other(format!("{e:#}")))?
+            .args(&args_owned)
+            .output()
     })
     .await
     .map_err(|e| {
@@ -1345,6 +1364,62 @@ fn sanitize_filename(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::tools::spec::ToolSpec;
+
+    /// Recording an attempt reads the working-tree patch; repository diff
+    /// drivers and clean filters must not run, and the patch stays a patch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn attempt_diff_runs_no_repository_configured_commands() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        let marker = outside.path().join("marker");
+        let script = |name: &str, body: &str| {
+            let path = outside.path().join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho {name} >> '{}'\n{body}", marker.display()),
+            )
+            .expect("write script");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            path.display().to_string()
+        };
+        let clean = script("clean.sh", "cat\n");
+        let external = script("external.sh", "");
+        let textconv = script("textconv.sh", "cat \"$1\"\n");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let status = crate::dependencies::Git::status(args, repo).expect("git should spawn");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            repo.join(".gitattributes"),
+            "a.md diff=conv\nf.txt filter=x\n",
+        )
+        .expect("attrs");
+        std::fs::write(repo.join("a.md"), "one\n").expect("write");
+        std::fs::write(repo.join("f.txt"), "one\n").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["config", "filter.x.clean", &clean]);
+        git(&["config", "diff.conv.textconv", &textconv]);
+        std::fs::write(repo.join("a.md"), "two\n").expect("modify");
+        std::fs::write(repo.join("f.txt"), "two\n").expect("modify");
+        git(&["config", "diff.external", &external]);
+
+        let (diff, changed) = attempt_diff(repo).await.expect("attempt diff");
+        assert!(
+            !marker.exists(),
+            "recording ran a repository-configured command: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        assert!(diff.contains("+two"), "{diff}");
+        assert_eq!(changed, vec!["a.md".to_string(), "f.txt".to_string()]);
+    }
 
     #[test]
     fn durable_task_schema_requires_prompt() {

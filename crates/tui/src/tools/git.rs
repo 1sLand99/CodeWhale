@@ -1794,8 +1794,13 @@ Binary files a/image.png and b/image.png differ
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).expect("mkdir repo");
         init_git_repo(&repo);
-        fs::write(repo.join(".gitattributes"), "a.md diff=conv\n").expect("attrs");
+        fs::write(
+            repo.join(".gitattributes"),
+            "a.md diff=conv\nc.txt filter=x\n",
+        )
+        .expect("attrs");
         fs::write(repo.join("a.md"), "one\n").expect("write");
+        fs::write(repo.join("c.txt"), "c1\n").expect("write");
         let upstream_arg = upstream.display().to_string();
         git(
             &repo,
@@ -1869,5 +1874,28 @@ Binary files a/image.png and b/image.png differ
             "{}",
             show.content
         );
+
+        // Working-tree reads also run the superproject's clean filter, which
+        // no diff flag disables; blame applies textconv unless told not to.
+        git(&repo, &["config", "filter.x.clean", &clean]);
+        fs::write(repo.join("c.txt"), "c2\n").expect("modify");
+        let diff = GitDiffTool
+            .execute(json!({}), &ctx)
+            .await
+            .expect("git_diff");
+        no_marker("git_diff with a clean filter");
+        assert!(diff.content.contains("+c2"), "{}", diff.content);
+        let plan = GitCommitPlanTool
+            .execute(json!({}), &ctx)
+            .await
+            .expect("git_commit_plan");
+        no_marker("git_commit_plan");
+        assert!(plan.success, "{}", plan.content);
+        let blame = super::super::git_history::GitBlameTool
+            .execute(json!({"path": "a.md"}), &ctx)
+            .await
+            .expect("git_blame");
+        no_marker("git_blame");
+        assert!(blame.success, "{}", blame.content);
     }
 }

@@ -540,10 +540,12 @@ pub(crate) fn apply_git_noninteractive_env(cmd: &mut Command) {
 
 impl Git {
     /// Flags every `diff`, `show` or patch `log` that collects repository
-    /// content passes, so the output never runs a repository-configured
-    /// command. `--no-ext-diff`/`--no-textconv` skip diff drivers; a dirty
-    /// check or `diff.submodule=diff` spawns a child git inside each submodule
-    /// that inherits neither flag, so submodules compare by commit only.
+    /// content passes. `--no-ext-diff`/`--no-textconv` skip diff drivers; a
+    /// dirty check or `diff.submodule=diff` spawns a child git inside each
+    /// submodule that inherits neither flag, so submodules compare by commit
+    /// only. A read that touches the working tree also runs the superproject's
+    /// clean filters, which no flag disables: build it from
+    /// [`Self::review_command`] too.
     pub(crate) const REVIEW_DIFF_ARGS: [&'static str; 4] = [
         "--no-ext-diff",
         "--no-textconv",
@@ -555,30 +557,55 @@ impl Git {
     /// Review callers also pass [`Self::REVIEW_DIFF_ARGS`] for diffs.
     /// Configured filters otherwise execute even when those flags are present.
     pub(crate) fn review_command(workspace: &Path) -> anyhow::Result<Command> {
+        let overrides = Self::review_filter_overrides(workspace)?;
+        let mut command = Self::review_base(workspace)?;
+        let mut count = 2;
+        for (key, value) in overrides {
+            // A subsection may contain '='; `-c key=value` would then
+            // override a different key. Separate env fields preserve it.
+            command.env(format!("GIT_CONFIG_KEY_{count}"), key);
+            command.env(format!("GIT_CONFIG_VALUE_{count}"), value);
+            count += 1;
+        }
+        command.env("GIT_CONFIG_COUNT", count.to_string());
+        Ok(command)
+    }
+
+    /// Git with fsmonitor, hooks, lazy fetch and replace objects disabled,
+    /// running in `workspace`. [`Self::review_command`] adds filter overrides.
+    fn review_base(workspace: &Path) -> anyhow::Result<Command> {
+        use anyhow::Context;
+
+        let mut command = Self::command().context("git not found on PATH")?;
+        command
+            .current_dir(workspace)
+            .stdin(std::process::Stdio::null())
+            // GIT_CONFIG redirects only `git config`, not `git diff`.
+            // Both phases must observe the same effective repository config.
+            .env_remove("GIT_CONFIG")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+            .env("GIT_CONFIG_VALUE_0", "false")
+            .env("GIT_CONFIG_KEY_1", "core.hooksPath")
+            .env(
+                "GIT_CONFIG_VALUE_1",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_NO_REPLACE_OBJECTS", "1");
+        Ok(command)
+    }
+
+    /// Config overrides (`key`, `value`) that neutralize every clean/process
+    /// filter driver configured for the repository at `workspace`. Callers
+    /// apply them through `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`.
+    pub(crate) fn review_filter_overrides(
+        workspace: &Path,
+    ) -> anyhow::Result<Vec<(String, &'static str)>> {
         use anyhow::{Context, bail};
 
-        let base = || -> anyhow::Result<Command> {
-            let mut command = Self::command().context("git not found on PATH")?;
-            command
-                .current_dir(workspace)
-                .stdin(std::process::Stdio::null())
-                // GIT_CONFIG redirects only `git config`, not `git diff`.
-                // Both phases must observe the same effective repository config.
-                .env_remove("GIT_CONFIG")
-                .env_remove("GIT_CONFIG_PARAMETERS")
-                .env("GIT_CONFIG_COUNT", "2")
-                .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
-                .env("GIT_CONFIG_VALUE_0", "false")
-                .env("GIT_CONFIG_KEY_1", "core.hooksPath")
-                .env(
-                    "GIT_CONFIG_VALUE_1",
-                    if cfg!(windows) { "NUL" } else { "/dev/null" },
-                )
-                .env("GIT_NO_LAZY_FETCH", "1")
-                .env("GIT_NO_REPLACE_OBJECTS", "1");
-            Ok(command)
-        };
-        let output = base()?
+        let output = Self::review_base(workspace)?
             .args([
                 "config",
                 "--null",
@@ -606,24 +633,15 @@ impl Git {
             let (driver, _) = key
                 .rsplit_once('.')
                 .context("Invalid Git review filter key")?;
-            filters.insert(driver);
+            filters.insert(driver.to_string());
         }
-        let mut command = base()?;
-        let mut count = 2;
-        for driver in filters {
-            for (suffix, value) in [("clean", ""), ("process", ""), ("required", "false")] {
-                // A subsection may contain '='; `-c key=value` would then
-                // override a different key. Separate env fields preserve it.
-                command.env(
-                    format!("GIT_CONFIG_KEY_{count}"),
-                    format!("{driver}.{suffix}"),
-                );
-                command.env(format!("GIT_CONFIG_VALUE_{count}"), value);
-                count += 1;
-            }
-        }
-        command.env("GIT_CONFIG_COUNT", count.to_string());
-        Ok(command)
+        Ok(filters
+            .into_iter()
+            .flat_map(|driver| {
+                [("clean", ""), ("process", ""), ("required", "false")]
+                    .map(|(suffix, value)| (format!("{driver}.{suffix}"), value))
+            })
+            .collect())
     }
 }
 
