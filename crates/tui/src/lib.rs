@@ -5465,12 +5465,12 @@ async fn run_doctor(
         None => {
             println!("  {} pandoc: not found (optional)", "·".dimmed(),);
             println!(
-                "    pandoc_convert tool is NOT advertised to the model. Install pandoc to enable:"
+                "    pandoc_convert tool is NOT advertised to the model. Install pandoc 2.15+ to enable:"
             );
             match std::env::consts::OS {
                 "macos" => println!("      brew install pandoc"),
                 "linux" => println!(
-                    "      sudo apt install pandoc    (Debian/Ubuntu) — or your distro's equivalent"
+                    "      release package from pandoc.org/installing.html (distro packages may predate 2.15)"
                 ),
                 "windows" => {
                     println!("      winget install JohnMacFarlane.Pandoc")

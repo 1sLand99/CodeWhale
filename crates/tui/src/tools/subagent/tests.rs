@@ -11573,25 +11573,20 @@ fn parse_spawn_request_cwd_empty_string_yields_none() {
 
 #[test]
 fn create_isolated_worktree_creates_branch_checkout_outside_parent_repo() {
-    let repo = init_subagent_git_repo();
-    let worktree_home = tempdir().expect("worktree home");
+    let (_harness, repo) = git_repo_in_harness();
     let request = SubAgentWorktreeRequest {
         branch: Some("codex/agent-isolated-test".to_string()),
-        path: Some(worktree_home.path().join("isolated")),
+        path: Some(PathBuf::from("isolated")),
         base_ref: None,
     };
 
-    let path = create_isolated_worktree(
-        repo.path(),
-        &request,
-        Some("isolated-test"),
-        &FleetRole::Builder,
-    )
-    .expect("worktree should be created");
+    let path =
+        create_isolated_worktree(&repo, &request, Some("isolated-test"), &FleetRole::Builder)
+            .expect("worktree should be created");
 
     assert!(path.exists(), "worktree path should exist");
     assert!(
-        !path.starts_with(repo.path()),
+        !path.starts_with(&repo),
         "generated worktree must be outside the parent checkout"
     );
     assert_eq!(
@@ -11602,14 +11597,13 @@ fn create_isolated_worktree_creates_branch_checkout_outside_parent_repo() {
 
 #[test]
 fn unchanged_isolated_worktree_is_removed_and_changed_one_is_kept() {
-    let repo = init_subagent_git_repo();
-    let worktree_home = tempdir().expect("worktree home");
+    let (harness, repo) = git_repo_in_harness();
     let make = |name: &str| {
         create_isolated_worktree(
-            repo.path(),
+            &repo,
             &SubAgentWorktreeRequest {
                 branch: Some(format!("codex/agent-{name}")),
-                path: Some(worktree_home.path().join(name)),
+                path: Some(PathBuf::from(name)),
                 base_ref: None,
             },
             Some(name),
@@ -11621,7 +11615,7 @@ fn unchanged_isolated_worktree_is_removed_and_changed_one_is_kept() {
         std::process::Command::new("git")
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("refs/heads/codex/agent-{name}"))
-            .current_dir(repo.path())
+            .current_dir(&repo)
             .status()
             .expect("git rev-parse")
             .success()
@@ -11649,17 +11643,139 @@ fn unchanged_isolated_worktree_is_removed_and_changed_one_is_kept() {
     // An ignored file is invisible to the delivery inventory but was still
     // written by the worker, so the worktree is kept.
     let ignored = make("ignored");
-    std::fs::write(repo.path().join(".git/info/exclude"), "scratch/\n").expect("exclude");
+    std::fs::write(repo.join(".git/info/exclude"), "scratch/\n").expect("exclude");
     std::fs::create_dir_all(ignored.join("scratch")).expect("scratch dir");
     std::fs::write(ignored.join("scratch/report.md"), "findings").expect("ignored file");
     assert!(!worktree::remove_unchanged_worktree(&ignored, Some(&empty)));
     assert!(ignored.join("scratch/report.md").exists());
 
     // Never deletes a directory git does not list as a linked worktree.
-    let plain = worktree_home.path().join("plain");
+    let plain = harness.path().join("plain");
     std::fs::create_dir_all(&plain).expect("plain dir");
     assert!(!worktree::remove_unchanged_worktree(&plain, Some(&empty)));
     assert!(plain.exists());
+}
+
+/// A git repository at `<harness>/repo`, so its sub-agent worktree root
+/// (`<harness>/.codewhale-worktrees/repo`) is removed with the harness.
+fn git_repo_in_harness() -> (tempfile::TempDir, PathBuf) {
+    let harness = tempdir().expect("harness");
+    let repo = harness.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    init_git_repo_at(&repo);
+    let repo = repo.canonicalize().expect("canonical repo");
+    (harness, repo)
+}
+
+#[test]
+fn create_isolated_worktree_keeps_absolute_paths_under_worktree_root() {
+    let (harness, repo) = git_repo_in_harness();
+    let outside = tempdir().expect("outside dir");
+    let escape = outside.path().join("escaped");
+    let branch_exists = |name: &str| {
+        Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{name}"))
+            .current_dir(&repo)
+            .status()
+            .expect("git rev-parse")
+            .success()
+    };
+
+    let err = create_isolated_worktree(
+        &repo,
+        &SubAgentWorktreeRequest {
+            branch: Some("codex/agent-escape".to_string()),
+            path: Some(escape.clone()),
+            base_ref: None,
+        },
+        None,
+        &FleetRole::Builder,
+    )
+    .expect_err("absolute path outside the worktree root must be refused");
+    assert!(
+        err.to_string().contains("must stay under"),
+        "unexpected error: {err}"
+    );
+    assert!(!escape.exists(), "nothing is created at the refused path");
+    assert!(!branch_exists("codex/agent-escape"));
+
+    // A `..` walk out of the root is refused the same way.
+    let root = harness
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".codewhale-worktrees")
+        .join("repo");
+    let dotdot = root.join("..").join("..").join("walked");
+    create_isolated_worktree(
+        &repo,
+        &SubAgentWorktreeRequest {
+            branch: Some("codex/agent-dotdot".to_string()),
+            path: Some(dotdot),
+            base_ref: None,
+        },
+        None,
+        &FleetRole::Builder,
+    )
+    .expect_err("a path that walks out of the root must be refused");
+    assert!(!harness.path().join("walked").exists());
+
+    // A symlink under the root that points elsewhere is refused.
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(&root).expect("worktree root");
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).expect("symlink");
+        create_isolated_worktree(
+            &repo,
+            &SubAgentWorktreeRequest {
+                branch: Some("codex/agent-link".to_string()),
+                path: Some(root.join("link").join("child")),
+                base_ref: None,
+            },
+            None,
+            &FleetRole::Builder,
+        )
+        .expect_err("a symlinked parent must not redirect the checkout");
+        assert!(!outside.path().join("child").exists());
+        assert!(!branch_exists("codex/agent-link"));
+    }
+
+    // An absolute path inside the root is still accepted.
+    let inside = root.join("inside");
+    let path = create_isolated_worktree(
+        &repo,
+        &SubAgentWorktreeRequest {
+            branch: Some("codex/agent-inside".to_string()),
+            path: Some(inside),
+            base_ref: None,
+        },
+        None,
+        &FleetRole::Builder,
+    )
+    .expect("absolute path under the worktree root");
+    assert!(path.exists());
+}
+
+#[test]
+fn create_isolated_worktree_rejects_option_shaped_base_ref() {
+    let (harness, repo) = git_repo_in_harness();
+    let err = create_isolated_worktree(
+        &repo,
+        &SubAgentWorktreeRequest {
+            branch: Some("codex/agent-optbase".to_string()),
+            path: Some(PathBuf::from("optbase")),
+            base_ref: Some("--no-checkout".to_string()),
+        },
+        None,
+        &FleetRole::Scout,
+    )
+    .expect_err("option-shaped base ref must be refused");
+    assert!(
+        err.to_string().contains("cannot start with '-'"),
+        "unexpected error: {err}"
+    );
+    assert!(!harness.path().join(".codewhale-worktrees").exists());
 }
 
 #[test]
@@ -11716,10 +11832,9 @@ fn create_isolated_worktree_discovers_nested_repo_from_harness_parent() {
     let nested = harness.path().join("CodeWhale");
     std::fs::create_dir_all(&nested).expect("nested checkout dir");
     init_git_repo_at(&nested);
-    let worktree_home = tempdir().expect("worktree home");
     let request = SubAgentWorktreeRequest {
         branch: Some("codex/agent-harness-nested".to_string()),
-        path: Some(worktree_home.path().join("isolated")),
+        path: Some(PathBuf::from("isolated")),
         base_ref: None,
     };
 
@@ -13969,6 +14084,12 @@ fn write_capable_or_unproven_starts_keep_the_approval_gate() {
         json!({"action": "start", "type": "scout", "role": "builder", "prompt": "x"}),
         json!({"action": "start", "role": "release_lead", "prompt": "x"}), // roster token
         json!({"action": "start", "type": "bogus", "prompt": "x"}),
+        // Any worktree request provisions a checkout, so a read-only role
+        // does not skip the approval card.
+        json!({"action": "start", "type": "reviewer", "worktree_path": "/tmp/x", "prompt": "x"}),
+        json!({"action": "start", "type": "scout", "worktree": true, "prompt": "x"}),
+        json!({"action": "start", "type": "scout", "base_ref": "HEAD", "prompt": "x"}),
+        json!({"action": "start", "type": "scout", "isolation": "worktree", "prompt": "x"}),
     ] {
         assert_eq!(
             tool.approval_requirement_for(&input),

@@ -222,7 +222,7 @@ export const TOOLS = [
         app_ref: { type: "object", properties: { name: { type: "string" }, bundle_id: { type: "string" }, pid: { type: "integer" } }, description: "macOS: capture this app window even when it is in the background." },
         display: { type: ["integer", "string"], description: "Display index or 'all'" },
         region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in screen points" },
-        path: { type: "string", description: "Optional output path (absolute). Defaults into the recordings directory." },
+        path: { type: "string", description: "Optional absolute .png/.jpg/.jpeg path inside the recordings directory. Omit to use a generated name there." },
         computer: computerParam,
       },
       additionalProperties: false,
@@ -236,7 +236,7 @@ export const TOOLS = [
       required: ["region"],
       properties: {
         region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in last-raster pixels" },
-        path: { type: "string" },
+        path: { type: "string", description: "Optional absolute .png/.jpg/.jpeg path inside the recordings directory. Omit to use a generated name there." },
         computer: computerParam,
       },
       additionalProperties: false,

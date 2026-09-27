@@ -520,6 +520,28 @@ quieter, and Fleet runs can be checked before they spend anything.
   read-only commands, since some shells treat them as glob qualifiers or
   command substitution.
 
+### Security
+
+- Sub-agent worktrees stay under the per-repo `.codewhale-worktrees/<repo>/`
+  root: an absolute `worktree_path` is now held to the same containment as a
+  relative one, with symlinks resolved before the check. Any start that asks
+  for a worktree keeps the approval card, even for a read-only role. A
+  `worktree_base` starting with `-` is refused, and `git worktree add` now
+  receives its path and base after `--`.
+- Fleet and reasoning-router names must be plain file names (optionally
+  `origin/name`); a name with path separators or `..` is refused before any
+  file is looked up, through one shared check in the workflow crate.
+- `pandoc_convert` and `image_ocr` apply the same read deny-list and
+  credential-store checks as `read`, through one shared helper, and pandoc
+  always runs with `--sandbox`. This needs pandoc 2.15 or newer; an older
+  pandoc gets an upgrade message instead of a conversion.
+- Computer Use: screenshot and zoom output paths must be `.png`/`.jpg`/`.jpeg`
+  files inside the recordings directory, and zoom always crops the last
+  captured raster instead of a caller-named source file.
+- Skill registry sync refuses an index key that is not a single path-safe
+  name before it is used as a cache directory, the same check an installed
+  skill name already gets.
+
 ### Removed
 
 - Flags, settings and tool parameters that did nothing are gone
