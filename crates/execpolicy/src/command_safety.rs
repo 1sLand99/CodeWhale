@@ -312,7 +312,7 @@ pub fn classify_command(tokens: &[&str]) -> String {
 /// The one flag that may sit inside a canonical prefix is the `-m` of
 /// `python -m <module>`, which names the module runner rather than tuning it;
 /// a canonical form that omits it (`python http.server`) still matches.
-pub(crate) fn canonical_prefix_is_leading(tokens: &[&str], canonical: &str) -> bool {
+pub fn canonical_prefix_is_leading(tokens: &[&str], canonical: &str) -> bool {
     let words: Vec<&str> = canonical.split_whitespace().collect();
     let python_module = tokens.get(1) == Some(&"-m")
         && matches!(
@@ -609,8 +609,9 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///
 /// - pipelines `a | b`, where **every** segment must itself be an admitted
 ///   read-only command (an empty segment — including `||` — rejects);
-/// - literal `*` arguments (for tools such as `find -name '*.rs'`); shell
-///   expansion is never allowed to introduce operands after validation;
+/// - `*` arguments that are quoted (`find -name '*.rs'`) or follow a literal
+///   prefix (`src/*.rs`); a word that starts with an unquoted `*` could expand
+///   to an option after validation, so it rejects;
 /// - `git -C <dir> <subcommand>` and `git --no-pager <subcommand>`, whose
 ///   remainder re-enters the existing per-subcommand option tables;
 /// - `find` without any mutating primary (`-delete`, `-exec`, `-execdir`,
@@ -649,7 +650,8 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
                 | '('
                 | ')'
         )
-    }) {
+    }) || has_leading_glob(trimmed)
+    {
         return false;
     }
     // A pipeline is admitted only when every segment is: `a | b` is two
@@ -657,6 +659,33 @@ pub fn is_agent_readonly_shell_command(command: &str) -> bool {
     // segment and reject. Quoted pipes inside an argument mis-split here,
     // which only ever makes a segment fail classification (fail closed).
     trimmed.split('|').all(is_agent_readonly_segment)
+}
+
+/// True when an unquoted `*` starts a word. Its matches can begin with `-`,
+/// so a file named `--pre=./x.sh` turns `rg foo *` into an option after the
+/// option allowlist has already checked the words. A glob behind a literal
+/// prefix (`src/*.rs`, `./*`) only matches paths and stays admitted.
+fn has_leading_glob(command: &str) -> bool {
+    let mut chars = command.chars();
+    let mut word_start = true;
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some('"'), '\\') => {
+                chars.next();
+            }
+            (Some(open), _) if ch == open => quote = None,
+            (Some(_), _) => word_start = false,
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '\\') => {
+                chars.next();
+                word_start = false;
+            }
+            (None, '*') if word_start => return true,
+            (None, _) => word_start = ch.is_whitespace() || ch == '|',
+        }
+    }
+    false
 }
 
 fn is_agent_readonly_segment(segment: &str) -> bool {
@@ -2142,13 +2171,13 @@ mod tests {
             "git log --oneline | head -20",
             "cat Cargo.toml | wc -l",
             "rg enum crates/ | sort | uniq -c | head",
-            "find . -name *.rs -maxdepth 3",
-            "find crates -type f -name *.toml | head",
+            "find . -name '*.rs' -maxdepth 3",
+            "find crates -type f -name '*.toml' | head",
             "sed -n 10p Cargo.toml",
             "sed -n 1,5p README.md",
             "npm view codewhale version",
             "sort deps.txt | uniq -c",
-            "ls -la *.md",
+            "ls -la docs/*.md",
         ] {
             assert!(
                 is_agent_readonly_shell_command(command),
@@ -2315,7 +2344,7 @@ mod tests {
         for command in [
             "git log | head -5",
             "grep TODO crates/ | head",
-            "find . -name *.rs",
+            "find . -name '*.rs'",
             "git -C crates/tui log",
             "sed -n 10p Cargo.toml",
             "npm view codewhale version",

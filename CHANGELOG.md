@@ -166,12 +166,35 @@ quieter, and Fleet runs can be checked before they spend anything.
   it: a variable (`$v`), a substitution, a glob or brace list, escaped ANSI-C
   quoting, or a shell reading its script from a pipe, here-string or process
   substitution. While any deny rule is configured, such a command is refused
-  instead of being checked against text the shell will rewrite. Commands after
+  instead of being checked against text the shell will rewrite (an
+  approval-always policy asks instead). This also applies to common forms such
+  as `source "$HOME/.cargo/env"`, `eval "$(pyenv init -)"` and `$PYTHON -m
+  pytest`; name the command directly to run it. The same holds when the text
+  does not parse cleanly (an unterminated quote, substitution or heredoc, a
+  `case` inside `$( … )`) or when a parse budget runs out. Commands after
   `if`, `then`, `while`, `do`, `!` and similar words, `function f { … }`
   bodies, and `find -exec` payloads are now checked like any other command.
 - Wrapper commands are unwrapped by their real option grammar, so
   `chroot DIR cmd`, `sudo --user NAME cmd` and `timeout -s SIG N cmd` expose
-  `cmd` (and any `-c` payload) to deny rules.
+  `cmd` (and any `-c` payload) to deny rules. Options missing from a wrapper's
+  table are read both with and without a value, BSD and macOS options are
+  covered (`env -P`, `xargs -J`, `chroot -u`), and more wrappers are recognized
+  (`caffeinate`, `arch`, `sandbox-exec`, `nsenter`, `unshare`, `runuser`,
+  `flock`, `watch`, `wsl`, `noglob`, `nocorrect`), including `.exe` spellings.
+  Code passed as a string to `trap`, `su -c`, `flock -c`, `script -c`,
+  `watch`, `cmd /c` and PowerShell `-Command` is checked as a command line.
+- `(( … ))` arithmetic no longer reads `<<` as a heredoc that hides the lines
+  after it, and an `xargs` or `find -exec` replacement string used as the
+  command or as shell code (`xargs -I{} sh -c {}`) counts as known only at run
+  time.
+- `task_shell_start` and task gate commands are now checked against shell deny
+  and ask rules, like any other shell command.
+- An "approve for session" grant for a shell command covers only flag variants
+  of that command as written; a command with options before the subcommand,
+  a chain, or nested code matches only an identical repeat.
+- The read-only shell surface for sub-agents rejects a word that starts with
+  an unquoted `*`, whose matches could be read as options; quote the pattern
+  or give it a path prefix (`src/*.rs`).
 - A trusted or allow prefix such as `git status` no longer covers options
   placed before the subcommand (`git -c key=value status`,
   `git --exec-path=… status`), nor a command that runs nested code or whose

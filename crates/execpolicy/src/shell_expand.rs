@@ -38,7 +38,12 @@
 //! Known limits: a script *file* (`bash ./x.sh`, `. ./env.sh`) is opaque, as
 //! is any program that interprets its arguments as code (`python -c`, `ssh
 //! host cmd`, `git -c alias.x=!cmd`). Aliases and functions defined in an
-//! earlier call are not tracked.
+//! earlier call are not tracked. Arithmetic contexts (`(( ))`, `$(( ))`,
+//! `let`, `[[ … -eq … ]]`) evaluate the *values* of variables they name, so a
+//! value holding `a[$(cmd)]` runs `cmd` without it appearing in the text.
+//! `cmd /c` and PowerShell `-Command` payloads are scanned with this POSIX
+//! grammar, which finds their command words but not every cmd.exe or
+//! PowerShell construct.
 
 use std::collections::HashSet;
 
@@ -50,8 +55,8 @@ const MAX_DEPTH: usize = 8;
 const MAX_COMMANDS: usize = 256;
 
 /// Upper bound on the parser states explored while locating the real command
-/// word behind wrapper words.
-const MAX_HEAD_STATES: usize = 64;
+/// word behind wrapper words. Running out marks the command unresolved.
+const MAX_HEAD_STATES: usize = 512;
 
 /// A word that prefixes another command rather than being the command: the
 /// real invocation is what follows. Stripping it keeps `sudo rm -rf /`
@@ -60,12 +65,15 @@ const MAX_HEAD_STATES: usize = 64;
 /// The option grammar matters: an option that takes a separate value
 /// (`sudo -u root`, `timeout -s KILL`) and a required operand
 /// (`chroot NEWROOT`, `timeout DURATION`) both sit between the wrapper and the
-/// command it runs. An unknown long option may or may not take a value, so
-/// both readings are explored.
+/// command it runs. An option missing from the table may or may not take a
+/// value, so both readings are explored.
 struct Wrapper {
     name: &'static str,
     /// Short options whose value is the rest of the word or the next word.
     short_values: &'static str,
+    /// Short options known to take no value. Any other short option may or
+    /// may not take one, so both readings are explored.
+    short_switches: &'static str,
     /// Long options whose value may be the next word.
     long_values: &'static [&'static str],
     /// Long options known to take no value.
@@ -77,7 +85,8 @@ struct Wrapper {
 static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "sudo",
-        short_values: "ughpCDrtTRU",
+        short_values: "ughpCDrtTRUac",
+        short_switches: "AbBEeHiKklNnPSsVv",
         long_values: &[
             "user",
             "group",
@@ -90,6 +99,8 @@ static WRAPPERS: &[Wrapper] = &[
             "command-timeout",
             "chroot",
             "other-user",
+            "auth-type",
+            "login-class",
         ],
         long_switches: &[
             "login",
@@ -112,21 +123,24 @@ static WRAPPERS: &[Wrapper] = &[
     },
     Wrapper {
         name: "doas",
-        short_values: "uC",
+        short_values: "uCa",
+        short_switches: "Lns",
         long_values: &[],
         long_switches: &[],
         operands: 0,
     },
     Wrapper {
         name: "env",
-        short_values: "uC",
-        long_values: &["unset", "chdir"],
+        short_values: "uCSPa",
+        short_switches: "i0v",
+        long_values: &["unset", "chdir", "argv0"],
         long_switches: &["ignore-environment", "null", "debug"],
         operands: 0,
     },
     Wrapper {
         name: "nohup",
         short_values: "",
+        short_switches: "",
         long_values: &[],
         long_switches: &[],
         operands: 0,
@@ -134,6 +148,7 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "nice",
         short_values: "n",
+        short_switches: "",
         long_values: &["adjustment"],
         long_switches: &[],
         operands: 0,
@@ -141,20 +156,23 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "ionice",
         short_values: "cnpPu",
+        short_switches: "t",
         long_values: &["class", "classdata", "pid", "pgid", "uid"],
-        long_switches: &[],
+        long_switches: &["ignore"],
         operands: 0,
     },
     Wrapper {
         name: "time",
         short_values: "fo",
+        short_switches: "aplqvh",
         long_values: &["format", "output"],
-        long_switches: &[],
+        long_switches: &["append", "portability", "verbose", "quiet"],
         operands: 0,
     },
     Wrapper {
         name: "timeout",
         short_values: "sk",
+        short_switches: "fpv",
         long_values: &["signal", "kill-after"],
         long_switches: &["preserve-status", "foreground", "verbose"],
         operands: 1,
@@ -162,6 +180,7 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "stdbuf",
         short_values: "ioe",
+        short_switches: "",
         long_values: &["input", "output", "error"],
         long_switches: &[],
         operands: 0,
@@ -169,13 +188,15 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "setsid",
         short_values: "",
+        short_switches: "cfw",
         long_values: &[],
-        long_switches: &[],
+        long_switches: &["ctty", "fork", "wait"],
         operands: 0,
     },
     Wrapper {
         name: "command",
         short_values: "",
+        short_switches: "pvV",
         long_values: &[],
         long_switches: &[],
         operands: 0,
@@ -183,6 +204,7 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "builtin",
         short_values: "",
+        short_switches: "",
         long_values: &[],
         long_switches: &[],
         operands: 0,
@@ -190,13 +212,15 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "exec",
         short_values: "a",
+        short_switches: "cl",
         long_values: &[],
         long_switches: &[],
         operands: 0,
     },
     Wrapper {
         name: "xargs",
-        short_values: "adEILnPs",
+        short_values: "adEILnPsJSR",
+        short_switches: "0eiloprtx",
         long_values: &[
             "arg-file",
             "delimiter",
@@ -222,6 +246,7 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "unbuffer",
         short_values: "",
+        short_switches: "p",
         long_values: &[],
         long_switches: &[],
         operands: 0,
@@ -229,20 +254,23 @@ static WRAPPERS: &[Wrapper] = &[
     Wrapper {
         name: "busybox",
         short_values: "",
+        short_switches: "",
         long_values: &[],
         long_switches: &[],
         operands: 0,
     },
     Wrapper {
         name: "chroot",
-        short_values: "",
+        short_values: "ugG",
+        short_switches: "",
         long_values: &["userspec", "groups"],
         long_switches: &["skip-chdir"],
         operands: 1,
     },
     Wrapper {
         name: "proot",
-        short_values: "rbmwqk",
+        short_values: "rbmwqkRSvi",
+        short_switches: "0Vh",
         long_values: &[
             "rootfs",
             "bind",
@@ -251,8 +279,139 @@ static WRAPPERS: &[Wrapper] = &[
             "pwd",
             "qemu",
             "kernel-release",
+            "verbose",
         ],
         long_switches: &[],
+        operands: 0,
+    },
+    Wrapper {
+        name: "caffeinate",
+        short_values: "tw",
+        short_switches: "dimsu",
+        long_values: &[],
+        long_switches: &[],
+        operands: 0,
+    },
+    Wrapper {
+        name: "arch",
+        short_values: "ed",
+        short_switches: "",
+        long_values: &[],
+        long_switches: &[],
+        operands: 0,
+    },
+    Wrapper {
+        name: "sandbox-exec",
+        short_values: "fnpD",
+        short_switches: "",
+        long_values: &[],
+        long_switches: &[],
+        operands: 0,
+    },
+    Wrapper {
+        name: "noglob",
+        short_values: "",
+        short_switches: "",
+        long_values: &[],
+        long_switches: &[],
+        operands: 0,
+    },
+    Wrapper {
+        name: "nocorrect",
+        short_values: "",
+        short_switches: "",
+        long_values: &[],
+        long_switches: &[],
+        operands: 0,
+    },
+    Wrapper {
+        name: "-",
+        short_values: "",
+        short_switches: "",
+        long_values: &[],
+        long_switches: &[],
+        operands: 0,
+    },
+    Wrapper {
+        name: "nsenter",
+        short_values: "tSG",
+        short_switches: "amuinpUCTrwFZcy",
+        long_values: &["target", "setuid", "setgid"],
+        long_switches: &["all", "preserve-credentials", "no-fork"],
+        operands: 0,
+    },
+    Wrapper {
+        name: "unshare",
+        short_values: "SGRw",
+        short_switches: "mupinUCTrcfk",
+        long_values: &["root", "wd", "setuid", "setgid", "propagation", "setgroups"],
+        long_switches: &[
+            "fork",
+            "mount-proc",
+            "map-root-user",
+            "map-current-user",
+            "kill-child",
+        ],
+        operands: 0,
+    },
+    Wrapper {
+        name: "runuser",
+        short_values: "ugGcswf",
+        short_switches: "lmpP",
+        long_values: &[
+            "user",
+            "group",
+            "supp-group",
+            "command",
+            "shell",
+            "whitelist-environment",
+            "session-command",
+        ],
+        long_switches: &["login", "preserve-environment", "pty"],
+        operands: 0,
+    },
+    Wrapper {
+        name: "flock",
+        short_values: "wEc",
+        short_switches: "sxunoFh",
+        long_values: &["timeout", "wait", "conflict-exit-code", "command"],
+        long_switches: &[
+            "shared",
+            "exclusive",
+            "unlock",
+            "nonblock",
+            "nb",
+            "close",
+            "no-fork",
+            "verbose",
+        ],
+        operands: 1,
+    },
+    Wrapper {
+        name: "watch",
+        short_values: "nq",
+        short_switches: "bcdeghprtwx",
+        long_values: &["interval", "equexit"],
+        long_switches: &[
+            "beep",
+            "color",
+            "no-color",
+            "differences",
+            "errexit",
+            "chgexit",
+            "precise",
+            "no-title",
+            "no-wrap",
+            "exec",
+        ],
+        operands: 0,
+    },
+    Wrapper {
+        name: "wsl",
+        short_values: "du",
+        short_switches: "e",
+        long_values: &["distribution", "user", "cd", "shell-type"],
+        long_switches: &["exec"],
         operands: 0,
     },
 ];
@@ -393,21 +552,22 @@ enum ShellInput {
 
 impl Expander {
     fn emit(&mut self, tokens: &[String]) {
-        if self.out.len() >= MAX_COMMANDS {
-            return;
-        }
         let joined = tokens
             .iter()
             .filter(|token| !token.is_empty())
             .cloned()
             .collect::<Vec<_>>()
             .join(" ");
-        if joined.is_empty() {
+        if joined.is_empty() || self.seen.contains(&joined) {
             return;
         }
-        if self.seen.insert(joined.clone()) {
-            self.out.push(joined);
+        if self.out.len() >= MAX_COMMANDS {
+            // A dropped command line was never checked: unresolved.
+            self.dynamic = true;
+            return;
         }
+        self.seen.insert(joined.clone());
+        self.out.push(joined);
     }
 
     /// Word-split `input` into command lines and record each one, recursing
@@ -437,6 +597,10 @@ impl Expander {
         let mut word = WordBuf::default();
         let mut nested: Vec<String> = Vec::new();
         let mut heredocs = Vec::new();
+        // Set when the text does not parse cleanly (an unterminated quote,
+        // substitution or heredoc, a `case` inside a substitution): where
+        // this parser ends a region may not be where the shell ends it.
+        let mut uncertain = false;
 
         while i < n {
             let c = chars[i];
@@ -475,6 +639,7 @@ impl Expander {
                         word.text.push(chars[i]);
                         i += 1;
                     }
+                    uncertain |= i >= n;
                     i = (i + 1).min(n);
                 }
                 // Double quotes suppress word splitting but NOT substitution.
@@ -494,19 +659,15 @@ impl Expander {
                             }
                             '`' => {
                                 word.dynamic = true;
-                                let (inner, next) = read_backtick(&chars, i);
+                                let (inner, next, certain) = read_backtick(&chars, i);
+                                uncertain |= !certain;
                                 nested.push(inner);
                                 i = next;
                             }
-                            '$' if i + 1 < n && chars[i + 1] == '(' => {
+                            '$' if i + 1 < n && matches!(chars[i + 1], '(' | '{') => {
                                 word.dynamic = true;
-                                let (inner, next) = read_delimited(&chars, i + 1, '(', ')');
-                                nested.push(inner);
-                                i = next;
-                            }
-                            '$' if i + 1 < n && chars[i + 1] == '{' => {
-                                word.dynamic = true;
-                                let (inner, next) = read_delimited(&chars, i + 1, '{', '}');
+                                let (inner, next, certain) = read_substitution(&chars, i + 1);
+                                uncertain |= !certain;
                                 nested.push(inner);
                                 i = next;
                             }
@@ -519,6 +680,7 @@ impl Expander {
                             }
                         }
                     }
+                    uncertain |= i >= n;
                     i = (i + 1).min(n);
                 }
                 // `$'…'` (ANSI-C quoting) is literal text with C escapes. The
@@ -538,6 +700,7 @@ impl Expander {
                             i += 1;
                         }
                     }
+                    uncertain |= i >= n;
                     i = (i + 1).min(n);
                 }
                 // Command substitution, both spellings. The body is a command
@@ -546,31 +709,21 @@ impl Expander {
                 '`' => {
                     word.started |= word.redirect_operand;
                     word.dynamic = true;
-                    let (inner, next) = read_backtick(&chars, i);
+                    let (inner, next, certain) = read_backtick(&chars, i);
+                    uncertain |= !certain;
                     nested.push(inner);
                     i = next;
                 }
-                '$' if i + 1 < n && chars[i + 1] == '(' => {
-                    word.started |= word.redirect_operand;
-                    word.dynamic = true;
-                    let (inner, next) = read_delimited(&chars, i + 1, '(', ')');
-                    nested.push(inner);
-                    i = next;
-                }
-                // `${…}` is an expansion, not a command — but it can *contain*
-                // one (`${x:-$(rm -rf /)}`), so the body is rescanned.
-                '$' if i + 1 < n && chars[i + 1] == '{' => {
-                    word.started |= word.redirect_operand;
-                    word.dynamic = true;
-                    let (inner, next) = read_delimited(&chars, i + 1, '{', '}');
-                    nested.push(inner);
-                    i = next;
-                }
+                // `$(…)`, and `${…}`: an expansion, not a command — but it can
+                // *contain* one (`${x:-$(rm -rf /)}`), so the body is rescanned.
                 // Process substitution `<(…)` / `>(…)` also runs its body.
-                '<' | '>' if i + 1 < n && chars[i + 1] == '(' => {
+                '$' | '<' | '>'
+                    if i + 1 < n && (chars[i + 1] == '(' || (c == '$' && chars[i + 1] == '{')) =>
+                {
                     word.started |= word.redirect_operand;
                     word.dynamic = true;
-                    let (inner, next) = read_delimited(&chars, i + 1, '(', ')');
+                    let (inner, next, certain) = read_substitution(&chars, i + 1);
+                    uncertain |= !certain;
                     nested.push(inner);
                     i = next;
                 }
@@ -645,7 +798,19 @@ impl Expander {
                     word.flush(&mut line);
                     end_command(&mut commands, &mut line);
                     word.redirect_operand = false;
-                    i += 1;
+                    if c == '(' && chars.get(i + 1) == Some(&'(') {
+                        // `(( … ))` is arithmetic, where `<<` is a shift and
+                        // not a heredoc. Its substitutions still run, and
+                        // `((cmd) )` is two subshells, so the body is scanned
+                        // as code on its own; a heredoc it appears to open
+                        // cannot swallow the lines after it.
+                        let (inner, next, certain) = read_substitution(&chars, i);
+                        uncertain |= !certain;
+                        nested.push(inner);
+                        i = next;
+                    } else {
+                        i += 1;
+                    }
                 }
                 // Control operators end the current command line. `&&`, `||`,
                 // `;;`, `|&` and runs of newlines collapse into one break.
@@ -656,14 +821,17 @@ impl Expander {
                     i += 1;
                     if c == '\n' && !heredocs.is_empty() {
                         let shell_stdin = commands.iter().any(|line| {
-                            command_heads(&line.words).0.iter().any(|&head| {
-                                let name = basename(&line.words[head]).to_ascii_lowercase();
+                            command_heads(&line.words).heads.iter().any(|&head| {
+                                let name = command_name(&line.words[head]);
                                 SHELL_NAMES.contains(&name.as_str())
                                     || matches!(name.as_str(), "source" | ".")
                             })
                         });
                         for (delimiter, literal, strip_tabs) in heredocs.drain(..) {
                             let mut body = String::new();
+                            // A body that runs to the end of the input may be
+                            // a misread `<<`; what it swallowed is unexamined.
+                            let mut terminated = false;
                             while i < n {
                                 let start = i;
                                 while i < n && chars[i] != '\n' {
@@ -697,15 +865,19 @@ impl Expander {
                                     &text
                                 };
                                 if text == delimiter {
+                                    terminated = true;
                                     break;
                                 }
                                 body.push_str(text);
                                 body.push('\n');
                             }
+                            uncertain |= !terminated;
                             if shell_stdin {
                                 nested.push(body);
                             } else if !literal {
-                                nested.extend(heredoc_substitutions(&body));
+                                let (bodies, certain) = heredoc_substitutions(&body);
+                                uncertain |= !certain;
+                                nested.extend(bodies);
                             }
                         }
                     }
@@ -728,6 +900,7 @@ impl Expander {
         }
         word.flush(&mut line);
         end_command(&mut commands, &mut line);
+        self.dynamic |= uncertain;
 
         for line in &commands {
             self.record(line, depth);
@@ -750,48 +923,96 @@ impl Expander {
         }
         self.emit(tokens);
 
-        let (heads, split_payloads) = command_heads(tokens);
-        for payload in split_payloads {
+        let heads = command_heads(tokens);
+        self.dynamic |= heads.truncated;
+        for payload in &heads.split_payloads {
             // `env -S 'cmd args'` splits its value into a command line.
-            self.expand(&payload, depth + 1);
+            self.expand(payload, depth + 1);
         }
-        for head in heads {
+        let mut dynamic = line.dynamic.clone();
+        mark_replacement_operands(tokens, &heads.heads, &mut dynamic);
+        for &head in &heads.heads {
             // `sudo rm -rf /` is an `rm -rf /`: emit the command the wrappers
             // run, with their options and operands removed.
             if head > 0 {
                 self.emit(&tokens[head..]);
             }
+            // Also keep a wrapper's options in front of the command it runs,
+            // so a deny rule can still skip them as flags if the option table
+            // misreads one. (`command -v NAME` runs nothing: no head follows.)
+            if wrapper_index(&tokens[head]).is_some()
+                && heads.heads.iter().any(|&inner| inner > head)
+            {
+                self.emit(&tokens[head + 1..]);
+            }
             // A command word (or a wrapper word before it) that the shell
             // rewrites at run time cannot be matched against any rule.
             if tokens[..=head]
                 .iter()
-                .zip(&line.dynamic)
+                .zip(&dynamic)
                 .any(|(token, dynamic)| *dynamic && !is_env_assignment(token))
             {
                 self.dynamic = true;
             }
-            let name = basename(&tokens[head]).to_ascii_lowercase();
-            let args_dynamic = line.dynamic[head + 1..].iter().any(|dynamic| *dynamic);
+            let name = command_name(&tokens[head]);
+            let args_dynamic = dynamic[head + 1..].iter().any(|dynamic| *dynamic);
             match name.as_str() {
                 // `eval …` takes a *command line* as data. Parse it.
-                "eval" => {
-                    self.dynamic |= args_dynamic;
-                    self.expand(&tokens[head + 1..].join(" "), depth + 1);
-                }
+                "eval" => self.code_payload(&tokens[head + 1..].join(" "), args_dynamic, depth),
                 "source" | "." => match tokens.get(head + 1) {
                     None if !line.heredoc => self.dynamic = true,
-                    Some(_) if line.dynamic[head + 1] => self.dynamic = true,
+                    Some(_) if dynamic[head + 1] => self.dynamic = true,
                     _ => {}
                 },
                 "find" => self.record_find_exec(line, head, depth),
+                // `trap 'code' SIGNAL…` runs its first operand later in this
+                // shell.
+                "trap" => {
+                    if let Some(at) =
+                        (head + 1..tokens.len()).find(|&at| !tokens[at].starts_with('-'))
+                    {
+                        self.code_payload(&tokens[at], dynamic[at], depth);
+                    }
+                }
+                // These hand the value of `-c` / `--command` to a shell.
+                "su" | "runuser" | "flock" | "script" => {
+                    for (payload, payload_dynamic) in
+                        command_option_payloads(tokens, head, &dynamic)
+                    {
+                        self.code_payload(&payload, payload_dynamic, depth);
+                    }
+                }
+                // `watch` joins its operands and hands them to `sh -c`.
+                "watch" => {
+                    for &inner in heads.heads.iter().filter(|&&inner| inner > head) {
+                        let inner_dynamic = dynamic[inner..].iter().any(|dynamic| *dynamic);
+                        self.code_payload(&tokens[inner..].join(" "), inner_dynamic, depth);
+                    }
+                }
+                // `cmd /c …` parses the rest as a cmd.exe command line, which
+                // expands `%VAR%` and `!VAR!` and strips `^` escapes itself.
+                "cmd" => {
+                    if let Some(at) = (head + 1..tokens.len()).find(|&at| {
+                        matches!(tokens[at].to_ascii_lowercase().as_str(), "/c" | "/k" | "/r")
+                    }) {
+                        let payload = tokens[at + 1..].join(" ");
+                        let payload_dynamic = dynamic[at + 1..].iter().any(|dynamic| *dynamic)
+                            || payload.contains(['%', '!', '^']);
+                        self.code_payload(&payload, payload_dynamic, depth);
+                    }
+                }
+                "powershell" | "pwsh" => self.record_powershell(tokens, head, &dynamic, depth),
                 _ if SHELL_NAMES.contains(&name.as_str()) => {
                     match shell_input(&tokens[head..]) {
                         ShellInput::Command(offset) => {
-                            self.dynamic |= line.dynamic[head + offset];
-                            self.expand(&tokens[head + offset], depth + 1);
+                            self.code_payload(
+                                &tokens[head + offset],
+                                dynamic[head + offset],
+                                depth,
+                            );
                         }
                         ShellInput::Script(offset) => {
-                            self.dynamic |= line.dynamic[head + offset];
+                            self.dynamic |= dynamic[head + offset];
                         }
                         // A heredoc body was already expanded as the script;
                         // any other stdin is only known at run time.
@@ -799,6 +1020,65 @@ impl Expander {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Code handed to another command as a string: parse it as a command line.
+    fn code_payload(&mut self, payload: &str, dynamic: bool, depth: usize) {
+        self.dynamic |= dynamic;
+        self.expand(payload, depth + 1);
+    }
+
+    /// `powershell` / `pwsh`: `-Command` (or any prefix of it) takes the rest
+    /// of the line as code, `-EncodedCommand` cannot be read statically, and
+    /// a bare operand may start code too (Windows PowerShell's default).
+    /// PowerShell syntax is only approximated by the POSIX parser, which is
+    /// enough to find the command words a deny rule names.
+    fn record_powershell(
+        &mut self,
+        tokens: &[String],
+        head: usize,
+        dynamic: &[bool],
+        depth: usize,
+    ) {
+        let rest = |at: usize| {
+            (
+                tokens[at..].join(" "),
+                dynamic[at..].iter().any(|dynamic| *dynamic),
+            )
+        };
+        let mut positional_seen = false;
+        for at in head + 1..tokens.len() {
+            let Some(option) = tokens[at].strip_prefix(['-', '/']) else {
+                if !positional_seen {
+                    positional_seen = true;
+                    let (payload, payload_dynamic) = rest(at);
+                    self.code_payload(&payload, payload_dynamic, depth);
+                }
+                continue;
+            };
+            let option = option.to_ascii_lowercase();
+            if option.is_empty() {
+                continue;
+            }
+            if "command".starts_with(option.as_str()) {
+                if at + 1 >= tokens.len() || tokens[at + 1] == "-" {
+                    // The code arrives on stdin.
+                    self.dynamic = true;
+                } else {
+                    let (payload, payload_dynamic) = rest(at + 1);
+                    self.code_payload(&payload, payload_dynamic, depth);
+                }
+                return;
+            }
+            if option == "ec" || "encodedcommand".starts_with(option.as_str()) {
+                self.dynamic = true;
+                return;
+            }
+            if "file".starts_with(option.as_str()) {
+                // A script file is opaque, as it is for every other shell.
+                return;
             }
         }
     }
@@ -819,9 +1099,13 @@ impl Expander {
                 }
                 if start < end {
                     self.nested = true;
+                    // `{}` is replaced by each file name found, so a word
+                    // holding it is only known at run time.
                     let payload = Line {
                         words: tokens[start..end].to_vec(),
-                        dynamic: line.dynamic[start..end].to_vec(),
+                        dynamic: (start..end)
+                            .map(|at| line.dynamic[at] || tokens[at].contains("{}"))
+                            .collect(),
                         heredoc: false,
                     };
                     self.record(&payload, depth + 1);
@@ -829,6 +1113,109 @@ impl Expander {
                 index = end;
             }
             index += 1;
+        }
+    }
+}
+
+/// Values of `-c CMD`, `-cCMD`, `--command CMD`, `--command=CMD` and
+/// `--session-command` after `tokens[head]`, with whether each is dynamic:
+/// the code `su`, `runuser`, `flock` and `script` hand to a shell.
+fn command_option_payloads(
+    tokens: &[String],
+    head: usize,
+    dynamic: &[bool],
+) -> Vec<(String, bool)> {
+    let mut payloads = Vec::new();
+    for (at, token) in tokens.iter().enumerate().skip(head + 1) {
+        let next = || {
+            tokens
+                .get(at + 1)
+                .map(|value| (value.clone(), dynamic[at + 1]))
+        };
+        if let Some(long) = token.strip_prefix("--") {
+            let (name, inline) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            if matches!(name, "command" | "session-command") {
+                payloads.extend(match inline {
+                    Some(value) => Some((value.to_string(), dynamic[at])),
+                    None => next(),
+                });
+            }
+        } else if let Some(flags) = token.strip_prefix('-')
+            && let Some(offset) = flags.find('c')
+        {
+            let value = &flags[offset + 1..];
+            payloads.extend(if value.is_empty() {
+                next()
+            } else {
+                Some((value.to_string(), dynamic[at]))
+            });
+        }
+    }
+    payloads
+}
+
+/// Mark the operands of an `xargs` that contain its replacement string
+/// (`-I R`, `-J R`, `-i[R]`, `--replace[=R]`, `{}` by default) as known only
+/// at run time: `xargs -I{} sh -c {}` runs whatever arrives on stdin.
+fn mark_replacement_operands(tokens: &[String], heads: &[usize], dynamic: &mut [bool]) {
+    let Some(xargs) = WRAPPERS.iter().find(|wrapper| wrapper.name == "xargs") else {
+        return;
+    };
+    for &head in heads {
+        if command_name(&tokens[head]) != "xargs" {
+            continue;
+        }
+        let mut replacements: Vec<String> = Vec::new();
+        let mut values = HashSet::new();
+        let mut index = head + 1;
+        while index < tokens.len() && tokens[index].starts_with('-') && tokens[index] != "--" {
+            let token = tokens[index].as_str();
+            if let Some(long) = token.strip_prefix("--") {
+                match long.split_once('=') {
+                    Some(("replace", value)) => replacements.push(value.to_string()),
+                    None if long == "replace" => replacements.push("{}".to_string()),
+                    None if xargs.long_values.contains(&long) => {
+                        values.insert(index + 1);
+                        index += 1;
+                    }
+                    _ => {}
+                }
+            } else {
+                for (at, flag) in token[1..].char_indices() {
+                    let rest = &token[1 + at + flag.len_utf8()..];
+                    if flag == 'i' {
+                        replacements.push(if rest.is_empty() { "{}" } else { rest }.to_string());
+                        break;
+                    }
+                    if xargs.short_values.contains(flag) {
+                        let value = if rest.is_empty() {
+                            values.insert(index + 1);
+                            index += 1;
+                            tokens.get(index).cloned()
+                        } else {
+                            Some(rest.to_string())
+                        };
+                        if matches!(flag, 'I' | 'J') {
+                            replacements.extend(value);
+                        }
+                        break;
+                    }
+                }
+            }
+            index += 1;
+        }
+        for (at, token) in tokens.iter().enumerate().skip(head + 1) {
+            if !values.contains(&at)
+                && !token.starts_with('-')
+                && replacements.iter().any(|replacement| {
+                    !replacement.is_empty() && token.contains(replacement.as_str())
+                })
+            {
+                dynamic[at] = true;
+            }
         }
     }
 }
@@ -842,10 +1229,12 @@ fn starts_parameter(next: Option<&char>) -> bool {
     })
 }
 
-/// Unquoted heredocs expand substitutions, but quotes and ordinary lines are data.
-fn heredoc_substitutions(body: &str) -> Vec<String> {
+/// Unquoted heredocs expand substitutions, but quotes and ordinary lines are
+/// data. Also reports whether every substitution was read with certainty.
+fn heredoc_substitutions(body: &str) -> (Vec<String>, bool) {
     let chars: Vec<char> = body.chars().collect();
     let mut result = Vec::new();
+    let mut all_certain = true;
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
@@ -856,19 +1245,21 @@ fn heredoc_substitutions(body: &str) -> Vec<String> {
                 i += 2
             }
             '`' => {
-                let (inner, next) = read_backtick(&chars, i);
+                let (inner, next, certain) = read_backtick(&chars, i);
+                all_certain &= certain;
                 result.push(inner);
                 i = next;
             }
             '$' if chars.get(i + 1) == Some(&'(') => {
-                let (inner, next) = read_delimited(&chars, i + 1, '(', ')');
+                let (inner, next, certain) = read_substitution(&chars, i + 1);
+                all_certain &= certain;
                 result.push(inner);
                 i = next;
             }
             _ => i += 1,
         }
     }
-    result
+    (result, all_certain)
 }
 
 fn redirection_len(chars: &[char]) -> usize {
@@ -933,8 +1324,9 @@ fn push_command(commands: &mut Vec<Line>, piece: &mut Line) {
 }
 
 /// Read a backtick substitution. `start` indexes the opening backtick; returns
-/// the body and the index just past the closing backtick.
-fn read_backtick(chars: &[char], start: usize) -> (String, usize) {
+/// the body, the index just past the closing backtick, and whether a closing
+/// backtick was found.
+fn read_backtick(chars: &[char], start: usize) -> (String, usize, bool) {
     let mut i = start + 1;
     let mut inner = String::new();
     while i < chars.len() {
@@ -944,42 +1336,106 @@ fn read_backtick(chars: &[char], start: usize) -> (String, usize) {
                 inner.push(chars[i + 1]);
                 i += 2;
             }
-            '`' => return (inner, i + 1),
+            '`' => return (inner, i + 1, true),
             c => {
                 inner.push(c);
                 i += 1;
             }
         }
     }
-    (inner, i)
+    (inner, i, false)
 }
 
-/// Read a balanced `open`/`close` region. `open_at` indexes the opening
-/// delimiter; returns the body and the index just past the matching close.
-fn read_delimited(chars: &[char], open_at: usize, open: char, close: char) -> (String, usize) {
+/// Read a `( … )` or `{ … }` region. `open_at` indexes the opening delimiter;
+/// returns the body, the index just past the matching close, and whether the
+/// region was read with certainty.
+///
+/// Quoted text, escapes, backticks and nested `$(`/`${` are skipped the way
+/// the shell skips them, so `$(echo ")"; rm x)` closes at the last paren. A
+/// `case` inside a `$( … )` is flagged uncertain rather than parsed: its
+/// `pattern)` closes no paren, so the shell may end the region elsewhere. An
+/// unterminated region is uncertain too.
+fn read_substitution(chars: &[char], open_at: usize) -> (String, usize, bool) {
+    let n = chars.len();
+    let (open, close) = if chars[open_at] == '{' {
+        ('{', '}')
+    } else {
+        ('(', ')')
+    };
+    let start = open_at + 1;
     let mut depth = 1usize;
-    let mut i = open_at + 1;
-    let mut inner = String::new();
-    while i < chars.len() {
+    let mut certain = true;
+    let mut i = start;
+    while i < n {
         let c = chars[i];
-        if c == '\\' && i + 1 < chars.len() {
-            inner.push(c);
-            inner.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if c == open {
-            depth += 1;
-        } else if c == close {
-            depth -= 1;
-            if depth == 0 {
-                return (inner, i + 1);
+        match c {
+            '\\' => i += 2,
+            '\'' => {
+                i += 1;
+                while i < n && chars[i] != '\'' {
+                    i += 1;
+                }
+                certain &= i < n;
+                i += 1;
+            }
+            '"' => {
+                i += 1;
+                while i < n && chars[i] != '"' {
+                    match chars[i] {
+                        '\\' => i += 2,
+                        '`' => {
+                            let (_, next, inner_certain) = read_backtick(chars, i);
+                            certain &= inner_certain;
+                            i = next;
+                        }
+                        '$' if matches!(chars.get(i + 1), Some('(' | '{')) => {
+                            let (_, next, inner_certain) = read_substitution(chars, i + 1);
+                            certain &= inner_certain;
+                            i = next;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                certain &= i < n;
+                i += 1;
+            }
+            '`' => {
+                let (_, next, inner_certain) = read_backtick(chars, i);
+                certain &= inner_certain;
+                i = next;
+            }
+            '$' if matches!(chars.get(i + 1), Some('(' | '{')) => {
+                let (_, next, inner_certain) = read_substitution(chars, i + 1);
+                certain &= inner_certain;
+                i = next;
+            }
+            _ if c == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return (chars[start..i].iter().collect(), i + 1, certain);
+                }
+                i += 1;
+            }
+            _ => {
+                if c == open {
+                    depth += 1;
+                } else if open == '('
+                    && c == 'c'
+                    && chars[i..].starts_with(&['c', 'a', 's', 'e'])
+                    && chars.get(i + 4).is_none_or(|next| next.is_whitespace())
+                    && (i == start
+                        || matches!(
+                            chars[i - 1],
+                            ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | '!'
+                        ))
+                {
+                    certain = false;
+                }
+                i += 1;
             }
         }
-        inner.push(c);
-        i += 1;
     }
-    (inner, i)
+    (chars[start..n.max(start)].iter().collect(), n, false)
 }
 
 /// The final path component, so `/usr/bin/sudo` reads as `sudo`.
@@ -1011,10 +1467,31 @@ fn is_scalar_operand(token: &str) -> bool {
     !body.is_empty() && body.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
 }
 
+/// The command a word names, for comparing against a table of names: the
+/// lowercased basename with any `.exe` suffix removed, so `/usr/bin/sudo`,
+/// `bash.exe` and `C:\Git\bin\bash.EXE` read as `sudo` and `bash`.
+fn command_name(token: &str) -> String {
+    let name = basename(token).to_ascii_lowercase();
+    match name.strip_suffix(".exe") {
+        Some(stem) if !stem.is_empty() => stem.to_string(),
+        _ => name,
+    }
+}
+
 /// Index into [`WRAPPERS`] when `token` names a wrapper word.
 fn wrapper_index(token: &str) -> Option<usize> {
-    let name = basename(token).to_ascii_lowercase();
+    let name = command_name(token);
     WRAPPERS.iter().position(|wrapper| wrapper.name == name)
+}
+
+/// What [`command_heads`] found.
+struct Heads {
+    /// Every index that may be a command word, ascending.
+    heads: Vec<usize>,
+    /// `env -S` values, which are command lines.
+    split_payloads: Vec<String>,
+    /// The walk ran out of states before every reading was explored.
+    truncated: bool,
 }
 
 /// Every index in `tokens` that may be a command word, walking leading
@@ -1022,11 +1499,11 @@ fn wrapper_index(token: &str) -> Option<usize> {
 /// operands those wrappers take. Wrapper words are themselves command words
 /// and are included. Also returns `env -S` payloads, which are command lines.
 ///
-/// Where the grammar is ambiguous (an unknown long option that may take a
-/// value, a bare number after a wrapper) both readings are kept, because an
-/// extra candidate only makes deny matching stricter while a missing one is
-/// a bypass.
-fn command_heads(tokens: &[String]) -> (Vec<usize>, Vec<String>) {
+/// Where the grammar is ambiguous (an option missing from the table that may
+/// take a value, a bare number after a wrapper) both readings are kept,
+/// because an extra candidate only makes deny matching stricter while a
+/// missing one is a bypass.
+fn command_heads(tokens: &[String]) -> Heads {
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum State {
         /// At a command word position.
@@ -1040,12 +1517,18 @@ fn command_heads(tokens: &[String]) -> (Vec<usize>, Vec<String>) {
     }
     let mut heads = Vec::new();
     let mut payloads = Vec::new();
+    let mut truncated = false;
     let mut seen = HashSet::new();
     let mut stack = vec![(0usize, State::Command)];
     while let Some((index, state)) = stack.pop() {
-        if index >= tokens.len() || seen.len() >= MAX_HEAD_STATES || !seen.insert((index, state)) {
+        if index >= tokens.len() || seen.contains(&(index, state)) {
             continue;
         }
+        if seen.len() >= MAX_HEAD_STATES {
+            truncated = true;
+            break;
+        }
+        seen.insert((index, state));
         let token = tokens[index].as_str();
         match state {
             State::Command => {
@@ -1119,11 +1602,30 @@ fn command_heads(tokens: &[String]) -> (Vec<usize>, Vec<String>) {
                                 payloads.push(value.to_string());
                             }
                         }
-                        let takes_next = flags
-                            .char_indices()
-                            .find(|(_, flag)| spec.short_values.contains(*flag))
-                            .is_some_and(|(at, flag)| at + flag.len_utf8() == flags.len());
-                        stack.push((index + if takes_next { 2 } else { 1 }, same));
+                        // Walk the cluster: a switch continues it, a value
+                        // option takes the rest of the word or the next word,
+                        // and an option missing from the table is read both
+                        // ways (`env -P DIR cmd`, `xargs -J % cmd %`).
+                        let mut step = Some(1);
+                        for (at, flag) in flags.char_indices() {
+                            if spec.short_values.contains(flag) {
+                                if at + flag.len_utf8() == flags.len() {
+                                    step = Some(2);
+                                }
+                                break;
+                            }
+                            if !flag.is_ascii_digit() && !spec.short_switches.contains(flag) {
+                                step = None;
+                                break;
+                            }
+                        }
+                        match step {
+                            Some(step) => stack.push((index + step, same)),
+                            None => {
+                                stack.push((index + 1, same));
+                                stack.push((index + 2, same));
+                            }
+                        }
                     }
                 } else if operands > 0 {
                     stack.push((index + 1, next(operands - 1, options_done)));
@@ -1137,7 +1639,11 @@ fn command_heads(tokens: &[String]) -> (Vec<usize>, Vec<String>) {
         }
     }
     heads.sort_unstable();
-    (heads, payloads)
+    Heads {
+        heads,
+        split_payloads: payloads,
+        truncated,
+    }
 }
 
 /// How the shell invocation `tokens` (with `tokens[0]` the shell) gets its

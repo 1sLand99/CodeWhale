@@ -5,7 +5,7 @@ use codewhale_execpolicy::{
     AskForApproval, ExecApprovalRequirement, ExecPolicyContext, ExecPolicyEngine, PermissionAction,
     Ruleset, ToolAskRule,
     bash_arity::BashArityDict,
-    command_safety::is_parallel_readonly_command,
+    command_safety::{is_agent_readonly_shell_command, is_parallel_readonly_command},
     toml_rules::{ExecPolicyConfig, RuleDecision},
 };
 
@@ -66,6 +66,42 @@ const HIDDEN_RM: &[&str] = &[
     "sudo --user root rm -rf /",
     "timeout -s KILL 5 rm x",
     "env -S'rm x'",
+    // Wrapper options missing from the option tables, read both ways.
+    "env -P /usr/bin rm -rf /",
+    "ls | xargs -J % rm -rf %",
+    "proot -R /x rm -rf /",
+    "chroot -u root / rm -rf /",
+    "doas -a style rm x",
+    "sudo -a type rm x",
+    // Substitution bodies read past quotes, and a `case` inside one.
+    "echo $(case x in x) rm -rf /;; esac)",
+    "echo $(echo \")\"; rm -rf /)",
+    "echo 'unterminated $(rm x)",
+    // `<<` inside arithmetic is a shift, not a heredoc.
+    "((x = 1 << 2))\nrm -rf /",
+    "let x=1<<2\nrm x",
+    // Replacement strings are only known at run time.
+    "echo 'rm -rf /' | xargs -I{} sh -c {}",
+    "echo rm | xargs -I CMD CMD -rf /",
+    "find . -exec sh -c {} \\;",
+    // More wrappers, shells and code-as-string commands.
+    "bash.exe -c 'rm -rf /'",
+    "caffeinate -i rm -rf /",
+    "arch -arm64 rm -rf /",
+    "noglob rm -rf /",
+    "nsenter -t 1 -m rm x",
+    "unshare -r rm x",
+    "sandbox-exec -n no-network rm x",
+    "runuser -u root -- rm x",
+    "trap 'rm -rf /' EXIT",
+    "su -c 'rm -rf /' root",
+    "flock /tmp/lock -c 'rm x'",
+    "script -qc 'rm x' /dev/null",
+    "watch 'ls; rm -rf /'",
+    "cmd /c rm x",
+    "pwsh -NoProfile -Command rm x",
+    "powershell -enc cgBtACAAeAA=",
+    "wsl -e rm x",
 ];
 
 /// Literal spellings that were already denied and must stay denied.
@@ -82,22 +118,73 @@ const LITERAL_RM: &[&str] = &[
     "command -p rm x",
 ];
 
+/// Commands whose parse runs into a budget: past the budget, nothing was
+/// checked, so the command is unresolved.
+fn budget_commands() -> Vec<String> {
+    vec![
+        format!("sudo {}rm -rf /", "-H ".repeat(600)),
+        format!("env {}rm -rf /", "-i ".repeat(600)),
+        (1..=256)
+            .map(|index| format!("true {index}"))
+            .chain(["rm -rf /".to_string()])
+            .collect::<Vec<_>>()
+            .join("; "),
+    ]
+}
+
+fn denied(engine: &ExecPolicyEngine, command: &str) -> bool {
+    let decision = engine
+        .check(context(command, AskForApproval::Never))
+        .expect("policy check");
+    !decision.allow
+        && matches!(
+            decision.requirement,
+            ExecApprovalRequirement::Forbidden { .. }
+        )
+}
+
 #[test]
 fn deny_rules_hold_against_runtime_resolved_and_reserved_word_spellings() {
+    let budget = budget_commands();
+    let mut missed = Vec::new();
     for engine in deny_rm_engines() {
-        for command in HIDDEN_RM.iter().chain(LITERAL_RM) {
-            let decision = engine
-                .check(context(command, AskForApproval::Never))
-                .expect("policy check");
-            assert!(
-                !decision.allow
-                    && matches!(
-                        decision.requirement,
-                        ExecApprovalRequirement::Forbidden { .. }
-                    ),
-                "{command:?} was not denied: {decision:?}"
-            );
+        for command in HIDDEN_RM
+            .iter()
+            .chain(LITERAL_RM)
+            .copied()
+            .chain(budget.iter().map(String::as_str))
+        {
+            if !denied(&engine, command) {
+                missed.push(command.chars().take(80).collect::<String>());
+            }
         }
+    }
+    assert!(missed.is_empty(), "not denied: {missed:#?}");
+}
+
+#[test]
+fn unresolved_words_prompt_only_where_a_person_always_sees_the_prompt() {
+    let engine = ExecPolicyEngine::new(vec![], vec!["rm".to_string()]);
+    let requirement = |approval| {
+        engine
+            .check(context("v=rm; $v x", approval))
+            .expect("policy check")
+            .requirement
+    };
+    assert!(matches!(
+        requirement(AskForApproval::OnRequest),
+        ExecApprovalRequirement::NeedsApproval { .. }
+    ));
+    assert!(matches!(
+        requirement(AskForApproval::UnlessTrusted),
+        ExecApprovalRequirement::NeedsApproval { .. }
+    ));
+    // `OnFailure` is also the posture of sessions that approve on their own.
+    for approval in [AskForApproval::OnFailure, AskForApproval::Never] {
+        assert!(matches!(
+            requirement(approval),
+            ExecApprovalRequirement::Forbidden { .. }
+        ));
     }
 }
 
@@ -114,6 +201,15 @@ fn ordinary_commands_stay_allowed_next_to_a_deny_rule() {
             "sudo -u root ls",
             "command -v rm",
             "command -pV rm",
+            "sudo -E ls $f",
+            "nice -5 ls",
+            "timeout -v 5 ls",
+            "xargs -I{} echo {}",
+            "find . -exec grep -l x {} +",
+            "cat <<EOF\nhello\nEOF\nls",
+            "for ((i = 0; i < 3; i++)); do echo $i; done",
+            "echo $(echo \")\")",
+            "watch -n 5 ls",
         ] {
             let decision = engine
                 .check(context(command, AskForApproval::Never))
@@ -174,17 +270,40 @@ deny = ["rm", "rm *"]
 "#,
     )
     .expect("parse rules");
-    for command in HIDDEN_RM {
-        assert!(
-            matches!(config.evaluate(command), RuleDecision::Deny(_)),
-            "{command:?} was not denied"
-        );
-    }
+    let budget = budget_commands();
+    let missed: Vec<&str> = HIDDEN_RM
+        .iter()
+        .copied()
+        .chain(budget.iter().map(String::as_str))
+        .filter(|command| !matches!(config.evaluate(command), RuleDecision::Deny(_)))
+        .collect();
+    assert!(missed.is_empty(), "not denied: {missed:#?}");
     assert_eq!(config.evaluate("git status -s"), RuleDecision::Allow);
     for command in ["git -ccore.fsmonitor=x status", "ls $(touch x)"] {
         assert!(
             matches!(config.evaluate(command), RuleDecision::AskUser(_)),
             "{command:?} was auto-approved"
+        );
+    }
+}
+
+#[test]
+fn agent_read_only_rejects_a_glob_that_can_expand_to_an_option() {
+    for command in ["rg foo *", "ls *", "git log ''*", "cat *.md"] {
+        assert!(
+            !is_agent_readonly_shell_command(command),
+            "{command:?} was classified read-only"
+        );
+    }
+    for command in [
+        "ls src/*",
+        "rg foo ./*",
+        "find . -name '*.rs'",
+        "cat README.md",
+    ] {
+        assert!(
+            is_agent_readonly_shell_command(command),
+            "{command:?} was rejected"
         );
     }
 }

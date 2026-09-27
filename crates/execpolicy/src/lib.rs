@@ -543,17 +543,38 @@ impl ExecPolicyEngine {
                     .iter()
                     .any(|rule| rule.action == PermissionAction::Deny && rule.tool == tool)
             });
+        // A mode that always shows a person the prompt may ask instead. The
+        // others refuse: `OnFailure` is also the posture of auto-approving
+        // sessions, where a prompt would run unseen.
         if expansion.dynamic && deny_rules_configured {
+            let reason = "Deny rules are in force and this command's words are only known when it \
+                          runs (a variable, substitution, glob or brace list, escaped quoting, \
+                          a script read from a pipe, or text that does not parse cleanly), so \
+                          they cannot be checked against those rules.";
+            let (allow, requires_approval, requirement) = match ctx.ask_for_approval {
+                AskForApproval::UnlessTrusted | AskForApproval::OnRequest => (
+                    true,
+                    true,
+                    ExecApprovalRequirement::NeedsApproval {
+                        reason: reason.to_string(),
+                        proposed_execpolicy_amendment: None,
+                        proposed_network_policy_amendments: Vec::new(),
+                    },
+                ),
+                _ => (
+                    false,
+                    false,
+                    ExecApprovalRequirement::Forbidden {
+                        reason: reason.to_string(),
+                    },
+                ),
+            };
             return Ok(ExecPolicyDecision {
-                allow: false,
-                requires_approval: false,
+                allow,
+                requires_approval,
                 matched_rule: None,
-                matched_action: Some(PermissionAction::Deny),
-                requirement: ExecApprovalRequirement::Forbidden {
-                    reason:
-                        "Command word cannot be resolved statically while deny rules are in force."
-                            .to_string(),
-                },
+                matched_action: (!allow).then_some(PermissionAction::Deny),
+                requirement,
             });
         }
         // An allow rule names the command as written. Code nested inside it

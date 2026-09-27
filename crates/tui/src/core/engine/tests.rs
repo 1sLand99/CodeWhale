@@ -10193,6 +10193,44 @@ fn exec_shell_scenario() {
 }
 
 #[test]
+fn task_shell_tools_answer_to_shell_deny_rules() {
+    let engine =
+        codewhale_execpolicy::ExecPolicyEngine::new(vec!["ls".to_string()], vec!["rm".to_string()]);
+    for (tool, input) in [
+        ("task_shell_start", json!({"command": "rm -rf ~/x"})),
+        (
+            "tasks",
+            json!({"action": "gate_run", "gate": "g", "command": "rm -rf ~/x"}),
+        ),
+    ] {
+        for mode in [ApprovalMode::Auto, ApprovalMode::Never] {
+            let decision = exec_shell_ask_rule_decision_for_policy(
+                &engine,
+                tool,
+                &input,
+                Path::new("/repo"),
+                mode,
+            );
+            assert!(
+                matches!(decision, Some(ToolAskRuleDecision::Block(_))),
+                "{tool} in {mode:?}: {decision:?}"
+            );
+        }
+    }
+    // A shell allow rule does not waive a task tool's own approval.
+    assert_eq!(
+        exec_shell_ask_rule_decision_for_policy(
+            &engine,
+            "task_shell_start",
+            &json!({"command": "ls"}),
+            Path::new("/repo"),
+            ApprovalMode::Auto,
+        ),
+        None
+    );
+}
+
+#[test]
 fn canonical_bash_run_honors_legacy_typed_ask_rules() {
     let config = EngineConfig {
         exec_policy_engine: ask_rule_engine("cargo test"),
