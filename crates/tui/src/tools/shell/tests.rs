@@ -5072,3 +5072,142 @@ fn pty_raw_stdin_roundtrips_nul_and_non_utf8_bytes() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// #6654: a `Managed` background shell must (a) survive the exit of the thread
+/// that spawned it — callers such as `spawn_blocking` retire their threads —
+/// and (b) die with its whole process group when the TUI process is
+/// SIGKILLed, including a grandchild the shell did not `exec` (the shell
+/// itself keeps waiting on it). The TUI is played by a re-exec of this test
+/// binary.
+#[cfg(unix)]
+#[test]
+fn managed_background_shell_outlives_spawning_thread_but_not_the_tui() {
+    const PROBE: &str = "CODEWHALE_TEST_BG_PDEATHSIG_PIDFILE";
+
+    #[cfg(target_os = "linux")]
+    fn is_alive(pid: libc::pid_t) -> bool {
+        // A killed child may linger as a zombie until its new parent reaps it
+        // (a container's init may never do so).
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state != "Z" && state != "X"),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn is_alive(pid: libc::pid_t) -> bool {
+        // Orphans are reparented to launchd, which reaps them promptly.
+        // SAFETY: kill(2) with signal 0 only checks for existence.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    if let Some(pid_file) = std::env::var_os(PROBE) {
+        // Probe role: spawn from a short-lived thread, let the thread exit,
+        // mark readiness (libtest captures stdout, so through a file), then
+        // hang until SIGKILLed.
+        let pid_file = PathBuf::from(pid_file);
+        let workspace = pid_file.parent().unwrap().to_path_buf();
+        // No `exec`: the shell forks `sleep` and waits, as `npm run dev; echo
+        // done` or `a | b` would.
+        let command = format!(
+            "sleep 600 & echo \"$$ $!\" > '{}'; wait",
+            pid_file.display()
+        );
+        let manager = std::thread::spawn(move || {
+            let mut manager = ShellManager::new(workspace);
+            let result = manager
+                .execute_with_options_env(
+                    &command,
+                    None,
+                    600_000,
+                    true,
+                    None,
+                    false,
+                    Some(ExecutionSandboxPolicy::DangerFullAccess),
+                    HashMap::new(),
+                )
+                .expect("spawn background shell");
+            assert_eq!(result.status, ShellStatus::Running);
+            manager
+        })
+        .join()
+        .expect("spawning thread");
+        std::fs::write(pid_file.with_extension("ready"), b"").expect("write ready marker");
+        let _keep_alive = manager;
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("bg.pid");
+    let ready_file = pid_file.with_extension("ready");
+    let mut tui = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tools::shell::tests::managed_background_shell_outlives_spawning_thread_but_not_the_tui",
+            "--test-threads=1",
+        ])
+        .env(PROBE, &pid_file)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn probe process");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let pids = loop {
+        let pids = if ready_file.exists() {
+            std::fs::read_to_string(&pid_file).ok().and_then(|text| {
+                let pids = text
+                    .split_whitespace()
+                    .map(|pid| pid.parse::<libc::pid_t>().ok())
+                    .collect::<Option<Vec<_>>>()?;
+                (pids.len() == 2).then_some(pids)
+            })
+        } else {
+            None
+        };
+        if let Some(pids) = pids {
+            break pids;
+        }
+        if Instant::now() >= deadline || tui.try_wait().ok().flatten().is_some() {
+            let _ = tui.kill();
+            let _ = tui.wait();
+            panic!("probe process never reported the background shell pid");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    // The spawning thread is gone by now; give a mis-armed signal time to land.
+    std::thread::sleep(Duration::from_millis(500));
+    let survived_thread_exit = pids.iter().all(|&pid| is_alive(pid));
+
+    tui.kill().expect("SIGKILL the probe process");
+    tui.wait().expect("reap the probe process");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while pids.iter().any(|&pid| is_alive(pid)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let survivors = pids
+        .iter()
+        .copied()
+        .filter(|&pid| is_alive(pid))
+        .collect::<Vec<_>>();
+    for &pid in &survivors {
+        // SAFETY: plain kill(2) on a pid this test started.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+
+    assert!(
+        survived_thread_exit,
+        "the background shell died when its spawning thread exited"
+    );
+    assert!(
+        survivors.is_empty(),
+        "background processes outlived the SIGKILLed TUI: {survivors:?} of shell/grandchild {pids:?}"
+    );
+}

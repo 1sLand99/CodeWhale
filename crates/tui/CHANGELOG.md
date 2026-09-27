@@ -129,6 +129,14 @@ quieter, and Fleet runs can be checked before they spend anything.
 - The terminal caret no longer blinks at the hidden composer while a picker,
   settings screen or other view covers it; it returns when the view closes
   ([#6545](https://github.com/Hmbown/Codewhale/issues/6545)).
+- On Linux and macOS, a `background: true` shell's process group is now
+  stopped when the TUI dies without cleaning up (SIGKILL, a crash, or the
+  signal exit path). The shell and the processes it started used to keep
+  running as orphans. Processes that move to their own process group or
+  session, staged services you choose to keep, and `tty: true` background
+  shells are not covered. Under the bwrap sandbox, the sandboxed command
+  now also exits when bwrap does
+  ([#6654](https://github.com/Hmbown/Codewhale/issues/6654)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you
