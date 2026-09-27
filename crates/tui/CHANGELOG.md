@@ -94,6 +94,14 @@ quieter, and Fleet runs can be checked before they spend anything.
   discovered symlinks are not followed. Cleanup also masks current configured
   credentials, and doctor's bounded scan reserves capacity for saved transcripts
   and checkpoints separately from Runtime receipts.
+- Hooks: `tool_call_after` and `on_error` now get a shell command's exit code
+  in `DEEPSEEK_TOOL_EXIT_CODE` on Runtime API threads as well as in the TUI,
+  and for a failing command as well as a passing one, so `exit_code`
+  conditions match. The Runtime API path passed no exit code at all, and a
+  command that exited nonzero, timed out, or was killed reached hooks with no
+  exit code on either surface. The new `DEEPSEEK_TOOL_STATUS` says how the
+  command ended (`completed`, `failed`, `timed_out`, `killed`)
+  ([#6582](https://github.com/Hmbown/Codewhale/issues/6582)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you
