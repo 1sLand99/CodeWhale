@@ -53,11 +53,16 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 - Inline ```` ```repl ```` blocks in a reply now follow the same rules as the
   `code_execution` tool. They never run in Plan mode or when
-  `code_execution` is not on the turn's tool surface, they wait for the same
-  approval under the session's permission posture (a denied or unanswerable
-  approval skips them with a visible note), and only a fence that opens its
-  own line counts, so a reply that mentions the fence in prose runs nothing.
-  The docs no longer describe the REPL kernel as sandboxed.
+  `code_execution` is not on the turn's tool surface, and they are admitted
+  like a `code_execution` call with the same code: before-tool hooks,
+  disallowed-tool rules, Auto-Review (including its reviewer) and repository
+  law all apply, then the same approval under the session's permission
+  posture (a blocked, denied or unanswerable call skips them with a visible
+  note). Only a fence that opens its own line counts, here and in the `rlm`
+  tool's child rounds, so a reply that mentions a fence in prose runs nothing.
+  An `rlm(...)` call from a fence gets a one-shot child answer rather than a
+  child that runs its own code. The docs no longer describe the REPL kernel
+  as sandboxed.
 
 ### Fixed
 

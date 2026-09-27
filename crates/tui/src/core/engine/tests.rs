@@ -6810,12 +6810,139 @@ async fn repl_fence_requires_code_execution_approval() {
             let note = {
                 let mut rx = events.write().await;
                 std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
-                    matches!(event, Event::Status { message } if message.starts_with("REPL block not run: denied"))
+                    matches!(event, Event::Status { message } if message.starts_with("REPL block not run: not approved"))
                 })
             };
             assert!(note, "a denied fence leaves a visible status note");
         }
     }
+}
+
+/// A fence is admitted through the same planning as a `code_execution`
+/// call, so an Auto-Review block rule on `code_execution` also stops the
+/// fence, even under Full Access where no card would open.
+#[tokio::test]
+async fn repl_fence_obeys_auto_review_block_under_full_access() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use codewhale_models::{ContentBlock, Message};
+
+    let workspace = tempdir().expect("tempdir");
+    let marker = workspace.path().join("fence-ran");
+    let fence = format!(
+        "```repl\nopen({:?}, 'w').write('x')\nfinalize('done')\n```",
+        marker.display().to_string()
+    );
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn(&fence),
+        canned::simple_text_turn("Done."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let mut config = deterministic_engine_config(workspace.path());
+    config.auto_review_policy = crate::tui::auto_review::AutoReviewPolicy {
+        block_rules: vec![
+            crate::tui::auto_review::AutoReviewRule::block("no-code", "code is blocked here")
+                .tool_name(CODE_EXECUTION_TOOL_NAME),
+        ],
+        ..crate::tui::auto_review::AutoReviewPolicy::default()
+    };
+    let (mut engine, handle) = Engine::new_with_model_client(config, &Config::default(), client);
+    engine.session.auto_approve = true;
+    engine.session.add_message(Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Compute.".to_string(),
+            cache_control: None,
+        }],
+    });
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let policy = test_tool_surface(
+        &engine,
+        registry,
+        Some(vec![catalog_tool(CODE_EXECUTION_TOOL_NAME)]),
+        AppMode::Agent,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, policy, None, None).await;
+
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert!(
+        engine.repl_kernel.is_none(),
+        "blocked fence starts no kernel"
+    );
+    assert!(!marker.exists(), "blocked fence must not run");
+    let note = {
+        let mut rx = handle.rx_event.write().await;
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(event, Event::Status { message }
+                if message.starts_with("REPL block not run:") && message.contains("code is blocked here"))
+        })
+    };
+    assert!(note, "the block reason is shown");
+}
+
+/// Under Auto-Review a fence goes through the same review as a
+/// `code_execution` call instead of an approval card that the posture can
+/// only auto-deny: with the reviewer allowing it, the fence runs.
+#[tokio::test]
+async fn repl_fence_runs_through_auto_review_without_a_card() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use codewhale_models::{ContentBlock, Message};
+
+    let workspace = tempdir().expect("tempdir");
+    let marker = workspace.path().join("fence-ran");
+    let fence = format!(
+        "```repl\nopen({:?}, 'w').write('x')\nfinalize('done')\n```",
+        marker.display().to_string()
+    );
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn(&fence),
+        canned::simple_text_turn("Done."),
+    ]));
+    mock.push_message_response(guardian_fixture_response(
+        r#"{"risk_level":"low","decision":"allow","reason":"isolated fixture write"}"#,
+    ));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.session.auto_approve = false;
+    engine.session.approval_mode = ApprovalMode::Auto;
+    engine.session.add_message(Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Compute.".to_string(),
+            cache_control: None,
+        }],
+    });
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let policy = test_tool_surface(
+        &engine,
+        registry,
+        Some(vec![catalog_tool(CODE_EXECUTION_TOOL_NAME)]),
+        AppMode::Agent,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = tokio::time::timeout(
+        Duration::from_secs(30),
+        engine.run_turn(&mut turn, policy, None, None),
+    )
+    .await
+    .expect("an Auto-Review fence must not wait on a card");
+
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    let asked = {
+        let mut rx = handle.rx_event.write().await;
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, Event::ApprovalRequired { .. }))
+    };
+    assert!(!asked, "Auto-Review opens no card for a reviewed fence");
+    assert!(marker.exists(), "the reviewed fence runs");
 }
 
 async fn snapshot_for_catalog(

@@ -406,14 +406,26 @@ pub(super) fn replace_runtime_mcp_tools(
 
 impl Engine {
     /// Inline ```repl blocks run model-written Python in the session kernel,
-    /// so they take `code_execution`'s approval: the same prepared
-    /// requirement, resolved under the session posture, and the same card.
-    /// Returns `None` when the blocks may run, otherwise why they may not.
+    /// so they are admitted exactly like a `code_execution` call carrying
+    /// the same code: planned by `plan_tool_calls` (mode, allow/deny lists,
+    /// before-tool hooks, Auto-Review floor and reviewer, repo law, the
+    /// registry approval) and, when the plan still needs it, approved through
+    /// the same card. Returns `None` when the blocks may run, otherwise why
+    /// they may not.
+    #[allow(clippy::too_many_arguments)] // mirrors `gate_nested_call`
     async fn repl_fence_blocked_reason(
         &mut self,
         blocks: &[crate::repl::ReplBlock],
-        registry: Option<&crate::tools::ToolRegistry>,
         approval_id: &str,
+        client: &dyn crate::core::model_client::ModelClient,
+        turn: &mut TurnContext,
+        tool_policy: &ToolSurfacePolicy,
+        tool_catalog: &[codewhale_models::Tool],
+        tool_registry: Option<&crate::tools::ToolRegistry>,
+        active_tool_names: &mut std::collections::HashSet<String>,
+        tool_call_budget: &mut ToolCallBudget,
+        mode: AppMode,
+        fleet_denial_guard: Option<&FleetDenialGuard>,
     ) -> Option<String> {
         let tool_name = super::tool_catalog::CODE_EXECUTION_TOOL_NAME;
         let code = blocks
@@ -421,60 +433,105 @@ impl Engine {
             .map(|block| block.code.trim_matches('\n'))
             .collect::<Vec<_>>()
             .join("\n\n");
-        let prepared = match prepare_tool_call(
-            tool_name,
-            json!({ "code": code }),
-            registry,
-            self.session.auto_approve,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => return Some(error.to_string()),
-        };
-        let force_prompt = registered_tool_forces_prompt(tool_name, prepared.call.approval)
-            && !prepared.auto_approve;
-        if !force_prompt
-            && !registered_tool_approval_required(
-                tool_name,
-                prepared.call.approval,
-                prepared.auto_approve,
-            )
-        {
-            return None;
-        }
-        let input = prepared.call.input;
-        let event = Event::ApprovalRequired {
+        let mut uses = [ToolUseState {
             id: approval_id.to_string(),
-            tool_name: tool_name.to_string(),
-            approval_key: crate::tools::approval_cache::build_approval_key(tool_name, &input).0,
-            approval_grouping_key: crate::tools::approval_cache::build_approval_grouping_key(
-                tool_name, &input,
+            name: tool_name.to_string(),
+            input: json!({ "code": code }),
+            caller: None,
+            thought_signature: None,
+            input_buffer: String::new(),
+            input_parse_error: None,
+        }];
+        let PlannedToolCalls { plans, .. } = self
+            .plan_tool_calls(
+                client,
+                turn,
+                tool_policy,
+                &mut uses,
+                tool_catalog,
+                tool_registry,
+                active_tool_names,
+                tool_call_budget,
+                mode,
+                fleet_denial_guard,
+                ToolCallSource::CodeMode,
             )
-            .0,
-            input,
-            description: "Run model-written Python from the reply's ```repl block(s) in the \
-                          session REPL kernel (not OS-sandboxed)"
-                .to_string(),
-            intent_summary: None,
-            approval_force_prompt: force_prompt,
-        };
-        let decision = self
-            .request_tool_approval(approval_id, tool_name, event)
             .await;
-        emit_tool_audit(json!({
-            "event": "tool.approval_decision",
-            "tool_id": approval_id,
-            "tool_name": tool_name,
-            "decision": if matches!(decision, Ok(ApprovalResult::Approved)) { "approved" } else { "denied" },
-            "caller": "repl_fence",
-        }));
-        match decision {
-            Ok(ApprovalResult::Approved) => None,
-            Ok(ApprovalResult::Denied) => Some("denied by user".to_string()),
-            Ok(ApprovalResult::RetryWithPolicy(_)) => {
-                Some("inline REPL blocks cannot run under a changed sandbox policy".to_string())
-            }
-            Err(error) => Some(error.to_string()),
+        let Some(plan) = plans.into_iter().next() else {
+            return Some("the code could not be planned".to_string());
+        };
+        if let Some(error) = plan.blocked_error {
+            return Some(error.to_string());
         }
+        // The kernel runs the fenced blocks as written. A hook that rewrote
+        // the code (or a guard that answered in its place) would make the
+        // admitted input differ from what runs, so nothing runs.
+        if plan.guard_result.is_some()
+            || plan.name != tool_name
+            || plan.input.get("code").and_then(Value::as_str) != Some(code.as_str())
+        {
+            tool_call_budget.refund();
+            return Some("a before-tool hook changed the code".to_string());
+        }
+        let approved = if plan.approval_required {
+            let event = Event::ApprovalRequired {
+                id: approval_id.to_string(),
+                tool_name: tool_name.to_string(),
+                approval_key: crate::tools::approval_cache::build_approval_key(
+                    tool_name,
+                    &plan.input,
+                )
+                .0,
+                approval_grouping_key: crate::tools::approval_cache::build_approval_grouping_key(
+                    tool_name,
+                    &plan.input,
+                )
+                .0,
+                input: plan.input,
+                description: format!(
+                    "Run the reply's ```repl block(s) in the session REPL kernel (a local \
+                     subprocess, not OS-sandboxed): {}",
+                    plan.approval_description
+                ),
+                intent_summary: None,
+                approval_force_prompt: plan.approval_force_prompt,
+            };
+            let decision = self
+                .request_tool_approval(approval_id, tool_name, event)
+                .await;
+            emit_tool_audit(json!({
+                "event": "tool.approval_decision",
+                "tool_id": approval_id,
+                "tool_name": tool_name,
+                "decision": if matches!(decision, Ok(ApprovalResult::Approved)) { "approved" } else { "denied" },
+                "caller": "repl_fence",
+            }));
+            match decision {
+                Ok(ApprovalResult::Approved) => true,
+                Ok(ApprovalResult::Denied) => return Some("not approved".to_string()),
+                Ok(ApprovalResult::RetryWithPolicy(_)) => {
+                    return Some(
+                        "inline REPL blocks cannot run under a changed sandbox policy".to_string(),
+                    );
+                }
+                Err(error) => return Some(error.to_string()),
+            }
+        } else {
+            false
+        };
+        // Planning (hooks, Auto-Review) and an approval wait can outlive a
+        // posture switch. Same rule as a direct call: an approval survives an
+        // equal or broader posture; anything else does not run.
+        let posture_before_drain = self.applied_runtime_authority();
+        if self.apply_pending_runtime_authority().await
+            && (!approved
+                || self
+                    .applied_runtime_authority()
+                    .narrows(&posture_before_drain))
+        {
+            return Some("permissions changed before the code ran".to_string());
+        }
+        None
     }
 
     /// A connection completed during inference must be discoverable in this
@@ -2406,8 +2463,22 @@ impl Engine {
                 if !repl_blocks.is_empty() {
                     let approval_id = format!("{}-repl-{}", turn.id, turn.step);
                     repl_fence_skip_reason = self
-                        .repl_fence_blocked_reason(&repl_blocks, tool_registry, &approval_id)
+                        .repl_fence_blocked_reason(
+                            &repl_blocks,
+                            &approval_id,
+                            client.as_ref(),
+                            turn,
+                            &tool_policy,
+                            &tool_catalog,
+                            tool_registry,
+                            &mut active_tool_names,
+                            &mut tool_call_budget,
+                            mode,
+                            fleet_denial_guard.as_ref(),
+                        )
                         .await;
+                    // Admission may have applied a pending posture change.
+                    mode = self.current_mode;
                 }
                 if let Some(reason) = repl_fence_skip_reason.as_deref() {
                     let _ = self
@@ -2457,13 +2528,19 @@ impl Engine {
                     // same kernel contract, rather than quietly dropping
                     // programmatic recursion outside the legacy DeepSeek
                     // client path.
+                    //
+                    // Depth 0: the approval above covers the code in the
+                    // fence, not code a child model writes later. A nested
+                    // `rlm(...)` from a fence degrades to a one-shot child
+                    // completion (text back to Python) instead of starting a
+                    // sub-RLM whose code rounds would run unapproved.
                     let bridge = self.model_client.as_ref().map(|client| {
                         crate::rlm::RlmBridge::new(
                             std::sync::Arc::new(crate::rlm::ModelClientRlmAdapter::new(
                                 std::sync::Arc::clone(client),
                             )),
                             self.session.model.clone(),
-                            1,
+                            0,
                         )
                         // A nested `rlm_query` reports on this turn's stream,
                         // so its model calls are part of the record (#6511).
