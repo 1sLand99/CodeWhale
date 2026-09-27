@@ -1102,7 +1102,7 @@ pub(crate) fn untrusted_project_skills_warning(workspace: &Path) -> Option<Strin
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!(
-        "Project skills in {dirs} were not loaded: this workspace is not trusted. Run /trust on to load them."
+        "Project skills in {dirs} were not loaded: this workspace is not trusted. Run /trust on --save to persist workspace trust and enable project skills, commands, hooks, MCP servers, and project context."
     ))
 }
 

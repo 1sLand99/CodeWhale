@@ -656,7 +656,7 @@
   "TranslationInProgress": "Traduciendo la salida del asistente...",
   "TranslationComplete": "Traducción completada",
   "TranslationFailed": "Traducción fallida",
-  "CmdTrustDescription": "Gestionar la confianza del workspace y la lista de paths permitidos",
+  "CmdTrustDescription": "Cambiar la confianza en archivos para esta sesión; --save también guarda la confianza en habilidades, comandos, hooks, servidores MCP y contexto del proyecto",
   "CmdWorkspaceDescription": "Mostrar o cambiar el workspace actual — el subcomando worktrees abre el gestor de worktrees de git",
   "CmdUndoDescription": "Eliminar el último par de mensajes",
   "CmdVerboseDescription": "Alternar pensamiento en vivo completo en la transcripción",

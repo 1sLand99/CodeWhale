@@ -9,9 +9,10 @@
 //! rewrites them on request.
 //!
 //! Only transcript tool results and Runtime tool receipts (including event
-//! copies) are touched. Legacy cleanup uses credential-shaped masking; unknown
-//! bare secrets cannot be recovered from old configuration. Runtime rewrites
-//! require the store's exclusive process lease, so close live sessions first.
+//! copies) are touched. Cleanup masks credential shapes and currently configured
+//! secret values; bare secrets absent from current configuration cannot be recovered.
+//! Runtime rewrites require the exclusive process lease; busy stores are reported
+//! and left untouched while the remaining files are scrubbed.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,29 +33,44 @@ pub(crate) struct ScrubReport {
     pub flagged_tool_results: usize,
     /// Files the scan could not read or parse, left untouched.
     pub unreadable: Vec<PathBuf>,
+    /// Credential-bearing Runtime files left untouched because their store is live.
+    pub busy: Vec<PathBuf>,
 }
 
-/// Session/checkpoint JSON and Runtime items/events, newest first. Scan only
-/// known store directories; never follow repository-controlled symlinks.
+/// Session/checkpoint JSON and Runtime items/events, newest first. Resolve the
+/// user-selected roots (including the fixed checkpoints root), but never follow
+/// symlink entries discovered inside those roots. Enumeration failures are partial
+/// coverage, not a reason to discard the files that can still be scrubbed.
 pub(crate) fn session_files(
     sessions_dir: &Path,
     standalone_runtime: &Path,
-) -> io::Result<Vec<PathBuf>> {
-    let mut dirs = vec![sessions_dir.to_path_buf(), sessions_dir.join("checkpoints")];
-    let mut runtime_roots = vec![standalone_runtime.to_path_buf()];
-    for session in directory_entries(sessions_dir)? {
-        if !session.file_type()?.is_dir() {
-            continue;
+    unreadable: &mut Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let sessions_root = canonical_store_root(sessions_dir, unreadable);
+    let mut dirs = Vec::new();
+    let mut runtime_roots = Vec::new();
+    if let Some(root) = canonical_store_root(standalone_runtime, unreadable) {
+        runtime_roots.push(root);
+    }
+    if let Some(root) = sessions_root {
+        if let Some(checkpoints) = canonical_store_root(&root.join("checkpoints"), unreadable) {
+            dirs.push(checkpoints);
         }
-        for runtime in directory_entries(&session.path())? {
-            let name = runtime.file_name();
-            let name = name.to_string_lossy();
-            if runtime.file_type()?.is_dir()
-                && (name == "runtime" || name.starts_with("runtime-recovered-"))
-            {
-                runtime_roots.push(runtime.path());
+        for session in directory_entries(&root, unreadable) {
+            if !entry_has_type(&session, true, unreadable) {
+                continue;
+            }
+            for runtime in directory_entries(&session.path(), unreadable) {
+                let name = runtime.file_name();
+                let name = name.to_string_lossy();
+                if (name == "runtime" || name.starts_with("runtime-recovered-"))
+                    && entry_has_type(&runtime, true, unreadable)
+                {
+                    runtime_roots.push(runtime.path());
+                }
             }
         }
+        dirs.push(root);
     }
     for root in runtime_roots {
         dirs.push(root.join("items"));
@@ -62,9 +78,9 @@ pub(crate) fn session_files(
     }
     let mut files = Vec::new();
     for dir in dirs {
-        for entry in directory_entries(&dir)? {
+        for entry in directory_entries(&dir, unreadable) {
             let path = entry.path();
-            if !entry.file_type()?.is_file()
+            if !entry_has_type(&entry, false, unreadable)
                 || !matches!(
                     path.extension().and_then(|ext| ext.to_str()),
                     Some("json" | "jsonl")
@@ -72,31 +88,97 @@ pub(crate) fn session_files(
             {
                 continue;
             }
-            let modified = entry
-                .metadata()?
-                .modified()
-                .unwrap_or(std::time::UNIX_EPOCH);
-            files.push((modified, path));
+            match entry.metadata() {
+                Ok(meta) => files.push((meta.modified().unwrap_or(std::time::UNIX_EPOCH), path)),
+                Err(_) => unreadable.push(path),
+            }
         }
     }
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     files.dedup_by(|a, b| a.1 == b.1);
-    Ok(files.into_iter().map(|(_, path)| path).collect())
+    unreadable.sort();
+    unreadable.dedup();
+    files.into_iter().map(|(_, path)| path).collect()
 }
 
-fn directory_entries(dir: &Path) -> io::Result<Vec<std::fs::DirEntry>> {
-    match std::fs::symlink_metadata(dir) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-        Ok(meta) if !meta.is_dir() => {
-            return Err(io::Error::other(format!(
-                "Not a store directory: {}",
-                dir.display()
-            )));
+fn canonical_store_root(dir: &Path, unreadable: &mut Vec<PathBuf>) -> Option<PathBuf> {
+    match std::fs::canonicalize(dir) {
+        Ok(root) => Some(root),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => {
+            unreadable.push(dir.to_path_buf());
+            None
         }
-        Ok(_) => {}
     }
-    std::fs::read_dir(dir)?.collect()
+}
+
+fn entry_has_type(
+    entry: &std::fs::DirEntry,
+    directory: bool,
+    unreadable: &mut Vec<PathBuf>,
+) -> bool {
+    match entry.file_type() {
+        Ok(kind) => {
+            if directory {
+                kind.is_dir()
+            } else {
+                kind.is_file()
+            }
+        }
+        Err(_) => {
+            unreadable.push(entry.path());
+            false
+        }
+    }
+}
+
+fn directory_entries(dir: &Path, unreadable: &mut Vec<PathBuf>) -> Vec<std::fs::DirEntry> {
+    let entries = match std::fs::symlink_metadata(dir) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Ok(meta) if meta.is_dir() => std::fs::read_dir(dir).ok(),
+        _ => None,
+    };
+    let Some(entries) = entries else {
+        unreadable.push(dir.to_path_buf());
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(_) => {
+                unreadable.push(dir.to_path_buf());
+                None
+            }
+        })
+        .collect()
+}
+
+/// Reserve an independent budget for transcripts/checkpoints and Runtime receipts,
+/// so one busy Runtime cannot evict every saved conversation from doctor's scan.
+pub(crate) fn doctor_files(files: Vec<PathBuf>, per_category: usize) -> Vec<PathBuf> {
+    let mut counts = [0, 0];
+    files
+        .into_iter()
+        .filter(|path| {
+            let count = &mut counts[usize::from(runtime_root(path).is_some())];
+            *count += 1;
+            *count <= per_category
+        })
+        .collect()
+}
+
+/// Called once per command from its blocking worker. This is read-only, including
+/// active-key resolution; the resulting values must never appear in a report.
+pub(crate) fn configured_secrets(
+    config_path: Option<PathBuf>,
+    profile: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let config = crate::config::Config::load(config_path, profile)?;
+    let active_key = config.active_route_api_key_read_only().unwrap_or_default();
+    Ok(crate::client::configured_model_bound_secret_values(
+        &config,
+        &active_key,
+    ))
 }
 
 fn runtime_root(path: &Path) -> Option<&Path> {
@@ -113,19 +195,30 @@ fn runtime_root(path: &Path) -> Option<&Path> {
 pub(crate) fn scrub_files(
     files: &[PathBuf],
     apply: Option<&crate::session_manager::SessionManager>,
+    secrets: &[String],
 ) -> io::Result<ScrubReport> {
     let mut report = ScrubReport::default();
     for path in files {
         report.files_scanned += 1;
         // The scan is read-only; its counts are what the report prints.
-        let scan = scrub_file(path, false)?;
+        let scan = scrub_file(path, false, secrets)?;
         let scan = match (apply, scan) {
             (Some(_), FileScan::Dirty(_)) if runtime_root(path).is_some() => {
-                let _lease = crate::runtime_threads::RuntimeProcessOwnerLock::acquire(
+                let _lease = match crate::runtime_threads::RuntimeProcessOwnerLock::acquire(
                     runtime_root(path).unwrap(),
-                )
-                .map_err(io::Error::other)?;
-                scrub_file(path, true)?
+                ) {
+                    Ok(lease) => lease,
+                    Err(error)
+                        if error
+                            .downcast_ref::<io::Error>()
+                            .is_some_and(|error| error.kind() == io::ErrorKind::WouldBlock) =>
+                    {
+                        report.busy.push(path.clone());
+                        continue;
+                    }
+                    Err(error) => return Err(io::Error::other(error)),
+                };
+                scrub_file(path, true, secrets)?
             }
             (Some(manager), FileScan::Dirty(redacted)) => {
                 // `<id>.json` and `checkpoints/<id>.json` share the id's lock.
@@ -133,7 +226,8 @@ pub(crate) fn scrub_files(
                 // whatever the file holds at that moment.
                 let session_id = path.file_stem().and_then(|stem| stem.to_str());
                 match session_id.map(|id| {
-                    manager.with_session_file_lock(id, || scrub_file(path, true).map(|_| ()))
+                    manager
+                        .with_session_file_lock(id, || scrub_file(path, true, secrets).map(|_| ()))
                 }) {
                     Some(Ok(Some(()))) => FileScan::Dirty(redacted),
                     // A deleted session is not resurrected by a rewrite.
@@ -166,7 +260,7 @@ enum FileScan {
     Dirty(usize),
 }
 
-fn scrub_file(path: &Path, apply: bool) -> io::Result<FileScan> {
+fn scrub_file(path: &Path, apply: bool, secrets: &[String]) -> io::Result<FileScan> {
     let Ok(raw) = std::fs::read(path) else {
         return Ok(FileScan::Unreadable);
     };
@@ -181,7 +275,10 @@ fn scrub_file(path: &Path, apply: bool) -> io::Result<FileScan> {
     let Ok(mut values) = parsed else {
         return Ok(FileScan::Unreadable);
     };
-    let redacted = values.iter_mut().map(scrub_value).sum();
+    let redacted = values
+        .iter_mut()
+        .map(|value| scrub_value(value, secrets))
+        .sum();
     if redacted == 0 {
         return Ok(FileScan::Clean);
     }
@@ -202,20 +299,20 @@ fn scrub_file(path: &Path, apply: bool) -> io::Result<FileScan> {
 
 /// Mask credentials in every `tool_result` text field below `value`.
 /// Returns how many fields changed.
-fn scrub_value(value: &mut Value) -> usize {
+fn scrub_value(value: &mut Value, secrets: &[String]) -> usize {
     match value {
         Value::Object(map) => {
             let mut changed = 0;
             if map.get("type").and_then(Value::as_str) == Some("tool_result") {
                 if let Some(Value::String(content)) = map.get_mut("content") {
-                    changed += usize::from(scrub_text(content));
+                    changed += usize::from(scrub_text(content, secrets));
                 }
                 if let Some(Value::Array(blocks)) = map.get_mut("content_blocks") {
                     for block in blocks {
                         if block.get("type").and_then(Value::as_str) == Some("text")
                             && let Some(Value::String(text)) = block.get_mut("text")
                         {
-                            changed += usize::from(scrub_text(text));
+                            changed += usize::from(scrub_text(text, secrets));
                         }
                     }
                 }
@@ -223,8 +320,7 @@ fn scrub_value(value: &mut Value) -> usize {
             if map.get("kind").and_then(Value::as_str) == Some("tool_call") {
                 for key in ["summary", "detail", "metadata"] {
                     if let Some(value) = map.get_mut(key) {
-                        let redacted =
-                            codewhale_config::persistence::redact_json_model_bound_secrets(value);
+                        let redacted = crate::client::redact_json_model_bound_text(value, secrets);
                         if *value != redacted {
                             *value = redacted;
                             changed += 1;
@@ -235,15 +331,22 @@ fn scrub_value(value: &mut Value) -> usize {
             // Strings below are only rewritten through a tool_result or receipt above,
             // so walking the rest (including this object's own fields) never
             // double-counts.
-            changed + map.values_mut().map(scrub_value).sum::<usize>()
+            changed
+                + map
+                    .values_mut()
+                    .map(|value| scrub_value(value, secrets))
+                    .sum::<usize>()
         }
-        Value::Array(items) => items.iter_mut().map(scrub_value).sum(),
+        Value::Array(items) => items
+            .iter_mut()
+            .map(|value| scrub_value(value, secrets))
+            .sum(),
         _ => 0,
     }
 }
 
-fn scrub_text(text: &mut String) -> bool {
-    let redacted = codewhale_config::persistence::redact_model_bound_secrets(text);
+fn scrub_text(text: &mut String, secrets: &[String]) -> bool {
+    let redacted = crate::client::redact_model_bound_text(text, secrets);
     if redacted == *text {
         return false;
     }
@@ -294,14 +397,17 @@ mod tests {
         std::fs::write(&checkpoint, session_with_tool_output(&output).to_string()).unwrap();
         std::fs::write(dir.path().join("broken.json"), "{not json").unwrap();
 
-        let files = session_files(dir.path(), &dir.path().join("standalone")).expect("enumerate");
+        let files = session_files(dir.path(), &dir.path().join("standalone"), &mut Vec::new());
         assert_eq!(files.len(), 4, "{files:?}");
 
-        let report = scrub_files(&files, None).expect("scan");
+        let report = scrub_files(&files, None, &[]).expect("scan");
         assert_eq!(report.files_scanned, 4);
         assert_eq!(report.flagged_files.len(), 2, "{report:?}");
         assert_eq!(report.flagged_tool_results, 6);
-        assert_eq!(report.unreadable, vec![dir.path().join("broken.json")]);
+        assert_eq!(
+            report.unreadable,
+            vec![dir.path().join("broken.json").canonicalize().unwrap()]
+        );
         assert!(
             std::fs::read_to_string(&dirty).unwrap().contains(TOKEN),
             "a scan must not rewrite anything"
@@ -309,9 +415,12 @@ mod tests {
 
         let manager =
             crate::session_manager::SessionManager::new(dir.path().to_path_buf()).expect("manager");
-        let applied = scrub_files(&files, Some(&manager)).expect("scrub");
+        let applied = scrub_files(&files, Some(&manager), &[]).expect("scrub");
         assert_eq!(applied.flagged_files.len(), 2);
-        assert_eq!(applied.unreadable, vec![dir.path().join("broken.json")]);
+        assert_eq!(
+            applied.unreadable,
+            vec![dir.path().join("broken.json").canonicalize().unwrap()]
+        );
         for path in [&dirty, &checkpoint] {
             let text = std::fs::read_to_string(path).unwrap();
             assert!(!text.contains(TOKEN), "{text}");
@@ -320,14 +429,16 @@ mod tests {
             assert_eq!(value["messages"][0]["content"][0]["text"], "show auth");
         }
         assert_eq!(
-            scrub_files(&files, None).expect("rescan").flagged_files,
+            scrub_files(&files, None, &[])
+                .expect("rescan")
+                .flagged_files,
             Vec::<PathBuf>::new(),
             "a scrubbed store scans clean"
         );
     }
 
     #[test]
-    fn scrub_legacy_runtime_items_and_events() {
+    fn regression_6601_busy_runtime_does_not_abort_scrub() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = dir.path().join("sessions");
         let standalone = dir.path().join("standalone");
@@ -340,23 +451,49 @@ mod tests {
             std::fs::write(root.join("items/item1.json"), item.to_string()).unwrap();
             std::fs::write(root.join("events/thread1.jsonl"), format!("{event}\n")).unwrap();
         }
-        let files = session_files(&sessions, &standalone).unwrap();
-        let report = scrub_files(&files, None).unwrap();
+        let files = session_files(&sessions, &standalone, &mut Vec::new());
+        let report = scrub_files(&files, None, &[]).unwrap();
         assert_eq!(report.files_scanned, 4);
         assert_eq!(report.flagged_files.len(), 4);
         assert_eq!(report.flagged_tool_results, 12);
+        let transcript = sessions.join("s1.json");
+        std::fs::write(&transcript, session_with_tool_output(TOKEN).to_string()).unwrap();
         let manager = crate::session_manager::SessionManager::new(sessions).unwrap();
         let lease = crate::runtime_threads::RuntimeProcessOwnerLock::acquire(&standalone).unwrap();
         let standalone_file = standalone.join("items/item1.json");
-        assert!(scrub_files(std::slice::from_ref(&standalone_file), Some(&manager)).is_err());
+        let report = scrub_files(
+            &[standalone_file.clone(), transcript.clone()],
+            Some(&manager),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(report.busy, vec![standalone_file.clone()]);
+        assert_eq!(report.flagged_files, vec![transcript.clone()]);
+        assert_eq!(report.files_scanned, 2);
+        assert!(
+            !std::fs::read_to_string(&transcript)
+                .unwrap()
+                .contains(TOKEN)
+        );
         assert!(
             std::fs::read_to_string(&standalone_file)
                 .unwrap()
                 .contains(TOKEN)
         );
         drop(lease);
-        scrub_files(&files, Some(&manager)).unwrap();
-        assert!(scrub_files(&files, None).unwrap().flagged_files.is_empty());
+        // Non-contention failures still propagate, rather than masquerading as busy.
+        let lock_path = standalone.join("runtime-process.owner.lock");
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        assert!(scrub_files(std::slice::from_ref(&standalone_file), Some(&manager), &[]).is_err());
+        std::fs::remove_dir(&lock_path).unwrap();
+        scrub_files(&files, Some(&manager), &[]).unwrap();
+        assert!(
+            scrub_files(&files, None, &[])
+                .unwrap()
+                .flagged_files
+                .is_empty()
+        );
         for path in &files {
             let raw = std::fs::read_to_string(path).unwrap();
             assert!(!raw.contains(TOKEN));
@@ -371,12 +508,157 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn regression_6601_symlinked_roots_scan_without_following_entries() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let sessions = root.join("sessions-real");
+        let checkpoints = root.join("checkpoints-real");
+        let runtime = root.join("runtime-real");
+        for dir in [&sessions, &checkpoints, &runtime.join("items")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let transcript = sessions.join("s1.json");
+        let checkpoint = checkpoints.join("s1.json");
+        let item = runtime.join("items/item.json");
+        for path in [&transcript, &checkpoint, &item] {
+            std::fs::write(path, session_with_tool_output(TOKEN).to_string()).unwrap();
+        }
+        symlink(&sessions, root.join("sessions")).unwrap();
+        symlink(&checkpoints, sessions.join("checkpoints")).unwrap();
+        symlink(&runtime, root.join("runtime")).unwrap();
+        // Discovered file and session-directory links must not expand the scan.
+        symlink(&transcript, sessions.join("outside.json")).unwrap();
+        symlink(&runtime, sessions.join("outside-session")).unwrap();
+        std::fs::create_dir(sessions.join("s1")).unwrap();
+        symlink(&runtime, sessions.join("s1/runtime")).unwrap();
+        let mut unreadable = Vec::new();
+        let files = session_files(
+            &root.join("sessions"),
+            &root.join("runtime"),
+            &mut unreadable,
+        );
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert_eq!(files.len(), 3);
+        for path in [&transcript, &checkpoint, &item] {
+            assert!(files.contains(path));
+        }
+        let manager = crate::session_manager::SessionManager::new(root.join("sessions")).unwrap();
+        assert_eq!(
+            scrub_files(&files, Some(&manager), &[])
+                .unwrap()
+                .flagged_files
+                .len(),
+            3
+        );
+        assert!(
+            scrub_files(&files, None, &[])
+                .unwrap()
+                .flagged_files
+                .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regression_6601_unreadable_directory_keeps_partial_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let blocked = root.join("blocked-session");
+        std::fs::create_dir(&blocked).unwrap();
+        let transcript = root.join("s1.json");
+        std::fs::write(&transcript, session_with_tool_output(TOKEN).to_string()).unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut unreadable = Vec::new();
+        let files = session_files(&root, &root.join("absent-runtime"), &mut unreadable);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(unreadable, vec![blocked]);
+        assert_eq!(files, vec![transcript]);
+        let mut report = scrub_files(&files, None, &[]).unwrap();
+        report.unreadable = unreadable;
+        assert_eq!(report.flagged_files.len(), 1);
+        let summary = crate::doctor_stored_secrets_summary(&report, files.len());
+        assert!(summary.contains("scan incomplete") && summary.contains("blocked-session"));
+        assert!(!summary.contains('✓'));
+    }
+
+    #[test]
+    fn regression_6601_configured_bare_secret_is_scrubbed() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _env = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let _user_home = EnvVarGuard::set("HOME", tmp.path());
+        let _profile = EnvVarGuard::set("USERPROFILE", tmp.path());
+        let config = tmp.path().join("config.toml");
+        let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config);
+        let secret = "abcdefghijklmnopqrst";
+        std::fs::write(&config, format!("sandbox_api_key = \"{secret}\"\n")).unwrap();
+        let secrets = configured_secrets(Some(config), None).unwrap();
+        assert!(secrets.iter().any(|value| value == secret));
+        let sessions = tmp.path().join("sessions");
+        let runtime = sessions.join("s1/runtime");
+        std::fs::create_dir_all(runtime.join("items")).unwrap();
+        std::fs::create_dir_all(runtime.join("events")).unwrap();
+        let transcript = sessions.join("s1.json");
+        let item = runtime.join("items/item.json");
+        let event = runtime.join("events/thread.jsonl");
+        let receipt = json!({"kind":"tool_call", "summary":secret, "detail":secret, "metadata":{"stdout_summary":secret, "exit_code":0}});
+        std::fs::write(&transcript, session_with_tool_output(secret).to_string()).unwrap();
+        std::fs::write(&item, receipt.to_string()).unwrap();
+        std::fs::write(&event, format!("{}\n", json!({"payload":{"item":receipt}}))).unwrap();
+        let files = vec![transcript, item, event];
+        assert!(
+            scrub_files(&files, None, &[])
+                .unwrap()
+                .flagged_files
+                .is_empty()
+        );
+        let report = scrub_files(&files, None, &secrets).unwrap();
+        assert_eq!(report.flagged_files.len(), 3);
+        assert_eq!(report.flagged_tool_results, 9);
+        let manager = crate::session_manager::SessionManager::new(sessions).unwrap();
+        scrub_files(&files, Some(&manager), &secrets).unwrap();
+        for path in files {
+            let raw = std::fs::read_to_string(path).unwrap();
+            assert!(!raw.contains(secret));
+            assert!(raw.contains(codewhale_config::persistence::REDACTED));
+        }
+    }
+
+    #[test]
+    fn regression_6601_doctor_reserves_transcript_scan_budget() {
+        // Already ordered newest-first: an active store has over 50 receipts,
+        // all newer than the credential-bearing transcript and checkpoint.
+        let mut files: Vec<PathBuf> = (0..60)
+            .map(|i| PathBuf::from(format!("s1/runtime/items/{i}.json")))
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("s1.json");
+        let checkpoint = tmp.path().join("checkpoints/s1.json");
+        std::fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+        for path in [&transcript, &checkpoint] {
+            std::fs::write(path, session_with_tool_output(TOKEN).to_string()).unwrap();
+            files.push(path.clone());
+        }
+        let checked = doctor_files(files, crate::DOCTOR_SECRET_SCAN_FILES);
+        assert_eq!(checked.len(), 52);
+        assert!(checked.contains(&transcript) && checked.contains(&checkpoint));
+        let report = scrub_files(&checked, None, &[]).unwrap();
+        assert_eq!(report.flagged_files, vec![transcript, checkpoint]);
+        let summary = crate::doctor_stored_secrets_summary(&report, 62);
+        assert!(summary.contains("per category") && summary.contains("sessions/checkpoints"));
+    }
+
     #[test]
     fn non_tool_result_text_is_left_alone() {
         let mut value = json!({
             "messages": [{"role": "user", "content": [{"type": "text", "text": TOKEN}]}]
         });
-        assert_eq!(scrub_value(&mut value), 0);
+        assert_eq!(scrub_value(&mut value, &[]), 0);
         assert_eq!(value["messages"][0]["content"][0]["text"], TOKEN);
     }
 }

@@ -656,7 +656,7 @@
   "TranslationInProgress": "アシスタント出力を翻訳中...",
   "TranslationComplete": "翻訳が完了しました",
   "TranslationFailed": "翻訳に失敗しました",
-  "CmdTrustDescription": "ワークスペースの信頼設定とパス別許可リストを管理する",
+  "CmdTrustDescription": "このセッションのファイルへの信頼を変更。--save はプロジェクトのスキル、コマンド、フック、MCP サーバー、コンテキストへの信頼も保存します",
   "CmdWorkspaceDescription": "現在のワークスペースを表示または切り替え — worktrees サブコマンドで git ワークツリー マネージャーを開く",
   "CmdUndoDescription": "最後のメッセージ対を削除",
   "CmdVerboseDescription": "ライブ思考表示の詳細モードを切り替え",

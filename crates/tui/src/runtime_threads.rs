@@ -5006,7 +5006,11 @@ impl RuntimeProcessOwnerLock {
                 Ok(()) => break,
                 Err(error) if Self::is_contention(&error) => {
                     if Instant::now() >= deadline {
-                        bail!("{RUNTIME_PROCESS_OWNER_LOCK_HELD}");
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            RUNTIME_PROCESS_OWNER_LOCK_HELD,
+                        )
+                        .into());
                     }
                     std::thread::yield_now();
                     std::thread::sleep(Duration::from_millis(1));

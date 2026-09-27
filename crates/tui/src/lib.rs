@@ -2320,6 +2320,7 @@ async fn run_async_main_dispatch(
                         &config,
                         &workspace,
                         cli.config.as_deref(),
+                        effective_config_profile(&cli).as_deref(),
                         probes,
                         plugin_registry.as_ref(),
                     )
@@ -2358,7 +2359,12 @@ async fn run_async_main_dispatch(
                 None => list_sessions(limit, search),
                 Some(SessionsCommand::List { limit, search }) => list_sessions(limit, search),
                 Some(SessionsCommand::ScrubSecrets { apply }) => {
-                    run_sessions_scrub_secrets(apply).await
+                    run_sessions_scrub_secrets(
+                        apply,
+                        cli.config.clone(),
+                        effective_config_profile(&cli),
+                    )
+                    .await
                 }
                 Some(SessionsCommand::Export {
                     id,
@@ -4550,6 +4556,7 @@ async fn run_doctor(
     config: &Config,
     workspace: &Path,
     config_path_override: Option<&Path>,
+    profile: Option<&str>,
     probes: crate::doctor::DoctorProbeRequest,
     plugins: &crate::plugins::PluginRegistry,
 ) {
@@ -4697,7 +4704,11 @@ async fn run_doctor(
         (aqua_r, aqua_g, aqua_b),
         (sky_r, sky_g, sky_b),
     );
-    print_doctor_stored_secrets_report().await;
+    print_doctor_stored_secrets_report(
+        config_path_override.map(Path::to_path_buf),
+        profile.map(str::to_owned),
+    )
+    .await;
 
     let (setup_state, setup_source) = doctor_setup_state(config, workspace);
     print_doctor_setup_report(
@@ -8198,7 +8209,7 @@ fn sessions_resume_command() -> &'static str {
     "codewhale resume"
 }
 
-/// Newest session files `codewhale doctor` inspects for stored credentials;
+/// Newest files per category (sessions/checkpoints and Runtime receipts) inspected;
 /// `codewhale sessions scrub-secrets` covers every file.
 const DOCTOR_SECRET_SCAN_FILES: usize = 50;
 
@@ -8207,18 +8218,23 @@ const DOCTOR_SECRET_SCAN_FILES: usize = 50;
 /// rewrite — scrubbing is the explicit `scrub-secrets` command. Doctor is a
 /// read-only diagnostic, so this resolves the sessions directory with the
 /// read-path resolver: it never creates the home or migrates a legacy tree.
-async fn print_doctor_stored_secrets_report() {
+async fn print_doctor_stored_secrets_report(config_path: Option<PathBuf>, profile: Option<String>) {
     use colored::Colorize;
 
-    let scan = tokio::task::spawn_blocking(|| -> Result<_> {
+    let scan = tokio::task::spawn_blocking(move || -> Result<_> {
         let sessions_dir = codewhale_config::resolve_state_dir("sessions")?;
         let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
             task_manager::default_tasks_dir(),
         );
-        let files = session_secret_scrub::session_files(&sessions_dir, &runtime.data_dir)?;
+        let mut unreadable = Vec::new();
+        let files =
+            session_secret_scrub::session_files(&sessions_dir, &runtime.data_dir, &mut unreadable);
         let total = files.len();
-        let checked: Vec<PathBuf> = files.into_iter().take(DOCTOR_SECRET_SCAN_FILES).collect();
-        Ok((session_secret_scrub::scrub_files(&checked, None)?, total))
+        let checked = session_secret_scrub::doctor_files(files, DOCTOR_SECRET_SCAN_FILES);
+        let secrets = session_secret_scrub::configured_secrets(config_path, profile.as_deref())?;
+        let mut report = session_secret_scrub::scrub_files(&checked, None, &secrets)?;
+        report.unreadable.extend(unreadable);
+        Ok((report, total))
     })
     .await;
     println!();
@@ -8234,7 +8250,10 @@ fn doctor_stored_secrets_summary(
     total: usize,
 ) -> String {
     let scope = if total > report.files_scanned {
-        format!("newest {} of {total}", report.files_scanned)
+        format!(
+            "{} of {total}; newest up to {DOCTOR_SECRET_SCAN_FILES} per category: sessions/checkpoints and Runtime receipts",
+            report.files_scanned
+        )
     } else {
         format!("{total}")
     };
@@ -8256,7 +8275,7 @@ fn doctor_stored_secrets_summary(
     }
     if !report.unreadable.is_empty() {
         lines.push(format!(
-            "  ! scan incomplete: {} files could not be read or parsed ({scope} checked)",
+            "  ! scan incomplete: {} files or directories could not be read or parsed ({scope} checked)",
             report.unreadable.len()
         ));
         for path in &report.unreadable {
@@ -8266,26 +8285,42 @@ fn doctor_stored_secrets_summary(
     lines.join("\n")
 }
 
-async fn run_sessions_scrub_secrets(apply: bool) -> Result<()> {
+async fn run_sessions_scrub_secrets(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<String>,
+) -> Result<()> {
     #[cfg(test)]
     let ticket = crate::test_support::env_scope_ticket();
     tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let _membership = crate::test_support::join_env_scope(ticket);
-        run_sessions_scrub_secrets_blocking(apply)
+        run_sessions_scrub_secrets_blocking(apply, config_path, profile.as_deref())
     })
     .await?
 }
 
-fn run_sessions_scrub_secrets_blocking(apply: bool) -> Result<()> {
+fn run_sessions_scrub_secrets_blocking(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<&str>,
+) -> Result<()> {
     let manager = session_manager::SessionManager::default_location()?;
     let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
         task_manager::default_tasks_dir(),
     );
-    let files = session_secret_scrub::session_files(manager.sessions_dir(), &runtime.data_dir)?;
-    let report = session_secret_scrub::scrub_files(&files, apply.then_some(&manager))?;
+    let mut unreadable = Vec::new();
+    let files = session_secret_scrub::session_files(
+        manager.sessions_dir(),
+        &runtime.data_dir,
+        &mut unreadable,
+    );
+    let secrets = session_secret_scrub::configured_secrets(config_path, profile)?;
+    let mut report =
+        session_secret_scrub::scrub_files(&files, apply.then_some(&manager), &secrets)?;
+    report.unreadable.extend(unreadable);
     let affected = report.flagged_files.len();
-    if affected == 0 && report.unreadable.is_empty() {
+    if affected == 0 && report.unreadable.is_empty() && report.busy.is_empty() {
         println!(
             "No stored credentials found in tool output across {} files.",
             report.files_scanned
@@ -8309,9 +8344,22 @@ fn run_sessions_scrub_secrets_blocking(apply: bool) -> Result<()> {
     }
     if !report.unreadable.is_empty() {
         println!(
-            "{} files could not be read or parsed and were left untouched.",
+            "{} files or directories could not be read or parsed and were left untouched.",
             report.unreadable.len()
         );
+        for path in &report.unreadable {
+            println!("  {}", path.display());
+        }
+    }
+    if !report.busy.is_empty() {
+        println!(
+            "{} credential-bearing Runtime files were skipped because their stores are active. Close the session or Runtime server and re-run `{} --apply`:",
+            report.busy.len(),
+            session_secret_scrub::SCRUB_COMMAND
+        );
+        for path in &report.busy {
+            println!("  {}", path.display());
+        }
     }
     Ok(())
 }
@@ -13373,7 +13421,7 @@ mod doctor_legacy_state_tests {
         let broken = tmp.path().join("broken.json");
         fs::write(&broken, "{\"access_token\": unfinished").unwrap();
         let mut report =
-            session_secret_scrub::scrub_files(std::slice::from_ref(&broken), None).unwrap();
+            session_secret_scrub::scrub_files(std::slice::from_ref(&broken), None, &[]).unwrap();
         let summary = doctor_stored_secrets_summary(&report, 1);
         assert!(summary.contains("scan incomplete") && summary.contains("broken.json"));
         assert!(!summary.contains('✓') && !summary.contains("no credentials found"));
@@ -13414,7 +13462,7 @@ mod doctor_legacy_state_tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             progressed.store(true, Ordering::SeqCst);
         });
-        run_sessions_scrub_secrets(true).await.unwrap();
+        run_sessions_scrub_secrets(true, None, None).await.unwrap();
         assert!(
             holder.join().unwrap(),
             "the timer must run while the scrub waits on the file lock"

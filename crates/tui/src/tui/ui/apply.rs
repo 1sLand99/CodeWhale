@@ -1566,8 +1566,8 @@ async fn apply_command_result_inner(
                     persist_full_reset_snapshot(app);
                 }
             }
-            AppAction::SetWorkspaceTrust(trusted) => {
-                let result = crate::commands::set_workspace_trust(app, trusted).await;
+            AppAction::SetWorkspaceTrust { trusted, save } => {
+                let result = crate::commands::set_workspace_trust(app, trusted, save).await;
                 sync_mode_update(app, engine_handle).await;
                 match result {
                     Ok(()) => {
@@ -1582,7 +1582,14 @@ async fn apply_command_result_inner(
                                         MessageId::ConfigValueOff
                                     }
                                 ),
-                                tr(app.ui_locale, MessageId::ConfigScopeSaved),
+                                tr(
+                                    app.ui_locale,
+                                    if save {
+                                        MessageId::ConfigScopeSaved
+                                    } else {
+                                        MessageId::ConfigScopeSession
+                                    }
+                                ),
                             ),
                             StatusToastLevel::Info,
                             None,

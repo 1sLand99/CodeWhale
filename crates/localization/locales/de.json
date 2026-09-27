@@ -652,7 +652,7 @@
   "TranslationInProgress": "Assistentenausgabe wird übersetzt...",
   "TranslationComplete": "Übersetzung abgeschlossen",
   "TranslationFailed": "Übersetzung fehlgeschlagen",
-  "CmdTrustDescription": "Workspace-Vertrauen und pfadbasierte Allowlist verwalten",
+  "CmdTrustDescription": "Dateivertrauen für diese Sitzung ändern; --save speichert auch das Vertrauen in Projekt-Skills, Befehle, Hooks, MCP-Server und Kontext",
   "CmdWorkspaceDescription": "Aktuellen Workspace anzeigen oder wechseln — der Unterbefehl worktrees öffnet den Git-Worktree-Manager",
   "CmdUndoDescription": "Letztes Nachrichtenpaar entfernen",
   "CmdVerboseDescription": "Vollständiges Live-Thinking im Transkript umschalten",

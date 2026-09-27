@@ -656,7 +656,7 @@
   "TranslationInProgress": "Translating...",
   "TranslationComplete": "Translated.",
   "TranslationFailed": "Couldn't translate.",
-  "CmdTrustDescription": "Manage workspace trust",
+  "CmdTrustDescription": "Change file trust for this session; --save also persists trust for project skills, commands, hooks, MCP servers, and context",
   "CmdWorkspaceDescription": "Show or switch the workspace; worktrees opens the manager",
   "CmdUndoDescription": "Drop the last exchange",
   "CmdVerboseDescription": "Toggle live thinking in the transcript",

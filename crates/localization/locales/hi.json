@@ -652,7 +652,7 @@
   "TranslationInProgress": "assistant आउटपुट अनुवादित हो रहा है...",
   "TranslationComplete": "अनुवाद पूर्ण",
   "TranslationFailed": "अनुवाद विफल",
-  "CmdTrustDescription": "वर्कस्पेस ट्रस्ट और प्रति-पथ अनुमति सूची प्रबंधित करें",
+  "CmdTrustDescription": "इस सत्र के लिए फ़ाइलों पर भरोसा बदलें; --save प्रोजेक्ट के कौशल, कमांड, हुक, MCP सर्वर और संदर्भ पर भरोसा भी सहेजता है",
   "CmdWorkspaceDescription": "वर्तमान वर्कस्पेस दिखाएँ या बदलें — worktrees उपकमांड git वर्कट्री प्रबंधक खोलता है",
   "CmdUndoDescription": "अंतिम संदेश जोड़ी हटाएँ",
   "CmdVerboseDescription": "ट्रांसक्रिप्ट में पूरी लाइव थिंकिंग टॉगल करें",

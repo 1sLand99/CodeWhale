@@ -20039,9 +20039,11 @@ fn workspace_file_change_never_moves_the_frozen_prefix() {
 }
 
 #[tokio::test]
-async fn trust_warning_survives_prompt_rebuild_in_session_history() {
+async fn regression_6601_trust_warning_is_internal_and_tracks_current_state() {
     let _lock = lock_test_env();
     let tmp = tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join("home"));
+    let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", tmp.path().join("config.toml"));
     fs::create_dir_all(tmp.path().join(".claude/skills")).unwrap();
     let (mut engine, handle) = Engine::new(
         EngineConfig {
@@ -20052,41 +20054,89 @@ async fn trust_warning_survives_prompt_rebuild_in_session_history() {
     );
     let context = engine.installed_next_turn_prompt_context();
     engine.refresh_pinned_header_for_turn(&context);
-    let warning = engine.session.messages.iter().find(|message| message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.starts_with("<workspace_trust>")))).expect("logged trust warning").clone();
+    let frozen = engine.session.system_prompt.clone();
+    let warning = engine
+        .session
+        .messages
+        .last()
+        .expect("logged warning")
+        .clone();
     assert_eq!(warning.role, Role::User);
+    assert!(crate::runtime_handoff::is_internal_runtime_handoff(
+        &warning
+    ));
+    assert!(crate::runtime_handoff::is_runtime_owned_user_message(
+        &warning
+    ));
+    assert!(crate::tui::history::history_cells_from_message(&warning).is_empty());
     assert!(
-        !codewhale_core::prefix_cache::system_prompt_text(engine.session.system_prompt.as_ref())
-            .contains("not trusted. Run /trust")
+        crate::compaction::retained_user_messages(std::slice::from_ref(&warning), 4096).is_empty()
+    );
+    let prompt = Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Review the code".into(),
+            cache_control: None,
+        }],
+    };
+    assert_eq!(
+        crate::session_manager::conversation_title_prompt(&[warning.clone(), prompt.clone()]),
+        Some("Review the code")
+    );
+    // Quoting the envelope without engine provenance remains an ordinary user turn.
+    let quoted = Message {
+        role: Role::User,
+        content: vec![warning.content[0].clone()],
+    };
+    assert!(!crate::runtime_handoff::is_internal_runtime_handoff(
+        &quoted
+    ));
+    assert!(!crate::runtime_handoff::is_runtime_owned_user_message(
+        &quoted
+    ));
+    engine.session.add_message(prompt.clone());
+    let initial = engine.session.messages.len();
+    engine.refresh_pinned_header_for_turn(&context);
+    assert_eq!(engine.session.messages.len(), initial);
+
+    crate::config::save_workspace_trust(tmp.path()).unwrap();
+    engine.refresh_pinned_header_for_turn(&context);
+    let resolved = engine.session.messages.last().unwrap().clone();
+    assert_ne!(resolved, warning);
+    assert!(crate::runtime_handoff::is_internal_runtime_handoff(
+        &resolved
+    ));
+    assert!(
+        matches!(&resolved.content[0], ContentBlock::Text { text, .. } if text.contains("no longer applies"))
     );
     engine.refresh_pinned_header_for_turn(&context);
+    assert_eq!(engine.session.messages.len(), initial + 1);
+    crate::config::set_workspace_trust(tmp.path(), false).unwrap();
+    engine.refresh_pinned_header_for_turn(&context);
+    assert_eq!(engine.session.messages.last(), Some(&warning));
     assert_eq!(
-        engine
-            .session
-            .messages
-            .iter()
-            .filter(|message| **message == warning)
-            .count(),
-        1
+        engine.session.messages.len(),
+        initial + 2,
+        "revocation must append a new warning after the correction"
     );
-    crate::config::save_workspace_trust(tmp.path()).unwrap();
+    assert_eq!(
+        engine.session.system_prompt, frozen,
+        "volatile trust facts never modify the frozen prefix"
+    );
+    assert!(
+        !codewhale_core::prefix_cache::system_prompt_text(frozen.as_ref())
+            .contains("kind=\"workspace_trust\"")
+    );
+
     engine.refresh_system_prompt_with_reason("model");
     engine.emit_session_updated().await;
     let event = handle.rx_event.write().await.recv().await.unwrap();
-    let Event::SessionUpdated {
-        messages,
-        system_prompt,
-        ..
-    } = event
-    else {
+    let Event::SessionUpdated { messages, .. } = event else {
         panic!("expected session update");
     };
-    assert!(
-        messages.contains(&warning),
-        "rebuilding the prefix must retain the original warning"
-    );
-    assert!(
-        !codewhale_core::prefix_cache::system_prompt_text(system_prompt.as_ref())
-            .contains("not trusted. Run /trust")
+    assert_eq!(
+        messages.as_slice(),
+        &[warning.clone(), prompt, resolved, warning]
     );
 }
 

@@ -652,7 +652,7 @@
   "TranslationInProgress": "Menerjemahkan output asisten...",
   "TranslationComplete": "Terjemahan selesai",
   "TranslationFailed": "Terjemahan gagal",
-  "CmdTrustDescription": "Kelola kepercayaan workspace dan daftar izin per jalur",
+  "CmdTrustDescription": "Ubah kepercayaan berkas untuk sesi ini; --save juga menyimpan kepercayaan untuk keterampilan, perintah, hook, server MCP, dan konteks proyek",
   "CmdWorkspaceDescription": "Tampilkan atau ganti workspace saat ini — subperintah worktrees membuka pengelola worktree git",
   "CmdUndoDescription": "Hapus pasangan pesan terakhir",
   "CmdVerboseDescription": "Alihkan tampilan proses berpikir langsung penuh di transkrip",

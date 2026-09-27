@@ -7281,19 +7281,19 @@ impl Engine {
     // KV-cache effect: append-only user history. SessionUpdated persists this
     // warning even when an explicit prompt rebuild replaces the system prefix.
     fn record_project_trust_warning(&mut self) {
-        if let Some(warning) =
-            crate::skills::untrusted_project_skills_warning(&self.session.workspace)
-        {
-            let message = Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: format!("<workspace_trust>\n{warning}\n</workspace_trust>"),
-                    cache_control: None,
-                }],
-            };
-            if !self.session.messages.contains(&message) {
-                self.session.add_message(message);
-            }
+        let warning = crate::skills::untrusted_project_skills_warning(&self.session.workspace);
+        let previous = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| crate::runtime_handoff::is_workspace_trust_message(message));
+        if warning.is_none() && previous.is_none() {
+            return;
+        }
+        let message = crate::runtime_handoff::workspace_trust_runtime_message(warning.as_deref());
+        if previous != Some(&message) {
+            self.session.add_message(message);
         }
     }
 
