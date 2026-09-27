@@ -9971,6 +9971,11 @@ fn start_requests_read_only_role(input: &Value) -> bool {
     // A parameter this function cannot even read is not proof of anything,
     // so a type error fails closed into the approval modal. `execute` then
     // refuses the call outright with the named-parameter error.
+    // Provisioning a git worktree creates a branch and a checkout on disk,
+    // so it is never read-only whatever the role.
+    if !matches!(parse_optional_worktree_request(input), Ok(None)) {
+        return false;
+    }
     let read = |keys: &[&str]| optional_input_str(input, keys).map(|v| v.map(str::to_string));
     let Ok(profile) = read(&["profile", "fleet_profile", "roster_profile"]) else {
         return false;

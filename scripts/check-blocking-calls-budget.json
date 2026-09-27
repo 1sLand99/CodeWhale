@@ -445,7 +445,7 @@
     "std_fs": 1
   },
   "crates/tui/src/tools/subagent/worktree.rs": {
-    "path_canonicalize": 6
+    "path_canonicalize": 7
   },
   "crates/tui/src/tools/terminal_session.rs": {
     "path_canonicalize": 3,

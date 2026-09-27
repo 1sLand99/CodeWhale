@@ -96,6 +96,11 @@ pub(super) fn create_isolated_worktree(
         .filter(|value| !value.is_empty())
         .unwrap_or("HEAD")
         .to_string();
+    if base_ref.starts_with('-') {
+        return Err(ToolError::invalid_input(format!(
+            "Invalid worktree_base '{base_ref}': a ref cannot start with '-'"
+        )));
+    }
     let worktree_path = resolve_worktree_path(&repo_root, &branch, request.path.as_ref())?;
     // One worktree implementation: the Runtime lane's (#4176). It creates the
     // parent directory and captures git output instead of inheriting the TUI.
@@ -275,12 +280,14 @@ fn resolve_worktree_path(
 ) -> Result<PathBuf, ToolError> {
     let default_root = default_worktree_root(repo_root);
     let path = match requested_path {
-        Some(path) if path.is_absolute() => path.to_path_buf(),
+        // Absolute and relative requests get the same containment: a
+        // sub-agent checkout lives under the per-repo worktree root and
+        // nowhere else.
         Some(path) => {
             let resolved = normalize_path_lexically(&default_root.join(path));
-            if !resolved.starts_with(&default_root) {
+            if !worktree_path_within_root(&resolved, &default_root) {
                 return Err(ToolError::invalid_input(format!(
-                    "relative worktree_path '{}' must stay under {}",
+                    "worktree_path '{}' must stay under {}",
                     path.display(),
                     default_root.display()
                 )));
@@ -301,6 +308,37 @@ fn resolve_worktree_path(
         )));
     }
     Ok(normalized)
+}
+
+/// `candidate` (already lexically normalized) must sit under `root` both as
+/// written and after resolving symlinks in its nearest existing ancestor, so
+/// a symlink planted under the worktree root cannot redirect the checkout.
+fn worktree_path_within_root(candidate: &Path, root: &Path) -> bool {
+    candidate.starts_with(root)
+        && canonicalize_existing_prefix(candidate).starts_with(canonicalize_existing_prefix(root))
+}
+
+/// Canonicalize the deepest existing ancestor of `path` and re-append the
+/// components that do not exist yet.
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(canonical) = cursor.canonicalize() {
+            let mut resolved = canonical;
+            for name in missing.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        match (cursor.file_name(), cursor.parent()) {
+            (Some(name), Some(parent)) => {
+                missing.push(name.to_os_string());
+                cursor = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 fn default_worktree_root(repo_root: &Path) -> PathBuf {
