@@ -10301,7 +10301,8 @@ fn collect_diff(
         let mut cmd = crate::dependencies::Git::review_command(workspace)?;
         // Review repository content without executing its diff drivers.
         cmd.current_dir(workspace)
-            .args(["diff", "--no-ext-diff", "--no-textconv"]);
+            .arg("diff")
+            .args(crate::dependencies::Git::REVIEW_DIFF_ARGS);
         if args.staged {
             cmd.arg("--cached");
         }
@@ -11517,6 +11518,9 @@ fn merge_project_config_with_approval_baseline(
         "mcp_config_path",
         "mcp_oauth_callback_port",
         "mcp_oauth_callback_url",
+        // The auto-approved `note` tool appends to `notes_path`, so a
+        // project value would be a write target the user never reviewed.
+        "notes_path",
     ];
     for key in DENY_AT_PROJECT_SCOPE {
         if table.contains_key(*key) {
@@ -11529,7 +11533,7 @@ fn merge_project_config_with_approval_baseline(
     }
 
     // String fields a project may legitimately override (model,
-    // approval/sandbox tightening, notes path, reasoning effort).
+    // approval/sandbox tightening, reasoning effort).
     if !config.environment_model_applied
         && let Some(model) = table.get("model").and_then(toml::Value::as_str)
         && !model.is_empty()
@@ -11538,15 +11542,10 @@ fn merge_project_config_with_approval_baseline(
         config.set_provider_model_override(config.api_provider(), Some(model.to_string()));
         config.remembered_selection_scope = Some(false);
     }
-    for (key, field) in [
-        ("reasoning_effort", &mut config.reasoning_effort),
-        ("notes_path", &mut config.notes_path),
-    ] {
-        if let Some(v) = table.get(key).and_then(toml::Value::as_str)
-            && !v.is_empty()
-        {
-            *field = Some(v.to_string());
-        }
+    if let Some(v) = table.get("reasoning_effort").and_then(toml::Value::as_str)
+        && !v.is_empty()
+    {
+        config.reasoning_effort = Some(v.to_string());
     }
 
     if let Some(v) = table.get("approval_policy").and_then(toml::Value::as_str)
@@ -19821,6 +19820,21 @@ sandbox_mode = "read-only"
         merge_project_config(&mut config, tmp.path());
         assert_eq!(config.approval_policy.as_deref(), Some("never"));
         assert_eq!(config.sandbox_mode.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn project_overlay_ignores_notes_path() {
+        // The auto-approved `note` tool appends to `notes_path`; a project
+        // config must not choose that write target.
+        for value in ["~/.zshrc", "/etc/profile", "../../.bashrc", "docs/notes.md"] {
+            let tmp = workspace_with_project_config(&format!("notes_path = {value:?}\n"));
+            let mut config = Config::default();
+            merge_project_config(&mut config, tmp.path());
+            assert_eq!(
+                config.notes_path, None,
+                "project notes_path {value:?} must be ignored"
+            );
+        }
     }
 
     #[test]

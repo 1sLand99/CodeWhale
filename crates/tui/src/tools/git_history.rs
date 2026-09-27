@@ -215,11 +215,8 @@ impl ToolSpec for GitShowTool {
         let stat = optional_bool(&input, "stat", true)?;
         let unified = optional_u64(&input, "unified", DEFAULT_UNIFIED)?.min(MAX_UNIFIED);
 
-        let mut args = vec![
-            "show".to_string(),
-            "--no-color".to_string(),
-            "--no-ext-diff".to_string(),
-        ];
+        let mut args = vec!["show".to_string(), "--no-color".to_string()];
+        args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS.map(String::from));
         if patch {
             args.push(format!("--unified={unified}"));
         } else {
@@ -235,7 +232,12 @@ impl ToolSpec for GitShowTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let working_dir = git_ctx.working_dir.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            super::git::run_git_review_command(&working_dir, &args)
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -354,8 +356,11 @@ impl ToolSpec for GitBlameTool {
         let end_line = start_line.saturating_add(max_lines.saturating_sub(1));
         let porcelain = optional_bool(&input, "porcelain", false)?;
 
+        // Blame reads the working-tree file, so it runs under the review
+        // command (no clean filters) and skips textconv drivers.
         let mut args = vec![
             "blame".to_string(),
+            "--no-textconv".to_string(),
             "--date=iso".to_string(),
             format!("-L{start_line},{end_line}"),
         ];
@@ -367,7 +372,12 @@ impl ToolSpec for GitBlameTool {
         args.push(pathspec.display().to_string());
 
         let command_str = format_command(working_dir, &args);
-        let output = run_git_command_async(working_dir.to_path_buf(), args).await?;
+        let blame_dir = working_dir.to_path_buf();
+        let output = tokio::task::spawn_blocking(move || {
+            super::git::run_git_review_command(&blame_dir, &args)
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -445,7 +455,7 @@ impl ToolSpec for GitFetchTool {
                 "refspecs": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional refspecs to fetch (e.g. pull/123/head). Empty fetches the remote's defaults."
+                    "description": "Optional refspecs to fetch (e.g. pull/123/head); a `src:dst` destination must be under refs/remotes/. Empty fetches the remote's defaults."
                 },
                 "path": {
                     "type": "string",
@@ -779,8 +789,26 @@ fn validate_git_refspec(refspec: &str) -> Result<(), ToolError> {
             "git refspec '{refspec}' must have at most one ':'"
         )));
     }
-    for side in parts {
+    for side in &parts {
         validate_git_refspec_side(refspec, side)?;
+    }
+    // `git fetch <remote> tag <name>` is shorthand for
+    // `refs/tags/<name>:refs/tags/<name>`, a local tag write.
+    if refspec == "tag" {
+        return Err(ToolError::invalid_input(
+            "git refspec 'tag' is not accepted: the `tag <name>` form writes a local tag; \
+             fetch refs/tags/<name> into FETCH_HEAD or under refs/remotes/ instead",
+        ));
+    }
+    // The tool updates remote-tracking refs only: a destination under
+    // `refs/heads/` or `refs/tags/` (or a bare name git would resolve there)
+    // could rewrite local branches and tags.
+    if let Some(dst) = parts.get(1)
+        && (!dst.starts_with("refs/remotes/") || dst.split('/').any(|part| part == ".."))
+    {
+        return Err(ToolError::invalid_input(format!(
+            "git refspec '{refspec}' must write under refs/remotes/; omit the destination to fetch into FETCH_HEAD"
+        )));
     }
     Ok(())
 }
@@ -1209,6 +1237,36 @@ mod tests {
                 matches!(err, ToolError::InvalidInput { .. }),
                 "{refspec}: {err}"
             );
+        }
+        for refspec in [
+            "+main:refs/heads/main",
+            "v1:refs/tags/v1",
+            "main:other",
+            "main:refs/remotes/../heads/main",
+        ] {
+            let err = validate_git_refspec(refspec)
+                .expect_err("a destination outside refs/remotes/ must be refused");
+            assert!(
+                err.to_string().contains("refs/remotes/"),
+                "{refspec}: {err}"
+            );
+        }
+        // `tag <name>` arrives as two array elements, each a plain rev.
+        let err = GitFetchTool
+            .execute(json!({ "refspecs": ["tag", "v1"] }), &ctx)
+            .await
+            .expect_err("the tag shorthand writes a local tag");
+        assert!(
+            matches!(err, ToolError::InvalidInput { .. }) && err.to_string().contains("tag"),
+            "{err}"
+        );
+        for refspec in [
+            "pull/123/head",
+            "refs/tags/v1",
+            "refs/heads/x:refs/remotes/origin/x",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ] {
+            validate_git_refspec(refspec).expect(refspec);
         }
         let err = GitFetchTool
             .execute(json!({ "refspecs": "pull/1/head" }), &ctx)

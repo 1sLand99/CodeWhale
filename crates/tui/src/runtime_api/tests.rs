@@ -20404,6 +20404,27 @@ async fn git_routes_drive_a_real_workspace_repo() -> Result<()> {
         f["path"] == "tracked.txt" && f["status"] == "modified" && f["staged"] == false
     }));
 
+    // Repository-configured diff drivers and clean filters must not run for
+    // these reads; the helper would replace the content with a sentinel.
+    #[cfg(unix)]
+    let helper_config = {
+        use std::os::unix::fs::PermissionsExt as _;
+        let helper = tmp.path().join("helper.sh");
+        fs::write(&helper, "#!/bin/sh\necho HELPER-RAN\n")?;
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))?;
+        let helper = helper.display().to_string();
+        fs::create_dir_all(workspace.join(".git/info"))?;
+        fs::write(
+            workspace.join(".git/info/attributes"),
+            "tracked.txt diff=conv filter=x\n",
+        )?;
+        let keys = ["diff.conv.textconv", "diff.external", "filter.x.clean"];
+        for key in keys {
+            git(&["config", key, &helper])?;
+        }
+        keys
+    };
+
     // The diff reads serve the same worktree change: a unified patch for one
     // file, the whole tree with a numstat inventory, and the changes list.
     let file_diff: Value = client
@@ -20469,6 +20490,16 @@ async fn git_routes_drive_a_real_workspace_repo() -> Result<()> {
     );
     assert!(tree["diff"].as_str().unwrap().contains("+v2"));
     assert_eq!(tree["truncated"], false);
+    #[cfg(unix)]
+    {
+        for read in [&file_diff, &tree] {
+            assert!(!read.to_string().contains("HELPER-RAN"), "{read}");
+        }
+        for key in helper_config {
+            git(&["config", "--unset", key])?;
+        }
+        fs::remove_file(workspace.join(".git/info/attributes"))?;
+    }
 
     // Diff path validation shares the file-route confinement.
     for (path, want) in [

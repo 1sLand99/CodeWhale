@@ -1765,6 +1765,21 @@ const EVENT_PROCESS_HELPER: &str = "runtime_threads::tests::runtime_event_proces
 // a test watchdog, not an expected runtime latency or a customer-facing SLO.
 const TURN_SETTLEMENT_DEADLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Durable record ids carry a full UUID: records live in flat per-kind
+/// directories and a save replaces by id, so a short suffix would let one
+/// thread's record overwrite another's.
+#[test]
+fn runtime_record_ids_carry_a_full_uuid() {
+    let id = runtime_record_id("thr");
+    let suffix = id.strip_prefix("thr_").expect("prefix");
+    assert_eq!(suffix.len(), 32, "{id}");
+    assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()), "{id}");
+    assert_eq!(validated_record_id(&id, "thread id").expect("valid"), id);
+    let ids: std::collections::HashSet<String> =
+        (0..10_000).map(|_| runtime_record_id("item")).collect();
+    assert_eq!(ids.len(), 10_000);
+}
+
 #[test]
 #[ignore = "spawned by real cross-process Runtime event tests"]
 fn runtime_event_process_child_helper() {

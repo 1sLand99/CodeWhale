@@ -956,19 +956,87 @@ fn readonly_argv_is_shell_free_and_disables_git_helpers() {
     let (program, args) = hardened_readonly_argv("git show HEAD").expect("argv");
     assert_eq!(program, "git");
     assert_eq!(
-        &args[..4],
+        &args[..6],
         [
             "show",
             "--no-ext-diff",
             "--no-textconv",
+            "--submodule=short",
+            "--ignore-submodules=dirty",
             "--no-show-signature"
         ]
     );
     assert_eq!(args.last().map(String::as_str), Some("HEAD"));
 
+    let (_, args) = hardened_readonly_argv("git -C sub blame f.txt").expect("blame argv");
+    assert_eq!(args, ["-C", "sub", "blame", "--no-textconv", "f.txt"]);
+    assert_eq!(
+        readonly_git_dirs(
+            "git -C sub diff | git --no-pager -C /abs status | cat",
+            std::path::Path::new("/ws")
+        ),
+        [
+            std::path::PathBuf::from("/ws/sub"),
+            std::path::PathBuf::from("/abs")
+        ]
+    );
+
     let (program, args) = hardened_readonly_argv("rg $PATTERN .").expect("literal argv");
     assert_eq!(program, "rg");
     assert_eq!(args, ["$PATTERN", "."]);
+}
+
+/// Classifier-approved working-tree reads must not run the repository's clean
+/// filter or textconv driver. The helpers print a sentinel instead of the
+/// content, so this holds whether or not a kernel sandbox blocks their writes.
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_git_reads_run_no_clean_filter_or_textconv() {
+    use crate::dependencies::ExternalTool as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let helper = outside.path().join("helper.sh");
+    std::fs::write(&helper, "#!/bin/sh\necho HELPER-RAN\n").expect("helper");
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let helper = helper.display().to_string();
+    let repo = workspace.path();
+    let git = |args: &[&str]| {
+        let status = crate::dependencies::Git::status(args, repo).expect("git should spawn");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join(".gitattributes"), "c.txt filter=x diff=conv\n").expect("attrs");
+    std::fs::write(repo.join("c.txt"), "c1\n").expect("write");
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+    git(&["config", "filter.x.clean", &helper]);
+    git(&["config", "diff.conv.textconv", &helper]);
+    std::fs::write(repo.join("c.txt"), "c2\n").expect("modify");
+
+    let ctx =
+        ToolContext::new(repo).with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let tool = BashTool::new("Bash");
+    for command in ["git diff", "git blame c.txt"] {
+        let result = tool
+            .execute(json!({"command": command}), &ctx)
+            .await
+            .expect(command);
+        assert!(result.success, "{command}: {}", result.content);
+        assert!(
+            !result.content.contains("HELPER-RAN"),
+            "{command} ran a repository-configured command: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("c2"),
+            "{command}: {}",
+            result.content
+        );
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -5209,5 +5277,52 @@ fn managed_background_shell_outlives_spawning_thread_but_not_the_tui() {
     assert!(
         survivors.is_empty(),
         "background processes outlived the SIGKILLed TUI: {survivors:?} of shell/grandchild {pids:?}"
+/// The auto-approved `note` tool appends to the configured notes file. A
+/// committed symlink (`notes.md -> ~/.zshrc`) or a symlinked notes directory
+/// must not redirect that append outside the workspace.
+#[cfg(unix)]
+#[tokio::test]
+async fn note_tool_refuses_symlinked_targets_that_leave_the_workspace() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    let rc = outside.path().join(".zshrc");
+    std::fs::write(&rc, "# rc\n").expect("write rc");
+
+    let linked_file = workspace.path().join("notes.md");
+    std::os::unix::fs::symlink(&rc, &linked_file).expect("symlink notes file");
+    let context = ToolContext::with_options(workspace.path(), false, &linked_file, "mcp.json");
+    let err = NoteTool
+        .execute(json!({"content": "appended text"}), &context)
+        .await
+        .expect_err("a symlinked notes file must be refused");
+    assert!(err.to_string().contains("symlink"), "{err}");
+
+    let linked_dir = workspace.path().join("notes");
+    std::os::unix::fs::symlink(outside.path(), &linked_dir).expect("symlink notes dir");
+    let context = ToolContext::with_options(
+        workspace.path(),
+        false,
+        linked_dir.join("sub/notes.md"),
+        "mcp.json",
+    );
+    let err = NoteTool
+        .execute(json!({"content": "appended text"}), &context)
+        .await
+        .expect_err("a notes dir resolving outside the workspace must be refused");
+    assert!(err.to_string().contains("outside the workspace"), "{err}");
+
+    assert_eq!(std::fs::read_to_string(&rc).expect("read rc"), "# rc\n");
+    assert!(!outside.path().join("sub").exists());
+
+    let plain = workspace.path().join("docs/notes.md");
+    let context = ToolContext::with_options(workspace.path(), false, &plain, "mcp.json");
+    NoteTool
+        .execute(json!({"content": "kept"}), &context)
+        .await
+        .expect("an ordinary in-workspace notes file is writable");
+    assert!(
+        std::fs::read_to_string(&plain)
+            .expect("read notes")
+            .contains("kept")
     );
 }

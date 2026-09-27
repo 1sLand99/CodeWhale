@@ -208,19 +208,10 @@ impl DeliveryEvidence {
         let mut candidates = status_paths(&baseline.root)?;
         candidates.extend(baseline.dirty.keys().cloned());
         if let Some(head) = baseline.head.as_deref() {
-            let output = git(
-                &baseline.root,
-                &[
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--name-only",
-                    "-z",
-                    head,
-                    "HEAD",
-                    "--",
-                ],
-            )?;
+            let mut args = vec!["diff"];
+            args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS);
+            args.extend(["--name-only", "-z", head, "HEAD", "--"]);
+            let output = git(&baseline.root, &args)?;
             for path in output
                 .split(|byte| *byte == 0)
                 .filter(|path| !path.is_empty())

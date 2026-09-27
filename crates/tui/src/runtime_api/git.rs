@@ -1101,18 +1101,10 @@ pub(super) async fn git_diff(
     require_repo(&workspace)?;
     let base = diff_base(&workspace).await?;
     let path_arg = path.to_string_lossy().into_owned();
-    let run = git_read(
-        &workspace,
-        &[
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            &base,
-            "--",
-            &path_arg,
-        ],
-    )
-    .await?;
+    let mut args = vec!["diff", "--no-color"];
+    args.extend(Git::REVIEW_DIFF_ARGS);
+    args.extend([base.as_str(), "--", &path_arg]);
+    let run = git_read(&workspace, &args).await?;
     if !run.status_success {
         return Err(ApiError::internal(format!(
             "git diff failed: {}",
@@ -1123,7 +1115,14 @@ pub(super) async fn git_diff(
     let untracked = if diff.is_empty() {
         let status = git_read(
             &workspace,
-            &["status", "--porcelain=v1", "-z", "--", &path_arg],
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--ignore-submodules=dirty",
+                "--",
+                &path_arg,
+            ],
         )
         .await?;
         status
@@ -1167,7 +1166,10 @@ pub(super) async fn workspace_diff(
     require_repo(&workspace)?;
     let base = diff_base(&workspace).await?;
 
-    let numstat = git_read(&workspace, &["diff", "--numstat", &base]).await?;
+    let mut numstat_args = vec!["diff", "--numstat"];
+    numstat_args.extend(Git::REVIEW_DIFF_ARGS);
+    numstat_args.push(&base);
+    let numstat = git_read(&workspace, &numstat_args).await?;
     if !numstat.status_success {
         return Err(ApiError::internal(format!(
             "git diff --numstat failed: {}",
@@ -1191,7 +1193,10 @@ pub(super) async fn workspace_diff(
         })
         .collect();
 
-    let run = git_read(&workspace, &["diff", "--no-color", "--no-ext-diff", &base]).await?;
+    let mut diff_args = vec!["diff", "--no-color"];
+    diff_args.extend(Git::REVIEW_DIFF_ARGS);
+    diff_args.push(&base);
+    let run = git_read(&workspace, &diff_args).await?;
     if !run.status_success {
         return Err(ApiError::internal(format!(
             "git diff failed: {}",

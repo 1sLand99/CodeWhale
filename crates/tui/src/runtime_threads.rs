@@ -291,6 +291,13 @@ fn strip_summary_section(base: &str) -> String {
     out
 }
 
+/// A fresh durable record id: `<prefix>_<32 hex>`. Records live in flat
+/// per-kind directories and saves replace by id, so ids carry a full UUID; an
+/// 8-hex suffix (32 bits) collides often enough to overwrite another record.
+fn runtime_record_id(prefix: &str) -> String {
+    format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
 fn validated_record_id<'a>(id: &'a str, label: &str) -> Result<&'a str> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
@@ -1518,7 +1525,7 @@ fn unaccepted_routed_usage_turn_id(
         )
         .collect::<Vec<_>>();
     if identities.is_empty() {
-        return format!("turn_unaccepted_{}", &Uuid::new_v4().to_string()[..8]);
+        return runtime_record_id("turn_unaccepted");
     }
     identities.sort_unstable();
     identities.dedup();
@@ -8560,7 +8567,7 @@ impl RuntimeThreadManager {
 
         let thread = ThreadRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            id: format!("thr_{}", &Uuid::new_v4().to_string()[..8]),
+            id: runtime_record_id("thr"),
             created_at: now,
             updated_at: now,
             model,
@@ -8796,7 +8803,7 @@ impl RuntimeThreadManager {
             codewhale_config::notifications::NotificationEvent::parse(kind).is_some(),
             "notice kind must be a NotificationEvent name: {kind}"
         );
-        let id = format!("notice_{}", &Uuid::new_v4().to_string()[..8]);
+        let id = runtime_record_id("notice");
         let mut notices = self.notices.lock();
         let list = notices.entry(thread_id.to_string()).or_default();
         list.push(ActiveNotice {
@@ -9838,7 +9845,7 @@ impl RuntimeThreadManager {
         let source = self.get_thread(id).await?;
         let mut forked = source.clone();
         let now = Utc::now();
-        forked.id = format!("thr_{}", &Uuid::new_v4().to_string()[..8]);
+        forked.id = runtime_record_id("thr");
         forked.created_at = now;
         forked.updated_at = now;
         forked.latest_turn_id = None;
@@ -9880,7 +9887,7 @@ impl RuntimeThreadManager {
         let mut cloned_records = Vec::with_capacity(source_turns.len());
         for source_turn in source_turns {
             let mut cloned_turn = source_turn.clone();
-            cloned_turn.id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+            cloned_turn.id = runtime_record_id("turn");
             cloned_turn.thread_id = forked.id.clone();
             if let Some(checkpoint) = forked.saved_session_checkpoint.as_mut()
                 && checkpoint.covered_turn_id.as_deref() == Some(source_turn.id.as_str())
@@ -9893,7 +9900,7 @@ impl RuntimeThreadManager {
             let mut cloned_items = Vec::with_capacity(items.len());
             for item in items {
                 let mut cloned_item = item.clone();
-                cloned_item.id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                cloned_item.id = runtime_record_id("item");
                 cloned_item.turn_id = cloned_turn.id.clone();
                 cloned_turn.item_ids.push(cloned_item.id.clone());
                 cloned_items.push(cloned_item);
@@ -10265,7 +10272,7 @@ impl RuntimeThreadManager {
         // between the two paths.
         let mut forked = source.clone();
         let now = Utc::now();
-        forked.id = format!("thr_{}", &Uuid::new_v4().to_string()[..8]);
+        forked.id = runtime_record_id("thr");
         forked.created_at = now;
         forked.updated_at = now;
         forked.latest_turn_id = None;
@@ -10390,7 +10397,7 @@ impl RuntimeThreadManager {
         let mut cloned_records = Vec::with_capacity(cutoff_turn_idx);
         for source_turn in source_turns.iter().take(cutoff_turn_idx) {
             let mut cloned_turn = source_turn.clone();
-            cloned_turn.id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+            cloned_turn.id = runtime_record_id("turn");
             cloned_turn.thread_id = forked.id.clone();
             if let Some(checkpoint) = forked.saved_session_checkpoint.as_mut()
                 && checkpoint.covered_turn_id.as_deref() == Some(source_turn.id.as_str())
@@ -10403,7 +10410,7 @@ impl RuntimeThreadManager {
             let mut cloned_items = Vec::with_capacity(items.len());
             for item in items {
                 let mut cloned_item = item.clone();
-                cloned_item.id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                cloned_item.id = runtime_record_id("item");
                 cloned_item.turn_id = cloned_turn.id.clone();
                 cloned_turn.item_ids.push(cloned_item.id.clone());
                 cloned_items.push(cloned_item);
@@ -10730,14 +10737,14 @@ impl RuntimeThreadManager {
 
         for turn_seed in turns {
             let turn_at = next_seed_stamp();
-            let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+            let turn_id = runtime_record_id("turn");
             let summary =
                 crate::utils::truncate_with_ellipsis(&turn_seed.user_text, SUMMARY_LIMIT, "...");
             let mut item_ids = Vec::new();
 
             // Save user message item.
             if !turn_seed.user_text.is_empty() || !turn_seed.image_content.is_empty() {
-                let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_id = runtime_record_id("item");
                 let item_at = next_seed_stamp();
                 let mut item = TurnItemRecord {
                     schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -10763,7 +10770,7 @@ impl RuntimeThreadManager {
 
             // Save assistant content items in order.
             for seed_item in &turn_seed.items {
-                let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_id = runtime_record_id("item");
                 let item_at = next_seed_stamp();
                 match seed_item {
                     SeedItem::Text(text) => {
@@ -10969,7 +10976,7 @@ impl RuntimeThreadManager {
             .transpose()?;
         let turn_id = match requested_turn_id.as_deref() {
             Some(turn_id) => turn_id.to_string(),
-            None => format!("turn_{}", &Uuid::new_v4().to_string()[..8]),
+            None => runtime_record_id("turn"),
         };
         Ok(Some(PreparedRuntimeTurnOperation {
             binding: RuntimeTurnOperationBinding {
@@ -12045,7 +12052,7 @@ impl RuntimeThreadManager {
         let turn_id = operation
             .as_ref()
             .map(|operation| operation.binding.turn_id.clone())
-            .unwrap_or_else(|| format!("turn_{}", &Uuid::new_v4().to_string()[..8]));
+            .unwrap_or_else(|| runtime_record_id("turn"));
         compaction.runtime_cost_owner = Some(turn_id.clone());
         let input_summary = req
             .input_summary
@@ -12097,7 +12104,7 @@ impl RuntimeThreadManager {
         // including this classifier batch. Pre-persisting the count here and
         // adding TurnComplete at settlement would count the same gap twice.
 
-        let user_item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+        let user_item_id = runtime_record_id("item");
         let mut user_item = TurnItemRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: user_item_id.clone(),
@@ -12402,7 +12409,7 @@ impl RuntimeThreadManager {
         let queued_turn;
         let item = TurnItemRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+            id: runtime_record_id("item"),
             turn_id: turn_id.to_string(),
             kind: TurnItemKind::UserMessage,
             // Queued, not Completed: the text is in the engine's mailbox, not
@@ -12534,8 +12541,8 @@ impl RuntimeThreadManager {
         );
 
         let now = Utc::now();
-        let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
-        let compaction_id = format!("compact_{}", &Uuid::new_v4().to_string()[..8]);
+        let turn_id = runtime_record_id("turn");
+        let compaction_id = runtime_record_id("compact");
         compaction.runtime_cost_owner = Some(turn_id.clone());
         // The same projection the turn record receipts, computed once: the
         // compaction runs under the thread's persisted policy.
@@ -13732,7 +13739,7 @@ impl RuntimeThreadManager {
         }
         let item = TurnItemRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+            id: runtime_record_id("item"),
             turn_id: turn_id.to_string(),
             kind: TurnItemKind::Status,
             status: TurnItemLifecycleStatus::Completed,
@@ -13972,7 +13979,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::MessageStarted { .. } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                         id: item_id.clone(),
@@ -14046,7 +14053,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::ThinkingStarted { .. } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                         id: item_id.clone(),
@@ -14116,7 +14123,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::ToolCallStarted { id, name, input } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     tool_items.insert(id.clone(), item_id.clone());
                     let kind = tool_kind_for_name(&name);
                     let summary = summarize_text(&format!("{name} started"), SUMMARY_LIMIT);
@@ -14381,7 +14388,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::CompactionStarted { id, auto, message } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     compaction_items.insert(id.clone(), item_id.clone());
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -14519,7 +14526,7 @@ impl RuntimeThreadManager {
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -14555,7 +14562,7 @@ impl RuntimeThreadManager {
                     let message = format!("Sub-agent {id}: {status}");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -14602,7 +14609,7 @@ impl RuntimeThreadManager {
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -14672,7 +14679,7 @@ impl RuntimeThreadManager {
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -15224,7 +15231,7 @@ impl RuntimeThreadManager {
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -15258,7 +15265,7 @@ impl RuntimeThreadManager {
                     let message = envelope.message.clone();
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Error,
                         status: TurnItemLifecycleStatus::Failed,
@@ -15521,7 +15528,7 @@ impl RuntimeThreadManager {
             turn_error = Some(EMPTY_TURN_REASON.to_string());
             let item = TurnItemRecord {
                 schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                id: runtime_record_id("item"),
                 turn_id: turn_id.clone(),
                 kind: TurnItemKind::Error,
                 status: TurnItemLifecycleStatus::Failed,
@@ -16199,7 +16206,7 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
                 "runtime dynamic tool '{name}' has no active turn"
             ))
         })?;
-        let call_id = format!("call_{}", &Uuid::new_v4().to_string()[..8]);
+        let call_id = runtime_record_id("call");
         let params = DynamicToolCallParams {
             thread_id: thread_id.clone(),
             turn_id: turn_id.clone(),

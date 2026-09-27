@@ -687,12 +687,40 @@ pub fn flush_and_sync(writer: &mut std::io::BufWriter<std::fs::File>) -> std::io
     writer.get_ref().sync_all()
 }
 
+/// Read a whole response body, failing as soon as it would exceed `max_bytes`.
+///
+/// A declared `Content-Length` over the cap is refused before anything is
+/// read; chunked or length-less bodies are bounded while streaming, so a
+/// server cannot make the caller buffer an unbounded body before a size check.
+pub async fn read_response_body_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    use futures_util::StreamExt;
+
+    if let Some(len) = response.content_length()
+        && len > max_bytes as u64
+    {
+        anyhow::bail!("response body of {len} bytes exceeds {max_bytes} bytes — aborting");
+    }
+    let mut stream = response.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("failed to read response body: {e}"))?;
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            anyhow::bail!("response body exceeds {max_bytes} bytes — aborting");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// Open a URL in the system's default browser.
 ///
 /// Dispatches to the platform-appropriate opener:
 /// - macOS: `open`
 /// - Linux / BSD: `xdg-open`
-/// - Windows: `cmd /C start ""`
+/// - Windows: `rundll32 url.dll,FileProtocolHandler`
 /// - Other: returns an error.
 ///
 /// This is the single entry point for URL opening — every call site in
@@ -733,10 +761,12 @@ fn browser_open_command(url: &str) -> Result<Command> {
         Ok(command)
     }
 
+    // Not `cmd /C start`: cmd.exe would parse `&`, `|`, `^` and `%` inside
+    // the URL. The protocol handler receives it as data.
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", url]);
+        let mut cmd = Command::new("rundll32");
+        cmd.args(["url.dll,FileProtocolHandler", url]);
         Ok(cmd)
     }
 
@@ -1908,13 +1938,24 @@ mod project_mapping_tests {
 
         #[cfg(target_os = "windows")]
         {
-            assert_eq!(command.get_program(), "cmd");
+            assert_eq!(command.get_program(), "rundll32");
             assert_eq!(
                 command
                     .get_args()
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect::<Vec<_>>(),
-                vec!["/C", "start", "", "https://example.com"]
+                vec!["url.dll,FileProtocolHandler", "https://example.com"]
+            );
+            // Shell metacharacters stay inside the single URL argument.
+            let url = "https://example.com/?a=1&b=2|x^y%PATH%";
+            let command = super::browser_open_command(url).expect("command");
+            assert_eq!(command.get_program(), "rundll32");
+            assert_eq!(
+                command
+                    .get_args()
+                    .last()
+                    .map(|arg| arg.to_string_lossy().into_owned()),
+                Some(url.to_string())
             );
         }
     }
