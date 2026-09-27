@@ -76,6 +76,12 @@ quieter, and Fleet runs can be checked before they spend anything.
   returning `201`. A nameless `PUT /v1/sessions` updates the document the
   thread is bound to
   ([#6621](https://github.com/Hmbown/Codewhale/issues/6621)).
+- A Runtime thread that is not bound to a saved session keeps one engine
+  session id, its own thread id, across its first turn, eviction and
+  restarts. Before, each engine spawn generated a new id, so the thread's
+  tool-output spills, snapshot tags and shell jobs were scattered across a
+  different `sessions/<id>/` per spawn
+  ([#6659](https://github.com/Hmbown/Codewhale/issues/6659)).
 - `codewhale exec --auto` no longer exits 141 with no output when a child
   it writes to, such as a stdio MCP server, closes its pipe early. Headless
   exec now ignores SIGPIPE while it runs, as the interactive TUI already did,

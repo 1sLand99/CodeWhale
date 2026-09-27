@@ -164,6 +164,81 @@ mod recovery {
         history_case(true).await
     }
 
+    /// #6659: an unbound thread (no saved session) keeps one engine session
+    /// id — its own thread id — across its first spawn, an LRU eviction and a
+    /// Runtime restart. That id keys the thread's spill directory
+    /// (`sessions/<id>/artifacts/`), its workspace snapshot tags and its shell
+    /// jobs, so none of them scatter per spawn.
+    #[tokio::test]
+    async fn unbound_thread_keeps_one_engine_session_id_across_respawns() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let manager_cfg = RuntimeThreadManagerConfig {
+            max_active_threads: 1,
+            ..test_manager_config(dir.path().join("runtime"))
+        };
+        let mut manager =
+            RuntimeThreadManager::open(config(), workspace.clone(), manager_cfg.clone())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        assert_eq!(thread.session_id, None, "the thread is unbound");
+        let history: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"hi"}]},
+            {"role":"assistant","content":[{"type":"text","text":"hello"}]}
+        ]))?;
+        manager
+            .seed_thread_from_messages(&thread.id, &history)
+            .await?;
+
+        let engine_session_id = |manager: &RuntimeThreadManager| {
+            let manager = manager.clone();
+            let thread_id = thread.id.clone();
+            async move {
+                anyhow::Ok(
+                    manager
+                        .get_engine(&thread_id)
+                        .await?
+                        .get_session_snapshot()
+                        .await?
+                        .session_id,
+                )
+            }
+        };
+
+        let first = engine_session_id(&manager).await?;
+        assert_eq!(first, thread.id);
+
+        // Loading another thread's engine evicts this one.
+        let other = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        manager.get_engine(&other.id).await?;
+        assert!(!manager.active.lock().await.engines.contains_key(&thread.id));
+        let after_eviction = engine_session_id(&manager).await?;
+        assert_eq!(after_eviction, first, "respawn after eviction");
+
+        close_engines(&manager).await?;
+        drop(manager);
+        manager = RuntimeThreadManager::open(config(), workspace, manager_cfg)?;
+        let after_restart = engine_session_id(&manager).await?;
+        assert_eq!(after_restart, first, "respawn after restart");
+        assert_eq!(
+            manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .thread
+                .session_id,
+            None,
+            "the engine identity does not bind the thread to a saved session"
+        );
+        close_engines(&manager).await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn saved_checkpoint_validation_and_forks_preserve_history() -> Result<()> {
         let _env = crate::test_support::lock_test_env();
