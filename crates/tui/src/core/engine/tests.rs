@@ -6838,13 +6838,20 @@ async fn repl_fence_obeys_auto_review_block_under_full_access() {
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
     let mut config = deterministic_engine_config(workspace.path());
-    config.auto_review_policy = crate::tui::auto_review::AutoReviewPolicy {
-        block_rules: vec![
-            crate::tui::auto_review::AutoReviewRule::block("no-code", "code is blocked here")
-                .tool_name(CODE_EXECUTION_TOOL_NAME),
-        ],
-        ..crate::tui::auto_review::AutoReviewPolicy::default()
-    };
+    // Built through the config entry point, as production does.
+    config.auto_review_policy = Config {
+        auto_review: Some(crate::config::AutoReviewConfig {
+            block: vec![crate::config::AutoReviewRuleConfig {
+                id: Some("no-code".to_string()),
+                tool: Some(CODE_EXECUTION_TOOL_NAME.to_string()),
+                reason: Some("code is blocked here".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Config::default()
+    }
+    .auto_review_policy();
     let (mut engine, handle) = Engine::new_with_model_client(config, &Config::default(), client);
     engine.session.auto_approve = true;
     engine.session.add_message(Message {
