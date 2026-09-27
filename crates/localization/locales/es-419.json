@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "El Runtime no pudo leer el historial de esta conversación — reintentando",
+  "MobileStreamCatchUpFailed": "El Runtime se atrasó y no pudo ponerse al día — reintentando",
+  "MobileStreamRuntimeShutdown": "El Runtime se está cerrando — reconectando",
+  "MobileStreamEnded": "El Runtime terminó el flujo de eventos — reconectando",
+  "MobileStreamClosed": "El Runtime cerró el flujo de eventos de esta conversación; vuelve a abrirla",
+  "MobileStreamReconnecting": "Se perdió la conexión; reconectando",
+  "MobileStreamConnected": "Conectado",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · Un hábitat compartido",
   "PetHabitatHints": "{back} volver · {sound} sonido · {browser} apariencia · {window} ventana",
   "PetHabitatQueued": "Enviado al hábitat compartido. /pet on abre la vista completa.",

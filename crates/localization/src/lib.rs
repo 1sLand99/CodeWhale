@@ -120,6 +120,13 @@ impl Locale {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageId {
+    MobileStreamReplayFailed,
+    MobileStreamCatchUpFailed,
+    MobileStreamRuntimeShutdown,
+    MobileStreamEnded,
+    MobileStreamClosed,
+    MobileStreamReconnecting,
+    MobileStreamConnected,
     SessionArchiveExported,
     SessionArchiveSizes,
     SessionArchiveNoArtifacts,
@@ -2627,6 +2634,13 @@ pub enum MessageId {
 
 #[allow(dead_code)]
 pub const ALL_MESSAGE_IDS: &[MessageId] = &[
+    MessageId::MobileStreamReplayFailed,
+    MessageId::MobileStreamCatchUpFailed,
+    MessageId::MobileStreamRuntimeShutdown,
+    MessageId::MobileStreamEnded,
+    MessageId::MobileStreamClosed,
+    MessageId::MobileStreamReconnecting,
+    MessageId::MobileStreamConnected,
     MessageId::SessionArchiveExported,
     MessageId::SessionArchiveSizes,
     MessageId::SessionArchiveNoArtifacts,

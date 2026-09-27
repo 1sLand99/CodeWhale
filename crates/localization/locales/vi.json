@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime không thể đọc lịch sử cuộc trò chuyện này — đang thử lại",
+  "MobileStreamCatchUpFailed": "Runtime bị chậm và không thể bắt kịp — đang thử lại",
+  "MobileStreamRuntimeShutdown": "Runtime đang tắt — đang kết nối lại",
+  "MobileStreamEnded": "Runtime đã kết thúc luồng sự kiện — đang kết nối lại",
+  "MobileStreamClosed": "Runtime đã đóng luồng sự kiện của cuộc trò chuyện này; hãy mở lại cuộc trò chuyện",
+  "MobileStreamReconnecting": "Mất kết nối; đang kết nối lại",
+  "MobileStreamConnected": "Đã kết nối",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · Một môi trường sống chung",
   "PetHabitatHints": "{back} quay lại · {sound} âm thanh · {browser} giao diện · {window} cửa sổ",
   "PetHabitatQueued": "Đã gửi đến môi trường sống chung. /pet on mở chế độ xem toàn màn hình.",

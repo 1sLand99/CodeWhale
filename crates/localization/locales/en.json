@@ -1,4 +1,11 @@
 {
+  "MobileStreamReplayFailed": "Runtime could not read this conversation's history — retrying",
+  "MobileStreamCatchUpFailed": "Runtime fell behind and could not catch up — retrying",
+  "MobileStreamRuntimeShutdown": "Runtime is shutting down — reconnecting",
+  "MobileStreamEnded": "Runtime ended the event stream — reconnecting",
+  "MobileStreamClosed": "Runtime closed this conversation's event stream; reopen the thread",
+  "MobileStreamReconnecting": "Connection lost; reconnecting",
+  "MobileStreamConnected": "Connected",
   "PetHabitatTitle": "CODEWHALE / WHALESONG · One shared habitat",
   "PetHabitatHints": "{back} back · {sound} sound · {browser} appearance · {window} window",
   "PetHabitatQueued": "Sent to the shared habitat. /pet on opens the full view.",
