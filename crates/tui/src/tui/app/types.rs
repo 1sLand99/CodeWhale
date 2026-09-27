@@ -393,6 +393,7 @@ pub struct TaskPanelEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskPanelEntryKind {
     Background,
+    Shell,
 }
 
 impl QueuedMessage {

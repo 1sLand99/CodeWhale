@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Component, Path};
 use std::time::Instant;
 
+use codewhale_localization::{Locale, MessageId, tr};
 use ratatui::layout::Rect;
 
 use crate::settings::InlineDiffMode;
@@ -10,6 +11,7 @@ use crate::tools::canonical_action::canonical_action_alias;
 use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult, SubAgentStatus};
 use crate::tui::app::{
     AgentCurrentActivityStatus, AgentProgressMeta, App, SidebarRowAction, TaskPanelEntry,
+    TaskPanelEntryKind,
 };
 use crate::tui::background_indicator::is_live_shell_entry;
 use crate::tui::history::{
@@ -917,8 +919,9 @@ fn background_view_rows(app: &mut App) -> Vec<WorkRow> {
     if !finished.is_empty() {
         out.push(section_heading(
             "finished",
-            &format!("Finished {}", finished.len()),
-            "Open a row for its output",
+            &tr(app.ui_locale, MessageId::BackgroundFinishedHeading)
+                .replace("{count}", &finished.len().to_string()),
+            &tr(app.ui_locale, MessageId::BackgroundFinishedHint),
         ));
         out.extend(finished);
     }
@@ -928,7 +931,7 @@ fn background_view_rows(app: &mut App) -> Vec<WorkRow> {
 
 /// A background shell row, live or finished.
 fn is_shell_entry(entry: &TaskPanelEntry) -> bool {
-    entry.prompt_summary.starts_with("shell: ") || entry.id.starts_with("shell_")
+    entry.kind == TaskPanelEntryKind::Shell
 }
 
 /// Queued or running. A stale running task still needs a look, so it stays.
@@ -992,7 +995,7 @@ fn finished_background_rows(app: &App) -> Vec<WorkRow> {
             };
             if is_shell_entry(entry) {
                 let command = shell_command(entry);
-                let outcome = finished_shell_outcome(entry);
+                let outcome = finished_shell_outcome(app.ui_locale, entry);
                 WorkRow {
                     id: WorkRowId(format!("shell:{}", entry.id)),
                     mark,
@@ -1025,7 +1028,18 @@ fn finished_background_rows(app: &App) -> Vec<WorkRow> {
                     id: WorkRowId(format!("task:{}", entry.id)),
                     mark,
                     label: entry.prompt_summary.clone(),
-                    detail: format!("{}{took} · {}", entry.status, entry.id),
+                    detail: format!(
+                        "{}{took} · {}",
+                        tr(
+                            app.ui_locale,
+                            match entry.status.as_str() {
+                                "completed" => MessageId::AutomationRunStatusCompleted,
+                                "failed" => MessageId::AutomationRunStatusFailed,
+                                _ => MessageId::SubagentsRowStatusCancelled,
+                            }
+                        ),
+                        entry.id
+                    ),
                     tone,
                     selectable: true,
                     primary_action: Some(SidebarRowAction::Command(format!(
@@ -1055,18 +1069,27 @@ fn shell_command(entry: &TaskPanelEntry) -> String {
 }
 
 /// How a finished shell ended, the same words its notice uses.
-fn finished_shell_outcome(entry: &TaskPanelEntry) -> String {
-    let exit = entry.exit_code.map(|code| format!("exit {code}"));
+fn finished_shell_outcome(locale: Locale, entry: &TaskPanelEntry) -> String {
+    let exit = entry
+        .exit_code
+        .map(|code| tr(locale, MessageId::BackgroundExitCode).replace("{code}", &code.to_string()));
     match entry.status.as_str() {
         "completed" => {
             let took = entry
                 .duration_ms
                 .map(|ms| format!(" · {}", crate::agent_roster::format_duration(ms)))
                 .unwrap_or_default();
-            format!("{}{took}", exit.unwrap_or_else(|| "done".to_string()))
+            format!(
+                "{}{took}",
+                exit.unwrap_or_else(|| tr(locale, MessageId::BackgroundOutcomeDone).into_owned())
+            )
         }
-        "failed" => exit.map_or_else(|| "failed".to_string(), |exit| format!("failed · {exit}")),
-        "timed_out" => "timed out".to_string(),
+        "failed" => {
+            let failed = tr(locale, MessageId::AutomationRunStatusFailed);
+            exit.map_or_else(|| failed.to_string(), |exit| format!("{failed} · {exit}"))
+        }
+        "killed" => tr(locale, MessageId::BackgroundOutcomeKilled).into_owned(),
+        "timed_out" => tr(locale, MessageId::BackgroundOutcomeTimedOut).into_owned(),
         other => other.to_string(),
     }
 }
@@ -1806,7 +1829,10 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                     .map(|meta| meta.files_touched)
                     .filter(|count| *count > 0)
                 {
-                    facts.push(format!("{files} files changed"));
+                    facts.push(
+                        tr(app.ui_locale, MessageId::BackgroundFilesChanged)
+                            .replace("{count}", &files.to_string()),
+                    );
                 }
             } else {
                 facts.extend(live_activity_facts(app, &agent.agent_id));
@@ -1953,19 +1979,23 @@ fn live_activity_facts(app: &App, agent_id: &str) -> Vec<String> {
     if let Some(tool) = activity.and_then(|activity| activity.current_tool.as_deref())
         && !said(tool)
     {
-        facts.push(format!("using {tool}"));
+        facts.push(tr(app.ui_locale, MessageId::BackgroundUsingTool).replace("{tool}", tool));
     }
     if let Some(step) = activity.and_then(|activity| activity.step) {
-        let step = format!("step {step}");
-        if !said(&step) {
-            facts.push(step);
+        if !said(&format!("step {step}")) {
+            facts.push(
+                tr(app.ui_locale, MessageId::BackgroundStep).replace("{step}", &step.to_string()),
+            );
         }
     }
     if let Some(files) = meta
         .map(|meta| meta.files_touched)
         .filter(|count| *count > 0)
     {
-        facts.push(format!("{files} files changed"));
+        facts.push(
+            tr(app.ui_locale, MessageId::BackgroundFilesChanged)
+                .replace("{count}", &files.to_string()),
+        );
     }
     facts
 }
@@ -1988,7 +2018,9 @@ fn quiet_fact(
     agent: &SubAgentResult,
     meta: Option<&AgentProgressMeta>,
 ) -> Option<String> {
-    if meta.and_then(|meta| meta.current_tool.as_ref()).is_some() {
+    if agent.worker_status == Some(AgentWorkerStatus::RunningTool)
+        || meta.and_then(|meta| meta.current_tool.as_ref()).is_some()
+    {
         return None;
     }
     let since_snapshot = app.subagent_cache_received_at.map_or(0, |at| {
@@ -2013,11 +2045,11 @@ fn quiet_fact(
             format!("{}m", seconds / 60)
         }
     };
-    Some(format!(
-        "quiet {} · auto-stop at {}",
-        coarse(idle.min(bound)),
-        coarse(bound)
-    ))
+    Some(
+        tr(app.ui_locale, MessageId::BackgroundQuiet)
+            .replace("{idle}", &coarse(idle.min(bound)))
+            .replace("{bound}", &coarse(bound)),
+    )
 }
 
 /// Whether `text` names `fact` as a whole token: "step 1" is not said by
@@ -4149,7 +4181,7 @@ mod tests {
             status: "running".to_string(),
             prompt_summary: format!("shell: {command}"),
             duration_ms: Some(42_000),
-            kind: crate::tui::app::TaskPanelEntryKind::Background,
+            kind: crate::tui::app::TaskPanelEntryKind::Shell,
             stale: false,
             elapsed_since_output_ms: None,
             owner_agent_id: None,
@@ -4301,12 +4333,10 @@ mod tests {
             "timed_out",
             None,
         ));
-        app.task_panel.push(finished_entry(
-            "task_done",
-            "summarize the logs",
-            "completed",
-            None,
-        ));
+        app.task_panel.push(TaskPanelEntry {
+            kind: TaskPanelEntryKind::Background,
+            ..finished_entry("task_done", "summarize the logs", "completed", None)
+        });
         let rows = visible_rows_for(&mut app, RailPanel::Background);
         let ids = rows.iter().map(|row| row.id.0.as_str()).collect::<Vec<_>>();
         assert_eq!(
@@ -4412,5 +4442,92 @@ mod tests {
             .last_progress_at =
             std::time::Instant::now().checked_sub(std::time::Duration::from_secs(125));
         assert!(detail(&app).contains("quiet 2m"), "{}", detail(&app));
+    }
+
+    #[test]
+    fn background_review_shell_prefixed_tasks_keep_task_actions() {
+        let mut app = test_app();
+        for (id, summary) in [
+            ("task_real", "shell: explain this command"),
+            ("shell_legacy", "ordinary task"),
+        ] {
+            app.task_panel.push(TaskPanelEntry {
+                kind: TaskPanelEntryKind::Background,
+                prompt_summary: summary.into(),
+                ..running_shell_entry(id, "unused")
+            });
+        }
+        assert!(
+            app.task_panel
+                .iter()
+                .all(|entry| !is_live_shell_entry(entry))
+        );
+        assert_eq!(
+            crate::tui::background_indicator::pending_work_from_app(&app)
+                .count(crate::tui::background_indicator::PendingItemKind::Task),
+            2
+        );
+        for status in ["running", "completed"] {
+            for entry in &mut app.task_panel {
+                entry.status = status.into();
+            }
+            let rows = visible_rows_for(&mut app, RailPanel::Background);
+            for id in ["task_real", "shell_legacy"] {
+                let row = rows
+                    .iter()
+                    .find(|row| row.id.0 == format!("task:{id}"))
+                    .expect("task row");
+                assert!(
+                    matches!(&row.primary_action, Some(SidebarRowAction::Command(command)) if command == &format!("/jobs show {id}"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn background_review_snapshot_tool_is_never_quiet_without_progress_metadata() {
+        let app = test_app();
+        let mut agent = running_agent("agent_tool");
+        agent.idle_ms = Some(125_000);
+        agent.heartbeat_timeout_ms = Some(300_000);
+        agent.worker_status = Some(AgentWorkerStatus::RunningTool);
+        assert_eq!(quiet_fact(&app, &agent, None), None);
+        assert_eq!(
+            quiet_fact(&app, &agent, Some(&AgentProgressMeta::default())),
+            None
+        );
+        agent.worker_status = None;
+        assert!(quiet_fact(&app, &agent, None).is_some());
+    }
+
+    #[test]
+    fn background_review_finished_rows_and_quiet_copy_use_the_selected_locale() {
+        let mut app = test_app();
+        app.ui_locale = Locale::Fr;
+        app.task_panel.push(finished_entry(
+            "shell_kill",
+            "shell: sleep 99",
+            "killed",
+            None,
+        ));
+        let rows = visible_rows_for(&mut app, RailPanel::Background);
+        assert_eq!(rows[0].label, "Terminés 1");
+        assert_eq!(rows[0].detail, "Ouvrez une ligne pour voir sa sortie");
+        assert!(rows[1].detail.starts_with("arrêté de force"));
+        for (status, expected) in [
+            ("completed", "code de sortie 0"),
+            ("failed", "échouée"),
+            ("timed_out", "délai dépassé"),
+        ] {
+            let entry = finished_entry("shell", "shell: command", status, Some(0));
+            assert!(finished_shell_outcome(Locale::Fr, &entry).contains(expected));
+        }
+        let mut agent = running_agent("agent_quiet");
+        agent.idle_ms = Some(125_000);
+        agent.heartbeat_timeout_ms = Some(300_000);
+        assert_eq!(
+            quiet_fact(&app, &agent, None).as_deref(),
+            Some("sans progrès depuis 2m · arrêt automatique à 5m")
+        );
     }
 }

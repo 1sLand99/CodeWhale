@@ -5,6 +5,7 @@
 use super::*;
 use crate::tui::automation_panel::AutomationScan;
 use crate::tui::background_finished::{FinishedOutcome, FinishedWork, MAX_FINISHED_SHELLS};
+use codewhale_localization::{Locale, MessageId, tr};
 
 pub(super) async fn refresh_active_task_panel(
     app: &mut App,
@@ -43,24 +44,31 @@ pub(super) async fn refresh_active_task_panel(
         None => Vec::new(),
     };
     let was_unavailable = std::mem::replace(&mut app.task_panel_unavailable, false);
-    let previously_active_durable_ids = app
-        .task_panel
-        .iter()
-        .filter(|entry| matches!(entry.status.as_str(), "queued" | "running"))
-        .map(|entry| entry.id.as_str())
-        .collect::<HashSet<_>>();
     // #6565: a durable task that failed or was cancelled is as much news as
     // one that completed; each lands in the batched notice by its summary.
     let newly_finished_tasks = tasks
         .iter()
-        .filter(|task| previously_active_durable_ids.contains(task.id.as_str()))
         .filter_map(|task| {
             let (outcome, word) = match task.status {
-                TaskStatus::Completed => (FinishedOutcome::Done, "done"),
-                TaskStatus::Failed => (FinishedOutcome::Failed, "failed"),
-                TaskStatus::Canceled => (FinishedOutcome::Stopped, "cancelled"),
+                TaskStatus::Completed => (FinishedOutcome::Done, MessageId::BackgroundOutcomeDone),
+                TaskStatus::Failed => (
+                    FinishedOutcome::Failed,
+                    MessageId::AutomationRunStatusFailed,
+                ),
+                TaskStatus::Canceled => (
+                    FinishedOutcome::Stopped,
+                    MessageId::SubagentsRowStatusCancelled,
+                ),
                 TaskStatus::Queued | TaskStatus::Running => return None,
             };
+            // Restored history is not a new completion. A task that finishes
+            // between polls still counts, without ever needing a live row.
+            if !task.ended_at.is_some_and(|at| at >= app.session_started_at)
+                || !app.notified_task_ids.insert(task.id.clone())
+            {
+                return None;
+            }
+            let word = tr(app.ui_locale, word);
             let summary = match task.duration_ms {
                 Some(ms) => format!("{word} · {}", crate::agent_roster::format_duration(ms)),
                 None => word.to_string(),
@@ -150,12 +158,6 @@ pub(super) async fn refresh_active_task_panel(
     // snapshot that may belong to a replaced session. Shell ownership,
     // cancellation, approval state, and output capture never depend on this
     // refresh succeeding.
-    let prev_live_shell_ids = app
-        .task_panel
-        .iter()
-        .filter(|entry| crate::tui::background_indicator::is_live_shell_entry(entry))
-        .map(|entry| entry.id.clone())
-        .collect::<HashSet<_>>();
     let jobs = match app.runtime_services.shell_manager.as_ref() {
         Some(shell_mgr) => match shell_mgr.try_lock() {
             Ok(mut mgr) => Some(
@@ -166,14 +168,45 @@ pub(super) async fn refresh_active_task_panel(
         None => None,
     };
     let jobs = jobs.unwrap_or_default();
+    let shell_background_completed = project_shell_jobs(app, &mut entries, &jobs);
+
+    // Report whether anything visible changed so the idle tick can skip the
+    // redraw: an unconditional 2.5 s repaint kept the app from ever going
+    // quiescent (#3757).
+    let changed = namespace_changed
+        || was_unavailable
+        || lifecycle_changed
+        || shell_background_completed
+        || app.task_panel != entries;
+    app.task_panel = entries;
+    let tip_shown = (durable_background_completed || shell_background_completed)
+        && app.maybe_show_behavioral_tip(
+            crate::tui::behavioral_tips::BehavioralTip::BackgroundJobReceipt,
+        );
+    changed || tip_shown
+}
+
+/// Fold one session-scoped snapshot. An empty snapshot may be a lock miss;
+/// neither completion deduplication nor retained IDs depend on visible rows.
+pub(super) fn project_shell_jobs(
+    app: &mut App,
+    entries: &mut Vec<TaskPanelEntry>,
+    jobs: &[crate::tools::shell::ShellJobSnapshot],
+) -> bool {
     // #6565: every terminal status is a completion a person should hear
     // about (a failed, killed or timed-out shell used to vanish silently),
     // and a finished shell stays listed, muted, with how it ended.
-    let finished_now = newly_terminal(&prev_live_shell_ids, &jobs);
+    let finished_now = newly_terminal(&mut app.notified_shell_ids, jobs);
     for job in &finished_now {
-        app.finished_shell_ids.retain(|id| id != &job.id);
-        app.finished_shell_ids.push_back(job.id.clone());
-        let (outcome, summary) = shell_outcome(job);
+        let retained = app
+            .finished_shell_ids
+            .entry(app.current_session_id.clone().unwrap_or_default())
+            .or_default();
+        retained.push_back(job.id.clone());
+        while retained.len() > MAX_FINISHED_SHELLS {
+            retained.pop_front();
+        }
+        let (outcome, summary) = shell_outcome(app.ui_locale, job);
         let toast = format!("shell · {} · {summary}", job.command.trim());
         let level = if outcome == FinishedOutcome::Done {
             crate::tui::app::StatusToastLevel::Info
@@ -192,16 +225,19 @@ pub(super) async fn refresh_active_task_panel(
             .in_turn(parent_busy),
         );
     }
-    while app.finished_shell_ids.len() > MAX_FINISHED_SHELLS {
-        app.finished_shell_ids.pop_front();
-    }
-    let finished_order = app.finished_shell_ids.iter().cloned().collect::<Vec<_>>();
+    let finished_order = app
+        .finished_shell_ids
+        .get(app.current_session_id.as_deref().unwrap_or_default())
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
     let shell_entry = |job: &crate::tools::shell::ShellJobSnapshot| TaskPanelEntry {
         id: job.id.clone(),
         status: shell_status_token(&job.status).to_string(),
         prompt_summary: format!("shell: {}", job.command),
         duration_ms: Some(job.elapsed_ms),
-        kind: TaskPanelEntryKind::Background,
+        kind: TaskPanelEntryKind::Shell,
         stale: job.stale,
         elapsed_since_output_ms: job.elapsed_since_output_ms,
         owner_agent_id: job.owner_agent_id.clone(),
@@ -225,22 +261,7 @@ pub(super) async fn refresh_active_task_panel(
             .filter(|job| !matches!(job.status, crate::tools::shell::ShellStatus::Running))
             .map(shell_entry),
     );
-    let shell_background_completed = !finished_now.is_empty();
-
-    // Report whether anything visible changed so the idle tick can skip the
-    // redraw: an unconditional 2.5 s repaint kept the app from ever going
-    // quiescent (#3757).
-    let changed = namespace_changed
-        || was_unavailable
-        || lifecycle_changed
-        || shell_background_completed
-        || app.task_panel != entries;
-    app.task_panel = entries;
-    let tip_shown = (durable_background_completed || shell_background_completed)
-        && app.maybe_show_behavioral_tip(
-            crate::tui::behavioral_tips::BehavioralTip::BackgroundJobReceipt,
-        );
-    changed || tip_shown
+    !finished_now.is_empty()
 }
 
 /// The wire token a shell status shows as in the task panel.
@@ -258,37 +279,52 @@ pub(crate) fn shell_status_token(status: &crate::tools::shell::ShellStatus) -> &
 /// How a finished shell ended, in the words its row and notice use:
 /// `exit 0 · 12s`, `failed · exit 2`, `killed`, `timed out`.
 pub(crate) fn shell_outcome(
+    locale: Locale,
     job: &crate::tools::shell::ShellJobSnapshot,
 ) -> (FinishedOutcome, String) {
     use crate::tools::shell::ShellStatus;
-    let exit = job.exit_code.map(|code| format!("exit {code}"));
+    let exit = job
+        .exit_code
+        .map(|code| tr(locale, MessageId::BackgroundExitCode).replace("{code}", &code.to_string()));
     let took = crate::agent_roster::format_duration(job.elapsed_ms);
     match job.status {
         ShellStatus::Completed | ShellStatus::Running => (
             FinishedOutcome::Done,
-            format!("{} · {took}", exit.unwrap_or_else(|| "done".to_string())),
+            format!(
+                "{} · {took}",
+                exit.unwrap_or_else(|| tr(locale, MessageId::BackgroundOutcomeDone).into_owned())
+            ),
         ),
         ShellStatus::Failed => (
             FinishedOutcome::Failed,
             match exit {
-                Some(exit) => format!("failed · {exit}"),
-                None => "failed".to_string(),
+                Some(exit) => format!(
+                    "{} · {exit}",
+                    tr(locale, MessageId::AutomationRunStatusFailed)
+                ),
+                None => tr(locale, MessageId::AutomationRunStatusFailed).into_owned(),
             },
         ),
-        ShellStatus::Killed => (FinishedOutcome::Stopped, "killed".to_string()),
-        ShellStatus::TimedOut => (FinishedOutcome::Stopped, "timed out".to_string()),
+        ShellStatus::Killed => (
+            FinishedOutcome::Stopped,
+            tr(locale, MessageId::BackgroundOutcomeKilled).into_owned(),
+        ),
+        ShellStatus::TimedOut => (
+            FinishedOutcome::Stopped,
+            tr(locale, MessageId::BackgroundOutcomeTimedOut).into_owned(),
+        ),
     }
 }
 
-/// Shells that were live last refresh and have reached any terminal status
-/// now: completed, failed, killed or timed out.
+/// Every terminal shell once, including those first seen after finishing.
+/// A missed manager lock or an evicted visible row never resets this ledger.
 pub(super) fn newly_terminal<'a>(
-    previously_live_ids: &HashSet<String>,
+    notified_ids: &mut HashSet<String>,
     jobs: &'a [crate::tools::shell::ShellJobSnapshot],
 ) -> Vec<&'a crate::tools::shell::ShellJobSnapshot> {
     jobs.iter()
         .filter(|job| !matches!(job.status, crate::tools::shell::ShellStatus::Running))
-        .filter(|job| previously_live_ids.contains(&job.id))
+        .filter(|job| notified_ids.insert(job.id.clone()))
         .collect()
 }
 

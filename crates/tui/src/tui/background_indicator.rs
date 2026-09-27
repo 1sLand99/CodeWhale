@@ -210,9 +210,6 @@ fn collect_pending_work(app: &App) -> PendingWork {
 /// comparing these wire values in their render paths.
 #[must_use]
 pub(crate) fn pending_item_state(entry: &TaskPanelEntry) -> Option<PendingItemState> {
-    if entry.kind != TaskPanelEntryKind::Background {
-        return None;
-    }
     match entry.status.as_str() {
         "queued" => Some(PendingItemState::Queued),
         "running" => Some(PendingItemState::Running),
@@ -225,8 +222,7 @@ pub(crate) fn pending_item_state(entry: &TaskPanelEntry) -> Option<PendingItemSt
 /// cannot be omitted or classified differently between surfaces.
 #[must_use]
 pub(crate) fn is_live_shell_entry(entry: &TaskPanelEntry) -> bool {
-    pending_item_state(entry).is_some()
-        && (entry.prompt_summary.starts_with("shell: ") || entry.id.starts_with("shell_"))
+    pending_item_state(entry).is_some() && entry.kind == TaskPanelEntryKind::Shell
 }
 
 #[cfg(test)]
@@ -340,7 +336,7 @@ mod tests {
             status: "running".to_string(),
             prompt_summary: "shell: cargo test -p codewhale-tui".to_string(),
             duration_ms: Some(42_000),
-            kind: TaskPanelEntryKind::Background,
+            kind: TaskPanelEntryKind::Shell,
             stale: true,
             elapsed_since_output_ms: Some(99_000),
             owner_agent_id: None,

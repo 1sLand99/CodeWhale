@@ -1327,6 +1327,7 @@ mod tests {
         for kind in [
             NotificationKind::TurnComplete,
             NotificationKind::SubagentTerminal,
+            NotificationKind::BackgroundTerminal,
             NotificationKind::ApprovalNeeded,
             NotificationKind::InputNeeded,
             NotificationKind::ElevationNeeded,
@@ -1345,6 +1346,7 @@ mod tests {
         for kind in [
             NotificationKind::TurnComplete,
             NotificationKind::SubagentTerminal,
+            NotificationKind::BackgroundTerminal,
             NotificationKind::ApprovalNeeded,
             NotificationKind::InputNeeded,
             NotificationKind::ElevationNeeded,
@@ -2220,6 +2222,7 @@ impl TidelineInboxRecord {
         match self.kind {
             NotificationKind::TurnComplete => "turn done",
             NotificationKind::SubagentTerminal => "whale done",
+            NotificationKind::BackgroundTerminal => "work done",
             NotificationKind::ApprovalNeeded => "approval",
             NotificationKind::InputNeeded => "question",
             NotificationKind::ElevationNeeded => "sandbox",
@@ -2233,7 +2236,9 @@ impl TidelineInboxRecord {
     pub fn kind_ink(&self) -> ChromeInk {
         match self.kind {
             NotificationKind::TurnComplete => ChromeInk::Outcome,
-            NotificationKind::SubagentTerminal => ChromeInk::Info,
+            NotificationKind::SubagentTerminal | NotificationKind::BackgroundTerminal => {
+                ChromeInk::Info
+            }
             NotificationKind::ApprovalNeeded | NotificationKind::InputNeeded => {
                 ChromeInk::PermissionAsk
             }

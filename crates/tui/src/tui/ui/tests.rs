@@ -15445,16 +15445,7 @@ fn every_terminal_shell_status_is_a_completion_with_its_exit_facts() {
     use crate::tui::background_finished::FinishedOutcome;
     // #6565: only `Completed` used to count; a failed, killed or timed-out
     // shell produced no signal at all.
-    let live = HashSet::from(
-        [
-            "shell_ok",
-            "shell_fail",
-            "shell_kill",
-            "shell_timeout",
-            "shell_live",
-        ]
-        .map(String::from),
-    );
+    let mut notified = HashSet::from(["shell_old".to_string()]);
     let jobs = vec![
         shell_job("shell_ok", "cargo build", ShellStatus::Completed, Some(0)),
         shell_job("shell_fail", "npm test", ShellStatus::Failed, Some(2)),
@@ -15463,7 +15454,7 @@ fn every_terminal_shell_status_is_a_completion_with_its_exit_facts() {
         shell_job("shell_live", "npm run dev", ShellStatus::Running, None),
         shell_job("shell_old", "ls", ShellStatus::Completed, Some(0)),
     ];
-    let finished = newly_terminal(&live, &jobs);
+    let finished = newly_terminal(&mut notified, &jobs);
     let ids = finished
         .iter()
         .map(|job| job.id.as_str())
@@ -15474,7 +15465,7 @@ fn every_terminal_shell_status_is_a_completion_with_its_exit_facts() {
     );
     let outcomes = finished
         .iter()
-        .map(|job| super::task_projection::shell_outcome(job))
+        .map(|job| super::task_projection::shell_outcome(codewhale_localization::Locale::En, job))
         .collect::<Vec<_>>();
     assert_eq!(
         outcomes,
@@ -15500,7 +15491,7 @@ fn ctrl_x_jobs_prefill_only_catches_running_shell_jobs_in_tasks_sidebar() {
         status: "running".to_string(),
         prompt_summary: "shell: cargo test".to_string(),
         duration_ms: Some(10),
-        kind: TaskPanelEntryKind::Background,
+        kind: TaskPanelEntryKind::Shell,
         stale: false,
         elapsed_since_output_ms: None,
         owner_agent_id: None,
@@ -15556,7 +15547,7 @@ fn ctrl_x_jobs_prefill_falls_through_outside_tasks_sidebar_shell_jobs() {
         status: "running".to_string(),
         prompt_summary: "shell: cargo test".to_string(),
         duration_ms: Some(10),
-        kind: TaskPanelEntryKind::Background,
+        kind: TaskPanelEntryKind::Shell,
         stale: false,
         elapsed_since_output_ms: None,
         owner_agent_id: None,
@@ -28321,7 +28312,7 @@ fn status_animation_ticks_for_a_visible_background_task() {
         status: "running".to_string(),
         prompt_summary: "shell: cargo test --locked".to_string(),
         duration_ms: Some(crate::tui::spinner::LIVE_MARKER_DELAY_MS),
-        kind: TaskPanelEntryKind::Background,
+        kind: TaskPanelEntryKind::Shell,
         stale: false,
         elapsed_since_output_ms: None,
         owner_agent_id: None,
@@ -28475,7 +28466,7 @@ fn a_shell_finished_during_a_completed_turn_is_left_to_the_turn_notice() {
 }
 
 #[test]
-fn a_stale_durable_task_does_not_hold_the_background_notice() {
+fn background_review_shell_prefixed_durable_task_holds_notice_unless_stale() {
     use crate::tui::background_finished::FinishedWork;
     // #6565 review: a recovered Running task with unverified ownership stays
     // Running indefinitely; it must not hold `final-only` forever.
@@ -28485,7 +28476,7 @@ fn a_stale_durable_task_does_not_hold_the_background_notice() {
         exit_code: None,
         id: "task_orphan".to_string(),
         status: "running".to_string(),
-        prompt_summary: "rebuild the index".to_string(),
+        prompt_summary: "shell: rebuild the index".to_string(),
         duration_ms: None,
         kind: TaskPanelEntryKind::Background,
         stale,
@@ -30889,7 +30880,8 @@ fn notification_input_result_never_reopens_or_clears_a_different_pending_questio
 }
 
 #[tokio::test]
-async fn task_inventory_failure_preserves_only_the_same_session_snapshot() -> anyhow::Result<()> {
+async fn background_review_fast_durable_completion_survives_inventory_failures()
+-> anyhow::Result<()> {
     use crate::task_manager::{
         NewTaskRequest, TaskExecutionResult, TaskManager, TaskManagerConfig, TaskStatus,
         TaskTerminalReason,
@@ -30939,6 +30931,14 @@ async fn task_inventory_failure_preserves_only_the_same_session_snapshot() -> an
     app.session_started_at = chrono::Utc::now() - chrono::Duration::minutes(1);
     super::task_projection::refresh_active_task_panel(&mut app, &tasks).await;
     assert!(app.task_panel.iter().any(|row| row.id == record.id));
+    assert_eq!(
+        app.background_finished.len(),
+        1,
+        "first observed after completion"
+    );
+    app.background_finished.clear();
+    super::task_projection::refresh_active_task_panel(&mut app, &tasks).await;
+    assert!(app.background_finished.is_empty(), "no repeated completion");
     let queue = root.path().join("queue.json");
     let saved = std::fs::read(&queue)?;
     std::fs::write(&queue, b"{corrupt")?;
@@ -31143,5 +31143,90 @@ fn workflow_task_label_is_the_one_name_for_that_agent() {
     assert_eq!(
         app.agent_given_name("agent_wf2").as_deref(),
         Some("audit docs")
+    );
+}
+
+#[test]
+fn background_review_shell_completion_survives_unobserved_live_and_missing_snapshots() {
+    use super::task_projection::project_shell_jobs;
+    use crate::tools::shell::ShellStatus;
+    let mut app = create_test_app();
+    app.current_session_id = Some("a".into());
+    let mut entries = Vec::new();
+    let fast = shell_job("shell_fast", "true", ShellStatus::Completed, Some(0));
+    assert!(project_shell_jobs(&mut app, &mut entries, &[fast.clone()]));
+    assert_eq!(app.background_finished.len(), 1);
+    assert_eq!(entries[0].id, "shell_fast");
+    assert_eq!(entries[0].kind, TaskPanelEntryKind::Shell);
+    let contended = shell_job("shell_contended", "sleep 1", ShellStatus::Running, None);
+    entries.clear();
+    project_shell_jobs(&mut app, &mut entries, &[fast.clone(), contended.clone()]);
+    entries.clear();
+    project_shell_jobs(&mut app, &mut entries, &[]);
+    assert!(
+        entries.is_empty(),
+        "a lock miss hides this frame's shell rows"
+    );
+    let terminal = crate::tools::shell::ShellJobSnapshot {
+        status: ShellStatus::Failed,
+        exit_code: Some(2),
+        ..contended
+    };
+    assert!(project_shell_jobs(
+        &mut app,
+        &mut entries,
+        &[fast.clone(), terminal.clone()]
+    ));
+    assert_eq!(app.background_finished.len(), 2);
+    assert!(entries.iter().any(|row| row.id == terminal.id));
+    entries.clear();
+    assert!(!project_shell_jobs(
+        &mut app,
+        &mut entries,
+        &[fast, terminal]
+    ));
+    assert_eq!(app.background_finished.len(), 2, "exactly once");
+}
+
+#[test]
+fn background_review_finished_shell_retention_is_capped_per_session() {
+    use super::task_projection::project_shell_jobs;
+    use crate::tools::shell::ShellStatus;
+    use crate::tui::background_finished::MAX_FINISHED_SHELLS;
+    let mut app = create_test_app();
+    let a = shell_job("shell_a", "true", ShellStatus::Completed, Some(0));
+    let mut entries = Vec::new();
+    app.current_session_id = Some("a".into());
+    project_shell_jobs(&mut app, &mut entries, &[a.clone()]);
+    app.current_session_id = Some("b".into());
+    let b = (0..MAX_FINISHED_SHELLS + 2)
+        .map(|n| {
+            shell_job(
+                &format!("shell_b{n}"),
+                "true",
+                ShellStatus::Completed,
+                Some(0),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.clear();
+    project_shell_jobs(&mut app, &mut entries, &b);
+    assert_eq!(entries.len(), MAX_FINISHED_SHELLS);
+    assert!(!entries.iter().any(|entry| entry.id == "shell_b0"));
+    let notices = app.background_finished.len();
+    entries.clear();
+    assert!(
+        !project_shell_jobs(&mut app, &mut entries, &b),
+        "eviction does not re-announce"
+    );
+    app.current_session_id = Some("a".into());
+    entries.clear();
+    assert!(!project_shell_jobs(&mut app, &mut entries, &[a]));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "shell_a");
+    assert_eq!(
+        app.background_finished.len(),
+        notices,
+        "switching back does not re-announce"
     );
 }

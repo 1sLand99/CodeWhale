@@ -1262,7 +1262,7 @@ pub(crate) fn prefill_jobs_cancel_all_if_tasks_sidebar(app: &mut App) -> bool {
         || !app
             .task_panel
             .iter()
-            .any(|task| task.id.starts_with("shell_") && task.status == "running")
+            .any(crate::tui::background_indicator::is_live_shell_entry)
     {
         return false;
     }
@@ -1320,8 +1320,7 @@ pub(crate) fn flush_background_finished(app: &mut App, config: &Config, parent_i
             // is not known to be running and could hold the batch forever,
             // the same reason suspect ghost agents are left out.
             !entry.stale
-                && !entry.prompt_summary.starts_with("shell: ")
-                && !entry.id.starts_with("shell_")
+                && entry.kind != TaskPanelEntryKind::Shell
                 && matches!(entry.status.as_str(), "queued" | "running")
         });
     let parent_busy = app.is_loading && !parent_idle;

@@ -2,9 +2,10 @@
 //!
 //! Every terminal transition of background work (a sub-agent, a background
 //! shell, a durable task) lands here with the name every other surface shows.
-//! The notice for a batch names all of it, not only the last child to finish,
-//! and names each item by what a person recognises (the agent's name, the
-//! shell's command), never an internal id.
+//! The notice for a batch covers all of it, not only the last child to finish.
+//! Agent notices use display names. Shells and tasks use generic labels on
+//! lock-screen-capable transports; their commands, prompts and errors remain
+//! in the in-app rows. Mixed batches also omit previews.
 //!
 //! When the notice fires is decided by [`ready_to_flush`]. In `final-only`
 //! mode it waits only for *finite* work: running agents and queued or running
@@ -16,7 +17,7 @@ use std::time::Duration;
 use codewhale_localization::{Locale, MessageId, tr};
 
 use crate::config::SubagentCompletionNotification;
-use crate::notify::payload::NotificationPayload;
+use crate::notify::payload::{NotificationPayload, PREVIEW_MAX_CHARS, sanitize_field};
 use crate::tools::subagent::SubAgentStatus;
 
 /// Finished background shells kept listed (muted) in the dock.
@@ -136,12 +137,11 @@ impl FinishedWork {
         self
     }
 
-    /// The preview line for this item: an agent's result headline (with `…`
-    /// and a pointer to the full result when the headline is not all of it),
-    /// or a shell or task's facts.
-    fn preview(&self, locale: Locale) -> Option<String> {
-        if let Some(summary) = self.summary.as_deref() {
-            return Some(summary.to_string());
+    /// Agent result headline, reserving room for the full-result pointer
+    /// after sanitization and the optional batch label have consumed space.
+    fn preview(&self, locale: Locale, named: bool) -> Option<String> {
+        if self.kind != FinishedKind::Agent {
+            return None;
         }
         let result = self.result.as_deref()?;
         let headline = crate::agent_roster::result_headline(result)?;
@@ -152,13 +152,23 @@ impl FinishedWork {
             .filter(|line| !line.is_empty() && !line.starts_with("<codewhale:"))
             .collect::<Vec<_>>()
             .join(" ");
-        if bounded == whole {
-            return Some(bounded);
+        let preview = sanitize_field(&if named {
+            format!("{}: {bounded}", self.name)
+        } else {
+            bounded.clone()
+        });
+        if bounded == whole && preview.chars().count() <= PREVIEW_MAX_CHARS {
+            return Some(preview);
         }
-        let bounded = bounded.trim_end_matches("...").trim_end();
-        Some(format!(
-            "{bounded} … {}",
+        let suffix = format!(
+            " … {}",
             tr(locale, MessageId::NotificationFullResultPointer)
+        );
+        let budget = PREVIEW_MAX_CHARS.saturating_sub(suffix.chars().count());
+        let kept: String = preview.chars().take(budget).collect();
+        Some(format!(
+            "{}{suffix}",
+            kept.trim_end_matches("...").trim_end()
         ))
     }
 
@@ -237,13 +247,26 @@ pub fn background_finished_payload(
                 .iter()
                 .filter(|item| item.outcome == FinishedOutcome::Done)
                 .count();
-            if done == many.len() {
+            let failed = many
+                .iter()
+                .filter(|item| item.outcome == FinishedOutcome::Failed)
+                .count();
+            let stopped = many
+                .iter()
+                .filter(|item| item.outcome == FinishedOutcome::Stopped)
+                .count();
+            if stopped > 0 {
+                tr(locale, MessageId::NotificationBackgroundStopped)
+                    .replace("{done}", &done.to_string())
+                    .replace("{failed}", &failed.to_string())
+                    .replace("{stopped}", &stopped.to_string())
+            } else if done == many.len() {
                 tr(locale, MessageId::NotificationBackgroundFinished)
                     .replace("{count}", &many.len().to_string())
             } else {
                 tr(locale, MessageId::NotificationBackgroundMixed)
                     .replace("{done}", &done.to_string())
-                    .replace("{failed}", &(many.len() - done).to_string())
+                    .replace("{failed}", &failed.to_string())
             }
         }
     };
@@ -252,23 +275,24 @@ pub fn background_finished_payload(
     let mut names = batch
         .iter()
         .take(MAX_NAMED)
-        .map(|item| item.name.as_str())
+        .map(|item| match item.kind {
+            FinishedKind::Agent => std::borrow::Cow::Borrowed(item.name.as_str()),
+            FinishedKind::Shell => tr(locale, MessageId::AgentFocusPostureShellFull),
+            FinishedKind::Task => tr(locale, MessageId::WorkflowDispatchFallbackTask),
+        })
         .collect::<Vec<_>>()
         .join(" · ");
     if batch.len() > MAX_NAMED {
         names.push_str(&format!(" · +{}", batch.len() - MAX_NAMED));
     }
+    if batch.iter().any(|item| item.kind != FinishedKind::Agent) {
+        return Some(NotificationPayload::background_terminal(&headline, &names));
+    }
     let featured = batch
         .iter()
         .find(|item| item.outcome != FinishedOutcome::Done)
         .unwrap_or(&batch[0]);
-    let preview = featured.preview(locale).map(|preview| {
-        if batch.len() > 1 {
-            format!("{}: {preview}", featured.name)
-        } else {
-            preview
-        }
-    });
+    let preview = featured.preview(locale, batch.len() > 1);
     Some(NotificationPayload::subagent_terminal(&headline, &names).with_preview(preview.as_deref()))
 }
 
@@ -366,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn shells_are_named_by_their_command_with_exit_facts() {
+    fn shell_notices_keep_outcomes_but_commands_and_output_stay_in_app() {
         for (outcome, summary, headline) in [
             (FinishedOutcome::Done, "exit 0 · 12s", "Shell finished"),
             (FinishedOutcome::Failed, "failed · exit 2", "Shell failed"),
@@ -381,8 +405,139 @@ mod tests {
             )];
             let payload = background_finished_payload(Locale::En, &batch, false).expect("payload");
             assert_eq!(payload.headline(), headline);
-            assert_eq!(payload.detail(), Some("npm test -- --watch=false"));
-            assert_eq!(payload.preview(), Some(summary));
+            assert_eq!(payload.detail(), Some("shell"));
+            assert_eq!(payload.preview(), None);
+        }
+    }
+
+    #[test]
+    fn background_review_stopped_work_is_never_counted_as_failed() {
+        let stopped = agent("cancelled", SubAgentStatus::Cancelled, "Stopped.");
+        let stopped_shell = FinishedWork::shell(
+            "sleep 99",
+            FinishedOutcome::Stopped,
+            "killed".into(),
+            Duration::ZERO,
+        );
+        let cases = [
+            (
+                vec![stopped.clone(), stopped_shell.clone()],
+                "0 done · 0 failed · 2 stopped",
+            ),
+            (
+                vec![
+                    agent("done", SubAgentStatus::Completed, "Done."),
+                    stopped.clone(),
+                ],
+                "1 done · 0 failed · 1 stopped",
+            ),
+            (
+                vec![
+                    agent("failed", SubAgentStatus::Failed("failed".into()), "Failed."),
+                    stopped_shell,
+                ],
+                "0 done · 1 failed · 1 stopped",
+            ),
+            (
+                vec![
+                    agent("done", SubAgentStatus::Completed, "Done."),
+                    agent("failed", SubAgentStatus::Failed("failed".into()), "Failed."),
+                    stopped,
+                ],
+                "1 done · 1 failed · 1 stopped",
+            ),
+        ];
+        for (batch, expected) in cases {
+            assert_eq!(
+                background_finished_payload(Locale::En, &batch, false)
+                    .unwrap()
+                    .headline(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn background_review_notifications_hide_commands_and_task_errors() {
+        let shell = FinishedWork::shell(
+            "mysql -psecret123 private_customer",
+            FinishedOutcome::Failed,
+            "private output".into(),
+            Duration::ZERO,
+        );
+        let task = FinishedWork::task(
+            "private account",
+            FinishedOutcome::Failed,
+            "private customer error".into(),
+            Duration::ZERO,
+        );
+        for batch in [
+            vec![shell.clone()],
+            vec![task.clone()],
+            vec![
+                agent("review", SubAgentStatus::Completed, "Done."),
+                shell,
+                task,
+            ],
+        ] {
+            let payload = background_finished_payload(Locale::En, &batch, false).unwrap();
+            assert_eq!(
+                payload.kind(),
+                crate::notify::payload::NotificationKind::BackgroundTerminal
+            );
+            assert_eq!(
+                payload
+                    .clone()
+                    .with_preview(Some("mysql -psecret123"))
+                    .preview(),
+                None
+            );
+            for private in ["mysql", "secret123", "private", "customer", "account"] {
+                assert!(
+                    !payload.render_inline().contains(private),
+                    "{}",
+                    payload.render_inline()
+                );
+            }
+        }
+        let batch = [agent(
+            "review https://user:shortpw@example.test",
+            SubAgentStatus::Completed,
+            "Done.",
+        )];
+        let payload = background_finished_payload(Locale::En, &batch, false).unwrap();
+        assert!(!payload.render_inline().contains("shortpw"));
+        assert!(!payload.detail().unwrap().contains("user:"));
+        assert!(payload.detail().unwrap().contains("example.test"));
+    }
+
+    #[test]
+    fn background_review_long_previews_keep_the_localized_full_result_pointer() {
+        for &locale in Locale::shipped_complete() {
+            for text in [
+                "A long first sentence ".repeat(30),
+                "詳しい結果 ".repeat(90),
+            ] {
+                for named in [false, true] {
+                    let mut batch = vec![agent(
+                        &"review ".repeat(40),
+                        SubAgentStatus::Completed,
+                        &text,
+                    )];
+                    if named {
+                        batch.push(agent("other", SubAgentStatus::Completed, "Done."));
+                    }
+                    let payload = background_finished_payload(locale, &batch, false).unwrap();
+                    let preview = payload.preview().unwrap();
+                    assert!(preview.chars().count() <= PREVIEW_MAX_CHARS);
+                    assert!(
+                        preview.ends_with(
+                            tr(locale, MessageId::NotificationFullResultPointer).as_ref()
+                        ),
+                        "{preview}"
+                    );
+                }
+            }
         }
     }
 }
