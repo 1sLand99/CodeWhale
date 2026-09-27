@@ -157,3 +157,57 @@ impl WorkspaceSnapshotRef {
             && snapshot.label.starts_with(self.kind.label_prefix())
     }
 }
+
+/// Post-turn snapshots this process has promised but not written yet.
+///
+/// An interactive engine takes its post-turn snapshot after `TurnComplete`,
+/// off the input path (#234), so `/undo` typed right after a turn can run
+/// before it lands. Without it the newest step would end at the workspace as
+/// it is now, taking every edit made since the turn's last restore point for
+/// the step's own, and both `git add -A` runs would race on the side repo's
+/// index (#6644). The engine reserves the snapshot before `TurnComplete` and
+/// `/undo` waits for it with [`wait_for_pending_post_turn_snapshots`].
+///
+/// In-process only: a post-turn snapshot another process is taking is not
+/// seen here.
+static PENDING_POST_TURN: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// A reserved post-turn snapshot; dropping it (after the snapshot is written,
+/// failed, or abandoned) releases the reservation.
+#[must_use = "the reservation is released when this is dropped"]
+pub struct PendingPostTurnSnapshot(());
+
+impl PendingPostTurnSnapshot {
+    pub fn reserve() -> Self {
+        let (count, _) = &PENDING_POST_TURN;
+        *count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        Self(())
+    }
+}
+
+impl Drop for PendingPostTurnSnapshot {
+    fn drop(&mut self) {
+        let (count, released) = &PENDING_POST_TURN;
+        let mut count = count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *count = count.saturating_sub(1);
+        released.notify_all();
+    }
+}
+
+/// Wait up to `timeout` for every reserved post-turn snapshot to be written.
+/// Returns whether none is still pending.
+pub fn wait_for_pending_post_turn_snapshots(timeout: std::time::Duration) -> bool {
+    let (count, released) = &PENDING_POST_TURN;
+    let count = count
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (count, _) = released
+        .wait_timeout_while(count, timeout, |pending| *pending > 0)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *count == 0
+}

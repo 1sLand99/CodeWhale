@@ -106,6 +106,12 @@ impl PathRestoreAction {
     }
 }
 
+/// The safety snapshot a path restore writes first, or one already taken.
+enum RestoreBackup<'a> {
+    Take(&'a str),
+    Existing(&'a SnapshotId),
+}
+
 /// Report of what [`SnapshotRepo::restore_paths`] did to one path.
 #[derive(Debug, Clone)]
 pub struct PathRestoreOutcome {
@@ -1107,6 +1113,42 @@ impl SnapshotRepo {
         prune_emptied_dirs: bool,
         preflight: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<Vec<PathRestoreOutcome>> {
+        self.restore_path_plan_backed_up(
+            plan,
+            RestoreBackup::Take(backup_label),
+            prune_emptied_dirs,
+            preflight,
+        )
+    }
+
+    /// [`Self::restore_path_plan`] with a safety snapshot the caller already
+    /// took (`backup`, a commit id) instead of a new one. `preflight` must
+    /// prove every planned path is still as `backup` holds it, so the backup
+    /// is as good as one taken now; reusing it keeps a second snapshot, and
+    /// the prune that comes with it, out of the window between planning and
+    /// the first write.
+    pub fn restore_path_plan_with_backup(
+        &self,
+        plan: &[(PathBuf, SnapshotId)],
+        backup: &SnapshotId,
+        prune_emptied_dirs: bool,
+        preflight: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Vec<PathRestoreOutcome>> {
+        self.restore_path_plan_backed_up(
+            plan,
+            RestoreBackup::Existing(backup),
+            prune_emptied_dirs,
+            preflight,
+        )
+    }
+
+    fn restore_path_plan_backed_up(
+        &self,
+        plan: &[(PathBuf, SnapshotId)],
+        backup: RestoreBackup<'_>,
+        prune_emptied_dirs: bool,
+        preflight: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Vec<PathRestoreOutcome>> {
         if plan.is_empty() {
             return Ok(Vec::new());
         }
@@ -1121,7 +1163,10 @@ impl SnapshotRepo {
 
         // A durable backup is required for this destructive API. Ignored
         // files cannot be removed/overwritten if the snapshot cannot retain them.
-        let backup = self.snapshot_with_session(backup_label, None)?;
+        let backup = match backup {
+            RestoreBackup::Take(label) => self.snapshot_with_session(label, None)?,
+            RestoreBackup::Existing(id) => id.clone(),
+        };
         for (rel, _, _, in_work) in &pre_state {
             if *in_work && !self.snapshot_contains_regular_file(&backup, rel)? {
                 return Err(io_other(
@@ -1201,41 +1246,6 @@ impl SnapshotRepo {
             }
         }
         Ok(outcomes)
-    }
-
-    /// `git diff --stat` between snapshot `id` and the current working tree,
-    /// computed inside the side repo.
-    ///
-    /// This is what restoring `id` *would* change, so it must be captured
-    /// before the restore runs — afterwards the work tree matches the snapshot
-    /// and the diff is empty by construction.
-    ///
-    /// It deliberately runs against the side repo rather than the user's. The
-    /// previous summary ran `git diff --stat` in the workspace with the user's
-    /// `.git`, which reports the user's own uncommitted work: it listed files
-    /// the restore had not touched, and reported nothing when that work
-    /// happened to be committed. Returns `None` when nothing differs.
-    pub fn snapshot_diff_stat(&self, id: &SnapshotId) -> io::Result<Option<String>> {
-        let diff = run_git(
-            &self.git_dir,
-            &self.work_tree,
-            &[
-                "diff",
-                "--stat",
-                "--end-of-options",
-                id.as_str(),
-                "--",
-                ":/",
-            ],
-        )?;
-        if !diff.status.success() {
-            return Err(io_other(format!(
-                "git diff --stat failed: {}",
-                String::from_utf8_lossy(&diff.stderr).trim()
-            )));
-        }
-        let stat = String::from_utf8_lossy(&diff.stdout).trim().to_string();
-        Ok((!stat.is_empty()).then_some(stat))
     }
 
     /// Return whether the current workspace matches the given snapshot's
@@ -2198,34 +2208,6 @@ mod tests {
             "user-work-in-progress",
             "the scoped restore must leave the unrelated edit alone"
         );
-    }
-
-    #[test]
-    fn snapshot_diff_stat_describes_what_a_restore_would_change() {
-        let tmp = tempdir().unwrap();
-        let (repo, _home) = make_repo(tmp.path());
-        let changed = repo.work_tree().join("changed.txt");
-        let untouched = repo.work_tree().join("untouched.txt");
-
-        std::fs::write(&changed, b"v1").unwrap();
-        std::fs::write(&untouched, b"stable").unwrap();
-        let id = repo.snapshot("pre-turn:1").expect("snapshot");
-
-        std::fs::write(&changed, b"v2").unwrap();
-
-        let stat = repo
-            .snapshot_diff_stat(&id)
-            .expect("diff stat")
-            .expect("the snapshot differs, so something must be reported");
-        assert!(stat.contains("changed.txt"), "got: {stat}");
-        // The stat describes the restore's effect, not the workspace's whole
-        // uncommitted state — a file the restore will not touch must not appear.
-        assert!(!stat.contains("untouched.txt"), "got: {stat}");
-
-        // After restoring, the two sides agree: nothing left to report. (Which
-        // is why the caller must capture this *before* the restore runs.)
-        repo.restore(&id).expect("restore");
-        assert_eq!(repo.snapshot_diff_stat(&id).expect("diff stat"), None);
     }
 
     #[test]

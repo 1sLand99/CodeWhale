@@ -1288,6 +1288,11 @@ impl SessionManager {
         Ok(trimmed)
     }
 
+    /// Metadata of saved session `id`, read without loading its transcript.
+    pub fn load_session_metadata_by_id(&self, id: &str) -> std::io::Result<SessionMetadata> {
+        Self::load_session_metadata(&self.validated_session_path(id)?)
+    }
+
     fn validated_session_path(&self, id: &str) -> std::io::Result<PathBuf> {
         let trimmed = self.validated_session_id(id)?;
         Ok(self.sessions_dir.join(format!("{trimmed}.json")))

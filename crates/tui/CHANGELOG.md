@@ -59,6 +59,16 @@ quieter, and Fleet runs can be checked before they spend anything.
   replay the damage themselves when they return. That hold was added for the
   MATE flicker in [#6311](https://github.com/Hmbown/Codewhale/issues/6311)
   ([#6651](https://github.com/Hmbown/Codewhale/issues/6651)).
+- TUI `/undo` now restores only the files the undone tool call or turn
+  changed, and refuses, changing nothing, when one of them changed since.
+  Before, it checked out the whole snapshot tree, which also reverted later
+  edits to other files. It also finds restore points older than the newest
+  100 snapshots, and a forked session can undo the turns it inherited. It
+  waits for a post-turn snapshot that is still being written, leaves a
+  changed symlink or other non-regular path in place (and says so) instead
+  of refusing the whole undo, and writes nothing to the snapshot store when
+  it refuses outside trusted mode
+  ([#6644](https://github.com/Hmbown/Codewhale/issues/6644)).
 - A top-level `base_url` or `api_key` in `config.toml` now means one thing
   everywhere. Every reader used its own rule for which routes inherited it,
   which is how a DeepSeek endpoint became the Xiaomi MiMo route's and failed
