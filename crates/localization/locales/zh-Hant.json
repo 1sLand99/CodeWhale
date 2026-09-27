@@ -570,7 +570,7 @@
   "CmdTranslateDescription": "切換輸出翻譯為目前系統語言的開關狀態",
   "CmdTranslateOff": "輸出翻譯已關閉（顯示原始模型輸出）",
   "CmdTranslateOn": "輸出翻譯已開啟：模型回覆將以繁體中文顯示",
-  "CmdTrustDescription": "管理工作區信任與按路徑的白名單",
+  "CmdTrustDescription": "變更本工作階段的檔案信任；--save 也會持久儲存對專案技能、命令、鉤子、MCP 伺服器和上下文的信任",
   "CmdTurnInspectDescription": "Open the whole-turn inspector",
   "CmdUndoDescription": "移除最後一組訊息對",
   "CmdVerboseDescription": "切換實時思考內容的完整顯示",

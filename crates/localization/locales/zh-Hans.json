@@ -663,7 +663,7 @@
   "TranslationInProgress": "正在翻译助手输出...",
   "TranslationComplete": "翻译完成",
   "TranslationFailed": "翻译失败",
-  "CmdTrustDescription": "管理工作区信任与按路径的白名单",
+  "CmdTrustDescription": "更改本会话的文件信任；--save 还会持久保存对项目技能、命令、钩子、MCP 服务器和上下文的信任",
   "CmdWorkspaceDescription": "显示或切换当前工作空间 — worktrees 子命令打开 git 工作树管理器",
   "CmdUndoDescription": "移除最后一组消息对",
   "CmdVerboseDescription": "切换实时思考内容的完整显示",

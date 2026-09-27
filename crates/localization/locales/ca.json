@@ -659,7 +659,7 @@
   "TranslationInProgress": "S'està traduint la sortida de l'assistent...",
   "TranslationComplete": "Traducció completada",
   "TranslationFailed": "La traducció ha fallat",
-  "CmdTrustDescription": "Gestiona la confiança de l'espai de treball i la llista de permisos per ruta",
+  "CmdTrustDescription": "Canvia la confiança dels fitxers per a aquesta sessió; --save també desa la confiança en les habilitats, ordres, hooks, servidors MCP i context del projecte",
   "CmdWorkspaceDescription": "Mostra o canvia l'espai de treball actual — el subcomandament worktrees obre el gestor de worktrees de git",
   "CmdUndoDescription": "Elimina l'últim parell de missatges",
   "CmdVerboseDescription": "Commuta el pensament en viu complet a la transcripció",

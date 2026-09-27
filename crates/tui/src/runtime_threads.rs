@@ -5572,7 +5572,7 @@ impl RuntimeProcessOwnerLock {
                     Ok(()) => break,
                     Err(error) if Self::is_contention(&error) => {
                         if Instant::now() >= deadline {
-                            bail!("{RUNTIME_PROCESS_OWNER_LOCK_HELD}");
+                            return Err(Self::held_error());
                         }
                         std::thread::yield_now();
                         std::thread::sleep(Duration::from_millis(1));
@@ -5588,7 +5588,17 @@ impl RuntimeProcessOwnerLock {
             // A maintenance move renamed the file out of this store between
             // our open and our lock; the lock we hold is on the moved store.
         }
-        bail!("{RUNTIME_PROCESS_OWNER_LOCK_HELD}")
+        Err(Self::held_error())
+    }
+
+    /// A held lock is typed `WouldBlock` so callers (the credential scrub,
+    /// #6601) can tell a busy owner from a real lock failure.
+    fn held_error() -> anyhow::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            RUNTIME_PROCESS_OWNER_LOCK_HELD,
+        )
+        .into()
     }
 
     fn is_contention(error: &std::io::Error) -> bool {
@@ -13763,6 +13773,25 @@ impl RuntimeThreadManager {
                 state.and_then(|state| state.hook_executor.clone()),
             )
         };
+        // Runtime receipts always mask credentials, including when verbatim
+        // model-bound tool output was explicitly enabled. Resolve the active
+        // thread's key off the runtime and reuse the client's exact-value list.
+        let mut receipt_config = self.read_config().clone();
+        if let Some(state) = self.active.lock().await.engines.get(&thread_id) {
+            receipt_config.scope_to_provider_identity(&state.route_identity);
+        }
+        #[cfg(test)]
+        let ticket = crate::test_support::env_scope_ticket();
+        let receipt_secrets = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let _membership = crate::test_support::join_env_scope(ticket);
+            let active_key = receipt_config
+                .active_route_api_key_read_only()
+                .unwrap_or_default();
+            crate::client::configured_model_bound_secret_values(&receipt_config, &active_key)
+        })
+        .await
+        .context("Runtime receipt redaction setup failed")?;
         let mut latest_goal_snapshot: Option<crate::tools::goal::GoalSnapshot> = None;
         // Tool definitions of the finished turn's request surface, from the
         // final TurnComplete receipt. Goal settlement uses it to mirror the
@@ -14190,18 +14219,33 @@ impl RuntimeThreadManager {
                                         "response_redacted": true,
                                     }));
                                 } else {
+                                    // Durable receipt: credentials a tool
+                                    // printed are masked before they reach
+                                    // the item store or the event log (B1).
+                                    let content = crate::client::redact_model_bound_text(
+                                        &output.content,
+                                        &receipt_secrets,
+                                    );
                                     item.summary = summarize_text(
-                                        &format!("{name}: {}", output.content),
+                                        &format!("{name}: {content}"),
                                         SUMMARY_LIMIT,
                                     );
-                                    item.detail = Some(output.content.clone());
+                                    item.detail = Some(content);
                                     // `detail` is now the tool output, so the
                                     // call identity persisted at start must be
                                     // carried through metadata. Mark the
                                     // terminal result too so restart history
                                     // rebuild can re-emit the paired
                                     // tool_call/tool_result (#5823).
-                                    let mut meta = match output.metadata {
+                                    // Tool metadata carries output too
+                                    // (`exec_shell` keeps stdout/stderr
+                                    // summaries), so it is masked the same way.
+                                    let mut meta = match output.metadata.as_ref().map(|value| {
+                                        crate::client::redact_json_model_bound_text(
+                                            value,
+                                            &receipt_secrets,
+                                        )
+                                    }) {
                                         Some(Value::Object(map)) => Value::Object(map),
                                         _ => json!({}),
                                     };
@@ -14257,9 +14301,13 @@ impl RuntimeThreadManager {
                             }
                             Err(err) => {
                                 item.status = TurnItemLifecycleStatus::Failed;
+                                let err = crate::client::redact_model_bound_text(
+                                    &err.to_string(),
+                                    &receipt_secrets,
+                                );
                                 item.summary =
                                     summarize_text(&format!("{name} failed: {err}"), SUMMARY_LIMIT);
-                                item.detail = Some(err.to_string());
+                                item.detail = Some(err);
                             }
                         }
                         self.store.save_item(&item)?;
@@ -15005,7 +15053,8 @@ impl RuntimeThreadManager {
                             .await
                             .ok();
                             // Recorded and reported as a timeout, not the
-                            // operator's denial.
+                            // operator's denial; the engine refunds the call's
+                            // tool-call budget slot.
                             let _ = engine.deny_tool_call_timed_out(id).await;
                         }
                     }

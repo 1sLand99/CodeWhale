@@ -48,6 +48,7 @@ mod session_lifecycle_regression_tests;
 
 use std::sync::OnceLock;
 
+pub(crate) use groups::config::config::set_workspace_trust;
 pub use traits::CommandInfo;
 
 // Long-standing public paths that predate the group layout.
@@ -274,6 +275,9 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         .filter(|value| !value.is_empty());
 
     // Check user-defined commands FIRST so they can override built-ins.
+    // Workspace (repository) commands load only in a trusted workspace and
+    // never under a protected built-in such as /trust or /undo — the
+    // registry drops those at load.
     if let Some(result) = user_registry::try_dispatch(app, trimmed) {
         return result;
     }
@@ -549,6 +553,7 @@ mod tests {
     #[test]
     fn user_command_shadows_builtin_before_group_dispatch() {
         let temp = tempdir().unwrap();
+        crate::test_support::trust_workspace(temp.path());
         let commands_dir = temp.path().join(".codewhale").join("commands");
         std::fs::create_dir_all(&commands_dir).unwrap();
         std::fs::write(
@@ -572,6 +577,7 @@ mod tests {
     #[test]
     fn removed_user_command_reloads_and_falls_back_to_builtin() {
         let temp = tempdir().unwrap();
+        crate::test_support::trust_workspace(temp.path());
         let commands_dir = temp.path().join(".codewhale").join("commands");
         std::fs::create_dir_all(&commands_dir).unwrap();
         let command_path = commands_dir.join("help.md");

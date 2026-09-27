@@ -119,6 +119,7 @@ mod session_peek;
 mod session_projection;
 mod session_reconcile;
 mod session_resume;
+mod session_secret_scrub;
 mod settings;
 mod shell_dispatcher;
 mod skills;
@@ -395,6 +396,14 @@ enum SessionsCommand {
         /// Search sessions by title
         #[arg(short, long)]
         search: Option<String>,
+    },
+    /// Mask credentials that older builds stored in saved sessions' tool
+    /// output. Reports what it would change unless `--apply` is given. Run it
+    /// while no Codewhale session is open.
+    ScrubSecrets {
+        /// Rewrite the affected session files (default: report only)
+        #[arg(long, default_value_t = false)]
+        apply: bool,
     },
     /// Export a session as a full-fidelity tar.xz archive (complete context:
     /// system prompt, messages, tool calls and results, plus artifacts)
@@ -2333,6 +2342,7 @@ async fn run_async_main_dispatch(
                         &config,
                         &workspace,
                         cli.config.as_deref(),
+                        effective_config_profile(&cli).as_deref(),
                         probes,
                         plugin_registry.as_ref(),
                     )
@@ -2370,6 +2380,14 @@ async fn run_async_main_dispatch(
             } => match command {
                 None => list_sessions(limit, search),
                 Some(SessionsCommand::List { limit, search }) => list_sessions(limit, search),
+                Some(SessionsCommand::ScrubSecrets { apply }) => {
+                    run_sessions_scrub_secrets(
+                        apply,
+                        cli.config.clone(),
+                        effective_config_profile(&cli),
+                    )
+                    .await
+                }
                 Some(SessionsCommand::Export {
                     id,
                     output,
@@ -4560,6 +4578,7 @@ async fn run_doctor(
     config: &Config,
     workspace: &Path,
     config_path_override: Option<&Path>,
+    profile: Option<&str>,
     probes: crate::doctor::DoctorProbeRequest,
     plugins: &crate::plugins::PluginRegistry,
 ) {
@@ -4717,6 +4736,11 @@ async fn run_doctor(
         (aqua_r, aqua_g, aqua_b),
         (sky_r, sky_g, sky_b),
     );
+    print_doctor_stored_secrets_report(
+        config_path_override.map(Path::to_path_buf),
+        profile.map(str::to_owned),
+    )
+    .await;
 
     let (setup_state, setup_source) = doctor_setup_state(config, workspace);
     print_doctor_setup_report(
@@ -8240,6 +8264,161 @@ fn rustc_version() -> String {
 /// List saved sessions
 fn sessions_resume_command() -> &'static str {
     "codewhale resume"
+}
+
+/// Newest files per category (sessions/checkpoints and Runtime receipts) inspected;
+/// `codewhale sessions scrub-secrets` covers every file.
+const DOCTOR_SECRET_SCAN_FILES: usize = 50;
+
+/// B1 finding: sessions written before tool output was redacted at the
+/// transcript boundary can still hold live credentials. Report, never
+/// rewrite — scrubbing is the explicit `scrub-secrets` command. Doctor is a
+/// read-only diagnostic, so this resolves the sessions directory with the
+/// read-path resolver: it never creates the home or migrates a legacy tree.
+async fn print_doctor_stored_secrets_report(config_path: Option<PathBuf>, profile: Option<String>) {
+    use colored::Colorize;
+
+    let scan = tokio::task::spawn_blocking(move || -> Result<_> {
+        let sessions_dir = codewhale_config::resolve_state_dir("sessions")?;
+        let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+            task_manager::default_tasks_dir(),
+        );
+        let mut unreadable = Vec::new();
+        let files =
+            session_secret_scrub::session_files(&sessions_dir, &runtime.data_dir, &mut unreadable);
+        let total = files.len();
+        let checked = session_secret_scrub::doctor_files(files, DOCTOR_SECRET_SCAN_FILES);
+        let secrets = session_secret_scrub::configured_secrets(config_path, profile.as_deref())?;
+        let mut report = session_secret_scrub::scrub_files(&checked, None, &secrets)?;
+        report.unreadable.extend(unreadable);
+        Ok((report, total))
+    })
+    .await;
+    println!();
+    println!("{}", "Stored Sessions:".bold());
+    match scan {
+        Ok(Ok((report, total))) => println!("{}", doctor_stored_secrets_summary(&report, total)),
+        _ => println!("  ! stored credential scan could not be completed"),
+    }
+}
+
+fn doctor_stored_secrets_summary(
+    report: &session_secret_scrub::ScrubReport,
+    total: usize,
+) -> String {
+    let scope = if total > report.files_scanned {
+        format!(
+            "{} of {total}; newest up to {DOCTOR_SECRET_SCAN_FILES} per category: sessions/checkpoints and Runtime receipts",
+            report.files_scanned
+        )
+    } else {
+        format!("{total}")
+    };
+    let mut lines = Vec::new();
+    if report.flagged_files.is_empty() && report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ✓ no credentials found in stored tool output ({scope} files)"
+        ));
+    }
+    if !report.flagged_files.is_empty() {
+        lines.push(format!(
+            "  ✗ {} files hold credentials in stored tool output ({scope} checked)",
+            report.flagged_files.len()
+        ));
+        lines.push(format!(
+            "    fix: `{}` to review, then `--apply` to mask them; rotate any exposed credential",
+            session_secret_scrub::SCRUB_COMMAND
+        ));
+    }
+    if !report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ! scan incomplete: {} files or directories could not be read or parsed ({scope} checked)",
+            report.unreadable.len()
+        ));
+        for path in &report.unreadable {
+            lines.push(format!("    {}", path.display()));
+        }
+    }
+    lines.join("\n")
+}
+
+async fn run_sessions_scrub_secrets(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<String>,
+) -> Result<()> {
+    #[cfg(test)]
+    let ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(ticket);
+        run_sessions_scrub_secrets_blocking(apply, config_path, profile.as_deref())
+    })
+    .await?
+}
+
+fn run_sessions_scrub_secrets_blocking(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let manager = session_manager::SessionManager::default_location()?;
+    let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+        task_manager::default_tasks_dir(),
+    );
+    let mut unreadable = Vec::new();
+    let files = session_secret_scrub::session_files(
+        manager.sessions_dir(),
+        &runtime.data_dir,
+        &mut unreadable,
+    );
+    let secrets = session_secret_scrub::configured_secrets(config_path, profile)?;
+    let mut report =
+        session_secret_scrub::scrub_files(&files, apply.then_some(&manager), &secrets)?;
+    report.unreadable.extend(unreadable);
+    let affected = report.flagged_files.len();
+    if affected == 0 && report.unreadable.is_empty() && report.busy.is_empty() {
+        println!(
+            "No stored credentials found in tool output across {} files.",
+            report.files_scanned
+        );
+    } else if affected > 0 {
+        let verb = if apply { "Scrubbed" } else { "Found" };
+        println!(
+            "{verb} {} credential-bearing tool results in {affected} of {} session files:",
+            report.flagged_tool_results, report.files_scanned
+        );
+        for path in &report.flagged_files {
+            println!("  {}", path.display());
+        }
+        if !apply {
+            println!(
+                "Re-run with `{} --apply` to mask them (close open Codewhale sessions first). \
+                 Rotate any credential that was exposed: redaction cannot un-leak it.",
+                session_secret_scrub::SCRUB_COMMAND
+            );
+        }
+    }
+    if !report.unreadable.is_empty() {
+        println!(
+            "{} files or directories could not be read or parsed and were left untouched.",
+            report.unreadable.len()
+        );
+        for path in &report.unreadable {
+            println!("  {}", path.display());
+        }
+    }
+    if !report.busy.is_empty() {
+        println!(
+            "{} credential-bearing Runtime files were skipped because their stores are active. Close the session or Runtime server and re-run `{} --apply`:",
+            report.busy.len(),
+            session_secret_scrub::SCRUB_COMMAND
+        );
+        for path in &report.busy {
+            println!("  {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 fn list_sessions(limit: usize, search: Option<String>) -> Result<()> {
@@ -13292,6 +13471,61 @@ mod doctor_legacy_state_tests {
     use std::ffi::OsString;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn doctor_reports_unreadable_files_without_clean_marker() {
+        let tmp = TempDir::new().unwrap();
+        let broken = tmp.path().join("broken.json");
+        fs::write(&broken, "{\"access_token\": unfinished").unwrap();
+        let mut report =
+            session_secret_scrub::scrub_files(std::slice::from_ref(&broken), None, &[]).unwrap();
+        let summary = doctor_stored_secrets_summary(&report, 1);
+        assert!(summary.contains("scan incomplete") && summary.contains("broken.json"));
+        assert!(!summary.contains('✓') && !summary.contains("no credentials found"));
+        report.flagged_files.push(tmp.path().join("dirty.json"));
+        let summary = doctor_stored_secrets_summary(&report, 2);
+        assert!(summary.contains("hold credentials") && summary.contains("scan incomplete"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scrub_does_not_block_tokio_worker() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let _env = lock_test_env();
+        let tmp = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let _runtime = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", tmp.path().join("runtime"));
+        let manager = session_manager::SessionManager::default_location().unwrap();
+        fs::write(manager.sessions_dir().join("dirty.json"), serde_json::json!({"type":"tool_result", "content":"sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij"}).to_string()).unwrap();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let progressed = Arc::new(AtomicBool::new(false));
+        let progress_for_lock = progressed.clone();
+        let holder = std::thread::spawn(move || {
+            manager
+                .with_session_file_lock("dirty", || {
+                    locked_tx.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    Ok(progress_for_lock.load(Ordering::SeqCst))
+                })
+                .unwrap()
+                .unwrap()
+        });
+        locked_rx.recv().unwrap();
+        let tick = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            progressed.store(true, Ordering::SeqCst);
+        });
+        run_sessions_scrub_secrets(true, None, None).await.unwrap();
+        assert!(
+            holder.join().unwrap(),
+            "the timer must run while the scrub waits on the file lock"
+        );
+        tick.await.unwrap();
+    }
 
     struct EnvVarRestore {
         key: &'static str,

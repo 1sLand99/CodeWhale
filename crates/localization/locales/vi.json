@@ -663,7 +663,7 @@
   "TranslationInProgress": "Đang dịch câu trả lời của trợ lý...",
   "TranslationComplete": "Đã dịch xong",
   "TranslationFailed": "Dịch thất bại",
-  "CmdTrustDescription": "Quản lý quyền tin cậy không gian làm việc và danh sách trắng theo đường dẫn",
+  "CmdTrustDescription": "Thay đổi mức tin cậy tệp cho phiên này; --save cũng lưu mức tin cậy cho kỹ năng, lệnh, hook, máy chủ MCP và ngữ cảnh dự án",
   "CmdWorkspaceDescription": "Hiển thị hoặc chuyển đổi không gian làm việc hiện tại — lệnh con worktrees mở trình quản lý worktree git",
   "CmdUndoDescription": "Xóa cặp tin nhắn gần nhất",
   "CmdVerboseDescription": "Bật/Tắt chế độ hiển thị đầy đủ quá trình suy nghĩ trực tiếp",

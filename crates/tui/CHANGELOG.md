@@ -85,6 +85,15 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- `/trust on|off` changes file-tool trust for this session. Add `--save` to
+  persist workspace trust for project skills, commands, hooks, MCP servers,
+  and project context. Skipped-skill notices stay out of conversation titles
+  and user bubbles, and trust changes append a correction to the model's history.
+- Stored-secret cleanup skips busy Runtime stores and reports unreadable paths
+  while continuing through other files. Configured storage roots may be symlinks;
+  discovered symlinks are not followed. Cleanup also masks current configured
+  credentials, and doctor's bounded scan reserves capacity for saved transcripts
+  and checkpoints separately from Runtime receipts.
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you

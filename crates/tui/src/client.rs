@@ -708,7 +708,10 @@ fn push_file_backed_model_bound_secrets(values: &mut Vec<String>) {
     }
 }
 
-fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -> Vec<String> {
+pub(crate) fn configured_model_bound_secret_values(
+    config: &Config,
+    active_api_key: &str,
+) -> Vec<String> {
     let mut values = Vec::new();
     push_model_bound_secret(&mut values, Some(active_api_key));
     push_model_bound_secret(&mut values, config.sandbox_api_key.as_deref());
@@ -848,7 +851,7 @@ fn request_query_secret_values(url: &reqwest::Url) -> Vec<String> {
     values
 }
 
-fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
+pub(crate) fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
     let mut redacted = text.to_string();
     for secret in exact_secret_values {
         redacted = redacted.replace(secret, codewhale_config::persistence::REDACTED);
@@ -857,6 +860,32 @@ fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String
     // are masked here; key-only hits (`password: credentials?.password`) stay
     // byte-exact. Logs and previews keep the broad key-based scrubber.
     codewhale_config::persistence::redact_model_bound_secrets(&redacted)
+}
+
+pub(crate) fn redact_json_model_bound_text(
+    value: &serde_json::Value,
+    secrets: &[String],
+) -> serde_json::Value {
+    fn mask_exact_values(value: &mut serde_json::Value, secrets: &[String]) {
+        match value {
+            serde_json::Value::String(text) => *text = redact_model_bound_text(text, secrets),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    mask_exact_values(value, secrets);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values_mut() {
+                    mask_exact_values(value, secrets);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Preserve sensitive-key masking and the existing recursion-depth bound.
+    let mut redacted = codewhale_config::persistence::redact_json_model_bound_secrets(value);
+    mask_exact_values(&mut redacted, secrets);
+    redacted
 }
 
 // === Helpers ===
@@ -1798,6 +1827,18 @@ impl CodewhaleClient {
     /// routing summaries.
     pub(crate) fn redact_model_bound_text(&self, text: &str) -> String {
         redact_model_bound_text(text, &self.model_bound_secret_values)
+    }
+
+    /// Redact tool output as it enters the transcript. Same masking as the
+    /// request boundary, including the confirmed `[redaction] model_bound`
+    /// opt-out: a user who chose to let the model see file bytes verbatim
+    /// keeps that, and everyone else never stores a live credential.
+    pub(crate) fn redact_tool_output_for_transcript(&self, text: &str) -> String {
+        if self.model_bound_masking {
+            redact_model_bound_text(text, &self.model_bound_secret_values)
+        } else {
+            text.to_string()
+        }
     }
 
     /// Alternate models share this client's frozen endpoint and declarations.

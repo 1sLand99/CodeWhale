@@ -3905,9 +3905,43 @@ impl Engine {
         Some(format!("Active goal token budget: {token_budget}"))
     }
 
-    async fn add_session_message(&mut self, message: Message) {
+    async fn add_session_message(&mut self, mut message: Message) {
+        self.redact_tool_results_for_transcript(&mut message);
         self.session.add_message(message);
         self.emit_session_updated().await;
+    }
+
+    /// Scrub credentials from tool output once, as it enters the transcript
+    /// (B1). The transcript is what session JSON, the journal and every
+    /// later request are built from, so a token a tool printed is never
+    /// written to disk live. Honors the confirmed `[redaction] model_bound`
+    /// opt-out the same way the request boundary does.
+    fn redact_tool_results_for_transcript(&self, message: &mut Message) {
+        for block in &mut message.content {
+            let ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            *content = self.redact_tool_output_for_transcript(content);
+            for value in content_blocks.iter_mut().flatten() {
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                    && let Some(serde_json::Value::String(text)) = value.get_mut("text")
+                {
+                    *text = self.redact_tool_output_for_transcript(text);
+                }
+            }
+        }
+    }
+
+    fn redact_tool_output_for_transcript(&self, text: &str) -> String {
+        match self.codewhale_client.as_ref() {
+            Some(client) => client.redact_tool_output_for_transcript(text),
+            None => codewhale_config::persistence::redact_model_bound_secrets(text),
+        }
     }
 
     async fn add_interrupted_assistant_text(&mut self, text: &str) {
@@ -7339,6 +7373,25 @@ impl Engine {
         self.refresh_system_prompt_from_context_with_reason(&context, reason);
     }
 
+    // KV-cache effect: append-only user history. SessionUpdated persists this
+    // warning even when an explicit prompt rebuild replaces the system prefix.
+    fn record_project_trust_warning(&mut self) {
+        let warning = crate::skills::untrusted_project_skills_warning(&self.session.workspace);
+        let previous = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| crate::runtime_handoff::is_workspace_trust_message(message));
+        if warning.is_none() && previous.is_none() {
+            return;
+        }
+        let message = crate::runtime_handoff::workspace_trust_runtime_message(warning.as_deref());
+        if previous != Some(&message) {
+            self.session.add_message(message);
+        }
+    }
+
     /// Recompose the stable system prompt from current context. When the bytes
     /// actually change (hash differs), record `reason` as the declared cause
     /// so the turn loop's prefix check re-pins the KV-cache prefix under a
@@ -7351,6 +7404,7 @@ impl Engine {
         context: &NextTurnPromptContext,
         reason: &str,
     ) {
+        self.record_project_trust_warning();
         let stable_prompt = self.compose_stable_system_prompt(context);
 
         let stable_hash = system_prompt_hash(stable_prompt.as_ref());
@@ -7384,6 +7438,7 @@ impl Engine {
         &mut self,
         context: &NextTurnPromptContext,
     ) -> Option<String> {
+        self.record_project_trust_warning();
         if self.session.system_prompt_override {
             return None;
         }
