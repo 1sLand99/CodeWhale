@@ -549,31 +549,17 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             session_id,
             snapshot: to_value(snapshot),
         },
+        Event::WorkspaceSnapshotTaken { snapshot } => wire::EventMsg::WorkspaceSnapshotTaken {
+            thread_id,
+            session_id,
+            snapshot: to_value(snapshot),
+        },
         Event::RouteDispatched { turn_id, route } => wire::EventMsg::RouteDispatched {
             thread_id,
             session_id,
             turn_id: turn_id.clone(),
             route: route_to_wire(route),
         },
-        Event::TurnWorkspaceSnapshots {
-            turn_id, pre_turn, ..
-        } => {
-            let (pre_turn_snapshot_id, unavailable_reason) = match pre_turn {
-                crate::core::events::WorkspaceSnapshot::Taken(id) => (Some(id.clone()), None),
-                crate::core::events::WorkspaceSnapshot::Unavailable(reason) => {
-                    (None, Some(reason.as_str().to_string()))
-                }
-                // A pre-turn snapshot is taken before the event exists.
-                crate::core::events::WorkspaceSnapshot::Pending => (None, None),
-            };
-            wire::EventMsg::TurnWorkspaceSnapshots {
-                thread_id,
-                session_id,
-                turn_id: turn_id.clone(),
-                pre_turn_snapshot_id,
-                unavailable_reason,
-            }
-        }
         Event::TurnComplete {
             usage,
             parent_route_usage,
@@ -1459,6 +1445,17 @@ mod tests {
                 error: Some("stopped".into()),
                 tool_catalog: None,
                 base_url: Some("https://example.invalid".into()),
+            },
+            Event::WorkspaceSnapshotTaken {
+                snapshot: crate::snapshot::WorkspaceSnapshotRef {
+                    kind: crate::snapshot::WorkspaceSnapshotKind::Tool,
+                    snapshot_id: "a".repeat(40),
+                    tree_id: "b".repeat(40),
+                    session_id: "thr_1".into(),
+                    tool_call_id: Some("c1".into()),
+                    write_paths: Some(vec!["src/lib.rs".into()]),
+                    changed_paths: Some(Vec::new()),
+                },
             },
             Event::RoutedTurnUsage {
                 usage: usage.clone(),

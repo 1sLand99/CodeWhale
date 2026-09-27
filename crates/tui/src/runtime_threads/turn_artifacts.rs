@@ -100,9 +100,10 @@ pub struct TurnArtifactRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     pub source: TurnArtifactSource,
-    /// A snapshot id `POST /v1/threads/{id}/file-revert` accepts for this
-    /// file on this thread. Present only when that call can succeed: the
-    /// snapshot exists and is tagged with the thread's bound session.
+    /// A restore point `POST /v1/threads/{id}/file-revert` accepts for this
+    /// file on this thread: the tree id of a `tool` or `pre_turn` snapshot
+    /// recorded on this turn (`TurnRecord::workspace_snapshots`), so the
+    /// thread owns it (#6621). Absent when the turn recorded none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_snapshot_id: Option<String>,
     pub recorded_at: DateTime<Utc>,
@@ -117,9 +118,10 @@ pub(crate) struct ToolArtifactContext<'a> {
     /// and canonicalized when that differs (tools resolve against the
     /// configured path, which may traverse a symlink such as macOS `/var`).
     pub workspace_roots: &'a [PathBuf],
-    /// The thread's bound saved-session id. A restore point is published
-    /// only when the snapshot is tagged with exactly this session.
-    pub bound_session_id: Option<&'a str>,
+    /// The `tool` restore point recorded on this turn for this call (its
+    /// tree id), when there is one. Only a receipt the thread owns is
+    /// advertised.
+    pub restore_snapshot_id: Option<&'a str>,
     pub recorded_at: DateTime<Utc>,
 }
 
@@ -239,18 +241,11 @@ pub(crate) fn artifact_refs_from_tool_metadata(
         recorded_at: context.recorded_at,
     };
 
-    // A `tool:<call>` restore point is usable only on a thread bound to the
-    // session the snapshot is tagged with; file-revert refuses otherwise.
-    let restore_snapshot_id = metadata
-        .get("restore_snapshot_id")
-        .and_then(Value::as_str)
+    // The call's own `tool` restore point, from the receipt recorded on this
+    // turn — never from the tool's result metadata, which a tool controls.
+    let restore_snapshot_id = context
+        .restore_snapshot_id
         .filter(|id| crate::snapshot::SnapshotId::is_well_formed(id))
-        .filter(|_| {
-            let tag = metadata
-                .get("restore_snapshot_session_id")
-                .and_then(Value::as_str);
-            tag.is_some() && tag == context.bound_session_id
-        })
         .map(str::to_owned);
 
     if let Some(mutation) = metadata.get("mutation") {
@@ -442,23 +437,8 @@ pub enum TurnWorkspaceReason {
     NotCaptured,
     /// The Runtime restarted before the delta settled.
     RuntimeRestarted,
-    /// The post-turn snapshot did not finish within the settlement bound.
-    SettlementTimeout,
     /// The snapshots exist but diffing them failed.
     DeltaFailed,
-}
-
-impl From<crate::core::events::SnapshotUnavailable> for TurnWorkspaceReason {
-    fn from(reason: crate::core::events::SnapshotUnavailable) -> Self {
-        use crate::core::events::SnapshotUnavailable;
-        match reason {
-            SnapshotUnavailable::Disabled => Self::SnapshotsDisabled,
-            SnapshotUnavailable::WorkspaceTooLarge => Self::WorkspaceTooLarge,
-            SnapshotUnavailable::TooManyFiles => Self::TooManyFiles,
-            SnapshotUnavailable::UnsafeLocation => Self::UnsafeLocation,
-            SnapshotUnavailable::Failed => Self::SnapshotFailed,
-        }
-    }
 }
 
 /// The workspace half of a turn's artifact accounting.
@@ -515,7 +495,8 @@ pub(crate) struct WorkspaceDelta {
 }
 
 /// Convert a snapshot delta into turn refs. `restore_snapshot_id` is the
-/// pre-turn snapshot when file-revert would accept it for this thread.
+/// pre-turn restore point recorded on the turn, which file-revert accepts
+/// for this thread.
 pub(crate) fn delta_refs(
     delta: &crate::snapshot::SnapshotDelta,
     restore_snapshot_id: Option<&str>,
@@ -695,13 +676,13 @@ mod tests {
 
     const SNAPSHOT: &str = "0123456789abcdef0123456789abcdef01234567";
 
-    fn context<'a>(workspace: &'a [PathBuf], bound: Option<&'a str>) -> ToolArtifactContext<'a> {
+    fn context<'a>(workspace: &'a [PathBuf], restore: Option<&'a str>) -> ToolArtifactContext<'a> {
         ToolArtifactContext {
             item_id: "item_1",
             tool_call_id: "call_1",
             tool_name: "apply_patch",
             workspace_roots: workspace,
-            bound_session_id: bound,
+            restore_snapshot_id: restore,
             recorded_at: Utc::now(),
         }
     }
@@ -726,12 +707,10 @@ mod tests {
                 ],
                 "renames": [{ "from": "old.txt", "to": "new.txt", "size": 4, "sha256": digest }]
             },
-            "restore_snapshot_id": SNAPSHOT,
-            "restore_snapshot_session_id": "sess-1",
         });
         let refs = artifact_refs_from_tool_metadata(
             &metadata,
-            &context(&[workspace.path().to_path_buf()], Some("sess-1")),
+            &context(&[workspace.path().to_path_buf()], Some(SNAPSHOT)),
         );
         let paths: Vec<&str> = refs.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(
@@ -773,36 +752,27 @@ mod tests {
     }
 
     #[test]
-    fn restore_point_is_published_only_for_the_bound_session_tag() {
+    fn restore_point_comes_only_from_the_recorded_receipt() {
         let workspace = tempfile::tempdir().unwrap();
-        let metadata = |tag: Option<&str>| {
-            let mut value = json!({
-                "mutation": { "files": [{ "path": "a.txt", "outcome": "created" }] },
-                "restore_snapshot_id": SNAPSHOT,
-            });
-            if let Some(tag) = tag {
-                value["restore_snapshot_session_id"] = json!(tag);
-            }
-            value
-        };
-        let restore = |value: &Value, bound| {
+        // A tool cannot name its own restore point: result metadata that
+        // claims one is ignored (#6621).
+        let metadata = json!({
+            "mutation": { "files": [{ "path": "a.txt", "outcome": "created" }] },
+            "restore_snapshot_id": SNAPSHOT,
+            "restore_snapshot_session_id": "sess-1",
+        });
+        let restore = |recorded| {
             artifact_refs_from_tool_metadata(
-                value,
-                &context(&[workspace.path().to_path_buf()], bound),
+                &metadata,
+                &context(&[workspace.path().to_path_buf()], recorded),
             )[0]
             .restore_snapshot_id
             .clone()
         };
-        assert_eq!(
-            restore(&metadata(Some("sess-1")), Some("sess-1")).as_deref(),
-            Some(SNAPSHOT)
-        );
-        // Tagged with another (e.g. a random engine) session: file-revert
-        // would refuse it, so it is not advertised.
-        assert_eq!(restore(&metadata(Some("random")), Some("sess-1")), None);
-        // Unbound threads cannot file-revert at all.
-        assert_eq!(restore(&metadata(Some("sess-1")), None), None);
-        assert_eq!(restore(&metadata(None), Some("sess-1")), None);
+        let recorded = "fedcba9876543210fedcba9876543210fedcba98";
+        assert_eq!(restore(Some(recorded)).as_deref(), Some(recorded));
+        assert_eq!(restore(None), None);
+        assert_eq!(restore(Some("not-a-snapshot")), None);
     }
 
     #[test]

@@ -39,6 +39,7 @@ use crate::route_runtime::resolve_runtime_route;
 use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
+use crate::snapshot::{WorkspaceSnapshotKind, WorkspaceSnapshotRef};
 use crate::tools::goal::{
     GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
 };
@@ -76,14 +77,14 @@ use super::authority::agent_approval_mode_for_turn;
 use super::authority::{
     PolicyNarrowingEvent, TurnAuthority, effective_input_policy, shell_policy_for_mode,
 };
-use super::events::{Event, SnapshotUnavailable, TurnOutcomeStatus, TurnRoute, WorkspaceSnapshot};
+use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
     McpManagerUpdate, Op, ProviderRuntimeStatus, SessionContextBudget, SessionSnapshot, TurnSpec,
     USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
 use super::session::Session;
 use super::tool_parser;
-use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
+use super::turn::{TurnContext, format_snapshot_label, post_turn_snapshot};
 use codewhale_models::Role;
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
@@ -372,6 +373,26 @@ pub struct EngineConfig {
     /// first init. `0` disables the cap. Resolved from
     /// `[snapshots] max_workspace_gb` × 1 GB at engine construction.
     pub snapshots_max_workspace_bytes: u64,
+    /// The host records every `Event::WorkspaceSnapshotTaken` receipt on the
+    /// running turn and resolves turn-scoped undo from them (the Runtime
+    /// API). The engine then:
+    ///
+    /// - takes the post-turn snapshot *before* `TurnComplete`, so its receipt
+    ///   belongs to the turn it closes — one arriving after `TurnComplete`
+    ///   would land after the turn settled, on the next turn, or nowhere once
+    ///   the engine is evicted;
+    /// - bounds every tool call that may write (any call not read-only) with
+    ///   a `tool` snapshot before it and a `post_tool` snapshot after it, so
+    ///   the spans in which the turn's own tools ran are known and a change
+    ///   made outside them (another thread, an editor) is never taken for the
+    ///   turn's;
+    /// - reports on each receipt the paths changed since the turn's previous
+    ///   one.
+    ///
+    /// Interactive hosts keep `false`: the TUI does not record receipts,
+    /// keeps the post-turn snapshot off its input path (#234), and snapshots
+    /// only before file-writing tools.
+    pub record_restore_points: bool,
     /// Post-edit LSP diagnostics injection (#136). When `None`, the engine
     /// constructs a disabled manager so the field is always present.
     pub lsp_config: Option<crate::lsp::LspConfig>,
@@ -577,6 +598,7 @@ impl Default for EngineConfig {
             snapshots_enabled: true,
             snapshots_max_workspace_bytes:
                 crate::snapshot::DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT,
+            record_restore_points: false,
             lsp_config: None,
             runtime_services: RuntimeToolServices::default(),
             subagent_model_overrides: HashMap::new(),
@@ -936,6 +958,11 @@ pub struct Engine {
     pub(super) cancel_reason: Arc<StdMutex<Option<CancelReason>>>,
     tool_exec_lock: Arc<RwLock<()>>,
     turn_counter: u64,
+    /// Tree of the running turn's latest restore-point snapshot, the base the
+    /// next receipt's `changed_paths` is computed against. `None` before a
+    /// turn's first snapshot and after one failed, so a span that cannot be
+    /// accounted for is reported as unknown rather than folded into the next.
+    restore_point_since: Option<crate::snapshot::SnapshotId>,
     /// Post-edit LSP diagnostics injection (#136). Populated unconditionally
     /// — when LSP is disabled in config, this is an inert manager that
     /// always returns `None` from `diagnostics_for`.
@@ -1927,6 +1954,7 @@ impl Engine {
             cancel_reason: cancel_reason.clone(),
             tool_exec_lock,
             turn_counter: 0,
+            restore_point_since: None,
             lsp_manager,
             pending_lsp_blocks: Vec::new(),
             sandbox_backend,
@@ -2021,7 +2049,15 @@ impl Engine {
             })
             .await;
 
-        let pre_turn_workspace = self.capture_pre_turn_workspace(&snapshot_prompt).await;
+        // The command runs from this snapshot to the post-turn one, so the
+        // receipt names it as the call that span belongs to.
+        self.take_restore_point(
+            WorkspaceSnapshotKind::PreTurn,
+            format_snapshot_label("pre-turn", self.turn_counter, Some(&snapshot_prompt)),
+            Some(tool_id.as_str()),
+            None,
+        )
+        .await;
 
         self.emit_pending_snapshot_notices().await;
 
@@ -2127,9 +2163,9 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
-        drop(turn_control);
-        self.finish_turn_workspace_capture(turn_id, pre_turn_workspace, snapshot_prompt)
+        self.post_turn_snapshot_before_complete(&snapshot_prompt)
             .await;
+        drop(turn_control);
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
@@ -2142,66 +2178,98 @@ impl Engine {
                 base_url: None,
             })
             .await;
+
+        self.post_turn_snapshot_after_complete("post-shell-turn-snapshot", snapshot_prompt);
     }
 
-    /// Take this turn's `pre-turn:<seq>` snapshot on the blocking pool. The
-    /// result is kept: it is one side of the pair a host diffs to learn what
-    /// the turn changed, and the restore point file-revert accepts.
-    async fn capture_pre_turn_workspace(&self, prompt: &str) -> WorkspaceSnapshot {
+    /// Take one workspace snapshot for the running turn and report it as an
+    /// `Event::WorkspaceSnapshotTaken` receipt. Returns whether it was taken.
+    ///
+    /// A snapshot that fails (or is gated off) reports nothing: the host then
+    /// has no such restore point for the turn and must say so rather than
+    /// guess one. With [`EngineConfig::record_restore_points`] the receipt
+    /// also carries the paths changed since the turn's previous snapshot,
+    /// and a failure leaves the next span unknown instead of merging it into
+    /// the one before.
+    pub(crate) async fn take_restore_point(
+        &mut self,
+        kind: WorkspaceSnapshotKind,
+        label: String,
+        tool_call_id: Option<&str>,
+        write_paths: Option<Vec<String>>,
+    ) -> bool {
         if !self.config.snapshots_enabled {
-            return WorkspaceSnapshot::Unavailable(SnapshotUnavailable::Disabled);
+            return false;
         }
+        let record = self.config.record_restore_points;
+        let since = if record && kind != WorkspaceSnapshotKind::PreTurn {
+            self.restore_point_since.clone()
+        } else {
+            None
+        };
         let workspace = self.session.workspace.clone();
-        let seq = self.turn_counter;
         let cap = self.config.snapshots_max_workspace_bytes;
-        let prompt = prompt.to_string();
-        let session_id = self.session.id.clone();
-        tokio::task::spawn_blocking(move || {
-            pre_turn_snapshot(&workspace, seq, cap, Some(&prompt), Some(&session_id))
+        let sid = self.session.id.clone();
+        let taken = tokio::task::spawn_blocking(move || {
+            super::turn::restore_point_snapshot(&workspace, &label, cap, Some(&sid), since.as_ref())
         })
         .await
-        .map_or(
-            WorkspaceSnapshot::Unavailable(SnapshotUnavailable::Failed),
-            WorkspaceSnapshot::from,
-        )
-    }
-
-    /// Start the `post-turn:<seq>` snapshot and report the turn's snapshot
-    /// pair. Called immediately before `TurnComplete` on every path that took
-    /// (or tried) a pre-turn snapshot. The snapshot itself runs on the
-    /// blocking pool and never delays `TurnComplete` (#234); the event's
-    /// receiver resolves when it finishes, and closes if the task dies.
-    async fn finish_turn_workspace_capture(
-        &self,
-        turn_id: String,
-        pre_turn: WorkspaceSnapshot,
-        prompt: String,
-    ) {
-        let (post_tx, post_rx) = tokio::sync::watch::channel(WorkspaceSnapshot::Pending);
-        if self.config.snapshots_enabled {
-            let workspace = self.session.workspace.clone();
-            let seq = self.turn_counter;
-            let cap = self.config.snapshots_max_workspace_bytes;
-            let session_id = self.session.id.clone();
-            crate::utils::spawn_blocking_supervised("post-turn-snapshot", move || {
-                let taken =
-                    post_turn_snapshot(&workspace, seq, cap, Some(&prompt), Some(&session_id));
-                let _ = post_tx.send(WorkspaceSnapshot::from(taken));
-            });
-        } else {
-            let _ = post_tx.send(WorkspaceSnapshot::Unavailable(
-                SnapshotUnavailable::Disabled,
-            ));
+        .ok()
+        .flatten();
+        let Some((taken, changed)) = taken else {
+            self.restore_point_since = None;
+            return false;
+        };
+        if record {
+            self.restore_point_since = Some(taken.tree.clone());
         }
+        let mut snapshot = WorkspaceSnapshotRef::new(kind, &taken, &self.session.id, tool_call_id);
+        snapshot.write_paths = write_paths;
+        snapshot.changed_paths = changed.map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        });
         let _ = self
             .tx_event
-            .send(Event::TurnWorkspaceSnapshots {
-                turn_id,
-                session_id: self.session.id.clone(),
-                pre_turn,
-                post_turn: post_rx,
-            })
+            .send(Event::WorkspaceSnapshotTaken { snapshot })
             .await;
+        true
+    }
+
+    /// With [`EngineConfig::record_restore_points`], take the post-turn
+    /// snapshot now — before `TurnComplete` — and report it.
+    async fn post_turn_snapshot_before_complete(&mut self, prompt: &str) {
+        if !self.config.record_restore_points {
+            return;
+        }
+        let label = format_snapshot_label("post-turn", self.turn_counter, Some(prompt));
+        self.take_restore_point(WorkspaceSnapshotKind::PostTurn, label, None, None)
+            .await;
+    }
+
+    /// Without [`EngineConfig::record_restore_points`], take the post-turn
+    /// snapshot fire-and-forget: `TurnComplete` is already emitted, so the UI
+    /// is unblocked and the user can type / select / paste immediately
+    /// (#234). The git work proceeds on the blocking pool.
+    fn post_turn_snapshot_after_complete(&self, task: &'static str, prompt: String) {
+        if !self.config.snapshots_enabled || self.config.record_restore_points {
+            return;
+        }
+        let post_workspace = self.session.workspace.clone();
+        let post_seq = self.turn_counter;
+        let post_cap = self.config.snapshots_max_workspace_bytes;
+        let post_sid = self.session.id.clone();
+        crate::utils::spawn_blocking_supervised(task, move || {
+            post_turn_snapshot(
+                &post_workspace,
+                post_seq,
+                post_cap,
+                Some(&prompt),
+                Some(&post_sid),
+            );
+        });
     }
 
     /// Apply a user/host mode-or-posture change to the live session.
@@ -5433,7 +5501,13 @@ impl Engine {
         // failure is non-fatal (the helper logs at WARN).
         // The label carries a truncated first line of the prompt so
         // `/restore` listings are human-readable.
-        let pre_turn_workspace = self.capture_pre_turn_workspace(&content).await;
+        self.take_restore_point(
+            WorkspaceSnapshotKind::PreTurn,
+            format_snapshot_label("pre-turn", self.turn_counter, Some(&content)),
+            None,
+            None,
+        )
+        .await;
 
         self.emit_pending_snapshot_notices().await;
 
@@ -5457,12 +5531,6 @@ impl Engine {
                 .tx_event
                 .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
                 .await;
-            self.finish_turn_workspace_capture(
-                turn.id.clone(),
-                pre_turn_workspace,
-                snapshot_prompt_post,
-            )
-            .await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -5778,13 +5846,9 @@ impl Engine {
                 .send(Event::ToolRequestSnapshot { snapshot })
                 .await;
         }
+        self.post_turn_snapshot_before_complete(&snapshot_prompt_post)
+            .await;
         drop(turn_control);
-        self.finish_turn_workspace_capture(
-            turn.id.clone(),
-            pre_turn_workspace,
-            snapshot_prompt_post,
-        )
-        .await;
         // `event_sent` means the TurnComplete event reached the UI channel —
         // never that the user saw model output. (#6184: the old `delivered`
         // name was read as user-visible delivery on Interrupted turns that
@@ -5808,6 +5872,10 @@ impl Engine {
             event_sent = turn_complete_event_sent,
             "engine turn completion settled"
         );
+
+        // Post-turn snapshot, unless it was already taken before
+        // TurnComplete (see `EngineConfig::record_restore_points`).
+        self.post_turn_snapshot_after_complete("post-turn-snapshot", snapshot_prompt_post);
 
         // ── Background advisor watcher (#3982) ────────────────────────────
         // Fire-and-forget: TurnComplete is already emitted. The advisor
@@ -7779,7 +7847,7 @@ fn file_tool_permission_paths(tool_name: &str, input: &Value) -> Option<Vec<Stri
 /// Target paths when a call is one of the canonical workspace file-write
 /// tools (`write_file` / `edit_file` / `apply_patch`), `None` for any other
 /// tool. Feeds the in-workspace write carve-out (#5185).
-fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
+pub(crate) fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
     let canonical = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     if !matches!(canonical, "write_file" | "edit_file" | "apply_patch") {
         return None;
@@ -7824,8 +7892,15 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     config: EngineConfig,
     api_config: &Config,
     authoritative_route_config: Arc<parking_lot::RwLock<Config>>,
+    model_client: Option<SharedModelClient>,
 ) -> (EngineHandle, tokio::task::JoinHandle<()>) {
-    let (mut engine, handle) = Engine::new(config, api_config);
+    // `model_client` replaces only the model I/O boundary (see
+    // `Engine::new_with_model_client`); hosts pass `None` for the provider
+    // client the route resolves.
+    let (mut engine, handle) = match model_client {
+        Some(client) => Engine::new_with_model_client(config, api_config, client),
+        None => Engine::new(config, api_config),
+    };
     engine.authoritative_route_config = Some(authoritative_route_config);
 
     let worker = spawn_supervised(

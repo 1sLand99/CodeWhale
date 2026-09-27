@@ -639,7 +639,7 @@ mod tests {
         app.current_session_id = Some("session-a".into());
         assert!(
             crate::core::turn::pre_turn_snapshot(&workspace, 1, 1024, None, Some("session-a"))
-                .is_err()
+                .is_none()
         );
         assert_eq!(
             crate::core::turn::take_snapshots_disabled_notices(&workspace, Some("session-a")).len(),
@@ -667,7 +667,8 @@ mod tests {
         );
         app.current_session_id = Some("session-a".into());
         assert!(
-            crate::core::turn::pre_turn_snapshot(&workspace, 2, 0, None, Some("session-a")).is_ok()
+            crate::core::turn::pre_turn_snapshot(&workspace, 2, 0, None, Some("session-a"))
+                .is_some()
         );
         assert!(
             !status(&mut app)

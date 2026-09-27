@@ -164,6 +164,81 @@ mod recovery {
         history_case(true).await
     }
 
+    /// #6659: an unbound thread (no saved session) keeps one engine session
+    /// id — its own thread id — across its first spawn, an LRU eviction and a
+    /// Runtime restart. That id keys the thread's spill directory
+    /// (`sessions/<id>/artifacts/`), its workspace snapshot tags and its shell
+    /// jobs, so none of them scatter per spawn.
+    #[tokio::test]
+    async fn unbound_thread_keeps_one_engine_session_id_across_respawns() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let manager_cfg = RuntimeThreadManagerConfig {
+            max_active_threads: 1,
+            ..test_manager_config(dir.path().join("runtime"))
+        };
+        let mut manager =
+            RuntimeThreadManager::open(config(), workspace.clone(), manager_cfg.clone())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        assert_eq!(thread.session_id, None, "the thread is unbound");
+        let history: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"hi"}]},
+            {"role":"assistant","content":[{"type":"text","text":"hello"}]}
+        ]))?;
+        manager
+            .seed_thread_from_messages(&thread.id, &history)
+            .await?;
+
+        let engine_session_id = |manager: &RuntimeThreadManager| {
+            let manager = manager.clone();
+            let thread_id = thread.id.clone();
+            async move {
+                anyhow::Ok(
+                    manager
+                        .get_engine(&thread_id)
+                        .await?
+                        .get_session_snapshot()
+                        .await?
+                        .session_id,
+                )
+            }
+        };
+
+        let first = engine_session_id(&manager).await?;
+        assert_eq!(first, thread.id);
+
+        // Loading another thread's engine evicts this one.
+        let other = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        manager.get_engine(&other.id).await?;
+        assert!(!manager.active.lock().await.engines.contains_key(&thread.id));
+        let after_eviction = engine_session_id(&manager).await?;
+        assert_eq!(after_eviction, first, "respawn after eviction");
+
+        close_engines(&manager).await?;
+        drop(manager);
+        manager = RuntimeThreadManager::open(config(), workspace, manager_cfg)?;
+        let after_restart = engine_session_id(&manager).await?;
+        assert_eq!(after_restart, first, "respawn after restart");
+        assert_eq!(
+            manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .thread
+                .session_id,
+            None,
+            "the engine identity does not bind the thread to a saved session"
+        );
+        close_engines(&manager).await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn saved_checkpoint_validation_and_forks_preserve_history() -> Result<()> {
         let _env = crate::test_support::lock_test_env();
@@ -1942,6 +2017,7 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         agent_mail_message_id: None,
         artifacts: Vec::new(),
         workspace: None,
+        workspace_snapshots: Vec::new(),
     }
 }
 
@@ -16169,6 +16245,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         agent_mail_message_id: None,
         artifacts: Vec::new(),
         workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
     manager.store.save_turn(&TurnRecord {
         max_output_tokens: None,
@@ -16206,6 +16283,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         agent_mail_message_id: None,
         artifacts: Vec::new(),
         workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
     drop(manager);
 
@@ -16401,6 +16479,7 @@ fn seed_turns_with_user_messages(
             agent_mail_message_id: None,
             artifacts: Vec::new(),
             workspace: None,
+            workspace_snapshots: Vec::new(),
         })?;
         turn_ids.push(turn_id);
     }
@@ -17219,6 +17298,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
         agent_mail_message_id: None,
         artifacts: Vec::new(),
         workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -17323,6 +17403,7 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
         agent_mail_message_id: None,
         artifacts: Vec::new(),
         workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -17422,6 +17503,7 @@ fn restart_rebuild_skips_steers_the_engine_never_delivered() -> Result<()> {
         agent_mail_message_id: None,
         artifacts: Vec::new(),
         workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -17522,6 +17604,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         agent_mail_message_id: None,
         artifacts: Vec::new(),
         workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -19594,13 +19677,50 @@ async fn workspace_turn_fixture() -> Result<WorkspaceTurnFixture> {
     })
 }
 
+/// Take one real restore point in the fixture workspace, tagged the way a
+/// Runtime engine tags it (the thread's own id, #6621).
+fn fixture_restore_point(
+    fixture: &WorkspaceTurnFixture,
+    kind: crate::snapshot::WorkspaceSnapshotKind,
+    label: &str,
+    tool_call_id: Option<&str>,
+) -> Result<crate::snapshot::WorkspaceSnapshotRef> {
+    let (taken, _) = crate::core::turn::restore_point_snapshot(
+        &fixture.workspace,
+        label,
+        0,
+        Some(&fixture.thread.id),
+        None,
+    )
+    .ok_or_else(|| anyhow!("snapshot {label} failed"))?;
+    Ok(crate::snapshot::WorkspaceSnapshotRef::new(
+        kind,
+        &taken,
+        &fixture.thread.id,
+        tool_call_id,
+    ))
+}
+
+/// Which restore points the scripted engine reports for the turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScriptedSnapshots {
+    /// `pre_turn`, `tool` (before `call_patch`) and `post_turn`.
+    All,
+    /// Only `pre_turn`: the closing snapshot failed and reported nothing.
+    PreTurnOnly,
+    /// None: snapshots off, gated, or failed.
+    None,
+}
+
 /// Drive one scripted turn: a file-tool write with its receipt, a shell-style
-/// write with none, then the engine's snapshot pair and TurnComplete.
+/// write with none, the engine's restore-point receipts (all before
+/// TurnComplete, as a recording host gets them) and TurnComplete. Returns the
+/// terminal turn and the receipts sent.
 async fn run_workspace_turn(
     fixture: &WorkspaceTurnFixture,
-    pre_turn: crate::core::events::WorkspaceSnapshot,
-    post_turn: watch::Receiver<crate::core::events::WorkspaceSnapshot>,
-) -> Result<TurnRecord> {
+    scripted: ScriptedSnapshots,
+) -> Result<(TurnRecord, Vec<crate::snapshot::WorkspaceSnapshotRef>)> {
+    use crate::snapshot::WorkspaceSnapshotKind;
     let manager = &fixture.manager;
     let mut harness = install_mock_engine(manager, &fixture.thread.id).await;
     let turn = manager
@@ -19624,7 +19744,18 @@ async fn run_workspace_turn(
             route: None,
         })
         .await?;
-    fs::write(fixture.workspace.join("notes.md"), "# notes\n")?;
+    let mut sent = Vec::new();
+    if scripted != ScriptedSnapshots::None {
+        let pre =
+            fixture_restore_point(fixture, WorkspaceSnapshotKind::PreTurn, "pre-turn:1", None)?;
+        harness
+            .tx_event
+            .send(EngineEvent::WorkspaceSnapshotTaken {
+                snapshot: pre.clone(),
+            })
+            .await?;
+        sent.push(pre);
+    }
     harness
         .tx_event
         .send(EngineEvent::ToolCallStarted {
@@ -19633,6 +19764,22 @@ async fn run_workspace_turn(
             input: json!({}),
         })
         .await?;
+    if scripted == ScriptedSnapshots::All {
+        let tool = fixture_restore_point(
+            fixture,
+            WorkspaceSnapshotKind::Tool,
+            "tool:call_patch",
+            Some("call_patch"),
+        )?;
+        harness
+            .tx_event
+            .send(EngineEvent::WorkspaceSnapshotTaken {
+                snapshot: tool.clone(),
+            })
+            .await?;
+        sent.push(tool);
+    }
+    fs::write(fixture.workspace.join("notes.md"), "# notes\n")?;
     harness
         .tx_event
         .send(EngineEvent::ToolCallComplete {
@@ -19650,15 +19797,21 @@ async fn run_workspace_turn(
         .await?;
     // A shell command's write: no receipt reaches the runtime.
     fs::write(fixture.workspace.join("out.md"), "shell output\n")?;
-    harness
-        .tx_event
-        .send(EngineEvent::TurnWorkspaceSnapshots {
-            turn_id: "engine-turn".to_string(),
-            session_id: "engine-session".to_string(),
-            pre_turn,
-            post_turn,
-        })
-        .await?;
+    if scripted == ScriptedSnapshots::All {
+        let post = fixture_restore_point(
+            fixture,
+            WorkspaceSnapshotKind::PostTurn,
+            "post-turn:1",
+            None,
+        )?;
+        harness
+            .tx_event
+            .send(EngineEvent::WorkspaceSnapshotTaken {
+                snapshot: post.clone(),
+            })
+            .await?;
+        sent.push(post);
+    }
     harness
         .tx_event
         .send(EngineEvent::TurnComplete {
@@ -19671,7 +19824,7 @@ async fn run_workspace_turn(
             base_url: None,
         })
         .await?;
-    wait_for_terminal_turn(manager, &turn.id).await
+    Ok((wait_for_terminal_turn(manager, &turn.id).await?, sent))
 }
 
 async fn wait_for_turn_workspace(
@@ -19695,59 +19848,32 @@ async fn wait_for_turn_workspace(
     }
 }
 
-/// The workspace delta between the engine's pre/post snapshots settles into
-/// the turn aggregate: a shell-written file appears with its revision next
-/// to the tool-written one, `turn.artifacts` is published, and the list
-/// route serves it only for the owning thread.
+/// The workspace delta between the pre/post-turn restore points recorded on
+/// the turn settles into the turn aggregate: a shell-written file appears
+/// with its revision next to the tool-written one, every restore point a ref
+/// advertises is one recorded on the thread's own turn (#6621),
+/// `turn.artifacts` is published, and the list route serves it only for the
+/// owning thread.
 #[tokio::test]
 async fn turn_workspace_delta_settles_shell_writes_into_the_aggregate() -> Result<()> {
     let fixture = workspace_turn_fixture().await?;
-    let pre = crate::core::turn::pre_turn_snapshot(
-        &fixture.workspace,
-        1,
-        0,
-        None,
-        Some("engine-session"),
-    )
-    .map_err(|reason| anyhow!("pre-turn snapshot: {reason:?}"))?;
-    let (post_tx, post_rx) = watch::channel(crate::core::events::WorkspaceSnapshot::Pending);
-    let turn = run_workspace_turn(
-        &fixture,
-        crate::core::events::WorkspaceSnapshot::Taken(pre.clone()),
-        post_rx,
-    )
-    .await?;
+    let (turn, receipts) = run_workspace_turn(&fixture, ScriptedSnapshots::All).await?;
+    let [pre, tool, post] = receipts.as_slice() else {
+        bail!("three receipts: {receipts:?}");
+    };
+    // The receipts are the turn's own restore points.
+    assert_eq!(turn.workspace_snapshots, receipts);
 
-    // Terminal first, pending: the post-turn snapshot is still running.
-    let workspace = turn.workspace.clone().expect("workspace accounting");
-    assert_eq!(workspace.state, TurnWorkspaceState::Pending);
-    assert_eq!(
-        workspace.pre_turn_snapshot_id.as_deref(),
-        Some(pre.as_str())
-    );
-    assert_eq!(
-        turn.artifacts
-            .iter()
-            .map(|r| r.path.as_str())
-            .collect::<Vec<_>>(),
-        ["notes.md"]
-    );
-
-    let post = crate::core::turn::post_turn_snapshot(
-        &fixture.workspace,
-        1,
-        0,
-        None,
-        Some("engine-session"),
-    )
-    .map_err(|reason| anyhow!("post-turn snapshot: {reason:?}"))?;
-    post_tx.send(crate::core::events::WorkspaceSnapshot::Taken(post.clone()))?;
     let turn =
         wait_for_turn_workspace(&fixture.manager, &turn.id, TurnWorkspaceState::Settled).await?;
     let workspace = turn.workspace.clone().unwrap();
     assert_eq!(
+        workspace.pre_turn_snapshot_id.as_deref(),
+        Some(pre.tree_id.as_str())
+    );
+    assert_eq!(
         workspace.post_turn_snapshot_id.as_deref(),
-        Some(post.as_str())
+        Some(post.tree_id.as_str())
     );
     let shell = turn
         .artifacts
@@ -19764,8 +19890,12 @@ async fn turn_workspace_delta_settles_shell_writes_into_the_aggregate() -> Resul
         Some(crate::hashing::sha256_hex(b"shell output\n").as_str())
     );
     assert_eq!(shell.size, Some(13));
-    // An unbound thread cannot file-revert, so no restore point is claimed.
-    assert_eq!(shell.restore_snapshot_id, None);
+    // The thread owns the turn's pre-turn restore point, so file-revert
+    // accepts it for a shell-written file, bound session or not.
+    assert_eq!(
+        shell.restore_snapshot_id.as_deref(),
+        Some(pre.tree_id.as_str())
+    );
     let notes = turn
         .artifacts
         .iter()
@@ -19776,6 +19906,23 @@ async fn turn_workspace_delta_settles_shell_writes_into_the_aggregate() -> Resul
         turn_artifacts::TurnArtifactSource::ToolMutation
     );
     assert_eq!(notes.tool_call_id.as_deref(), Some("call_patch"));
+    assert_eq!(
+        notes.restore_snapshot_id.as_deref(),
+        Some(pre.tree_id.as_str())
+    );
+    // The item names its own call's `tool` restore point.
+    let patch_item = turn
+        .item_ids
+        .iter()
+        .map(|id| fixture.manager.store.load_item(id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .find(|item| !item.artifacts.is_empty())
+        .expect("patch item");
+    assert_eq!(
+        patch_item.artifacts[0].restore_snapshot_id.as_deref(),
+        Some(tool.tree_id.as_str())
+    );
 
     // The settled turn is saved before `turn.artifacts` is emitted, so the
     // event can trail the state this test just observed.
@@ -19834,21 +19981,16 @@ async fn turn_workspace_delta_settles_shell_writes_into_the_aggregate() -> Resul
 }
 
 /// Snapshots off: the turn still lists what its tool receipts recorded, and
-/// says plainly why there is no workspace delta.
+/// says plainly why there is no workspace delta. A turn that recorded no
+/// restore point with snapshots on says it captured none; one whose closing
+/// snapshot failed keeps its pre-turn restore point and says so.
 #[tokio::test]
-async fn disabled_snapshots_leave_the_item_aggregate_with_a_reason() -> Result<()> {
+async fn a_turn_without_its_snapshot_pair_keeps_the_item_aggregate_with_a_reason() -> Result<()> {
     let fixture = workspace_turn_fixture().await?;
-    let disabled = crate::core::events::WorkspaceSnapshot::Unavailable(
-        crate::core::events::SnapshotUnavailable::Disabled,
-    );
-    let (_post_tx, post_rx) = watch::channel(disabled.clone());
-    let turn = run_workspace_turn(&fixture, disabled, post_rx).await?;
+    let (turn, _) = run_workspace_turn(&fixture, ScriptedSnapshots::None).await?;
     let workspace = turn.workspace.clone().expect("workspace accounting");
     assert_eq!(workspace.state, TurnWorkspaceState::Unavailable);
-    assert_eq!(
-        workspace.reason,
-        Some(TurnWorkspaceReason::SnapshotsDisabled)
-    );
+    assert_eq!(workspace.reason, Some(TurnWorkspaceReason::NotCaptured));
     assert_eq!(
         turn.artifacts
             .iter()
@@ -19856,52 +19998,28 @@ async fn disabled_snapshots_leave_the_item_aggregate_with_a_reason() -> Result<(
             .collect::<Vec<_>>(),
         ["notes.md"]
     );
-    Ok(())
-}
+    assert_eq!(turn.artifacts[0].restore_snapshot_id, None);
 
-/// A post-turn snapshot that never resolves ends as `settlement_timeout`
-/// (the bound is shortened here), and the result is still published.
-#[tokio::test]
-async fn an_unresolved_post_turn_snapshot_times_out_honestly() -> Result<()> {
-    let fixture = workspace_turn_fixture().await?;
-    let pre = crate::core::turn::pre_turn_snapshot(&fixture.workspace, 1, 0, None, None)
-        .map_err(|reason| anyhow!("pre-turn snapshot: {reason:?}"))?;
-    let (_post_tx, post_rx) = watch::channel(crate::core::events::WorkspaceSnapshot::Pending);
-    let turn = run_workspace_turn(
-        &fixture,
-        crate::core::events::WorkspaceSnapshot::Taken(pre.clone()),
-        post_rx.clone(),
-    )
-    .await?;
-    fixture
-        .manager
-        .settle_turn_workspace(
-            &fixture.thread.id,
-            &turn.id,
-            TurnWorkspaceCapture {
-                snapshot_session_id: "engine-session".to_string(),
-                pre_turn: crate::core::events::WorkspaceSnapshot::Taken(pre),
-                post_turn: post_rx,
-            },
-            Duration::from_millis(50),
-        )
-        .await?;
-    let turn = fixture.manager.store.load_turn(&turn.id)?;
-    let workspace = turn.workspace.clone().unwrap();
+    let (turn, receipts) = run_workspace_turn(&fixture, ScriptedSnapshots::PreTurnOnly).await?;
+    let workspace = turn.workspace.clone().expect("workspace accounting");
     assert_eq!(workspace.state, TurnWorkspaceState::Unavailable);
+    assert_eq!(workspace.reason, Some(TurnWorkspaceReason::SnapshotFailed));
+    assert_eq!(
+        workspace.pre_turn_snapshot_id.as_deref(),
+        Some(receipts[0].tree_id.as_str())
+    );
+
+    fixture.manager.config.write().snapshots = Some(crate::config::SnapshotsConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    let (turn, _) = run_workspace_turn(&fixture, ScriptedSnapshots::None).await?;
+    let workspace = turn.workspace.clone().expect("workspace accounting");
     assert_eq!(
         workspace.reason,
-        Some(TurnWorkspaceReason::SettlementTimeout)
+        Some(TurnWorkspaceReason::SnapshotsDisabled)
     );
-    assert_eq!(
-        turn.artifacts.len(),
-        1,
-        "item refs survive: {:?}",
-        turn.artifacts
-    );
-    let events = fixture.manager.events_since(&fixture.thread.id, None)?;
-    assert!(events.iter().any(|event| event.event == "turn.artifacts"
-        && event.payload["workspace"]["reason"] == "settlement_timeout"));
+    assert_eq!(turn.artifacts.len(), 1);
     Ok(())
 }
 

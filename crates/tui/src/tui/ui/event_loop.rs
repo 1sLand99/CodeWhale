@@ -2533,6 +2533,10 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::ToolRequestSnapshot { snapshot } => {
                         app.session.last_tool_request_snapshot = Some(snapshot);
                     }
+                    // Runtime-API hosts record restore-point receipts on their
+                    // turn records; the TUI's `/undo` resolves its own session's
+                    // snapshots from the store.
+                    EngineEvent::WorkspaceSnapshotTaken { .. } => {}
                     EngineEvent::RouteDispatched { turn_id, route } => {
                         if app.runtime_turn_id.as_deref() == Some(turn_id.as_str()) {
                             active_translation_client = match exact_translation_client(
@@ -2549,9 +2553,6 @@ pub(crate) async fn run_event_loop(
                             active_translation_route = Some(route);
                         }
                     }
-                    // The TUI keeps its own undo/restore flow; only Runtime
-                    // hosts settle a turn's workspace delta.
-                    EngineEvent::TurnWorkspaceSnapshots { .. } => {}
                     EngineEvent::TurnComplete {
                         usage,
                         parent_route_usage,
