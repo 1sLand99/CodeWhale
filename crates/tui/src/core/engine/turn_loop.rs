@@ -557,12 +557,24 @@ impl Engine {
                 "event": "tool.approval_decision",
                 "tool_id": approval_id,
                 "tool_name": tool_name,
-                "decision": if matches!(decision, Ok(ApprovalResult::Approved)) { "approved" } else { "denied" },
+                "decision": match decision {
+                    Ok(ApprovalResult::Approved) => "approved",
+                    Ok(ApprovalResult::TimedOut) => "timeout",
+                    _ => "denied",
+                },
                 "caller": "repl_fence",
             }));
             match decision {
                 Ok(ApprovalResult::Approved) => true,
                 Ok(ApprovalResult::Denied) => return Some("not approved".to_string()),
+                // An expired card is not the user's denial (#6601): refund
+                // the budget slot and say the approval timed out.
+                Ok(ApprovalResult::TimedOut) => {
+                    tool_call_budget.refund();
+                    return Some(
+                        "the approval request timed out before anyone answered".to_string(),
+                    );
+                }
                 Ok(ApprovalResult::RetryWithPolicy(_)) => {
                     return Some(
                         "inline REPL blocks cannot run under a changed sandbox policy".to_string(),

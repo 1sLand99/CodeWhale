@@ -873,7 +873,7 @@ fn snapshot_turn_changes(
         }
         let (pre, post, _, _) = &pairs[index];
         let (paths, truncated) = repo
-            .changed_paths_between(pre, post, MAX_FILES_PER_ACTION)
+            .path_changes_between(pre, post, MAX_FILES_PER_ACTION)
             .map_err(|error| error.to_string())?;
         let files = paths
             .into_iter()

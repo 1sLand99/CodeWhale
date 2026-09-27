@@ -4781,15 +4781,16 @@ async fn readonly_pipeline_preserves_arguments_and_disables_git_helpers() {
         .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
     let tool = BashTool::new("Bash");
     for command in ["sort * | cat", "sed -n 1p * | cat", "cat * | cat"] {
-        let result = tool
-            .execute(json!({"command": command}), &ctx)
-            .await
-            .unwrap();
-        assert!(
-            !result.success,
-            "literal wildcard has no matching operand: {command}"
-        );
-        assert!(!result.content.contains("private-marker"));
+        // #6675: a word-leading unquoted `*` is refused before anything runs
+        // (its matches could be option-shaped names like the ones above).
+        let result = tool.execute(json!({"command": command}), &ctx).await;
+        match result {
+            Err(error) => assert!(
+                error.to_string().contains("unquoted `*`"),
+                "{command}: {error}"
+            ),
+            Ok(result) => panic!("{command} must be refused, ran: {}", result.content),
+        }
         assert_eq!(
             std::fs::read_to_string(&sentinel).unwrap(),
             "private-marker\n"
@@ -5277,6 +5278,9 @@ fn managed_background_shell_outlives_spawning_thread_but_not_the_tui() {
     assert!(
         survivors.is_empty(),
         "background processes outlived the SIGKILLed TUI: {survivors:?} of shell/grandchild {pids:?}"
+    );
+}
+
 /// The auto-approved `note` tool appends to the configured notes file. A
 /// committed symlink (`notes.md -> ~/.zshrc`) or a symlinked notes directory
 /// must not redirect that append outside the workspace.

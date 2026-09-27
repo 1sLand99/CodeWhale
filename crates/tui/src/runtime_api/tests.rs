@@ -22336,6 +22336,8 @@ fn the_mobile_page_follows_agents_by_name() {
         !html.contains("\"Sub-agent \" + payload.agent_id"),
         "never shows the raw id"
     );
+}
+
 /// #6621: a Runtime thread owns the workspace restore points recorded on its
 /// own turns, for every kind of thread, through the HTTP API and with real
 /// engines built by `ensure_engine_loaded` (only the model client is

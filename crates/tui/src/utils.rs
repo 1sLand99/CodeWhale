@@ -12,6 +12,11 @@ use codewhale_models::{ContentBlock, Message};
 use ignore::WalkBuilder;
 use std::io;
 
+// Split out so the integration harness can `#[path]`-include it with
+// `skills/install.rs`, which reads registry downloads through it.
+mod response_body;
+pub use response_body::read_response_body_capped;
+
 /// A writer that counts bytes written without storing them.
 pub(crate) struct CountingWriter {
     count: usize,
@@ -685,34 +690,6 @@ pub fn open_append(path: &Path) -> std::io::Result<std::io::BufWriter<std::fs::F
 pub fn flush_and_sync(writer: &mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()> {
     writer.flush()?;
     writer.get_ref().sync_all()
-}
-
-/// Read a whole response body, failing as soon as it would exceed `max_bytes`.
-///
-/// A declared `Content-Length` over the cap is refused before anything is
-/// read; chunked or length-less bodies are bounded while streaming, so a
-/// server cannot make the caller buffer an unbounded body before a size check.
-pub async fn read_response_body_capped(
-    response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>> {
-    use futures_util::StreamExt;
-
-    if let Some(len) = response.content_length()
-        && len > max_bytes as u64
-    {
-        anyhow::bail!("response body of {len} bytes exceeds {max_bytes} bytes — aborting");
-    }
-    let mut stream = response.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| anyhow::anyhow!("failed to read response body: {e}"))?;
-        if buf.len().saturating_add(chunk.len()) > max_bytes {
-            anyhow::bail!("response body exceeds {max_bytes} bytes — aborting");
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf)
 }
 
 /// Open a URL in the system's default browser.

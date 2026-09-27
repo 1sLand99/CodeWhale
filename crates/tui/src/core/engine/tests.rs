@@ -20860,7 +20860,8 @@ async fn trust_warning_is_internal_and_tracks_current_state() {
     assert!(crate::runtime_handoff::is_runtime_owned_user_message(
         &warning
     ));
-    assert!(crate::tui::history::history_cells_from_message(&warning).is_empty());
+    // The transcript side (no history cell for it) is pinned in
+    // `tui::history::tests`, keeping this runtime test off the UI crate path.
     assert!(
         crate::compaction::retained_user_messages(std::slice::from_ref(&warning), 4096).is_empty()
     );

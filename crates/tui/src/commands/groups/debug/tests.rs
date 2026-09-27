@@ -2503,6 +2503,8 @@ fn patch_undo_outside_trusted_mode_writes_no_snapshot() {
     );
     assert_eq!(fx.repo.list(usize::MAX).unwrap().len(), before);
     assert_eq!(fx.read("a.txt"), "a1");
+}
+
 #[test]
 fn receipts_command_is_registered_and_reads_the_transcript() {
     assert_eq!(

@@ -31249,6 +31249,9 @@ fn the_git_probe_keeps_running_through_a_turn_while_the_git_view_shows() {
     app.work_surface.panel = crate::tui::work_surface::RailPanel::Git;
     assert!(super::event_loop::git_probe_allowed(&app, false));
     assert!(super::event_loop::git_probe_allowed(&app, true));
+}
+
+#[test]
 fn background_review_shell_completion_survives_unobserved_live_and_missing_snapshots() {
     use super::task_projection::project_shell_jobs;
     use crate::tools::shell::ShellStatus;

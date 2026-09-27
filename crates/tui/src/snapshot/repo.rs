@@ -81,7 +81,7 @@ pub struct Snapshot {
 }
 
 /// One path that differs between two snapshots
-/// ([`SnapshotRepo::changed_paths_between`]).
+/// ([`SnapshotRepo::path_changes_between`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotPathChange {
     /// Workspace-relative path, as git names it.
@@ -1294,7 +1294,7 @@ impl SnapshotRepo {
     /// caller that prints one must escape it. Both trees are read from the side repo; neither the
     /// work tree nor the index is touched. At most `limit` paths are
     /// returned; the flag says whether more differed.
-    pub fn changed_paths_between(
+    pub fn path_changes_between(
         &self,
         from: &SnapshotId,
         to: &SnapshotId,

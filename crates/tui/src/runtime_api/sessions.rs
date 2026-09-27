@@ -869,6 +869,7 @@ pub(super) async fn save_current_session(
                 message: format!(
                     "Session '{requested}' belongs to thread {other}; save this thread without a session_id, or into its own session"
                 ),
+                code: None,
             });
         }
     }

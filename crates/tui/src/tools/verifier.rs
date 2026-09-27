@@ -2228,7 +2228,7 @@ mod tests {
             skipped_reason: None,
             timeout: Duration::from_secs(30),
         };
-        let result = run_gate(gate).await;
+        let result = run_gate(gate, "env-probe-test").await;
         assert_eq!(result.stdout.trim(), "unset|declared", "{result:?}");
     }
 }
