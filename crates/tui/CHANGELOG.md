@@ -16,6 +16,12 @@ Planned for Codewhale v0.10.1: a reliability and first-run release. Turns that
 stall now say so, approvals keep what you approved, plugin suggestions are
 quieter, and Fleet runs can be checked before they spend anything.
 
+### Security
+
+- Harden workspace instruction, note, and anchor file access with shared
+  no-follow reads and writes. Compaction loads pinned anchors only from
+  trusted workspaces. Validate registry skill names before selecting cache paths.
+
 ### Contributors
 
 - **[@gaord](https://github.com/gaord)** — let a client fork a thread at a named turn ([#6580](https://github.com/Hmbown/Codewhale/pull/6580)), let undo roll back files for the turn it is undoing ([#6483](https://github.com/Hmbown/Codewhale/pull/6483)), stopped resume and fork from duplicating threads and sessions ([#6406](https://github.com/Hmbown/Codewhale/pull/6406)), and exposed user-defined provider routes to native clients ([#6404](https://github.com/Hmbown/Codewhale/pull/6404)).
