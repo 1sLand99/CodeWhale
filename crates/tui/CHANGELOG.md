@@ -51,6 +51,22 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
+  every frame on focus loss, so on Windows Terminal, macOS and other
+  terminals a window sitting behind another one looked frozen until you
+  clicked back into it. Frames are now held only on GTK/VTE terminals, which
+  replay the damage themselves when they return. That hold was added for the
+  MATE flicker in [#6311](https://github.com/Hmbown/Codewhale/issues/6311)
+  ([#6651](https://github.com/Hmbown/Codewhale/issues/6651)).
+- A top-level `base_url` or `api_key` in `config.toml` now means one thing
+  everywhere. Every reader used its own rule for which routes inherited it,
+  which is how a DeepSeek endpoint became the Xiaomi MiMo route's and failed
+  with DeepSeek's 401. Old files keep working: the keys are read as
+  `[providers.deepseek]` (or the vendor whose official host they name), the
+  next save moves them there with a one-time backup and a one-line note, and
+  a value that disagrees with its table is left for `codewhale config migrate
+  --prefer` to settle. `codewhale config doctor` shows what is in use
+  ([#6394](https://github.com/Hmbown/Codewhale/issues/6394)).
 - `codewhale exec --auto` no longer exits 141 with no output when a child
   it writes to, such as a stdio MCP server, closes its pipe early. Headless
   exec now ignores SIGPIPE while it runs, as the interactive TUI already did,
@@ -59,6 +75,8 @@ quieter, and Fleet runs can be checked before they spend anything.
   answer: the markup is removed, and an answer that was only a tool call
   fails at once with the reason and a pointer to `--auto`, instead of asking
   the model again and blaming an incomplete provider response.
+- Resuming a session keeps its "Resumed:" confirmation on screen instead of
+  replacing it with "Make room automatically: on" when nothing was switched.
 - The installation page is generated from `docs/INSTALL.md`, so the website
   and the guide can no longer disagree; broken anchors and unsafe links fail
   the build ([#6450](https://github.com/Hmbown/Codewhale/pull/6450)).
@@ -135,6 +153,12 @@ quieter, and Fleet runs can be checked before they spend anything.
   marked `[rlm_query incomplete: …]` instead of an empty string, its model
   calls appear in the parent turn's record, and its history is no longer
   trimmed ([#6511](https://github.com/Hmbown/Codewhale/issues/6511)).
+- Starting without a network connection no longer drops images you attach to a
+  model that accepts them. The offline model list lagged behind providers and
+  listed Claude and others as text-only; it can now only say a model takes
+  images, never that it refuses them, and a provider that does refuse gets one
+  resend without the image and a message saying so
+  ([#6396](https://github.com/Hmbown/Codewhale/issues/6396)).
 
 ### Removed
 
