@@ -4707,6 +4707,8 @@ impl Config {
     /// Whether organization requirements, rather than a user-editable config
     /// key, own approval posture. User config still outranks TUI settings, but
     /// `/config approval_mode ... --save` may edit that user-owned key.
+    /// Sandbox requirements also lock posture: Full Access changes the implicit
+    /// sandbox. This conservatively locks even posture changes that would fit.
     #[must_use]
     pub fn approval_policy_is_requirements_managed(&self) -> bool {
         let path = self
@@ -4725,7 +4727,10 @@ impl Config {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|contents| toml::from_str::<RequirementsFile>(&contents).ok())
-            .is_none_or(|requirements| !requirements.allowed_approval_policies.is_empty())
+            .is_none_or(|requirements| {
+                !requirements.allowed_approval_policies.is_empty()
+                    || !requirements.allowed_sandbox_modes.is_empty()
+            })
     }
 
     #[must_use]
@@ -11718,25 +11723,63 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
         )
     })?;
 
-    if !requirements.allowed_approval_policies.is_empty()
-        && let Some(policy) = config.approval_policy.as_ref()
-    {
-        let policy = policy.to_ascii_lowercase();
-        if !requirements
-            .allowed_approval_policies
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case(&policy))
-        {
+    if !requirements.allowed_approval_policies.is_empty() {
+        use codewhale_execpolicy::ApprovalMode;
+
+        let policy = config
+            .approval_policy
+            .as_deref()
+            .unwrap_or("on-request")
+            .to_ascii_lowercase();
+        if !requirements.allowed_approval_policies.iter().any(|p| {
+            match (
+                ApprovalMode::from_config_value(p),
+                ApprovalMode::from_config_value(&policy),
+            ) {
+                (Some(allowed), Some(effective)) => allowed == effective,
+                _ => p.eq_ignore_ascii_case(&policy),
+            }
+        }) {
             anyhow::bail!(
                 "approval_policy '{policy}' is not allowed by requirements ({})",
                 requirements.allowed_approval_policies.join(", ")
             );
         }
     }
-    if !requirements.allowed_sandbox_modes.is_empty()
-        && let Some(mode) = config.sandbox_mode.as_ref()
-    {
-        let mode = mode.to_ascii_lowercase();
+    if !requirements.allowed_sandbox_modes.is_empty() {
+        // At config load there is no live turn mode yet. Check the Agent
+        // baseline with the engine's resolver; Plan can narrow it later.
+        // Explicit settings retain their existing allow-list check.
+        let mode = config
+            .sandbox_mode
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| {
+                use crate::core::authority::{SandboxNetworkAccess, sandbox_policy_for_turn};
+                use crate::sandbox::SandboxPolicy;
+                use codewhale_execpolicy::ApprovalMode;
+
+                // Sandbox requirements lock approval posture at startup,
+                // excluding saved preferences and every YOLO override.
+                let approval = config
+                    .approval_policy
+                    .as_deref()
+                    .and_then(ApprovalMode::from_config_value)
+                    .unwrap_or_default();
+                match sandbox_policy_for_turn(
+                    codewhale_config::AppMode::Agent,
+                    approval,
+                    None,
+                    Path::new("."),
+                    SandboxNetworkAccess::from_config(config.sandbox_network_access),
+                ) {
+                    SandboxPolicy::ReadOnly => "read-only",
+                    SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
+                    SandboxPolicy::DangerFullAccess => "danger-full-access",
+                    SandboxPolicy::ExternalSandbox { .. } => "external-sandbox",
+                }
+                .to_string()
+            });
         if !requirements
             .allowed_sandbox_modes
             .iter()

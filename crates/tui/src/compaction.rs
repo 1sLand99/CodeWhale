@@ -300,11 +300,12 @@ const COMPACTION_CHECKPOINT_PROVENANCE: &str = "<!-- codewhale.compaction-checkp
 const COMPACTION_SUMMARY_BEGIN: &str = "<!-- compaction-summary:begin -->";
 const COMPACTION_SUMMARY_END: &str = "<!-- compaction-summary:end -->";
 
-/// Whether text carries a legacy checkpoint marker anywhere in it.
+/// Whether text starts with a legacy checkpoint header. A message that only
+/// quotes a marker later in its text is the user's, not a checkpoint (#6680).
 fn is_legacy_compaction_summary_text(text: &str) -> bool {
     LEGACY_COMPACTION_SUMMARY_MARKERS
         .iter()
-        .any(|marker| text.contains(marker))
+        .any(|marker| text.starts_with(marker))
 }
 
 /// Byte offset of the earliest legacy marker in `text`. New-format carriers
@@ -474,9 +475,12 @@ pub(crate) fn restore_compaction_checkpoint(
         messages.retain(|message| !is_wire_compaction_checkpoint_message(message));
         index
     } else {
-        // Legacy sessions have no independent provenance. Preserve their
-        // existing broad cleanup behavior; identical user text is ambiguous.
-        messages.retain(|message| !is_compaction_checkpoint_message(message));
+        // Legacy sessions have no independent provenance. Only replace
+        // header-prefixed messages when a saved checkpoint exists; identical
+        // user text is still ambiguous in that legacy format.
+        if checkpoint.is_some() {
+            messages.retain(|message| !is_compaction_checkpoint_message(message));
+        }
         messages.len()
     };
     if let Some(checkpoint) = checkpoint {
@@ -1956,6 +1960,43 @@ mod tests {
     use codewhale_models::{ImageUrlContent, Message};
 
     #[test]
+    fn restore_without_typed_checkpoint_preserves_user_marker_quotes() {
+        // The current marker is recognised only structurally (header block +
+        // provenance block), so only the legacy substring markers apply here.
+        for marker in [
+            LEGACY_V2_COMPACTION_SUMMARY_MARKER,
+            LEGACY_COMPACTION_SUMMARY_MARKER,
+        ] {
+            let quoted = Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: format!("Explain this marker: {marker}"),
+                    cache_control: None,
+                }],
+            };
+            let legacy = Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: format!("{marker}\nold summary"),
+                    cache_control: None,
+                }],
+            };
+            let messages = vec![quoted.clone(), legacy.clone()];
+            assert_eq!(
+                restore_compaction_checkpoint(messages.clone(), None),
+                messages
+            );
+
+            let summary = SystemPrompt::Text(build_compaction_summary_block_text("Summary", ""));
+            let restored =
+                restore_compaction_checkpoint(vec![quoted.clone(), legacy], Some(&summary));
+            assert_eq!(restored.len(), 2);
+            assert_eq!(restored[0], quoted);
+            assert!(is_wire_compaction_checkpoint_message(&restored[1]));
+        }
+    }
+
+    #[test]
     fn restore_replaces_duplicate_generated_checkpoints_without_deleting_user_quote() {
         let summary = SystemPrompt::Text(build_compaction_summary_block_text("Summary", ""));
         let generated = compaction_checkpoint_message(&summary);
@@ -1975,7 +2016,7 @@ mod tests {
         assert!(is_wire_compaction_checkpoint_message(&restored[0]));
         assert_eq!(restored[1], user_quote);
 
-        // No provenance means the historical broad cleanup remains in force.
+        // With a saved summary, legacy header-prefixed copies are replaced.
         let legacy = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
