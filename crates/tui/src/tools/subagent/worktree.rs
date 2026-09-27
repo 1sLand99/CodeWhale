@@ -283,16 +283,26 @@ fn resolve_worktree_path(
         // Absolute and relative requests get the same containment: a
         // sub-agent checkout lives under the per-repo worktree root and
         // nowhere else.
+        //
+        // The request is rebased onto `default_root` as git reported it, so a
+        // Windows caller spelling the same directory differently (`\\?\`
+        // verbatim prefix from `canonicalize`, `/` separators, drive-letter
+        // case) is compared, and checked out, in one form.
         Some(path) => {
-            let resolved = normalize_path_lexically(&default_root.join(path));
-            if !worktree_path_within_root(&resolved, &default_root) {
-                return Err(ToolError::invalid_input(format!(
-                    "worktree_path '{}' must stay under {}",
-                    path.display(),
-                    default_root.display()
-                )));
+            let requested = normalize_path_lexically(&default_root.join(path));
+            match relative_to_root(&requested, &default_root)
+                .map(|rest| normalize_path_lexically(&default_root.join(rest)))
+                .filter(|resolved| worktree_path_within_root(resolved, &default_root))
+            {
+                Some(resolved) => resolved,
+                None => {
+                    return Err(ToolError::invalid_input(format!(
+                        "worktree_path '{}' must stay under {}",
+                        path.display(),
+                        default_root.display()
+                    )));
+                }
             }
-            resolved
         }
         None => default_root.join(sanitize_worktree_slug(branch)),
     };
@@ -300,7 +310,7 @@ fn resolve_worktree_path(
     let repo_canonical = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
-    if normalized.starts_with(&repo_canonical) {
+    if relative_to_root(&normalized, &repo_canonical).is_some() {
         return Err(ToolError::invalid_input(format!(
             "worktree_path must not be inside the parent checkout: {} is under {}",
             normalized.display(),
@@ -316,6 +326,58 @@ fn resolve_worktree_path(
 fn worktree_path_within_root(candidate: &Path, root: &Path) -> bool {
     candidate.starts_with(root)
         && canonicalize_existing_prefix(candidate).starts_with(canonicalize_existing_prefix(root))
+}
+
+/// The part of `candidate` below `root`, or `None` when it is not under it.
+/// On Windows the two may spell one directory differently, so they are
+/// compared in a simplified, case-insensitive form.
+fn relative_to_root(candidate: &Path, root: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows_relative_to_root(&candidate.to_string_lossy(), &root.to_string_lossy())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        candidate.strip_prefix(root).ok().map(Path::to_path_buf)
+    }
+}
+
+/// String form of [`relative_to_root`] for Windows paths: `/` and `\` are one
+/// separator, the `\\?\` and `\\?\UNC\` verbatim prefixes are dropped, and
+/// ASCII case is ignored. The match must end on a component boundary, and a
+/// remainder with a `..` component is refused.
+#[cfg(any(windows, test))]
+fn windows_relative_to_root(candidate: &str, root: &str) -> Option<String> {
+    fn simplify(path: &str) -> String {
+        let mut simple = path.replace('/', "\\");
+        if let Some(rest) = simple.strip_prefix(r"\\?\UNC\") {
+            simple = format!(r"\\{rest}");
+        } else if let Some(rest) = simple.strip_prefix(r"\\?\") {
+            simple = rest.to_string();
+        }
+        while simple.len() > 3 && simple.ends_with('\\') {
+            simple.pop();
+        }
+        simple
+    }
+    let candidate = simplify(candidate);
+    let root = simplify(root);
+    if !candidate
+        .get(..root.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(&root))
+    {
+        return None;
+    }
+    let rest = &candidate[root.len()..];
+    if !(rest.is_empty() || root.ends_with('\\') || rest.starts_with('\\')) {
+        return None;
+    }
+    let rest = rest.trim_start_matches('\\');
+    if rest.split('\\').any(|part| part == "..") {
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 /// Canonicalize the deepest existing ancestor of `path` and re-append the
@@ -444,5 +506,56 @@ mod tests {
             validate_existing_child_cwd(workspace.path(), Path::new("sub")).expect("inside"),
             root.join("sub")
         );
+    }
+
+    #[test]
+    fn windows_paths_under_the_root_match_across_spellings() {
+        let root = r"C:\Users\runner\.codewhale-worktrees\repo";
+        for candidate in [
+            r"\\?\C:\Users\runner\.codewhale-worktrees\repo\inside",
+            r"c:/users/RUNNER/.codewhale-worktrees/repo/inside",
+            r"C:\Users\runner\.codewhale-worktrees\repo\inside\",
+        ] {
+            assert_eq!(
+                windows_relative_to_root(candidate, root).as_deref(),
+                Some("inside"),
+                "{candidate}"
+            );
+        }
+        assert_eq!(
+            windows_relative_to_root(r"\\?\C:\Users\runner\.codewhale-worktrees\repo", root)
+                .as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            windows_relative_to_root(
+                r"\\?\UNC\server\share\wt\repo\a\b",
+                r"\\server/share/wt/repo/"
+            )
+            .as_deref(),
+            Some(r"a\b")
+        );
+        assert_eq!(
+            windows_relative_to_root(r"C:\", r"c:\").as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn windows_paths_outside_the_root_are_refused() {
+        let root = r"C:\Users\runner\.codewhale-worktrees\repo";
+        for candidate in [
+            r"C:\Users\runner\.codewhale-worktrees\repo-evil\x",
+            r"D:\Users\runner\.codewhale-worktrees\repo\x",
+            r"\\?\C:\Users\runner\.codewhale-worktrees",
+            r"C:\Users\runner\.codewhale-worktrees\repo\..\escaped",
+            r"C:\Temp\escaped",
+        ] {
+            assert_eq!(
+                windows_relative_to_root(candidate, root),
+                None,
+                "{candidate}"
+            );
+        }
     }
 }
