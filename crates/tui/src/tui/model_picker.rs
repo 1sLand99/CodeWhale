@@ -2372,14 +2372,6 @@ fn inactive_custom_route_identities(app: &App, config: &Config) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default();
-    // The legacy root-field `provider = "custom"` shape owns no
-    // `[providers.<name>]` table but is still a real route.
-    if config.uses_legacy_literal_custom_route() {
-        let literal = ApiProvider::Custom.as_str().to_string();
-        if !identities.contains(&literal) {
-            identities.push(literal);
-        }
-    }
     identities.sort();
     identities.retain(|identity| active != Some(identity.as_str()));
     identities
@@ -3227,13 +3219,11 @@ fn sort_model_rows_for_view<'a, T>(
     pins: &[PinnedModel],
 ) {
     use std::cmp::Reverse;
+    // Same route match as marking and labelling (`pin_names_row`), so a row
+    // never sorts into the pinned block without carrying its pin.
     let pin_rank = |row: &ModelPickerRow| {
-        row_provider_identity(row)
-            .and_then(|provider| {
-                pins.iter().position(|pin| {
-                    provider.eq_ignore_ascii_case(&pin.provider) && row.id == pin.model
-                })
-            })
+        pins.iter()
+            .position(|pin| pin_names_row(pin, row))
             .unwrap_or(usize::MAX)
     };
     match view {
@@ -4792,6 +4782,39 @@ mod tests {
         let builtin = model_row(ApiProvider::Deepseek, true);
         assert!(pin_names_row(&pin("deepseek"), &builtin));
         assert!(pin_names_row(&pin("DeepSeek"), &builtin));
+    }
+
+    /// The catalog sort ranks pins with the same exact match that marks them:
+    /// a `TeamA` pin must not lift an unmarked `teama` row into the pinned
+    /// block above the groups.
+    #[test]
+    fn catalog_sort_ranks_only_rows_the_pin_names() {
+        let pins = vec![PinnedModel {
+            provider: "TeamA".to_string(),
+            model: "model".to_string(),
+            label: None,
+        }];
+        let custom = |identity: &str| ModelPickerRow {
+            provider_identity: Some(identity.to_string()),
+            ..model_row(ApiProvider::Custom, true)
+        };
+        let owned = [
+            model_row(ApiProvider::Deepseek, true),
+            custom("teama"),
+            custom("TeamA"),
+        ];
+        let mut rows: Vec<&ModelPickerRow> = owned.iter().collect();
+        sort_model_rows_for_view(&mut rows, |row| *row, ModelListView::Catalog, &pins);
+
+        // Pinned `TeamA` leads; `teama` falls back to plain group order
+        // (after `deepseek`) instead of riding the pin into the top block.
+        let order: Vec<Option<&str>> = rows
+            .iter()
+            .map(|row| row.provider_identity.as_deref())
+            .collect();
+        assert_eq!(order, vec![Some("TeamA"), None, Some("teama")]);
+        assert!(pin_for_row(&pins, rows[0]).is_some());
+        assert!(pin_for_row(&pins, rows[2]).is_none());
     }
 
     #[test]

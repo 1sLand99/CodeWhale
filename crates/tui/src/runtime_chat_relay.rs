@@ -777,6 +777,8 @@ impl RuntimeChatRelayHost {
                     auto_approve: Some(false),
                     dynamic_tools: Vec::new(),
                     environment_id: None,
+                    model_provider: None,
+                    model_provider_id: None,
                 },
                 &reserved_native_turn_id,
             )
@@ -2064,8 +2066,8 @@ mod tests {
             default_text_model: Some(crate::config::DEFAULT_OLLAMA_MODEL.to_string()),
             ..Config::default()
         };
-        config.api_key = Some("must-not-cross".to_string());
-        config.base_url = Some("http://127.0.0.1:11434/v1".to_string());
+        config.set_legacy_root(Some("must-not-cross".to_string()), None);
+        config.set_legacy_root(None, Some("http://127.0.0.1:11434/v1".to_string()));
         let challenge = "c".repeat(32);
         assert!(crate::runtime_api::runtime_chat_relay_catalog(&config, &challenge).is_err());
         config.default_text_model = Some("relay-local:fixture".to_string());

@@ -23,7 +23,7 @@ Env (mirrors `.env.example`):
 | `CRON_SECRET`               | Shared secret for manual `/api/cron` invocation                  | optional (Cloudflare cron triggers don't need it) |
 | `DEEPSEEK_MODEL`            | Defaults to `deepseek-v4-flash`                                  | optional             |
 | `DEEPSEEK_BASE_URL`         | Defaults to `https://api.deepseek.com`                           | optional             |
-| `MAINTAINER_TOKEN`          | Admin panel auth; access `/admin?token=<value>`                  | only for `/admin`    |
+| `MAINTAINER_TOKEN`          | Admin panel auth; enter it in the `/admin` login form            | only for `/admin`    |
 | `MAINTAINER_GITHUB_PAT`     | PAT with `issues:write`, for posting comments via `/admin`       | only for `/admin` posting |
 | `NEXT_PUBLIC_GITEE_ENABLED` | Set to `1` once the Gitee mirror exists; blank hides Gitee links | optional             |
 
@@ -135,11 +135,15 @@ web/
 │   ├── deepseek.ts             v4-flash chat client + curate() prompt
 │   ├── facts.ts                getFacts(): KV value, else build-time FACTS
 │   ├── facts.generated.ts      GENERATED — do not edit by hand
+│   ├── changelog.generated.ts  GENERATED at build/test time, untracked
+│   ├── install-guide.generated.ts GENERATED at build/test time, untracked
 │   ├── facts-drift.ts          runtime re-derivation for the drift cron
 │   ├── community-agent.ts      triage / pr-review / digest cron tasks
 │   └── kv.ts                   Cloudflare KV access via OpenNext bindings
 ├── scripts/
 │   ├── derive-facts.mjs        prebuild: repo sources → lib/facts.generated.ts
+│   ├── derive-changelog.mjs    prebuild + vitest setup: CHANGELOG.md → lib/changelog.generated.ts
+│   ├── derive-install.mjs      prebuild + vitest setup: docs/INSTALL.md → lib/install-guide.generated.ts
 │   ├── compare-deployed-facts.mjs credential-free exact-SHA receipt check
 │   └── check-kv-id.mjs         predeploy guard for KV namespace ids
 ├── wrangler.jsonc              CF Worker config + cron + KV binding

@@ -709,7 +709,6 @@ fn push_file_backed_model_bound_secrets(values: &mut Vec<String>) {
 fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -> Vec<String> {
     let mut values = Vec::new();
     push_model_bound_secret(&mut values, Some(active_api_key));
-    push_model_bound_secret(&mut values, config.api_key.as_deref());
     push_model_bound_secret(&mut values, config.sandbox_api_key.as_deref());
     push_model_bound_secret(
         &mut values,
@@ -2118,13 +2117,43 @@ fn build_default_headers(
     // identify the app, never the user, and a user-configured header of the
     // same name below still wins (the extra-header loop overwrites).
     if api_provider == ApiProvider::Openrouter {
+        // `HTTP-Referer` is the only required header: it is the app's unique
+        // identifier, and without it OpenRouter creates no app page at all.
         headers.insert(
             HeaderName::from_static("http-referer"),
             HeaderValue::from_static("https://codewhale.net"),
         );
+        // `X-OpenRouter-Title` is the current display-name header. `X-Title`
+        // is only kept for backwards compatibility — OpenRouter still honours
+        // it, and a base-URL override can point this provider at an
+        // OpenRouter-compatible gateway that knows the old name and not the
+        // new one. Two bytes of redundancy is cheaper than losing attribution.
+        //
+        // Both names carry one display title. A user who configures either
+        // one (a fork, say, setting only the legacy `X-Title`) must control
+        // the name on both, or the default left on the other header would
+        // silently override theirs on OpenRouter.
+        let user_title = |wanted: &str| {
+            extra_headers.iter().find_map(|(name, value)| {
+                let value = value.trim();
+                (name.trim().eq_ignore_ascii_case(wanted) && !value.is_empty()).then_some(value)
+            })
+        };
+        let title = HeaderValue::from_str(
+            user_title("x-openrouter-title")
+                .or_else(|| user_title("x-title"))
+                .unwrap_or("Codewhale"),
+        )?;
+        headers.insert(HeaderName::from_static("x-openrouter-title"), title.clone());
+        headers.insert(HeaderName::from_static("x-title"), title);
+        // Marketplace categories, at most two per request. These place the app
+        // under Coding → CLI Agents and Productivity → Personal Agents on
+        // openrouter.ai/apps, which is how the rankings page groups entries.
+        // Unrecognised values are dropped silently, so these must stay exactly
+        // as OpenRouter spells them.
         headers.insert(
-            HeaderName::from_static("x-title"),
-            HeaderValue::from_static("Codewhale"),
+            HeaderName::from_static("x-openrouter-categories"),
+            HeaderValue::from_static("cli-agent,personal-agent"),
         );
     }
     // OpenCode Go / OpenCode Zen gateways (https://opencode.ai/docs/go/)
@@ -5312,7 +5341,7 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// OpenRouter app attribution: the two headers that put an app on
+    /// OpenRouter app attribution: the headers that put an app on
     /// openrouter.ai's rankings are sent for OpenRouter routes only, and a
     /// user-configured header of the same name wins.
     #[test]
@@ -5334,6 +5363,22 @@ mod tests {
             headers.get("x-title").and_then(|v| v.to_str().ok()),
             Some("Codewhale")
         );
+        // The current display-name header, alongside the legacy one.
+        assert_eq!(
+            headers
+                .get("x-openrouter-title")
+                .and_then(|v| v.to_str().ok()),
+            Some("Codewhale")
+        );
+        // Marketplace categories must match OpenRouter's spelling exactly:
+        // unrecognised values are dropped silently, so a typo here is
+        // invisible in production and only shows up as a missing listing.
+        assert_eq!(
+            headers
+                .get("x-openrouter-categories")
+                .and_then(|v| v.to_str().ok()),
+            Some("cli-agent,personal-agent")
+        );
 
         // Attribution identifies this app to OpenRouter's rankings and has
         // no business on any other route, whichever provider that is.
@@ -5354,7 +5399,9 @@ mod tests {
             )
             .expect("headers");
             assert!(
-                other.get("http-referer").is_none() && other.get("x-title").is_none(),
+                other.get("http-referer").is_none()
+                    && other.get("x-title").is_none()
+                    && other.get("x-openrouter-title").is_none(),
                 "{provider:?} must not receive OpenRouter attribution headers"
             );
         }
@@ -5368,10 +5415,34 @@ mod tests {
             false,
         )
         .expect("headers");
-        assert_eq!(
-            overridden.get("x-title").and_then(|v| v.to_str().ok()),
-            Some("My Fork")
-        );
+        // A user title on the legacy header alone must follow onto the
+        // current one, or OpenRouter would still show "Codewhale".
+        for name in ["x-title", "x-openrouter-title"] {
+            assert_eq!(
+                overridden.get(name).and_then(|v| v.to_str().ok()),
+                Some("My Fork"),
+                "{name} must carry the user's title"
+            );
+        }
+
+        // And the other way round: setting only the current header also
+        // renames the legacy one, so the two never disagree.
+        let current_only = build_default_headers(
+            "sk-or-key",
+            &HashMap::from([("X-OpenRouter-Title".to_string(), "My Fork".to_string())]),
+            ApiProvider::Openrouter,
+            "https://openrouter.ai/api/v1",
+            WireFormat::ChatCompletions,
+            false,
+        )
+        .expect("headers");
+        for name in ["x-title", "x-openrouter-title"] {
+            assert_eq!(
+                current_only.get(name).and_then(|v| v.to_str().ok()),
+                Some("My Fork"),
+                "{name} must carry the user's title"
+            );
+        }
     }
 
     #[test]
@@ -5728,13 +5799,17 @@ mod tests {
         route_base_url: &str,
         transport_base_url: String,
     ) -> CodewhaleClient {
-        let mut client = CodewhaleClient::new(&Config {
-            provider: Some("deepseek".to_string()),
-            api_key: Some("deepseek-request-boundary-key".to_string()),
-            base_url: Some(route_base_url.to_string()),
-            default_text_model: Some("deepseek-v4-pro".to_string()),
-            ..Config::default()
-        })
+        let mut client = CodewhaleClient::new(
+            &Config {
+                provider: Some("deepseek".to_string()),
+                default_text_model: Some("deepseek-v4-pro".to_string()),
+                ..Config::default()
+            }
+            .with_legacy_root(
+                Some("deepseek-request-boundary-key".to_string()),
+                Some(route_base_url.to_string()),
+            ),
+        )
         .expect("DeepSeek request-boundary client");
         client.test_chat_transport_base_url = Some(transport_base_url);
         client
@@ -8521,42 +8596,44 @@ mod tests {
 
     fn client_with_config_secret_sentinels() -> CodewhaleClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        CodewhaleClient::new(&Config {
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                arcee: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[1].to_string()),
-                    ..ProviderConfig::default()
-                },
-                moonshot: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[2].to_string()),
-                    ..ProviderConfig::default()
-                },
-                openrouter: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[3].to_string()),
-                    ..ProviderConfig::default()
-                },
-                together: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[4].to_string()),
-                    ..ProviderConfig::default()
-                },
-                xiaomi_mimo: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[5].to_string()),
-                    ..ProviderConfig::default()
-                },
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                sakana: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[7].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        })
+        CodewhaleClient::new(
+            &Config {
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    arcee: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[1].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    moonshot: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[2].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    openrouter: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[3].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    together: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[4].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    xiaomi_mimo: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[5].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    sakana: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[7].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with secret sentinels")
     }
 
@@ -8742,22 +8819,24 @@ mod tests {
         )
         .expect("record opt-out confirmation");
 
-        let client = CodewhaleClient::new(&Config {
-            loaded_config_path: Some(codewhale_home.join("config.toml")),
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            redaction: Some(codewhale_config::redaction::RedactionToml {
-                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                loaded_config_path: Some(codewhale_home.join("config.toml")),
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                redaction: Some(codewhale_config::redaction::RedactionToml {
+                    model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with confirmed opt-out");
 
         let tool_output = format!(
@@ -8838,21 +8917,23 @@ mod tests {
         let _codewhale_home =
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
 
-        let client = CodewhaleClient::new(&Config {
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            redaction: Some(codewhale_config::redaction::RedactionToml {
-                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                redaction: Some(codewhale_config::redaction::RedactionToml {
+                    model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with unconfirmed opt-out request");
 
         let secret = CONFIG_SECRET_SENTINELS[0];
@@ -9701,18 +9782,20 @@ mod tests {
 
     #[test]
     fn client_stream_idle_timeout_uses_tui_config() {
-        let client = CodewhaleClient::new(&Config {
-            api_key: Some("sk-test".to_string()),
-            tui: Some(crate::config::TuiConfig {
-                stream_chunk_timeout_secs: Some(777),
-                max_model_steps: None,
-                turn_wall_clock_secs: None,
-                stream_max_content_mb: None,
-                stream_max_duration_secs: None,
-                ..crate::config::TuiConfig::default()
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                tui: Some(crate::config::TuiConfig {
+                    stream_chunk_timeout_secs: Some(777),
+                    max_model_steps: None,
+                    turn_wall_clock_secs: None,
+                    stream_max_content_mb: None,
+                    stream_max_duration_secs: None,
+                    ..crate::config::TuiConfig::default()
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some("sk-test".to_string()), None),
+        )
         .expect("client");
 
         assert_eq!(client.stream_idle_timeout, Duration::from_secs(777));
@@ -13446,11 +13529,10 @@ mod tests {
     ) -> (Config, crate::route_runtime::ResolvedRuntimeRoute) {
         let config = Config {
             provider: Some("deepseek".to_string()),
-            api_key: Some("ds-test".to_string()),
-            base_url: Some(base_url.to_string()),
             default_text_model: Some(model.to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("ds-test".to_string()), Some(base_url.to_string()));
         let route = crate::route_runtime::resolve_runtime_route(
             &config,
             ApiProvider::Deepseek,
@@ -13500,11 +13582,13 @@ mod tests {
     fn route_cap_test_client(wire_format: WireFormat, limits: RouteLimits) -> CodewhaleClient {
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("route-cap-test".to_string()),
-            base_url: Some("https://route-cap.example/v1".to_string()),
             default_text_model: Some("DeepSeek-V4-Flash".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("route-cap-test".to_string()),
+            Some("https://route-cap.example/v1".to_string()),
+        );
         CodewhaleClient::from_parts(
             "https://route-cap.example/v1".to_string(),
             "DeepSeek-V4-Flash".to_string(),
@@ -13795,11 +13879,10 @@ mod tests {
         let base_url = format!("{}/v1", server.uri());
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("fim-cap-test".to_string()),
-            base_url: Some(base_url.clone()),
             default_text_model: Some("local-fim".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("fim-cap-test".to_string()), Some(base_url.clone()));
         let client = CodewhaleClient::from_parts(
             base_url,
             "local-fim".to_string(),
@@ -13954,11 +14037,13 @@ mod tests {
 
         let config = Config {
             provider: Some("deepseek".to_string()),
-            api_key: Some("ds-test".to_string()),
-            base_url: Some("https://api.deepseek.com".to_string()),
             default_text_model: Some(model.to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            Some("ds-test".to_string()),
+            Some("https://api.deepseek.com".to_string()),
+        );
         let client = CodewhaleClient::from_candidate(&config, &candidate)
             .expect("client binds exact synthetic catalog offering");
         assert!(

@@ -47,6 +47,7 @@ mod doctor_fix;
 mod dsh_credentials;
 mod error_taxonomy;
 mod eval;
+mod extension_host;
 mod external_credentials;
 mod features;
 mod fleet;
@@ -73,6 +74,7 @@ mod oauth;
 mod operate;
 mod plugins;
 mod pricing;
+mod process_tree;
 mod project_context;
 mod project_context_cache;
 mod prompts;
@@ -2397,16 +2399,18 @@ async fn run_async_main_dispatch(
                 {
                     let trimmed = env_url.trim();
                     if !trimmed.is_empty() {
-                        config.base_url = Some(trimmed.to_string());
+                        let provider = config.api_provider();
+                        config.set_provider_base_url_override(provider, Some(trimmed.to_string()));
                     }
                 }
                 // Honour `--provider` (#4093): a Fleet worker whose profile pins
                 // a provider launches on that provider even when the parent
                 // session is on another one. This sets ONLY the non-secret
                 // provider identity (`config.provider`); credentials/base URL
-                // still resolve from the worker's own env/config, and for a
-                // non-DeepSeek provider the legacy root `base_url` above is
-                // ignored by `active_route_base_url()`. Must precede model
+                // still resolve from the worker's own env/config, and the
+                // endpoint above stays in the previously active provider's
+                // own table, so a different pinned provider never reads it.
+                // Must precede model
                 // resolution so an `auto`/default model resolves to the
                 // overridden provider's default.
                 let explicit_provider = args
@@ -4161,14 +4165,12 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
     let provider_config_key_kind = provider_config
         .and_then(|entry| entry.api_key.as_deref())
         .map(crate::config::classify_config_api_key_value);
-    let root_key_applies = matches!(
-        provider,
-        crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
-    ) || (provider == crate::config::ApiProvider::Custom
-        && config.uses_legacy_literal_custom_route());
-    let root_key_kind = root_key_applies
-        .then_some(config.api_key.as_deref())
+    // DeepSeek-CN shares `[providers.deepseek]`'s key (the two identities
+    // used to share the top-level `api_key`, #6394).
+    let root_key_kind = (provider == crate::config::ApiProvider::DeepseekCN)
+        .then(|| config.provider_config_for(crate::config::ApiProvider::Deepseek))
         .flatten()
+        .and_then(|entry| entry.api_key.as_deref())
         .map(crate::config::classify_config_api_key_value);
 
     if matches!(
@@ -4605,6 +4607,24 @@ async fn run_doctor(
                 );
             }
         }
+        // Legacy top-level `base_url` / `api_key` (#6394): which moves the
+        // file still has pending, which pair disagrees and which side is in
+        // use. Sources only, never values.
+        for note in &config.legacy_root.notes {
+            let pending = !matches!(
+                note,
+                codewhale_config::legacy_root::LegacyRootNote::Conflict { .. }
+            );
+            println!(
+                "  {} {note}{}",
+                "!".truecolor(sky_r, sky_g, sky_b),
+                if pending {
+                    " (read that way already; `codewhale config migrate` updates the file)"
+                } else {
+                    ""
+                }
+            );
+        }
     } else {
         println!(
             "  {} config.toml not found at {} (using defaults/env)",
@@ -4692,11 +4712,7 @@ async fn run_doctor(
                 crate::config::classify_config_api_key_value(key)
                     == crate::config::ConfigApiKeyValueKind::Literal
             })
-        }) || (matches!(provider, crate::config::ApiProvider::Deepseek)
-            && config.api_key.as_deref().is_some_and(|key| {
-                crate::config::classify_config_api_key_value(key)
-                    == crate::config::ConfigApiKeyValueKind::Literal
-            }));
+        });
         let env_source_declared = provider_config
             .and_then(|entry| entry.api_key_env.as_deref())
             .is_some_and(|name| !name.trim().is_empty());
@@ -6584,6 +6600,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let mut config_members = 0usize;
     let mut personal_members = 0usize;
     let mut workspace_members = 0usize;
+    let mut claude_members = 0usize;
     for member in roster.members() {
         match member.origin {
             crate::fleet::roster::ProfileOrigin::BuiltIn => built_in_members += 1,
@@ -6591,10 +6608,12 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             crate::fleet::roster::ProfileOrigin::Config => config_members += 1,
             crate::fleet::roster::ProfileOrigin::Personal => personal_members += 1,
             crate::fleet::roster::ProfileOrigin::Workspace => workspace_members += 1,
+            crate::fleet::roster::ProfileOrigin::ClaudeCode => claude_members += 1,
         }
     }
     let roster_members = roster.members().len();
-    let custom_members = plugin_members + config_members + personal_members + workspace_members;
+    let custom_members =
+        plugin_members + config_members + personal_members + workspace_members + claude_members;
     let roster_ready = roster.load_error().is_none() && roster_members > 0;
     let runtime_ready =
         subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
@@ -6652,6 +6671,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             "config": config_members,
             "personal": personal_members,
             "workspace": workspace_members,
+            "claude": claude_members,
             "custom": custom_members,
             "starter_roster_available": built_in_members > 0,
             "readiness_rule": "built-in starter roster or custom roster",
@@ -7537,11 +7557,7 @@ fn doctor_provider_config_table(config: &Config, provider: crate::config::ApiPro
     if provider != crate::config::ApiProvider::Custom {
         return provider_config_table_key(provider).to_string();
     }
-    if config.uses_legacy_literal_custom_route() {
-        "root (legacy literal custom)".to_string()
-    } else {
-        format!("providers.{}", config.provider_identity_for(provider))
-    }
+    format!("providers.{}", config.provider_identity_for(provider))
 }
 
 fn doctor_provider_source(config: &Config) -> &'static str {
@@ -8392,7 +8408,28 @@ fn load_structural_config_from_cli(cli: &Cli) -> Result<Config> {
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
+    install_extension_host_boot_config(&config);
     Ok(config)
+}
+
+/// Select the plugin activation policy (v3, or v4 with the experimental
+/// extension host) and the host's Node override, once per process, before
+/// any plugin discovery. Later config reloads never flip either.
+fn install_extension_host_boot_config(config: &Config) {
+    let enabled = config
+        .features()
+        .enabled(crate::features::Feature::ExtensionHost);
+    crate::plugins::activation::install_extension_host_policy(enabled);
+    if enabled {
+        crate::extension_host::configure(crate::extension_host::ExtensionHostOptions {
+            node_override: config
+                .extension_host
+                .as_ref()
+                .and_then(|table| table.node.as_deref())
+                .map(|node| PathBuf::from(shellexpand::tilde(node).as_ref())),
+            root: None,
+        });
+    }
 }
 
 fn effective_config_profile(cli: &Cli) -> Option<String> {
@@ -8412,6 +8449,7 @@ fn load_config_from_cli_with_effective_profile(cli: &Cli) -> Result<(Config, Opt
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
+    install_extension_host_boot_config(&config);
     // Install the foreign-instruction opt-in before anything can load project
     // context. This is the single funnel every runtime goes through — TUI,
     // exec, ACP, and the app-server passthrough all resolve config here — so
@@ -12116,8 +12154,49 @@ fn exec_sandbox_elevation_authorized(
 }
 
 fn emit_exec_stream_event(event: &ExecStreamEvent) -> Result<()> {
-    println!("{}", serde_json::to_string(&exec_stream_value(event)?)?);
-    Ok(())
+    let mut line = serde_json::to_string(&exec_stream_value(event)?)?;
+    line.push('\n');
+    write_exec_stdout(&line)
+}
+
+/// Headless `exec` ignores SIGPIPE while it runs, because it writes to pipes
+/// it does not own: a stdio MCP server, LSP, hook or shell child that exits
+/// early must fail that one write with `EPIPE`, not kill the run with no
+/// output. Under the default disposition, an MCP server whose interpreter
+/// could not start (a broken `node` on PATH for the built-in Computer Use
+/// plugin) made `exec --auto` exit 141 before printing anything.
+fn ignore_sigpipe_for_headless_exec() {
+    // SAFETY: a plain disposition change with no handler. Children still start
+    // with SIGPIPE at SIG_DFL: the standard library resets it before exec.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+/// Write exec output to stdout. SIGPIPE is ignored during exec (see
+/// [`ignore_sigpipe_for_headless_exec`]), so a reader that closed stdout
+/// (`codewhale exec ... | head -1`) surfaces here as `BrokenPipe`. End the
+/// process the way the default disposition would have (#4030) instead of
+/// panicking inside `print!`.
+fn write_exec_stdout(text: &str) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+            // SAFETY: restores the default disposition and re-raises the
+            // signal the write would have delivered without SIG_IGN.
+            #[cfg(unix)]
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                libc::raise(libc::SIGPIPE);
+            }
+            std::process::exit(141);
+        }
+        result => result.map_err(Into::into),
+    }
 }
 
 /// Process exit code `codewhale exec` uses when a turn ends on a retryable
@@ -12251,7 +12330,8 @@ async fn run_workflow_tool_command_inner(
     {
         let trimmed = env_url.trim();
         if !trimmed.is_empty() {
-            config.base_url = Some(trimmed.to_string());
+            let provider = config.api_provider();
+            config.set_provider_base_url_override(provider, Some(trimmed.to_string()));
         }
     }
 
@@ -14089,7 +14169,6 @@ mod doctor_setup_state_tests {
         .save()
         .expect("persist user constitution");
         let config = Config {
-            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
             approval_policy: Some("never".to_string()),
             allow_shell: Some(false),
             sandbox_mode: Some("read-only".to_string()),
@@ -14098,7 +14177,8 @@ mod doctor_setup_state_tests {
                 ..Default::default()
             }),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("TEST-STRUCTURAL-LITERAL".to_string()), None);
 
         let report = doctor_setup_report_json(&config, &workspace);
 
@@ -14142,10 +14222,8 @@ mod doctor_setup_state_tests {
         );
         assert_eq!(provider_step(&report)["result"], "deepseek/deepseek-chat");
 
-        let unprobed_config = Config {
-            api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
-            ..config.clone()
-        };
+        let unprobed_config = Config { ..config.clone() }
+            .with_legacy_root(Some(crate::config::API_KEYRING_SENTINEL.to_string()), None);
         let unprobed_report = doctor_setup_report_json(&unprobed_config, &workspace);
         assert_eq!(unprobed_report["credential"]["ready"], false);
         assert_eq!(unprobed_report["credential"]["availability"], "not_probed");
@@ -14300,9 +14378,9 @@ mod doctor_setup_state_tests {
         state.save().expect("persist setup state");
 
         let config = Config {
-            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("TEST-STRUCTURAL-LITERAL".to_string()), None);
         let report = doctor_setup_report_json(&config, &workspace);
 
         assert_eq!(report["first_run_ready"], true);
@@ -14426,9 +14504,9 @@ mod doctor_endpoint_tests {
     fn strict_tool_mode_doctor_warns_for_non_beta_deepseek_endpoint() {
         let config = Config {
             strict_tool_mode: Some(true),
-            base_url: Some("https://api.deepseek.com".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://api.deepseek.com".to_string()));
 
         let status = doctor_strict_tool_mode_status(&config);
 
@@ -14531,10 +14609,10 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_preserves_custom_deepseek_alias_namespace() {
         let mut config = Config {
-            base_url: Some("https://models.example/v1".to_string()),
             default_text_model: Some("deepseek-chat".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://models.example/v1".to_string()));
         crate::config::normalize_model_config_for_test(&mut config);
 
         let report = provider_capability_report(&config);
@@ -14560,10 +14638,13 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_preserves_v4_pro_without_retirement() {
         let mut config = Config {
-            base_url: Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
             default_text_model: Some("deepseek-v4-pro".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            None,
+            Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
+        );
         crate::config::normalize_model_config_for_test(&mut config);
         let report = provider_capability_report(&config);
         assert_eq!(report["resolved_model"], "deepseek-v4-pro");
@@ -14583,10 +14664,10 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_leaves_custom_v4_pro_namespace_untouched() {
         let mut config = Config {
-            base_url: Some("https://models.example/v1".to_string()),
             default_text_model: Some("deepseek-v4-pro".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://models.example/v1".to_string()));
         crate::config::normalize_model_config_for_test(&mut config);
 
         let report = provider_capability_report(&config);
@@ -15270,9 +15351,12 @@ mod terminal_mode_tests {
             provider: Some("deepseek".to_string()),
             // A fresh one-row roster must not replace the normal DeepSeek
             // endpoint's process-wide catalog for unrelated route tests.
-            base_url: Some("https://api.deepseek.com/v1/doctor-roster-fixture".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            None,
+            Some("https://api.deepseek.com/v1/doctor-roster-fixture".to_string()),
+        );
         let kind = crate::config::ApiProvider::Deepseek;
         let base_url = config.base_url_for_route_identity(kind, "deepseek");
         let fetched_at = std::time::SystemTime::now()
@@ -15638,11 +15722,11 @@ reasoning = "high"
         .expect("fleet file");
 
         let base = Config {
-            api_key: Some("test-key".to_string()),
             provider: Some("openrouter".to_string()),
             reasoning_effort: Some("off".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(Some("test-key".to_string()), None);
         let mut explicit = base.clone();
         assert!(
             !apply_selected_fleet_operator_for_launch(
@@ -15678,10 +15762,10 @@ reasoning = "high"
         assert!(selected.fleet_operator_reasoning_applied);
 
         let mut reasoning_override = Config {
-            api_key: Some("test-key".to_string()),
             reasoning_effort: Some("off".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(Some("test-key".to_string()), None);
         apply_selected_fleet_operator_for_launch(
             &mut reasoning_override,
             workspace.path(),
@@ -15831,17 +15915,19 @@ reasoning = "high"
     }
 
     #[test]
-    fn cli_route_execution_config_preserves_legacy_literal_custom_root_route() {
+    fn cli_route_execution_config_preserves_the_legacy_literal_custom_route() {
         let _lock = crate::test_support::lock_test_env();
         let _source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
         let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("legacy-root-key".to_string()),
-            base_url: Some("http://127.0.0.1:18183/v1".to_string()),
             default_text_model: Some("legacy-model".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            Some("legacy-root-key".to_string()),
+            Some("http://127.0.0.1:18183/v1".to_string()),
+        );
         let route = CliAutoRoute {
             provider: crate::config::ApiProvider::Custom,
             model: "routed-legacy-model".to_string(),
@@ -15852,13 +15938,9 @@ reasoning = "high"
 
         let execution = config_for_cli_route(&config, &route);
 
-        assert!(execution.uses_legacy_literal_custom_route());
-        assert!(
-            execution
-                .providers
-                .as_ref()
-                .is_none_or(|providers| !providers.custom.contains_key("custom"))
-        );
+        // The literal route's top-level fields live in `[providers.custom]`
+        // (#6394), and the routed model lands there too.
+        assert!(execution.selects_literal_custom_provider());
         assert_eq!(execution.provider.as_deref(), Some("custom"));
         assert_eq!(execution.default_model(), "routed-legacy-model");
         assert_eq!(
@@ -19362,20 +19444,22 @@ mcp_oauth_callback_url = "http://evil.example.com/callback"
 "#,
         );
         let mut config = Config {
-            api_key: Some("USER_KEY".to_string()),
-            base_url: Some("https://api.deepseek.com".to_string()),
             mcp_oauth_callback_port: Some(1455),
             mcp_oauth_callback_url: Some("http://127.0.0.1:1455/callback".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("USER_KEY".to_string()),
+            Some("https://api.deepseek.com".to_string()),
+        );
         merge_project_config(&mut config, tmp.path());
         assert_eq!(
-            config.api_key.as_deref(),
+            config.deepseek_table_api_key(),
             Some("USER_KEY"),
             "user api_key must survive project-config attack"
         );
         assert_eq!(
-            config.base_url.as_deref(),
+            config.deepseek_table_base_url(),
             Some("https://api.deepseek.com"),
             "user base_url must survive project-config attack"
         );
@@ -20976,9 +21060,9 @@ mod setup_helper_tests {
             std::env::remove_var("DEEPSEEK_API_KEY_SOURCE");
         }
         let cfg = Config {
-            api_key: Some("fresh-config-key".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("fresh-config-key".to_string()), None);
         let source = resolve_api_key_source(&cfg);
         match prev {
             Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY", value) },
@@ -21066,9 +21150,9 @@ mod setup_helper_tests {
         let _openrouter_key = crate::test_support::EnvVarGuard::remove("OPENROUTER_API_KEY");
         let cfg = Config {
             provider: Some("openrouter".to_string()),
-            api_key: Some("legacy-deepseek-root-key".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("legacy-deepseek-root-key".to_string()), None);
 
         let source = resolve_api_key_source(&cfg);
 
