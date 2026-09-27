@@ -20039,7 +20039,7 @@ fn workspace_file_change_never_moves_the_frozen_prefix() {
 }
 
 #[tokio::test]
-async fn regression_6601_trust_warning_is_internal_and_tracks_current_state() {
+async fn trust_warning_is_internal_and_tracks_current_state() {
     let _lock = lock_test_env();
     let tmp = tempdir().unwrap();
     let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join("home"));

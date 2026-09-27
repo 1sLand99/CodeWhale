@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn regression_6601_busy_runtime_does_not_abort_scrub() {
+    fn busy_runtime_does_not_abort_scrub() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = dir.path().join("sessions");
         let standalone = dir.path().join("standalone");
@@ -510,7 +510,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn regression_6601_symlinked_roots_scan_without_following_entries() {
+    fn symlinked_roots_scan_without_following_entries() {
         use std::os::unix::fs::symlink;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -563,7 +563,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn regression_6601_unreadable_directory_keeps_partial_scan() {
+    fn unreadable_directory_keeps_partial_scan() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn regression_6601_configured_bare_secret_is_scrubbed() {
+    fn configured_bare_secret_is_scrubbed() {
         use crate::test_support::{EnvVarGuard, lock_test_env};
         let _env = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn regression_6601_doctor_reserves_transcript_scan_budget() {
+    fn doctor_reserves_transcript_scan_budget() {
         // Already ordered newest-first: an active store has over 50 receipts,
         // all newer than the credential-bearing transcript and checkpoint.
         let mut files: Vec<PathBuf> = (0..60)

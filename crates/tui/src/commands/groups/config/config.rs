@@ -6246,7 +6246,7 @@ context_window = 262144
     }
 
     #[tokio::test]
-    async fn regression_6601_trust_only_persists_with_save() {
+    async fn trust_only_persists_with_save() {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::new(tmp.path());
         let config_path = tmp.path().join("config.toml");
