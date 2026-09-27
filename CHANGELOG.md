@@ -102,6 +102,15 @@ quieter, and Fleet runs can be checked before they spend anything.
   exit code on either surface. The new `DEEPSEEK_TOOL_STATUS` says how the
   command ended (`completed`, `failed`, `timed_out`, `killed`)
   ([#6582](https://github.com/Hmbown/Codewhale/issues/6582)).
+- Scrolling a long transcript no longer re-renders everything below the
+  reasoning block you scroll past. Moving the view shifts the `Space:expand`
+  hint to the newest visible reasoning cell, and each move re-flattened the
+  whole transcript tail from that cell, so scrolling slowed as a session
+  grew. The two hint rows are now repainted in place, including while a
+  reply is streaming, so a scroll frame only rebuilds rows that actually
+  changed. The pinned-prompt lookup also searches from the newest row
+  instead of the oldest. Other per-frame work still grows with session
+  length ([#6652](https://github.com/Hmbown/Codewhale/issues/6652)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you

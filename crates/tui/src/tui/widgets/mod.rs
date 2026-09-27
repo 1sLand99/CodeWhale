@@ -874,7 +874,9 @@ fn scrolled_user_prompt_pin(
                 }
                 _ => None,
             })?;
-    let first_line = line_meta.iter().position(|meta| match meta {
+    // The newest prompt sits near the tail, so search backward; a forward
+    // scan cost O(transcript) on every frame of a long session (#6652).
+    let first_line = line_meta.iter().rposition(|meta| match meta {
         TranscriptLineMeta::CellLine {
             cell_index,
             line_in_cell,
