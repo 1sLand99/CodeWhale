@@ -20626,6 +20626,9 @@ async fn dropped_operation_span_completes_as_cancelled() {
 async fn code_execution_does_not_inherit_parent_secret_env() {
     use crate::dependencies::ExternalTool as _;
     if !crate::dependencies::Python::available() {
+        // `dependencies::tests::runtime_commands_do_not_inherit_parent_secret_env`
+        // still covers the scrubbed Python constructor without Python.
+        eprintln!("skipping: python not available");
         return;
     }
     let _env_lock = lock_test_env();

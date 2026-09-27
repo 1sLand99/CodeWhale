@@ -496,12 +496,27 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
-fn run_git_command(working_dir: &Path, args: &[String]) -> Result<std::process::Output, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::command() else {
+/// Build the git command for the read-only workspace tools (`git_status`,
+/// `git_diff`, `git_log`, `git_show`, `git_blame`, `verify`). It goes through
+/// [`crate::dependencies::Git::review_command`], so fsmonitor, hooks and
+/// clean/process filters from the workspace's own config do not run.
+pub(super) fn read_only_git_command(
+    working_dir: &Path,
+) -> Result<std::process::Command, ToolError> {
+    if !crate::dependencies::Git::available() {
         return Err(ToolError::not_available(
             "git is not installed or not in PATH",
         ));
-    };
+    }
+    crate::dependencies::Git::review_command(working_dir)
+        .map_err(|e| ToolError::execution_failed(format!("Failed to prepare git: {e:#}")))
+}
+
+pub(super) fn run_git_command(
+    working_dir: &Path,
+    args: &[String],
+) -> Result<std::process::Output, ToolError> {
+    let mut cmd = read_only_git_command(working_dir)?;
     cmd.args(args).current_dir(working_dir);
     cmd.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -1219,6 +1234,52 @@ mod tests {
         };
         run(&["add", "."]);
         run(&["commit", "-q", "-m", message]);
+    }
+
+    /// The read-only git tools must not run programs named by the
+    /// workspace's own config: `core.fsmonitor` would otherwise execute on
+    /// every `git_status`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_git_tools_do_not_run_workspace_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt;
+        if !git_available() {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        let tmp = tempdir().expect("tempdir");
+        init_git_repo(tmp.path());
+        fs::write(tmp.path().join("file.txt"), "hello\n").expect("write");
+        commit_all(tmp.path(), "init");
+        fs::write(tmp.path().join("file.txt"), "hello\nworld\n").expect("modify");
+
+        let hooks = tempdir().expect("hooks");
+        let marker = hooks.path().join("ran");
+        let hook = hooks.path().join("fsmonitor.sh");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .expect("write hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let status = crate::dependencies::Git::status(
+            &["config", "core.fsmonitor", &hook.to_string_lossy()],
+            tmp.path(),
+        )
+        .expect("git config");
+        assert!(status.success());
+
+        let ctx = ToolContext::new(tmp.path());
+        let status = GitStatusTool
+            .execute(json!({}), &ctx)
+            .await
+            .expect("status");
+        assert!(status.success, "{}", status.content);
+        assert!(status.content.contains("file.txt"), "{}", status.content);
+        let diff = GitDiffTool.execute(json!({}), &ctx).await.expect("diff");
+        assert!(diff.success, "{}", diff.content);
+        assert!(diff.content.contains("+world"), "{}", diff.content);
+        assert!(!marker.exists(), "workspace fsmonitor hook ran");
     }
 
     #[tokio::test]

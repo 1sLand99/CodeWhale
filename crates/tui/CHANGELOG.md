@@ -172,6 +172,24 @@ quieter, and Fleet runs can be checked before they spend anything.
 - A `workflow` start with `verify: true` now needs approval even for a
   read-only plan, because the completion gates run workspace build and test
   scripts.
+- Git commands no longer hand provider credentials to programs that a
+  workspace's git config can start (`core.fsmonitor`, hooks, filters): every
+  git child starts from the scrubbed environment plus the ssh agent, global
+  config location and author identity. The read-only `git_status`,
+  `git_diff`, history and `verify` tools also disable the workspace's
+  fsmonitor, hooks and clean/process filters.
+- Language servers started for post-edit diagnostics, and every Python and
+  Node command constructor, start from the scrubbed child environment.
+- Proxy URLs passed to model-run children (`HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, `FTP_PROXY`, `CARGO_HTTP_PROXY`) keep their host and port but
+  lose any `user:password@` part.
+- Behaviour change: the scrubbed child environment now keeps non-secret build
+  configuration — `CARGO_*` (except registry and token-like keys),
+  `RUSTFLAGS`, `RUST_LOG`, `RUST_BACKTRACE`, `VIRTUAL_ENV`, `JAVA_HOME`, Go
+  paths, `NVM_*`/`NODE_OPTIONS` and CA-bundle variables — so `run_tests` and
+  gates keep the user's target dir, job limit and toolchain. Connection
+  strings such as `DATABASE_URL` are still dropped; declare them in a
+  verifier gate's `env` or the project's own config when a build needs them.
 
 ### Removed
 

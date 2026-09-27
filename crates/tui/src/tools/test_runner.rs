@@ -388,6 +388,7 @@ mod tests {
         use crate::test_support::{EnvVarGuard, lock_test_env};
         use std::os::unix::fs::PermissionsExt;
         if !cargo_available() {
+            eprintln!("skipping: cargo not available");
             return;
         }
         let _env_lock = lock_test_env();
@@ -397,7 +398,7 @@ mod tests {
         let probe = bin.path().join("cargo-envprobe");
         fs::write(
             &probe,
-            "#!/bin/sh\nprintf 'secret=%s' \"${CODEWHALE_TEST_CARGO_SECRET-unset}\"\n",
+            "#!/bin/sh\nprintf 'secret=%s target=%s' \"${CODEWHALE_TEST_CARGO_SECRET-unset}\" \"${CARGO_TARGET_DIR-unset}\"\n",
         )
         .expect("write probe");
         fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("chmod probe");
@@ -406,6 +407,8 @@ mod tests {
         paths.extend(std::env::split_paths(&path));
         let _path = EnvVarGuard::set("PATH", std::env::join_paths(paths).expect("join PATH"));
         let _secret = EnvVarGuard::set("CODEWHALE_TEST_CARGO_SECRET", "cargo-secret-value");
+        // Non-secret build configuration still reaches cargo.
+        let _target = EnvVarGuard::set("CARGO_TARGET_DIR", "/tmp/codewhale-fixture-target");
         let workspace = tempdir().expect("workspace");
 
         let output = run_cargo(workspace.path(), &["envprobe".to_string()]).expect("cargo runs");
@@ -415,6 +418,9 @@ mod tests {
             "{stdout} {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(stdout.trim(), "secret=unset");
+        assert_eq!(
+            stdout.trim(),
+            "secret=unset target=/tmp/codewhale-fixture-target"
+        );
     }
 }
