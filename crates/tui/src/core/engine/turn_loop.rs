@@ -405,6 +405,78 @@ pub(super) fn replace_runtime_mcp_tools(
 }
 
 impl Engine {
+    /// Inline ```repl blocks run model-written Python in the session kernel,
+    /// so they take `code_execution`'s approval: the same prepared
+    /// requirement, resolved under the session posture, and the same card.
+    /// Returns `None` when the blocks may run, otherwise why they may not.
+    async fn repl_fence_blocked_reason(
+        &mut self,
+        blocks: &[crate::repl::ReplBlock],
+        registry: Option<&crate::tools::ToolRegistry>,
+        approval_id: &str,
+    ) -> Option<String> {
+        let tool_name = super::tool_catalog::CODE_EXECUTION_TOOL_NAME;
+        let code = blocks
+            .iter()
+            .map(|block| block.code.trim_matches('\n'))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let prepared = match prepare_tool_call(
+            tool_name,
+            json!({ "code": code }),
+            registry,
+            self.session.auto_approve,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return Some(error.to_string()),
+        };
+        let force_prompt = registered_tool_forces_prompt(tool_name, prepared.call.approval)
+            && !prepared.auto_approve;
+        if !force_prompt
+            && !registered_tool_approval_required(
+                tool_name,
+                prepared.call.approval,
+                prepared.auto_approve,
+            )
+        {
+            return None;
+        }
+        let input = prepared.call.input;
+        let event = Event::ApprovalRequired {
+            id: approval_id.to_string(),
+            tool_name: tool_name.to_string(),
+            approval_key: crate::tools::approval_cache::build_approval_key(tool_name, &input).0,
+            approval_grouping_key: crate::tools::approval_cache::build_approval_grouping_key(
+                tool_name, &input,
+            )
+            .0,
+            input,
+            description: "Run model-written Python from the reply's ```repl block(s) in the \
+                          session REPL kernel (not OS-sandboxed)"
+                .to_string(),
+            intent_summary: None,
+            approval_force_prompt: force_prompt,
+        };
+        let decision = self
+            .request_tool_approval(approval_id, tool_name, event)
+            .await;
+        emit_tool_audit(json!({
+            "event": "tool.approval_decision",
+            "tool_id": approval_id,
+            "tool_name": tool_name,
+            "decision": if matches!(decision, Ok(ApprovalResult::Approved)) { "approved" } else { "denied" },
+            "caller": "repl_fence",
+        }));
+        match decision {
+            Ok(ApprovalResult::Approved) => None,
+            Ok(ApprovalResult::Denied) => Some("denied by user".to_string()),
+            Ok(ApprovalResult::RetryWithPolicy(_)) => {
+                Some("inline REPL blocks cannot run under a changed sandbox policy".to_string())
+            }
+            Err(error) => Some(error.to_string()),
+        }
+    }
+
     /// A connection completed during inference must be discoverable in this
     /// turn, without widening its command policy or making every MCP tool eager.
     pub(super) async fn refresh_boot_mcp_catalog(
@@ -2313,13 +2385,37 @@ impl Engine {
                 // same command gate as `code_execution`: a narrowed tool
                 // surface (`exec --allowed-tools …`, or plain `exec`'s zero-tool
                 // surface, #6510) must not execute code through a fence.
-                if has_sendable_assistant_content
+                // Plan mode withholds `code_execution` from the catalog, and a
+                // fence is not a way around that: it runs only when the tool is
+                // on this turn's surface, and only after the same approval.
+                let repl_fence_present = has_sendable_assistant_content
+                    && crate::repl::sandbox::has_repl_block(&current_text_visible);
+                let repl_fence_offered = mode != AppMode::Plan
+                    && tool_catalog
+                        .iter()
+                        .any(|tool| tool.name == super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
                     && tool_policy.passes_allow_list(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
-                    && !tool_policy.denies_tool(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
-                    && crate::repl::sandbox::has_repl_block(&current_text_visible)
-                {
-                    let repl_blocks =
-                        crate::repl::sandbox::extract_repl_blocks(&current_text_visible);
+                    && !tool_policy.denies_tool(super::tool_catalog::CODE_EXECUTION_TOOL_NAME);
+                let mut repl_fence_skip_reason = (repl_fence_present && !repl_fence_offered)
+                    .then(|| "code execution is not available on this turn".to_string());
+                let repl_blocks = if repl_fence_present && repl_fence_offered {
+                    crate::repl::sandbox::extract_repl_blocks(&current_text_visible)
+                } else {
+                    Vec::new()
+                };
+                if !repl_blocks.is_empty() {
+                    let approval_id = format!("{}-repl-{}", turn.id, turn.step);
+                    repl_fence_skip_reason = self
+                        .repl_fence_blocked_reason(&repl_blocks, tool_registry, &approval_id)
+                        .await;
+                }
+                if let Some(reason) = repl_fence_skip_reason.as_deref() {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!("REPL block not run: {reason}")))
+                        .await;
+                }
+                if !repl_blocks.is_empty() && repl_fence_skip_reason.is_none() {
                     if self.repl_kernel.is_none() {
                         self.repl_kernel = match crate::repl::runtime::PythonRuntime::new().await {
                             Ok(runtime) => Some(runtime),
