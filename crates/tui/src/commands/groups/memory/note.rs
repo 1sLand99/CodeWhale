@@ -34,15 +34,15 @@ fn note(workspace: &Path, content: Option<&str>) -> CommandResult {
     }
 
     match command.as_str() {
-        "add" => append_note_command(&notes_path, rest),
-        "list" => list_notes_command(&notes_path),
-        "show" => show_note_command(&notes_path, rest),
-        "edit" => edit_note_command(&notes_path, rest),
-        "remove" | "rm" | "delete" => remove_note_command(&notes_path, rest),
-        "clear" => clear_notes_command(&notes_path),
+        "add" => append_note_command(workspace, &notes_path, rest),
+        "list" => list_notes_command(workspace, &notes_path),
+        "show" => show_note_command(workspace, &notes_path, rest),
+        "edit" => edit_note_command(workspace, &notes_path, rest),
+        "remove" | "rm" | "delete" => remove_note_command(workspace, &notes_path, rest),
+        "clear" => clear_notes_command(workspace, &notes_path),
         "path" => CommandResult::message(format!("Notes path: {}", notes_path.display())),
         "help" => CommandResult::message(format!("Usage: {USAGE}")),
-        _ => append_note_command(&notes_path, Some(input)),
+        _ => append_note_command(workspace, &notes_path, Some(input)),
     }
 }
 
@@ -52,7 +52,7 @@ fn note(workspace: &Path, content: Option<&str>) -> CommandResult {
 /// view reads the same file through this resolver (#6565).
 pub(crate) fn notes_path(workspace: &Path) -> PathBuf {
     let primary = workspace.join(".codewhale").join("notes.md");
-    if primary.exists() {
+    if primary.symlink_metadata().is_ok() || workspace.join(".codewhale").is_symlink() {
         return primary;
     }
     workspace.join(".deepseek").join("notes.md")
@@ -98,19 +98,23 @@ fn split_command(input: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn append_note_command(notes_path: &Path, content: Option<&str>) -> CommandResult {
+fn append_note_command(
+    workspace: &Path,
+    notes_path: &Path,
+    content: Option<&str>,
+) -> CommandResult {
     let Some(note_content) = content.map(str::trim).filter(|content| !content.is_empty()) else {
         return CommandResult::error("Usage: /note add <text>");
     };
 
-    match append_note(notes_path, note_content) {
+    match append_note(workspace, notes_path, note_content) {
         Ok(()) => CommandResult::message(format!("Note appended to {}", notes_path.display())),
         Err(e) => CommandResult::error(e),
     }
 }
 
-fn list_notes_command(notes_path: &Path) -> CommandResult {
-    let notes = match read_notes(notes_path) {
+fn list_notes_command(workspace: &Path, notes_path: &Path) -> CommandResult {
+    let notes = match read_notes(workspace, notes_path) {
         Ok(notes) => notes,
         Err(e) => return CommandResult::error(e),
     };
@@ -126,8 +130,8 @@ fn list_notes_command(notes_path: &Path) -> CommandResult {
     CommandResult::message(output)
 }
 
-fn show_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
-    let notes = match read_notes(notes_path) {
+fn show_note_command(workspace: &Path, notes_path: &Path, rest: Option<&str>) -> CommandResult {
+    let notes = match read_notes(workspace, notes_path) {
         Ok(notes) => notes,
         Err(e) => return CommandResult::error(e),
     };
@@ -139,7 +143,7 @@ fn show_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
     CommandResult::message(format!("Note {}:\n\n{}", index + 1, notes[index]))
 }
 
-fn edit_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
+fn edit_note_command(workspace: &Path, notes_path: &Path, rest: Option<&str>) -> CommandResult {
     let Some(rest) = rest else {
         return CommandResult::error("Usage: /note edit <n> <text>");
     };
@@ -150,7 +154,7 @@ fn edit_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
         _ => return CommandResult::error("Usage: /note edit <n> <text>"),
     };
 
-    let mut notes = match read_notes(notes_path) {
+    let mut notes = match read_notes(workspace, notes_path) {
         Ok(notes) => notes,
         Err(e) => return CommandResult::error(e),
     };
@@ -160,7 +164,7 @@ fn edit_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
     };
 
     notes[index] = new_content.to_string();
-    match write_notes(notes_path, &notes) {
+    match write_notes(workspace, notes_path, &notes) {
         Ok(()) => CommandResult::message(format!(
             "Note {} updated in {}",
             index + 1,
@@ -170,8 +174,8 @@ fn edit_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
     }
 }
 
-fn remove_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
-    let mut notes = match read_notes(notes_path) {
+fn remove_note_command(workspace: &Path, notes_path: &Path, rest: Option<&str>) -> CommandResult {
+    let mut notes = match read_notes(workspace, notes_path) {
         Ok(notes) => notes,
         Err(e) => return CommandResult::error(e),
     };
@@ -181,7 +185,7 @@ fn remove_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
     };
 
     notes.remove(index);
-    match write_notes(notes_path, &notes) {
+    match write_notes(workspace, notes_path, &notes) {
         Ok(()) => CommandResult::message(format!(
             "Note {} removed from {}",
             index + 1,
@@ -191,21 +195,15 @@ fn remove_note_command(notes_path: &Path, rest: Option<&str>) -> CommandResult {
     }
 }
 
-fn clear_notes_command(notes_path: &Path) -> CommandResult {
-    match write_notes(notes_path, &[]) {
+fn clear_notes_command(workspace: &Path, notes_path: &Path) -> CommandResult {
+    match write_notes(workspace, notes_path, &[]) {
         Ok(()) => CommandResult::message(format!("Notes cleared in {}", notes_path.display())),
         Err(e) => CommandResult::error(e),
     }
 }
 
-fn append_note(notes_path: &Path, note_content: &str) -> Result<(), String> {
-    ensure_notes_parent(notes_path)?;
-
-    let mut file = match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(notes_path)
-    {
+fn append_note(workspace: &Path, notes_path: &Path, note_content: &str) -> Result<(), String> {
+    let mut file = match crate::fs_confined::open_append(workspace, notes_path) {
         Ok(f) => f,
         Err(e) => {
             return Err(format!("Failed to open notes file: {e}"));
@@ -220,29 +218,22 @@ fn append_note(notes_path: &Path, note_content: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn read_notes(notes_path: &Path) -> Result<Vec<String>, String> {
-    match fs::read_to_string(notes_path) {
+pub(crate) fn read_notes(workspace: &Path, notes_path: &Path) -> Result<Vec<String>, String> {
+    match crate::fs_confined::read_to_string(workspace, notes_path) {
         Ok(content) => Ok(parse_notes(&content)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("Failed to read notes file: {e}")),
     }
 }
 
-fn write_notes(notes_path: &Path, notes: &[String]) -> Result<(), String> {
-    ensure_notes_parent(notes_path)?;
+fn write_notes(workspace: &Path, notes_path: &Path, notes: &[String]) -> Result<(), String> {
     let content = notes
         .iter()
         .map(|note| format!("---\n{}", note.trim()))
         .collect::<Vec<_>>()
         .join("\n\n");
-    fs::write(notes_path, content).map_err(|e| format!("Failed to write notes file: {e}"))
-}
-
-fn ensure_notes_parent(notes_path: &Path) -> Result<(), String> {
-    if let Some(parent) = notes_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create notes directory: {e}"))?;
-    }
-    Ok(())
+    crate::fs_confined::write(workspace, notes_path, content.as_bytes())
+        .map_err(|e| format!("Failed to write notes file: {e}"))
 }
 
 fn parse_notes(content: &str) -> Vec<String> {
@@ -379,6 +370,64 @@ mod tests {
 
     fn message(result: CommandResult) -> String {
         result.message.expect("command message")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_notes_refuse_linked_files_and_directories() {
+        use std::os::unix::fs::symlink;
+
+        for directory in [".codewhale", ".deepseek"] {
+            for linked_directory in [false, true] {
+                let workspace = TempDir::new().unwrap();
+                let outside = TempDir::new().unwrap();
+                let original = "---\nfirst note\n\n---\nsecond note";
+                let target = outside.path().join("notes.md");
+                std::fs::write(&target, original).unwrap();
+                let parent = workspace.path().join(directory);
+                if linked_directory {
+                    symlink(outside.path(), &parent).unwrap();
+                } else {
+                    std::fs::create_dir(&parent).unwrap();
+                    symlink(&target, parent.join("notes.md")).unwrap();
+                }
+                for command in [
+                    "list",
+                    "show 1",
+                    "add next",
+                    "edit 1 next",
+                    "remove 1",
+                    "clear",
+                ] {
+                    let result = note(workspace.path(), Some(command));
+                    assert!(
+                        result.is_error,
+                        "{directory}, {linked_directory}, {command}"
+                    );
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_notes_refuse_dangling_links() {
+        for directory in [".codewhale", ".deepseek"] {
+            let workspace = TempDir::new().unwrap();
+            let outside = TempDir::new().unwrap();
+            let target = outside.path().join("missing.md");
+            let parent = workspace.path().join(directory);
+            std::fs::create_dir(&parent).unwrap();
+            std::os::unix::fs::symlink(&target, parent.join("notes.md")).unwrap();
+            for command in ["list", "add next", "clear"] {
+                assert!(note(workspace.path(), Some(command)).is_error);
+                assert!(!target.exists());
+            }
+            if directory == ".codewhale" {
+                assert!(!workspace.path().join(".deepseek").exists());
+            }
+        }
     }
 
     #[test]

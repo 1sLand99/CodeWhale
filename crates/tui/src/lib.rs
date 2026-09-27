@@ -51,6 +51,7 @@ mod extension_host;
 mod external_credentials;
 mod features;
 mod fleet;
+mod fs_confined;
 mod hooks;
 mod image_attach;
 mod import_claude;

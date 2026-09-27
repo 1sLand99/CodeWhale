@@ -25,6 +25,9 @@ quieter, and Fleet runs can be checked before they spend anything.
   Fleet SSH known-host checks support OpenSSH 7.x and later. SSH host configs
   using `host_key_fingerprint` must migrate to `known_hosts` with verified host
   keys; the unsupported fingerprint field now fails at configuration load.
+- Harden workspace instruction, note, and anchor file access with shared
+  no-follow reads and writes. Compaction loads pinned anchors only from
+  trusted workspaces. Validate registry skill names before selecting cache paths.
 
 ### Contributors
 

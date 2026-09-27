@@ -45,7 +45,7 @@ fn collect_snapshot(workspace: &Path, force: bool) -> WorkspaceContextSnapshot {
             .then(|| crate::tui::git_status::context_line(&snap))
             .flatten(),
         is_linked_worktree: current && snap.is_linked_worktree,
-        notes: crate::commands::read_notes(&crate::commands::notes_path(workspace))
+        notes: crate::commands::read_notes(workspace, &crate::commands::notes_path(workspace))
             .unwrap_or_default(),
     }
 }
