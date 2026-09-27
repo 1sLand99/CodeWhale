@@ -504,15 +504,35 @@ impl TranscriptViewCache {
         }
 
         self.per_cell = new_per_cell;
+        // Rows from here down are rebuilt this frame; rows above it are
+        // untouched and still sit at their recorded `cell_line_starts`.
+        let mut rebuild_from = if !any_dirty {
+            usize::MAX
+        } else if layout_changed {
+            0
+        } else {
+            self.visible_rebuild_start(first_dirty.unwrap_or(0).saturating_sub(1))
+        };
+        let mut hint_settled = true;
         if let Some(change) = self.set_action_owner(action_owner, original_index_map) {
-            // Owner-only movement (a scroll frame) keeps every cell and line
-            // count, so repaint the two hint rows rather than the tail.
-            if !any_dirty && self.repaint_action_hints(change) {
-                return;
+            // Scrolling moves the owner to the newest visible cell, including
+            // while a reply streams and its cell is dirty every frame. A
+            // hinted cell inside the rebuilt suffix is re-flattened with the
+            // new hint anyway; one above it keeps its geometry, so repaint its
+            // single hint row instead of rebuilding the tail below it (#6652).
+            let above = |cell: Option<usize>| cell.filter(|&cell| cell < rebuild_from);
+            let in_place = HintChange {
+                previous: above(change.previous),
+                next: above(change.next),
+            };
+            let repainted = self.repaint_action_hints(in_place);
+            if !repainted {
+                any_dirty = true;
+                rebuild_from = self.visible_rebuild_start(
+                    rebuild_from.min(first_hint_cell(change).saturating_sub(1)),
+                );
             }
-            let target_first = first_hint_cell(change);
-            any_dirty = true;
-            first_dirty = Some(first_dirty.map_or(target_first, |dirty| dirty.min(target_first)));
+            hint_settled = repainted && in_place == change;
         }
 
         if !any_dirty {
@@ -521,7 +541,7 @@ impl TranscriptViewCache {
 
         if !layout_changed
             && !folded_changed
-            && previous_rendered_target == self.reasoning_action_rendered_cell
+            && (hint_settled || previous_rendered_target == self.reasoning_action_rendered_cell)
             && old_len == total_cells
             && dirty_cells == 1
             && let Some((cell_index, line_from)) = streaming_tail_update
@@ -531,22 +551,6 @@ impl TranscriptViewCache {
             return;
         }
 
-        let mut rebuild_from = if layout_changed {
-            0
-        } else {
-            first_dirty.unwrap_or(0).saturating_sub(1)
-        };
-        // A hidden cell has no line boundary at which to truncate. Rebuild from
-        // a visible predecessor so appearance/disappearance cannot leave its
-        // old spacer or the following cell's boundary behind.
-        while rebuild_from > 0
-            && self
-                .per_cell
-                .get(rebuild_from)
-                .is_some_and(|cell| cell.is_empty)
-        {
-            rebuild_from -= 1;
-        }
         self.flatten_from(options.spacing, rebuild_from);
 
         let Some(viewport_lines) = options.reasoning_preview_viewport_lines else {
@@ -568,6 +572,16 @@ impl TranscriptViewCache {
             .set_action_owner(action_owner, original_index_map)
             .map_or(idx, |change| first_hint_cell(change).min(idx));
         self.flatten_from(options.spacing, rebuild_from.saturating_sub(1));
+    }
+
+    /// A hidden cell has no line boundary at which to truncate. Rebuild from
+    /// a visible predecessor so appearance/disappearance cannot leave its old
+    /// spacer or the following cell's boundary behind.
+    fn visible_rebuild_start(&self, mut from: usize) -> usize {
+        while from > 0 && self.per_cell.get(from).is_some_and(|cell| cell.is_empty) {
+            from -= 1;
+        }
+        from
     }
 
     /// Returns the previous and next hinted cells when the hint moved.

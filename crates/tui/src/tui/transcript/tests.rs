@@ -1794,6 +1794,136 @@ fn retargeting_a_long_transcript_repaints_only_the_hint_rows() {
     assert!(!plain_lines(&cache).join("\n").contains("Space:expand"));
 }
 
+/// While a reply streams its cell is dirty every frame. Scrolling in that
+/// state must still repaint only the hint rows plus the streamed tail, not
+/// re-flatten everything below the old owner (#6652).
+#[test]
+fn retargeting_while_streaming_repaints_only_hint_rows_and_tail() {
+    let (mut cells, _) = long_reasoning_transcript(100);
+    // A reasoning cell right above the streaming reply: moving the hint
+    // there lands inside the rows this frame rebuilds anyway.
+    cells.push(reasoning_cell(false));
+    let mut content = String::from("streamed start\n\n");
+    cells.push(assistant_cell(&content, true));
+    let streaming = cells.len() - 1;
+    let mut revisions = vec![1; cells.len()];
+    let options = TranscriptRenderOptions {
+        low_motion: true,
+        ..TranscriptRenderOptions::default()
+    };
+    let ensure = |cache: &mut TranscriptViewCache, cells: &[HistoryCell], revs: &[u64], owner| {
+        cache.ensure_split(
+            &[cells],
+            revs,
+            80,
+            options,
+            &HashMap::new(),
+            None,
+            Some(reasoning_owner(owner)),
+        );
+    };
+    let mut cache = TranscriptViewCache::new();
+    ensure(&mut cache, &cells, &revisions, 0);
+    assert!(cache.total_lines() > 800, "{}", cache.total_lines());
+
+    for (frame, owner) in [2, 100, 198, streaming - 1, 0, 4].into_iter().enumerate() {
+        let previous = revisions[streaming];
+        revisions[streaming] += 1;
+        content.push_str(&format!("chunk {frame} of the streamed reply\n\n"));
+        cells[streaming] = assistant_cell(&content, true);
+        cache.set_streaming_source_receipt(Some(StreamingSourceReceipt {
+            cell_index: streaming,
+            from_revision: previous,
+            to_revision: revisions[streaming],
+            content_len: content.len(),
+        }));
+        let before = cache.streaming_lines_reflattened();
+        ensure(&mut cache, &cells, &revisions, owner);
+        let work = cache.streaming_lines_reflattened() - before;
+        let tail_rows = (cache.per_cell[streaming - 1].lines.len()
+            + cache.per_cell[streaming].lines.len()
+            + 4) as u64;
+        assert!(
+            work <= tail_rows,
+            "streaming frame with owner {owner} re-flattened {work} rows (tail {tail_rows})"
+        );
+        let mut cold = TranscriptViewCache::new();
+        ensure(&mut cold, &cells, &revisions, owner);
+        assert_same_flat_output(&cache, &cold);
+    }
+}
+
+/// Collapsed transcripts render through an original-index map, and hidden
+/// cells record their successor's line start. In-place hint repaint must
+/// land on the right rows in both cases (#6652).
+#[test]
+fn retargeting_a_filtered_transcript_with_hidden_cells_repaints_in_place() {
+    let original = (0..80)
+        .flat_map(|turn| {
+            [
+                reasoning_cell(false),
+                // Renders no rows: a hidden cell between reasoning cells.
+                assistant_cell("", false),
+                reasoning_cell(false),
+                assistant_cell(&format!("answer {turn}\n\nmore prose for {turn}"), false),
+                // Dropped by the filter, so rendered and original indices diverge.
+                assistant_cell(&format!("collapsed {turn}"), false),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let map = (0..original.len())
+        .filter(|index| index % 5 != 4)
+        .collect::<Vec<_>>();
+    let refs = map
+        .iter()
+        .map(|&index| &original[index])
+        .collect::<Vec<_>>();
+    let revisions = vec![1; refs.len()];
+    let options = TranscriptRenderOptions::default();
+    let ensure = |cache: &mut TranscriptViewCache, owner: usize| {
+        cache.ensure_filtered(
+            &refs,
+            &revisions,
+            80,
+            options,
+            &HashMap::new(),
+            Some(&map),
+            Some(reasoning_owner(owner)),
+        );
+    };
+    let mut cache = TranscriptViewCache::new();
+    ensure(&mut cache, 0);
+    assert!(cache.per_cell.iter().any(|cell| cell.is_empty));
+    assert!(cache.total_lines() > 800, "{}", cache.total_lines());
+
+    // Original indices: 2 and 7 sit after a hidden cell, 397 is the last
+    // reasoning cell, and 1 is the hidden cell itself (no hint).
+    for owner in [2, 150, 397, 7, 0, 1, 5] {
+        let before = cache.streaming_lines_reflattened();
+        cache.retarget(Some(reasoning_owner(owner)), Some(&map));
+        assert!(
+            cache.streaming_lines_reflattened() - before <= 2,
+            "retarget to {owner} re-flattened {} rows",
+            cache.streaming_lines_reflattened() - before
+        );
+        let mut cold = TranscriptViewCache::new();
+        ensure(&mut cold, owner);
+        assert_same_flat_output(&cache, &cold);
+
+        let next = if owner == 0 { 5 } else { 0 };
+        let before = cache.streaming_lines_reflattened();
+        ensure(&mut cache, next);
+        assert!(
+            cache.streaming_lines_reflattened() - before <= 2,
+            "ensure with owner {next} re-flattened {} rows",
+            cache.streaming_lines_reflattened() - before
+        );
+        let mut cold = TranscriptViewCache::new();
+        ensure(&mut cold, next);
+        assert_same_flat_output(&cache, &cold);
+    }
+}
+
 /// Synthetic scroll benchmark for #6652; run with `--ignored --nocapture`.
 #[test]
 #[ignore = "timing benchmark, not a correctness gate"]

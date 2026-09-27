@@ -55,9 +55,11 @@ quieter, and Fleet runs can be checked before they spend anything.
   reasoning block you scroll past. Moving the view shifts the `Space:expand`
   hint to the newest visible reasoning cell, and each move re-flattened the
   whole transcript tail from that cell, so scrolling slowed as a session
-  grew. Only the two hint rows are now repainted, and the pinned-prompt
-  lookup searches from the newest row instead of the oldest
-  ([#6652](https://github.com/Hmbown/Codewhale/issues/6652)).
+  grew. The two hint rows are now repainted in place, including while a
+  reply is streaming, so a scroll frame only rebuilds rows that actually
+  changed. The pinned-prompt lookup also searches from the newest row
+  instead of the oldest. Other per-frame work still grows with session
+  length ([#6652](https://github.com/Hmbown/Codewhale/issues/6652)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you
