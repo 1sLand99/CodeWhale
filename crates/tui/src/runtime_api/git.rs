@@ -83,8 +83,8 @@ const MAX_PATH_ARGS: usize = 512;
 /// Per-read bound on working-tree bytes hashed for `files[].rev`. Rows past
 /// the budget get a stat fingerprint (`s-` token) instead of a content digest
 /// (`c-` token), so a large untracked tree cannot turn a status poll into
-/// gigabytes of reads. A token names its mode, and a precondition check
-/// recomputes in that mode, so the budget never causes a spurious 409.
+/// gigabytes of reads. Stat tokens are display-only: guarded writes refuse
+/// them, and a tree containing one has no whole-tree revision.
 const REV_CONTENT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 const REV_CONTENT_BUDGET_FILES: usize = 4_096;
 
@@ -199,10 +199,9 @@ fn run_git_sync(workspace: &FsPath, args: &[&str]) -> Result<String, ApiError> {
 // GET /v1/git — status detail
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct GitFileEntry {
-    /// Workspace-relative, like every other path on this surface. A
-    /// collapsed untracked directory keeps git's trailing `/`.
+    /// Workspace-relative, like every other path on this surface.
     path: String,
     /// Raw porcelain v1 index (X) and worktree (Y) columns.
     index: String,
@@ -230,8 +229,7 @@ pub(super) struct GitStatusDetailResponse {
     detached: bool,
     /// Abbreviated HEAD for display. Preconditions use `head_oid`.
     head: Option<String>,
-    /// Full HEAD commit id; null on an unborn branch (or when `index_token`
-    /// is null because the tokens could not be computed).
+    /// Full HEAD commit id; null on an unborn branch.
     head_oid: Option<String>,
     /// Opaque token for the whole index (every stage entry, repository-wide).
     index_token: Option<String>,
@@ -286,16 +284,20 @@ fn collect_git_status_detail(workspace: &FsPath) -> Result<GitStatusDetailRespon
             .as_deref()
             .is_some_and(|branch| branch.starts_with("detached@"));
 
-    let frame = RepoFrame::read(workspace).ok();
-    let prefix = frame.as_ref().map_or("", |frame| frame.prefix.as_str());
+    let frame = RepoFrame::read(workspace)?;
     // `-z` keeps paths verbatim: one NUL-terminated `XY <path>` record each,
     // with renames/copies carrying the source path in the following record.
-    let mut outside = Vec::new();
-    if let Ok(porcelain) = run_git_sync(workspace, &["status", "--porcelain=v1", "-z"]) {
-        let (inside, beyond) = split_by_workspace(parse_porcelain(&porcelain), prefix);
-        detail.files = inside;
-        outside = beyond;
-    }
+    // Expand untracked directories so a row equal to the workspace prefix
+    // still exposes addressable children.
+    let porcelain = review_sync_ok(
+        workspace,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    let (inside, outside) = split_by_workspace(
+        parse_porcelain(&String::from_utf8_lossy(&porcelain)),
+        &frame.prefix,
+    );
+    detail.files = inside;
     if let Ok(branches) = run_git_sync(workspace, &["branch", "--format=%(refname:short)"]) {
         detail.branches = branches
             .lines()
@@ -312,20 +314,10 @@ fn collect_git_status_detail(workspace: &FsPath) -> Result<GitStatusDetailRespon
             .map(str::to_string)
             .collect();
     }
-    // Tokens are best-effort on the read: a repository whose configuration
-    // cannot be read safely still gets its status, just no preconditions
-    // (`index_token: null` tells the client not to send any).
-    if let Some(frame) = frame
-        && let Ok(tokens) = compute_tokens(workspace, &frame, &mut detail.files, &outside)
-    {
-        detail.head_oid = tokens.head_oid;
-        detail.index_token = Some(tokens.index_token);
-        detail.revision = Some(tokens.revision);
-    } else {
-        for entry in &mut detail.files {
-            entry.rev = None;
-        }
-    }
+    let tokens = compute_tokens(workspace, &frame, &mut detail.files, &outside)?;
+    detail.head_oid = tokens.head_oid;
+    detail.index_token = Some(tokens.index_token);
+    detail.revision = tokens.revision;
     Ok(detail)
 }
 
@@ -360,27 +352,45 @@ fn parse_porcelain(porcelain: &str) -> Vec<GitFileEntry> {
     entries
 }
 
-/// Move repository-root rows into the workspace frame. Rows outside a
-/// subdirectory workspace cannot be addressed by a workspace-relative write,
-/// so they leave `files[]`; they still feed the whole-tree `revision` (as
-/// `root path + XY`) because `stage all` and `commit` reach them.
+/// Move repository-root rows into the workspace frame. Omitted paths still
+/// feed the whole-tree revision because stage-all and commit reach them.
+/// A rename leaving the workspace is shown as its source deletion.
 fn split_by_workspace(
     rows: Vec<GitFileEntry>,
     prefix: &str,
-) -> (Vec<GitFileEntry>, Vec<(String, String)>) {
+) -> (Vec<GitFileEntry>, Vec<GitFileEntry>) {
     let mut inside = Vec::new();
     let mut outside = Vec::new();
     for mut row in rows {
+        let old_path = row
+            .old_path
+            .as_deref()
+            .and_then(|old| workspace_frame_path(prefix, old));
         match workspace_frame_path(prefix, &row.path) {
             Some(path) => {
+                if row.old_path.is_some() && old_path.is_none() {
+                    outside.push(row.clone());
+                }
                 row.path = path;
-                row.old_path = row
-                    .old_path
-                    .as_deref()
-                    .and_then(|old| workspace_frame_path(prefix, old));
+                row.old_path = old_path;
                 inside.push(row);
             }
-            None => outside.push((row.path, format!("{}{}", row.index, row.worktree))),
+            None => {
+                if row.index == "R"
+                    && let Some(path) = old_path
+                {
+                    inside.push(GitFileEntry {
+                        path,
+                        index: "D".to_string(),
+                        worktree: " ".to_string(),
+                        staged: true,
+                        status: "deleted",
+                        old_path: None,
+                        rev: None,
+                    });
+                }
+                outside.push(row);
+            }
         }
     }
     (inside, outside)
@@ -407,6 +417,8 @@ fn normalized_row_path(path: &str) -> &str {
 /// fsmonitor, filters, hooks and replace-objects cannot run (or alter what
 /// the token sees) during a precondition read.
 fn review_sync(cwd: &FsPath, args: &[&str]) -> Result<std::process::Output, ApiError> {
+    #[cfg(test)]
+    tests::GIT_READS.with(|count| count.set(count.get() + 1));
     let mut command = Git::review_command(cwd)
         .map_err(|error| ApiError::internal(format!("git is unavailable: {error}")))?;
     command
@@ -464,11 +476,32 @@ impl RepoFrame {
 /// Full HEAD commit id, `None` on an unborn branch.
 fn head_oid(workspace: &FsPath) -> Result<Option<String>, ApiError> {
     let output = review_sync(workspace, &["rev-parse", "--verify", "-q", "HEAD^{commit}"])?;
-    if !output.status.success() {
-        return Ok(None);
+    if output.status.success() {
+        let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !oid.is_empty() {
+            return Ok(Some(oid));
+        }
+    } else {
+        let symbolic = review_sync(workspace, &["symbolic-ref", "-q", "HEAD"])?;
+        if symbolic.status.success() {
+            let reference = String::from_utf8_lossy(&symbolic.stdout);
+            let reference = reference.trim();
+            if reference.starts_with("refs/heads/") {
+                // for-each-ref warns when it ignores a broken ref. Only a
+                // clean, empty enumeration establishes an unborn branch.
+                let refs = review_sync(
+                    workspace,
+                    &["for-each-ref", "--format=%(refname)", reference],
+                )?;
+                if refs.status.success() && refs.stdout.is_empty() && refs.stderr.is_empty() {
+                    return Ok(None);
+                }
+            }
+        }
     }
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!oid.is_empty()).then_some(oid))
+    Err(ApiError::internal(
+        "git HEAD does not resolve to a commit or an unborn branch",
+    ))
 }
 
 /// The semantic index (mode, blob, stage, path — never the stat cache that
@@ -477,8 +510,10 @@ fn head_oid(workspace: &FsPath) -> Result<Option<String>, ApiError> {
 /// outside a subdirectory workspace.
 struct IndexSnapshot {
     token: String,
-    /// Workspace-frame path → that path's raw `ls-files --stage` records.
+    /// Repository-root path → that path's raw `ls-files --stage` records.
     by_path: BTreeMap<String, Vec<u8>>,
+    /// One inventory for all row and directory-path tokens in this read.
+    untracked: BTreeSet<String>,
 }
 
 impl IndexSnapshot {
@@ -490,15 +525,23 @@ impl IndexSnapshot {
                 continue;
             };
             let root_path = String::from_utf8_lossy(&record[tab + 1..]);
-            if let Some(path) = workspace_frame_path(&frame.prefix, &root_path) {
-                let slot = by_path.entry(path).or_default();
-                slot.extend_from_slice(record);
-                slot.push(0);
-            }
+            let slot = by_path.entry(root_path.into_owned()).or_default();
+            slot.extend_from_slice(record);
+            slot.push(0);
         }
+        let others = review_sync_ok(
+            &frame.toplevel,
+            &["ls-files", "-z", "--others", "--exclude-standard"],
+        )?;
+        let untracked = others
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect();
         Ok(Self {
             token: content_revision(&raw),
             by_path,
+            untracked,
         })
     }
 
@@ -525,10 +568,9 @@ fn is_at_or_under(path: &str, member: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RevMode {
     /// Working-tree files are identified by a sha256 of their bytes (the
-    /// Files routes' content revision). Files above the serving limit fall
-    /// back to size + mtime.
+    /// Files routes' content revision).
     Content,
-    /// Every file is identified by size + mtime (past the read budget).
+    /// Display-only size + mtime (oversized files or past the read budget).
     Stat,
 }
 
@@ -539,14 +581,6 @@ impl RevMode {
             Self::Stat => "s-",
         }
     }
-
-    fn of_token(token: &str) -> Self {
-        if token.starts_with("s-") {
-            Self::Stat
-        } else {
-            Self::Content
-        }
-    }
 }
 
 /// One member path of a row (the row itself, or a rename's source) with
@@ -554,7 +588,7 @@ impl RevMode {
 struct MemberListing {
     member: String,
     index_records: Vec<u8>,
-    /// Workspace-frame files whose working-tree state is part of the token.
+    /// Repository-root files whose working-tree state is part of the token.
     files: BTreeSet<String>,
 }
 
@@ -582,22 +616,13 @@ fn list_member(
             // Untracked files below a directory (a collapsed `dir/` row, or a
             // directory named in a request): exactly what `git add dir`
             // would pick up, with the same ignore rules.
-            let others = review_sync_ok(
-                workspace,
-                &[
-                    "--literal-pathspecs",
-                    "ls-files",
-                    "-z",
-                    "--others",
-                    "--exclude-standard",
-                    "--",
-                    member,
-                ],
-            )?;
-            for path in others.split(|byte| *byte == 0).filter(|p| !p.is_empty()) {
-                listing
-                    .files
-                    .insert(String::from_utf8_lossy(path).into_owned());
+            for path in index.untracked.range(member.to_string()..) {
+                if !path.starts_with(member) {
+                    break;
+                }
+                if is_at_or_under(path, member) {
+                    listing.files.insert(path.clone());
+                }
             }
         }
         Ok(_) => {
@@ -635,33 +660,76 @@ fn stat_fingerprint(metadata: &std::fs::Metadata) -> String {
 }
 
 /// A file's working-tree identity. Links are never followed.
-fn worktree_fingerprint(workspace: &FsPath, path: &str, mode: RevMode) -> String {
+fn worktree_fingerprint(workspace: &FsPath, path: &str, mode: RevMode) -> Result<String, ApiError> {
+    if has_linked_ancestor(workspace, path) {
+        return Err(ApiError::internal(
+            "cannot fingerprint through a symlinked directory",
+        ));
+    }
     let full = workspace.join(path);
+    let unreadable = |error| ApiError::internal(format!("cannot fingerprint {path}: {error}"));
     let metadata = match std::fs::symlink_metadata(&full) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return "absent".into(),
-        Err(error) => return format!("unreadable:{:?}", error.kind()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok("absent".into()),
+        Err(error) => return Err(unreadable(error)),
     };
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
-        return match std::fs::read_link(&full) {
-            Ok(target) => format!("link:{}", target.to_string_lossy()),
-            Err(error) => format!("unreadable:{:?}", error.kind()),
-        };
+        return std::fs::read_link(&full)
+            .map(|target| format!("link:{}", target.to_string_lossy()))
+            .map_err(unreadable);
     }
     if file_type.is_dir() {
-        return "dir".into();
+        // Gitlinks (including newly added nested repositories) record HEAD.
+        // Dirty submodule contents are summarized by status, not recursively
+        // hashed: ordinary add/checkout do not write those contents.
+        if full.join(".git").exists() {
+            let head = head_oid(&full)?;
+            let status = review_sync_ok(
+                &full,
+                &[
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
+            )?;
+            return Ok(format!(
+                "gitlink:{}:{}",
+                head.as_deref().unwrap_or("unborn"),
+                content_revision(&status)
+            ));
+        }
+        return Ok("dir".into());
     }
     if !file_type.is_file() {
-        return "other".into();
+        return Err(ApiError::internal(format!(
+            "cannot fingerprint special file {path}"
+        )));
     }
-    if mode == RevMode::Stat || metadata.len() > FILE_SERVE_MAX_BYTES {
-        return stat_fingerprint(&metadata);
-    }
-    match std::fs::read(&full) {
-        Ok(bytes) => content_revision(&bytes),
-        Err(error) => format!("unreadable:{:?}", error.kind()),
-    }
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o100 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = false;
+    let fingerprint = if mode == RevMode::Stat || metadata.len() > FILE_SERVE_MAX_BYTES {
+        stat_fingerprint(&metadata)
+    } else {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&full)
+            .and_then(|file| file.take(FILE_SERVE_MAX_BYTES + 1).read_to_end(&mut bytes))
+            .map_err(unreadable)?;
+        if bytes.len() as u64 > FILE_SERVE_MAX_BYTES {
+            stat_fingerprint(&metadata)
+        } else {
+            content_revision(&bytes)
+        }
+    };
+    Ok(format!("{fingerprint}:exec:{executable}"))
 }
 
 fn members_of(path: &str, old_path: Option<&str>) -> Vec<String> {
@@ -673,7 +741,12 @@ fn members_of(path: &str, old_path: Option<&str>) -> Vec<String> {
     members.into_iter().collect()
 }
 
-fn row_rev(workspace: &FsPath, listings: &[MemberListing], mode: RevMode) -> String {
+fn row_rev(
+    workspace: &FsPath,
+    listings: &[MemberListing],
+    mode: RevMode,
+) -> Result<String, ApiError> {
+    let mut effective_mode = mode;
     let mut hasher = Sha256::new();
     hasher.update(b"cw-git-rev-1\0");
     for listing in listings {
@@ -685,11 +758,19 @@ fn row_rev(workspace: &FsPath, listings: &[MemberListing], mode: RevMode) -> Str
         for file in &listing.files {
             hasher.update(file.as_bytes());
             hasher.update(b"\0");
-            hasher.update(worktree_fingerprint(workspace, file, mode).as_bytes());
+            let fingerprint = worktree_fingerprint(workspace, file, mode)?;
+            if fingerprint.starts_with("stat:") {
+                effective_mode = RevMode::Stat;
+            }
+            hasher.update(fingerprint.as_bytes());
             hasher.update(b"\0");
         }
     }
-    format!("{}{}", mode.tag(), hex(&hasher.finalize()))
+    Ok(format!(
+        "{}{}",
+        effective_mode.tag(),
+        hex(&hasher.finalize())
+    ))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -712,8 +793,10 @@ impl RevBudget {
         for file in listings.iter().flat_map(|listing| listing.files.iter()) {
             if let Ok(metadata) = std::fs::symlink_metadata(workspace.join(file))
                 && metadata.is_file()
-                && metadata.len() <= FILE_SERVE_MAX_BYTES
             {
+                if metadata.len() > FILE_SERVE_MAX_BYTES {
+                    return RevMode::Stat;
+                }
                 bytes += metadata.len();
                 files += 1;
             }
@@ -733,25 +816,31 @@ impl RevBudget {
 struct GitTokens {
     head_oid: Option<String>,
     index_token: String,
-    revision: String,
+    revision: Option<String>,
 }
 
 fn compute_tokens(
     workspace: &FsPath,
     frame: &RepoFrame,
     files: &mut [GitFileEntry],
-    outside: &[(String, String)],
+    outside: &[GitFileEntry],
 ) -> Result<GitTokens, ApiError> {
     let head_oid = head_oid(workspace)?;
     let index = IndexSnapshot::read(frame)?;
     let mut budget = RevBudget::default();
-    for entry in files.iter_mut() {
+    let mut content_safe = true;
+    let mut row_token = |entry: &GitFileEntry, prefix: &str| -> Result<String, ApiError> {
         let listings = members_of(&entry.path, entry.old_path.as_deref())
             .iter()
-            .map(|member| list_member(workspace, &index, member))
+            .map(|member| list_member(&frame.toplevel, &index, &format!("{prefix}{member}")))
             .collect::<Result<Vec<_>, _>>()?;
-        let mode = budget.choose(workspace, &listings);
-        entry.rev = Some(row_rev(workspace, &listings, mode));
+        let mode = budget.choose(&frame.toplevel, &listings);
+        let rev = row_rev(&frame.toplevel, &listings, mode)?;
+        content_safe &= rev.starts_with("c-");
+        Ok(rev)
+    };
+    for entry in files.iter_mut() {
+        entry.rev = Some(row_token(entry, &frame.prefix)?);
     }
     let mut hasher = Sha256::new();
     hasher.update(b"cw-git-revision-1\0");
@@ -767,19 +856,19 @@ fn compute_tokens(
         hasher.update(row.rev.as_deref().unwrap_or("").as_bytes());
         hasher.update(b"\0");
     }
-    let mut outside: Vec<&(String, String)> = outside.iter().collect();
-    outside.sort();
-    for (root_path, xy) in outside {
+    let mut outside: Vec<&GitFileEntry> = outside.iter().collect();
+    outside.sort_by(|a, b| a.path.cmp(&b.path));
+    for row in outside {
         hasher.update(b"outside\0");
-        hasher.update(root_path.as_bytes());
+        hasher.update(row.path.as_bytes());
         hasher.update(b"\0");
-        hasher.update(xy.as_bytes());
+        hasher.update(row_token(row, "")?.as_bytes());
         hasher.update(b"\0");
     }
     Ok(GitTokens {
         head_oid,
         index_token: index.token,
-        revision: hex(&hasher.finalize()),
+        revision: content_safe.then(|| hex(&hasher.finalize())),
     })
 }
 
@@ -1127,8 +1216,8 @@ pub(super) struct GitExpect {
     head: Option<Option<String>>,
     #[serde(default)]
     index: Option<String>,
-    #[serde(default)]
-    revision: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    revision: Option<Option<String>>,
     #[serde(default)]
     files: Option<BTreeMap<String, String>>,
 }
@@ -1197,7 +1286,12 @@ fn validate_expect(
         .transpose()?;
     let revision = expect
         .revision
-        .map(|raw| normalized_hex(&raw, &[64], "revision"))
+        .map(|raw| {
+            let raw = raw.ok_or_else(|| ApiError::bad_request(
+                "expect.revision cannot be null; a content-safe whole-tree revision is required",
+            ))?;
+            normalized_hex(&raw, &[64], "revision")
+        })
         .transpose()?;
     let files = match (expect.files, target) {
         (None, _) => None,
@@ -1219,11 +1313,11 @@ fn validate_expect(
                     .into_owned();
                 let token = token.trim().to_ascii_lowercase();
                 let valid = token.len() == 66
-                    && (token.starts_with("c-") || token.starts_with("s-"))
+                    && token.starts_with("c-")
                     && token[2..].bytes().all(|byte| byte.is_ascii_hexdigit());
                 if !valid {
                     return Err(ApiError::bad_request(format!(
-                        "expect.files[{path}] must be the rev read from GET /v1/git"
+                        "expect.files[{path}] must be a content-safe c- rev read from GET /v1/git; stat-only revisions cannot guard writes"
                     )));
                 }
                 if files.insert(path.clone(), token).is_some() {
@@ -1340,8 +1434,14 @@ fn check_preconditions(
     if let (Some(files), Some(index)) = (&expect.files, &index) {
         // A rename row's token also covers its source path; recover that
         // pairing from the current status, as the read did.
-        let porcelain = run_git_sync(workspace, &["status", "--porcelain=v1", "-z"])?;
-        let (rows, _) = split_by_workspace(parse_porcelain(&porcelain), &frame.prefix);
+        let porcelain = review_sync_ok(
+            workspace,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        let (rows, _) = split_by_workspace(
+            parse_porcelain(&String::from_utf8_lossy(&porcelain)),
+            &frame.prefix,
+        );
         let sources: BTreeMap<String, String> = rows
             .iter()
             .filter_map(|row| {
@@ -1353,9 +1453,11 @@ fn check_preconditions(
         for (path, expected) in files {
             let listings = members_of(path, sources.get(path).map(String::as_str))
                 .iter()
-                .map(|member| list_member(workspace, index, member))
+                .map(|member| {
+                    list_member(&frame.toplevel, index, &format!("{}{member}", frame.prefix))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
-            let current = row_rev(workspace, &listings, RevMode::of_token(expected));
+            let current = row_rev(&frame.toplevel, &listings, RevMode::Content)?;
             if &current != expected {
                 stale_paths.push(path.clone());
             }
@@ -1662,6 +1764,10 @@ mod tests {
     use super::*;
     use std::fs;
 
+    thread_local! {
+        pub(super) static GIT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     fn git(dir: &FsPath, args: &[&str]) {
         let output = Git::output(args, dir).expect("spawn git");
         assert!(
@@ -1689,9 +1795,16 @@ mod tests {
         let index = IndexSnapshot::read(&frame).unwrap();
         let listings: Vec<_> = members_of(path, None)
             .iter()
-            .map(|member| list_member(workspace, &index, member).unwrap())
+            .map(|member| {
+                list_member(
+                    &frame.toplevel,
+                    &index,
+                    &format!("{}{member}", frame.prefix),
+                )
+                .unwrap()
+            })
             .collect();
-        row_rev(workspace, &listings, RevMode::Content)
+        row_rev(&frame.toplevel, &listings, RevMode::Content).unwrap()
     }
 
     fn index_token(workspace: &FsPath) -> String {
@@ -1735,18 +1848,12 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_untracked_directory_rev_covers_files_inside() {
+    fn directory_rev_covers_untracked_files_inside() {
         let tmp = repo();
         let ws = tmp.path();
         fs::create_dir_all(ws.join("dir/deep")).unwrap();
         fs::write(ws.join("dir/deep/x.rs"), "x\n").unwrap();
-        let detail = collect_git_status_detail(ws).unwrap();
-        let row = detail
-            .files
-            .iter()
-            .find(|row| row.path == "dir/")
-            .expect("collapsed dir row");
-        let before = row.rev.clone().unwrap();
+        let before = rev(ws, "dir/");
         assert_eq!(rev(ws, "dir"), before, "dir and dir/ are one key");
         fs::write(ws.join("dir/deep/x.rs"), "y\n").unwrap();
         assert_ne!(rev(ws, "dir"), before);
@@ -1828,6 +1935,296 @@ mod tests {
         assert_ne!(before, after);
     }
 
+    fn expect_file(path: &str, token: String) -> Preconditions {
+        validate_expect(
+            Some(GitExpect {
+                files: Some(BTreeMap::from([(path.to_string(), token)])),
+                ..Default::default()
+            }),
+            ExpectTarget::Paths(&[path.to_string()]),
+        )
+        .unwrap()
+    }
+
+    fn assert_conflict(workspace: &FsPath, expect: &Preconditions) {
+        assert!(matches!(
+            check_preconditions(workspace, expect).unwrap(),
+            Err(GitWriteError::Coded {
+                status: StatusCode::CONFLICT,
+                code: "git_state_changed",
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn review_executable_mode_invalidates_row_guard() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = repo();
+        let ws = tmp.path();
+        git(ws, &["config", "core.filemode", "true"]);
+        fs::write(ws.join("a.txt"), "modified\n").unwrap();
+        fs::set_permissions(ws.join("a.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+        let detail = collect_git_status_detail(ws).unwrap();
+        let expect = expect_file("a.txt", detail.files[0].rev.clone().unwrap());
+        assert!(check_preconditions(ws, &expect).unwrap().is_ok());
+        fs::set_permissions(ws.join("a.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_conflict(ws, &expect);
+        assert_ne!(
+            collect_git_status_detail(ws).unwrap().revision,
+            detail.revision
+        );
+    }
+
+    #[test]
+    fn review_outside_content_invalidates_whole_tree_guard() {
+        let tmp = repo();
+        let root = tmp.path();
+        fs::create_dir(root.join("sub")).unwrap();
+        let ws = root.join("sub");
+        fs::write(root.join("a.txt"), "outside one\n").unwrap();
+        let detail = collect_git_status_detail(&ws).unwrap();
+        assert!(detail.files.is_empty());
+        let expect = Preconditions {
+            head: Some(detail.head_oid),
+            revision: Some(detail.revision.unwrap()),
+            ..Default::default()
+        };
+        assert!(check_preconditions(&ws, &expect).unwrap().is_ok());
+        // Keep the porcelain XY and index unchanged.
+        fs::write(root.join("a.txt"), "outside two\n").unwrap();
+        assert_conflict(&ws, &expect);
+    }
+
+    #[test]
+    fn review_submodule_head_invalidates_row_guard() {
+        let tmp = repo();
+        let ws = tmp.path();
+        let sub = ws.join("vendor");
+        fs::create_dir(&sub).unwrap();
+        git(&sub, &["init", "-q", "-b", "main"]);
+        git(&sub, &["config", "user.email", "git-rev@example.test"]);
+        git(&sub, &["config", "user.name", "Git Rev Test"]);
+        fs::write(sub.join("lib.txt"), "one\n").unwrap();
+        git(&sub, &["add", "lib.txt"]);
+        git(&sub, &["commit", "-q", "-m", "one"]);
+        git(ws, &["add", "vendor"]);
+        git(ws, &["commit", "-q", "-m", "gitlink"]);
+        for contents in ["two\n", "three\n"] {
+            fs::write(sub.join("lib.txt"), contents).unwrap();
+            git(&sub, &["commit", "-q", "-am", contents]);
+        }
+        git(&sub, &["checkout", "-q", "HEAD~1"]);
+        let detail = collect_git_status_detail(ws).unwrap();
+        let row = detail
+            .files
+            .iter()
+            .find(|row| row.path == "vendor")
+            .unwrap();
+        let expect = expect_file("vendor", row.rev.clone().unwrap());
+        assert!(check_preconditions(ws, &expect).unwrap().is_ok());
+        git(&sub, &["checkout", "-q", "main"]);
+        assert_conflict(ws, &expect);
+    }
+
+    #[test]
+    fn review_untracked_workspace_prefix_exposes_children() {
+        let tmp = repo();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("sub/deep")).unwrap();
+        fs::write(root.join("sub/new.txt"), "new\n").unwrap();
+        fs::write(root.join("sub/deep/child.txt"), "child\n").unwrap();
+        let ws = root.join("sub");
+        let detail = collect_git_status_detail(&ws).unwrap();
+        assert_eq!(
+            detail
+                .files
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            ["deep/child.txt", "new.txt"]
+        );
+        for row in detail.files {
+            assert_eq!(row.status, "untracked");
+            let expect = expect_file(&row.path, row.rev.unwrap());
+            assert!(check_preconditions(&ws, &expect).unwrap().is_ok());
+            git(&ws, &["add", "--", &row.path]);
+        }
+        assert_eq!(collect_git_status_detail(&ws).unwrap().staged, 2);
+    }
+
+    #[test]
+    fn review_outgoing_rename_exposes_source_deletion() {
+        let tmp = repo();
+        let root = tmp.path();
+        fs::create_dir(root.join("sub")).unwrap();
+        git(root, &["mv", "a.txt", "sub/a.txt"]);
+        git(root, &["commit", "-q", "-m", "inside"]);
+        git(root, &["mv", "sub/a.txt", "outside.txt"]);
+        let ws = root.join("sub");
+        let detail = collect_git_status_detail(&ws).unwrap();
+        assert_eq!(detail.files.len(), 1);
+        let row = &detail.files[0];
+        assert_eq!(row.path, "a.txt");
+        assert_eq!(row.index, "D");
+        assert_eq!(row.status, "deleted");
+        assert!(row.staged);
+        assert!(row.old_path.is_none());
+        let expect = expect_file("a.txt", row.rev.clone().unwrap());
+        assert!(check_preconditions(&ws, &expect).unwrap().is_ok());
+        // The projected row can unstage the in-workspace deletion.
+        git(&ws, &["restore", "--staged", "--", "a.txt"]);
+        assert_ne!(index_token(&ws), detail.index_token.unwrap());
+    }
+
+    #[test]
+    fn review_untracked_inventory_has_constant_git_reads() {
+        let tmp = repo();
+        let ws = tmp.path();
+        fs::write(ws.join(".gitignore"), "*.ignored\n").unwrap();
+        let mut read_counts = Vec::new();
+        for count in [1, 32] {
+            for n in 0..count {
+                let dir = ws.join(format!("dir{n}"));
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join("file.txt"), "file\n").unwrap();
+                fs::write(dir.join("skip.ignored"), "ignored\n").unwrap();
+            }
+            GIT_READS.with(|reads| reads.set(0));
+            let detail = collect_git_status_detail(ws).unwrap();
+            read_counts.push(GIT_READS.with(|reads| reads.get()));
+            assert!(detail.files.iter().all(|row| row.rev.is_some()));
+            assert!(
+                !detail
+                    .files
+                    .iter()
+                    .any(|row| row.path.ends_with(".ignored"))
+            );
+        }
+        assert_eq!(
+            read_counts[0], read_counts[1],
+            "Git reads must not grow per directory"
+        );
+    }
+
+    #[test]
+    fn review_broken_head_is_not_unborn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        git(ws, &["init", "-q", "-b", "main"]);
+        assert_eq!(head_oid(ws).unwrap(), None);
+        assert!(collect_git_status_detail(ws).unwrap().index_token.is_some());
+        let expect = Preconditions {
+            head: Some(None),
+            ..Default::default()
+        };
+        assert!(check_preconditions(ws, &expect).unwrap().is_ok());
+        // An existing branch pointing at a missing object is broken, not unborn.
+        fs::write(
+            ws.join(".git/refs/heads/main"),
+            format!("{}\n", "1".repeat(40)),
+        )
+        .unwrap();
+        assert!(head_oid(ws).is_err());
+        assert!(collect_git_status_detail(ws).is_err());
+        assert!(check_preconditions(ws, &expect).is_err());
+        fs::write(ws.join(".git/refs/heads/main"), "broken\n").unwrap();
+        assert!(
+            head_oid(ws).is_err(),
+            "a malformed ref is not an absent ref"
+        );
+        assert!(collect_git_status_detail(ws).is_err());
+        // The same failure in detached HEAD must also propagate.
+        fs::write(ws.join(".git/HEAD"), format!("{}\n", "1".repeat(40))).unwrap();
+        assert!(head_oid(ws).is_err());
+    }
+
+    #[test]
+    fn review_stat_only_revisions_cannot_guard_writes() {
+        use std::io::{Seek as _, Write as _};
+        let tmp = repo();
+        let ws = tmp.path();
+        let path = ws.join("a.txt");
+        let file = fs::File::options().write(true).open(&path).unwrap();
+        file.set_len(FILE_SERVE_MAX_BYTES + 1).unwrap();
+        drop(file);
+        let detail = collect_git_status_detail(ws).unwrap();
+        let token = detail.files[0].rev.clone().unwrap();
+        assert!(
+            token.starts_with("s-"),
+            "oversized row must not claim content safety"
+        );
+        assert!(
+            detail.revision.is_none(),
+            "whole-tree token cannot hide stat-only rows"
+        );
+        // Same size and mtime, different bytes: the display token can match.
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut file = fs::File::options().write(true).open(&path).unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        file.write_all(b"two\n").unwrap();
+        file.set_modified(modified).unwrap();
+        drop(file);
+        let after = collect_git_status_detail(ws).unwrap();
+        assert_eq!(after.files[0].rev.as_ref(), Some(&token));
+        assert!(
+            validate_expect(
+                Some(GitExpect {
+                    files: Some(BTreeMap::from([("a.txt".to_string(), token)])),
+                    ..Default::default()
+                }),
+                ExpectTarget::Paths(&["a.txt".to_string()]),
+            )
+            .is_err()
+        );
+        // An old c- token cannot pass after a file grows beyond the bound.
+        fs::write(&path, "small\n").unwrap();
+        let expect = expect_file("a.txt", rev(ws, "a.txt"));
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(FILE_SERVE_MAX_BYTES + 1)
+            .unwrap();
+        assert_conflict(ws, &expect);
+    }
+
+    #[test]
+    fn review_hash_budget_withholds_whole_tree_revision() {
+        let tmp = repo();
+        let ws = tmp.path();
+        for n in 0..=REV_CONTENT_BUDGET_FILES {
+            fs::write(ws.join(format!("file{n:05}")), "x").unwrap();
+        }
+        let detail = collect_git_status_detail(ws).unwrap();
+        assert!(detail.revision.is_none());
+        assert!(detail.index_token.is_some());
+        assert_eq!(
+            detail
+                .files
+                .iter()
+                .filter(|row| row.rev.as_deref().unwrap().starts_with("c-"))
+                .count(),
+            REV_CONTENT_BUDGET_FILES
+        );
+        let row = detail.files.last().unwrap();
+        assert!(row.rev.as_deref().unwrap().starts_with("s-"));
+        assert!(
+            validate_expect(
+                Some(GitExpect {
+                    files: Some(BTreeMap::from([(
+                        row.path.clone(),
+                        row.rev.clone().unwrap()
+                    )])),
+                    ..Default::default()
+                }),
+                ExpectTarget::Paths(&[row.path.clone()]),
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn expect_validation_rules() {
         let parse = |value: Value| serde_json::from_value::<GitExpect>(value);
@@ -1856,6 +2253,7 @@ mod tests {
             json!({ "head": "g".repeat(40) }),
             json!({ "index": "a".repeat(40) }),
             json!({ "revision": "zz" }),
+            json!({ "revision": null }),
         ] {
             assert!(
                 validate_expect(Some(parse(bad.clone()).unwrap()), ExpectTarget::Commit).is_err(),

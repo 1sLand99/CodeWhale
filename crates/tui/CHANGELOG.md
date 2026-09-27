@@ -34,7 +34,11 @@ quieter, and Fleet runs can be checked before they spend anything.
   longer stage bytes, discard edits or commit an index the user never saw.
   Requests without `expect` behave as before. Path writes now use literal
   pathspecs, as the docs already said, and `files[].path` is
-  workspace-relative in a subdirectory workspace
+  workspace-relative in a subdirectory workspace. Guards cover executable
+  mode, submodule HEAD and changes outside that workspace; oversized or
+  budget-limited stat-only revisions cannot authorize a guarded write.
+  Untracked workspace files and renames leaving the workspace remain
+  visible, and broken HEADs fail instead of being treated as unborn
   ([#6647](https://github.com/Hmbown/Codewhale/issues/6647)).
 - Runtime API: `POST /v1/threads/{id}/fork-at-turn` forks a thread at a named
   user turn, keeping that turn and every turn before it. The receipt matches

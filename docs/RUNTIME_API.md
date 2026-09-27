@@ -1396,21 +1396,27 @@ also how a client sees model-spawned work.
   `remotes`. `files[].path` and `old_path` are workspace-relative, the same
   frame the write routes take; in a workspace that is a subdirectory of its
   repository, rows outside the workspace are not listed (the counts stay
-  repository-wide). The precondition tokens are opaque:
+  repository-wide). A rename out of the workspace appears as its source
+  deletion. Untracked directories are expanded to individually addressable
+  files. The precondition tokens are opaque:
   - `head_oid` — the full HEAD commit id; `null` on an unborn branch
   - `index_token` — the whole index (mode, blob, stage and path of every
     entry, repository-wide). A stat-only refresh by `git status` does not
-    change it. `null` means the tokens could not be computed and a client
-    should send no `expect`
+    change it. Repository read failures, including a broken HEAD, return an
+    error rather than unchecked tokens
   - `files[].rev` — one row: its index entries plus the working-tree state
-    of every file it covers (a rename's source, every file under a
-    collapsed untracked `dir/`). Working-tree files are identified by a
-    sha256 of their bytes (`c-…`), or by size and modification time for a
-    file over 16 MiB. A read hashes at most 64 MiB / 4,096 files; rows past
-    that budget carry a size-and-mtime token (`s-…`), and a check
-    recomputes in the mode the token names
+    of every file it covers (including a rename's in-workspace source).
+    Content tokens (`c-…`) include file bytes, the executable bit on Unix,
+    symlink targets, and submodule HEAD/status. Submodule dirty contents
+    are summarized by porcelain status, not recursively hashed; ordinary
+    stage/discard do not write those contents. A read hashes at most
+    64 MiB / 4,096 files; rows past that budget or containing a file over
+    16 MiB carry a display-only size-and-mtime token (`s-…`). Those tokens
+    cannot guard writes
   - `revision` — the whole tree: `head_oid`, `index_token`, every row's
-    `rev`, and the status of rows outside a subdirectory workspace
+    `rev`, including the working-tree state of rows outside a subdirectory
+    workspace. `null` when any row is stat-only; whole-tree guarded writes
+    are unavailable in that case. Clients must not silently omit a guard
 - `GET /v1/changes` — the same porcelain `files[]` projection plus
   `head_oid`, `index_token` and `revision`, minus repo chrome
   (branches/remotes): one authority, so the change list can never disagree
@@ -1464,8 +1470,10 @@ is not a repository answers `404`.
 | commit `all` | `{head, revision}` |
 
 Malformed preconditions answer `400` before anything runs: `head` must be a
-40- or 64-hex id or `null`; `index` and `revision` 64 hex; `files` values a
-`rev`. `files` keys (workspace-relative; `dir/` and `dir` are the same key)
+40- or 64-hex id or `null`; `index` and `revision` 64 hex (an explicit
+`revision: null` is refused); `files` values a content-safe `c-` rev (`s-`
+tokens answer `400`). `files` keys
+(workspace-relative; `dir/` and `dir` are the same key)
 must name exactly the requested paths, so no path is left unguarded by
 accident. `files` is refused with `all: true` (use `revision`) and on
 commit. An unknown key inside `expect` is rejected like any other unknown
