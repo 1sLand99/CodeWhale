@@ -1634,6 +1634,10 @@ pub struct App {
     /// Updated by `/provider` switches so the UI/commands can read the
     /// active backend without re-deriving it from the live config.
     pub api_provider: ApiProvider,
+    /// The resolved startup config named a provider or model. Capture this
+    /// before runtime synchronization writes even the built-in route to Config;
+    /// missing credentials must not make that choice eligible for discovery.
+    pub(crate) startup_route_configured: bool,
     /// Exact configured provider key for persistence and route restoration.
     /// Built-ins use their canonical slug; named custom providers retain the
     /// user-owned key instead of collapsing to `custom`.
