@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:bbb8bfb61e57 -->
+<!-- source: README.md sha256:ccb7a0b00317 -->
 # Codewhale
 
 Codewhale to agent o otwartym kodzie źródłowym, który czyta Twój projekt, edytuje pliki, wykonuje polecenia i sprawdza swoją pracę przy użyciu wybranego przez Ciebie modelu hostowanego lub lokalnego. Zacznij od jednego zadania w terminalu. Przy większej pracy powierz jej części agentom korzystającym z różnych modeli i pełniącym różne role.
