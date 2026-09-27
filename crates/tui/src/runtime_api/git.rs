@@ -2219,7 +2219,7 @@ mod tests {
                     )])),
                     ..Default::default()
                 }),
-                ExpectTarget::Paths(&[row.path.clone()]),
+                ExpectTarget::Paths(std::slice::from_ref(&row.path)),
             )
             .is_err()
         );
