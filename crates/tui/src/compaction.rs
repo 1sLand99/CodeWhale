@@ -260,7 +260,11 @@ live tool state; anything left out is gone.\n\n{}\n\n{HANDOFF_FOLD_IN_RULE}\n\n{
 /// `summary_header_matches_what_replacement_history_keeps` test). It opens the
 /// checkpoint message, so together with [`COMPACTION_CHECKPOINT_PROVENANCE`]
 /// it is how a new-format checkpoint is recognised.
-const SUMMARY_HEADER: &str = "Codewhale handoff note. Earlier turns of this session were \
+///
+/// A history rebuilt from turn records has to recognise the checkpoint
+/// messages a document carries, so the header is crate-visible
+/// (`runtime_threads`' recovery projection tests, #6664).
+pub(crate) const SUMMARY_HEADER: &str = "Codewhale handoff note. Earlier turns of this session were \
 condensed to make room. Kept above are the most recent user messages and the last steps of the \
 current round. Long tool output there is shortened, with a marker where it was cut, and the \
 oldest kept message may be shortened too. Everything earlier, including earlier steps of this \
