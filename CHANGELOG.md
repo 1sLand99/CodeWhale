@@ -124,6 +124,8 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- Keep reasoning effort labels, including `xhigh` and `ultra`, visible beside
+  short model names in the 80-column terminal footer.
 - `/trust on|off` changes file-tool trust for this session. Add `--save` to
   persist workspace trust for project skills, commands, hooks, MCP servers,
   and project context. Skipped-skill notices stay out of conversation titles

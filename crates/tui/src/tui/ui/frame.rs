@@ -2495,6 +2495,40 @@ mod tests {
             .collect::<String>()
     }
 
+    #[test]
+    fn footer_keeps_reasoning_label_for_every_effort_tier() {
+        use crate::reasoning_preference::ReasoningEffort;
+
+        let mut app = app_with_context_percent(1);
+        app.api_provider = crate::config::ApiProvider::Openai;
+        app.active_route_base_url = "https://api.openai.com/v1".to_string();
+        app.model = "gpt-5.6".to_string();
+        app.auto_model = false;
+        app.ui_locale = codewhale_localization::Locale::En;
+
+        let mut missing = Vec::new();
+        for effort in [
+            ReasoningEffort::Off,
+            ReasoningEffort::Minimal,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Ultra,
+            ReasoningEffort::Auto,
+            ReasoningEffort::Max,
+        ] {
+            app.reasoning_effort = effort;
+            let label = app.reasoning_effort_display_label();
+            assert!(!label.is_empty(), "{effort:?} must have a label");
+            let row = metrics_row(&app, 80);
+            if !row.contains(&format!("thinking: {label}")) {
+                missing.push(format!("{effort:?}: {row:?}"));
+            }
+        }
+        assert!(missing.is_empty(), "missing footer labels: {missing:#?}");
+    }
+
     /// The reading used to go silent below 50% fullness, which is most of a
     /// session (#5950). It is a reading, not an alarm: it states 10% as
     /// readily as 60%, and only the ink changes at the thresholds.
