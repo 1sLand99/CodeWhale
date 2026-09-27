@@ -243,6 +243,15 @@ quieter, and Fleet runs can be checked before they spend anything.
   and `/cache` show the parent, agents and combined hit rates, each labelled,
   and the footer `cache N%` still means this conversation's own requests
   ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
+- The dock's GIT, FILES and NOTES views are real. GIT shows the branch and
+  where it stands against its upstream, the changes (with their paths one
+  Enter away), linked worktrees and the last five commits, and it keeps
+  updating during a turn while it is open. It says "not a git repository"
+  only when that is true. FILES lists the files this session edited, with
+  their size, and the files it read. NOTES lists your `/note` notes. The git
+  badge, the Git view and the model's git line now share one
+  `git status --porcelain=v2` call, so there are fewer git processes than
+  before ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
 
 ### Plugins
 
