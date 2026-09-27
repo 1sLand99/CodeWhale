@@ -13996,6 +13996,9 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
 /// reads as a live claim that the (already answered) call is still waiting.
 #[tokio::test]
 async fn approval_wait_heartbeat_is_never_sequenced_after_the_decision() -> Result<()> {
+    // The timeout test changes a process-wide override to 25 ms. This case
+    // checks heartbeat ordering while a decision is still pending.
+    let _timeout_guard = test_approval_timeout_ms(0);
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
         .create_thread(CreateThreadRequest::default())

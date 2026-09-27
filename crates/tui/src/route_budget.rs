@@ -528,6 +528,9 @@ mod tests {
     /// conservative compatibility ceiling, with an attributable source.
     #[test]
     fn uncatalogued_remote_model_keeps_a_conservative_ceiling() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
         let source = output_ceiling_source(ApiProvider::Openai, "totally-unknown-alias-v9");
         assert_eq!(
             source,
