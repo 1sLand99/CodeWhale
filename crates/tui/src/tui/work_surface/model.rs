@@ -1981,12 +1981,12 @@ fn live_activity_facts(app: &App, agent_id: &str) -> Vec<String> {
     {
         facts.push(tr(app.ui_locale, MessageId::BackgroundUsingTool).replace("{tool}", tool));
     }
-    if let Some(step) = activity.and_then(|activity| activity.step) {
-        if !said(&format!("step {step}")) {
-            facts.push(
-                tr(app.ui_locale, MessageId::BackgroundStep).replace("{step}", &step.to_string()),
-            );
-        }
+    if let Some(step) = activity.and_then(|activity| activity.step)
+        && !said(&format!("step {step}"))
+    {
+        facts.push(
+            tr(app.ui_locale, MessageId::BackgroundStep).replace("{step}", &step.to_string()),
+        );
     }
     if let Some(files) = meta
         .map(|meta| meta.files_touched)

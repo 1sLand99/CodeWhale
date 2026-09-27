@@ -31154,7 +31154,11 @@ fn background_review_shell_completion_survives_unobserved_live_and_missing_snaps
     app.current_session_id = Some("a".into());
     let mut entries = Vec::new();
     let fast = shell_job("shell_fast", "true", ShellStatus::Completed, Some(0));
-    assert!(project_shell_jobs(&mut app, &mut entries, &[fast.clone()]));
+    assert!(project_shell_jobs(
+        &mut app,
+        &mut entries,
+        std::slice::from_ref(&fast)
+    ));
     assert_eq!(app.background_finished.len(), 1);
     assert_eq!(entries[0].id, "shell_fast");
     assert_eq!(entries[0].kind, TaskPanelEntryKind::Shell);
@@ -31197,7 +31201,7 @@ fn background_review_finished_shell_retention_is_capped_per_session() {
     let a = shell_job("shell_a", "true", ShellStatus::Completed, Some(0));
     let mut entries = Vec::new();
     app.current_session_id = Some("a".into());
-    project_shell_jobs(&mut app, &mut entries, &[a.clone()]);
+    project_shell_jobs(&mut app, &mut entries, std::slice::from_ref(&a));
     app.current_session_id = Some("b".into());
     let b = (0..MAX_FINISHED_SHELLS + 2)
         .map(|n| {
