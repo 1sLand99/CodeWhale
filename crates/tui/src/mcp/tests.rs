@@ -8367,16 +8367,25 @@ async fn manual_retry_clears_supervision_marks() {
 /// request, so only that class may replay a tool call.
 #[test]
 fn connection_lost_covers_closed_transports_but_only_rejected_sessions_replay() {
-    use super::wire::{is_mcp_connection_lost_error, is_mcp_session_rejected_error};
+    use super::wire::{
+        McpSessionRejected, is_mcp_connection_lost_error, is_mcp_session_rejected_error,
+    };
     for rejected in [
-        "MCP session expired",
+        "MCP session expired (transport=sse endpoint=x status=400 Bad Request): session invalid",
         "MCP Streamable HTTP session expired; retry with a new session required (404)",
     ] {
-        let err = anyhow::anyhow!("{rejected}");
+        let err = anyhow::Error::from(McpSessionRejected(rejected.to_string()))
+            .context("MCP method 'tools/call' failed");
         assert!(is_mcp_connection_lost_error(&err), "{rejected}");
         assert!(is_mcp_session_rejected_error(&err), "{rejected}");
+        // The same words without the transport's type are not a refusal:
+        // a JSON-RPC error answering the request can carry them.
+        let text_only = anyhow::anyhow!("{rejected}");
+        assert!(is_mcp_connection_lost_error(&text_only), "{rejected}");
+        assert!(!is_mcp_session_rejected_error(&text_only), "{rejected}");
     }
     for ambiguous in [
+        "MCP session expired: {\"code\":-32000,\"message\":\"session invalid\"}",
         "connection reset by peer",
         "Stdio transport closed",
         "Stdio transport closed (exit status: 1)\nsession invalid",
@@ -8390,6 +8399,270 @@ fn connection_lost_covers_closed_transports_but_only_rejected_sessions_replay() 
     let app = anyhow::anyhow!("tool returned an application error");
     assert!(!is_mcp_connection_lost_error(&app));
     assert!(!is_mcp_session_rejected_error(&app));
+}
+
+/// A stdio server that logs every `tools/call` it receives to `$CALL_LOG`,
+/// so a test can count how many times the tool really ran. `$FIRST_CALL`
+/// picks what happens to the first call after it has run: `exit` kills the
+/// child before replying, `session-error` answers it with a JSON-RPC error
+/// whose text mentions an invalid session.
+#[cfg(unix)]
+const COUNTING_STDIO_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+    id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    case "$line" in
+        *'"method":"notifications/'*)
+            ;;
+        *'"method":"initialize"'*)
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"counter","version":"1.0.0"},"capabilities":{"tools":{}}}}\n' "$id"
+            ;;
+        *'"method":"tools/list"'*)
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"tools":[{"name":"act","inputSchema":{"type":"object"}}]}}\n' "$id"
+            ;;
+        *'"method":"tools/call"'*)
+            echo call >> "$CALL_LOG"
+            if [ "$(wc -l < "$CALL_LOG")" -eq 1 ]; then
+                case "$FIRST_CALL" in
+                    exit) exit 0 ;;
+                    session-error)
+                        printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32000,"message":"session invalid"}}\n' "$id"
+                        continue
+                        ;;
+                esac
+            fi
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"content":[{"type":"text","text":"ok"}]}}\n' "$id"
+            ;;
+        *)
+            [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
+            ;;
+    esac
+done
+"#;
+
+#[cfg(unix)]
+fn counting_stdio_pool(dir: &Path, first_call: &str) -> (McpPool, PathBuf) {
+    let script = dir.join("server.sh");
+    fs::write(&script, COUNTING_STDIO_SERVER).unwrap();
+    let call_log = dir.join("calls.log");
+    let mut server = test_server_config();
+    server.command = Some("sh".to_string());
+    server.args = vec![script.to_string_lossy().into_owned()];
+    server.env.insert(
+        "CALL_LOG".to_string(),
+        call_log.to_string_lossy().into_owned(),
+    );
+    server
+        .env
+        .insert("FIRST_CALL".to_string(), first_call.to_string());
+    server.connect_timeout = Some(10);
+    server.execute_timeout = Some(10);
+    let mut cfg = McpConfig::default();
+    cfg.servers.insert("counter".to_string(), server);
+    (McpPool::new(cfg), call_log)
+}
+
+#[cfg(unix)]
+fn server_call_count(call_log: &Path) -> usize {
+    fs::read_to_string(call_log)
+        .map(|log| log.lines().count())
+        .unwrap_or(0)
+}
+
+/// A stdio child that dies after reading `tools/call` may have run it: the
+/// call fails as unknown, runs once, and the next call gets a fresh child.
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_child_exit_during_tool_call_is_not_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut pool, call_log) = counting_stdio_pool(dir.path(), "exit");
+
+    let err = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect_err("a call whose child exited mid-flight must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(server_call_count(&call_log), 1);
+
+    let result = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect("the next call reconnects");
+    assert_eq!(
+        result,
+        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+    );
+    assert_eq!(server_call_count(&call_log), 2);
+}
+
+/// A JSON-RPC error answering the call id means the server processed the
+/// request, even when its text mentions an invalid session: the tool may
+/// have acted before failing, so the call is not sent again.
+#[cfg(unix)]
+#[tokio::test]
+async fn json_rpc_session_error_on_tool_call_is_not_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut pool, call_log) = counting_stdio_pool(dir.path(), "session-error");
+
+    let err = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect_err("a session error answering the call must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(server_call_count(&call_log), 1);
+
+    let result = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect("the next call reconnects");
+    assert_eq!(
+        result,
+        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+    );
+    assert_eq!(server_call_count(&call_log), 2);
+}
+
+/// A Streamable HTTP server that reads the whole `tools/call` POST and then
+/// drops the connection may have run it: the call runs once and the next
+/// call succeeds on a rebuilt connection.
+#[tokio::test]
+async fn streamable_http_reset_after_tool_call_post_is_not_replayed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let _lock = lock_mcp_loopback_tests().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let server_tool_calls = Arc::clone(&tool_calls);
+
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let tool_calls = Arc::clone(&server_tool_calls);
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                let header_end = loop {
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+                if headers.starts_with("GET ") {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let request_json: serde_json::Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                let method = request_json["method"].as_str().unwrap_or("");
+                let Some(id) = request_json.get("id").cloned() else {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 202 Accepted\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                };
+                let result = match method {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"tools": {}}
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{ "name": "act", "inputSchema": {"type": "object"} }]
+                    }),
+                    "tools/call" => {
+                        // The tool runs, then the connection drops before
+                        // any reply is written.
+                        if tool_calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                            drop(socket);
+                            return;
+                        }
+                        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let body =
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    let mut server_config = test_server_config();
+    server_config.command = None;
+    server_config.url = Some(format!("http://{addr}/mcp"));
+    server_config.connect_timeout = Some(10);
+    server_config.execute_timeout = Some(10);
+    let mut cfg = McpConfig::default();
+    cfg.servers.insert("remote".to_string(), server_config);
+    let mut pool = McpPool::new(cfg);
+
+    let err = pool
+        .call_tool("mcp_remote_act", serde_json::json!({}))
+        .await
+        .expect_err("a call whose connection dropped mid-flight must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 1);
+
+    let result = pool
+        .call_tool("mcp_remote_act", serde_json::json!({}))
+        .await
+        .expect("the next call reconnects");
+    assert_eq!(
+        result,
+        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+    );
+    assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 2);
+
+    server.abort();
 }
 
 // Executed both as an ordinary no-op test and as an isolated OS-process worker.

@@ -55,13 +55,16 @@ quieter, and Fleet runs can be checked before they spend anything.
   (`file_read`, `search`). Tools that write files or run commands are
   neither listed nor run unless the operator sets `require_approval = false`
   in the MCP server config; a client's own `approved` flag no longer counts
-  as approval.
+  as approval. At startup the server names on stderr each configured tool it
+  withholds and the setting that allows it.
 - A `Bash` entry in the disallowed tools now also blocks `start_mcp_server`
   and `start_registry_mcp_server`, which launch local processes.
 - An MCP tool call whose connection closes before it answers is no longer
   sent again on a new connection, since the server may already have run it.
-  The call reports an unknown outcome and the next call reconnects. A call
-  whose session the server refused is still retried once.
+  The same holds for a server error reply that mentions an expired or invalid
+  session. The call reports an unknown outcome and the next call reconnects.
+  Only a call the HTTP transport turned away for a stale session, before the
+  server handled it, is still retried once.
 
 ### Fixed
 

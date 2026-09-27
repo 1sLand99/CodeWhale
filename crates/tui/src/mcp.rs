@@ -2533,6 +2533,8 @@ impl McpConnection {
             // IDs, but accept numeric echoes for compatibility with older
             // servers and tests.
             if response_id_matches(value.get("id"), &expected_id) {
+                // Marks the connection stale so it is rebuilt, but this is a
+                // reply to the request, so it never qualifies for a replay.
                 if let Some(error) = value.get("error")
                     && is_mcp_stale_session_body(&error.to_string())
                 {
@@ -5041,9 +5043,9 @@ impl McpPool {
             Ok(result) => Ok(result),
             // A rejected credential is not a stale session: reconnecting
             // replays the same rejection, so it takes the auth-required
-            // path below instead of the transparent retry. Only a refused
-            // session id proves the server never ran the call, so only that
-            // class is replayed.
+            // path below instead of the transparent retry. Only a typed
+            // transport-level refusal of the session id proves the server
+            // never ran the call, so only that class is replayed.
             Err(err)
                 if is_mcp_session_rejected_error(&err)
                     && !oauth::error_looks_auth_required(&err) =>
@@ -5085,10 +5087,11 @@ impl McpPool {
                     )),
                 }
             }
-            // The transport died after the request was written: the server
-            // may already have run the tool, so replaying it could repeat a
-            // side effect. Rebuild the connection for the next call and let
-            // the caller decide whether to repeat this one.
+            // The transport died after the request was written, or the
+            // server answered this request id with a session error: either
+            // way it may already have run the tool, so replaying it could
+            // repeat a side effect. Rebuild the connection for the next call
+            // and let the caller decide whether to repeat this one.
             Err(err)
                 if is_mcp_connection_lost_error(&err)
                     && !oauth::error_looks_auth_required(&err) =>

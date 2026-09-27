@@ -17,12 +17,29 @@ pub(super) fn is_mcp_stale_session_body(body: &str) -> bool {
     body.contains("session") && (body.contains("expired") || body.contains("invalid"))
 }
 
-/// The server answered the request by refusing its session id, so it
-/// provably did not run it. This is the only failure after which a
-/// non-idempotent `tools/call` may be replayed on a fresh connection.
+/// A transport-level refusal of the session id, raised only where the
+/// HTTP layer turned the request away before handing it to the server's
+/// method dispatch: a Streamable HTTP stale-session status, or a legacy SSE
+/// POST rejected with a stale-session body. A JSON-RPC error response is
+/// never this type: it answers the request id, so the server processed it.
+#[derive(Debug)]
+pub(super) struct McpSessionRejected(pub(super) String);
+
+impl std::fmt::Display for McpSessionRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for McpSessionRejected {}
+
+/// The transport refused the session id, so the server provably did not run
+/// the request. This is the only failure after which a non-idempotent
+/// `tools/call` may be replayed on a fresh connection. Typed, not matched on
+/// text, so a tool error that merely mentions an expired session cannot
+/// qualify.
 pub(super) fn is_mcp_session_rejected_error(err: &anyhow::Error) -> bool {
-    let err = format!("{err:#}");
-    err.contains("MCP Streamable HTTP session expired") || err.contains("MCP session expired")
+    err.downcast_ref::<McpSessionRejected>().is_some()
 }
 
 /// The connection is unusable: either the server rejected the session id,

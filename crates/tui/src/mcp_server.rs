@@ -40,24 +40,25 @@ impl McpServerSettings {
         if let Some(path) = path.filter(|p| p.exists()) {
             let contents = std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read MCP server config: {}", path.display()))?;
-            let config: McpServerConfigFile = toml::from_str(&contents).with_context(|| {
-                format!("Failed to parse MCP server config: {}", path.display())
-            })?;
-            let expose_tools = config
-                .server
-                .expose_tools
-                .unwrap_or_else(default_expose_tools);
-            let require_approval = config.server.require_approval.unwrap_or(true);
-            Ok(Self {
-                expose_tools,
-                require_approval,
-            })
+            Self::from_toml(&contents)
+                .with_context(|| format!("Failed to parse MCP server config: {}", path.display()))
         } else {
             Ok(Self {
                 expose_tools: default_expose_tools(),
                 require_approval: true,
             })
         }
+    }
+
+    fn from_toml(contents: &str) -> Result<Self> {
+        let config: McpServerConfigFile = toml::from_str(contents)?;
+        Ok(Self {
+            expose_tools: config
+                .server
+                .expose_tools
+                .unwrap_or_else(default_expose_tools),
+            require_approval: config.server.require_approval.unwrap_or(true),
+        })
     }
 }
 
@@ -74,6 +75,15 @@ pub async fn run_mcp_server(workspace: PathBuf) -> Result<()> {
         .await
         .context("MCP server settings task failed")??;
     let mut server = McpServer::new(workspace, settings)?;
+    // stdout carries the protocol; the notice goes to stderr so an operator
+    // whose config lists write tools sees why they are missing.
+    for name in server.withheld_tools() {
+        eprintln!(
+            "codewhale mcp server: not exposing '{name}': it writes files or runs \
+             commands and require_approval is on. Set require_approval = false under \
+             [server] in the MCP server config to allow it."
+        );
+    }
     server.run().await
 }
 
@@ -193,6 +203,24 @@ impl McpServer {
         // are no more results. Emitting `null` violates the spec and breaks
         // strict clients (e.g. Claude Code) that validate the response shape.
         json!({ "tools": tools })
+    }
+
+    /// Configured tools that `require_approval` keeps out of `tools/list`.
+    fn withheld_tools(&self) -> Vec<String> {
+        if !self.require_approval {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        self.exposed_tools
+            .iter()
+            .filter(|entry| seen.insert(entry.public.clone()))
+            .filter(|entry| {
+                self.registry
+                    .get(&entry.internal)
+                    .is_some_and(|tool| !tool.is_read_only())
+            })
+            .map(|entry| entry.public.clone())
+            .collect()
     }
 
     async fn list_resources_response(&self) -> Value {
@@ -481,6 +509,24 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         assert_eq!(names, vec!["file_read", "search"], "{tools}");
+    }
+
+    #[test]
+    fn existing_config_without_require_approval_withholds_and_names_write_tools() {
+        let settings = McpServerSettings::from_toml(
+            "[server]\nexpose_tools = [\"file_read\", \"file_write\", \"apply_patch\"]\n",
+        )
+        .expect("parse config");
+        assert!(settings.require_approval);
+        let server = McpServer::new(PathBuf::from("."), settings).expect("build server");
+        assert_eq!(server.withheld_tools(), vec!["file_write", "apply_patch"]);
+
+        let allowed = McpServerSettings::from_toml(
+            "[server]\nexpose_tools = [\"file_write\"]\nrequire_approval = false\n",
+        )
+        .expect("parse config");
+        let server = McpServer::new(PathBuf::from("."), allowed).expect("build server");
+        assert!(server.withheld_tools().is_empty());
     }
 
     #[tokio::test]

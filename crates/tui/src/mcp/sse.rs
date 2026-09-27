@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
 use super::http_client::McpHttpClient;
 use super::wire::{
-    MAX_SSE_FRAME_BYTES, find_sse_event_separator_bytes, is_mcp_stale_session_body, sse_field_value,
+    MAX_SSE_FRAME_BYTES, McpSessionRejected, find_sse_event_separator_bytes,
+    is_mcp_stale_session_body, sse_field_value,
 };
 use super::{
     ERROR_BODY_PREVIEW_BYTES, McpHttpAuth, McpTransport, bounded_body_excerpt, mask_url_secrets,
@@ -294,12 +295,13 @@ impl McpTransport for SseTransport {
             let stale_session = is_mcp_stale_session_body(&body_excerpt);
             let body_excerpt = self.auth.server_error_preview(&body_excerpt);
             if stale_session {
-                anyhow::bail!(
+                return Err(McpSessionRejected(format!(
                     "MCP session expired (transport=sse endpoint={} status={}): {}",
                     mask_url_secrets(&endpoint),
                     status,
                     body_excerpt
-                );
+                ))
+                .into());
             }
             anyhow::bail!(
                 "MCP SSE POST rejected (transport=sse endpoint={} status={}): {}",
