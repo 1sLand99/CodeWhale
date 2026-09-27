@@ -920,10 +920,19 @@ impl SnapshotRepo {
                 let abs = abs
                     .to_str()
                     .ok_or_else(|| io_other("restore path must be UTF-8"))?;
+                // Git for Windows cannot open the `\\?\` verbatim form that
+                // `canonicalize` gives the work tree.
+                let abs = match abs.strip_prefix(r"\\?\") {
+                    Some(rest) => match rest.strip_prefix(r"UNC\") {
+                        Some(unc) => format!(r"\\{unc}"),
+                        None => rest.to_string(),
+                    },
+                    None => abs.to_string(),
+                };
                 let hashed = run_git(
                     &self.git_dir,
                     &self.work_tree,
-                    &["hash-object", &format!("--path={rel_str}"), "--", abs],
+                    &["hash-object", &format!("--path={rel_str}"), "--", &abs],
                 )?;
                 if !hashed.status.success() {
                     return Err(io_other(format!(
