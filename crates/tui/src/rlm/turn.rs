@@ -889,37 +889,31 @@ fn extract_text_blocks(blocks: &[ContentBlock]) -> String {
 /// Extract the first ` ```repl ` block from `text`. Falls back to
 /// ` ```python `/`` ```py `` for compatibility with prompts that learned
 /// the older fence style.
+///
+/// The opening fence must start its own line (up to three spaces of indent,
+/// as in Markdown) with no other info string, so prose that mentions a fence
+/// mid-line is never code to run.
 fn extract_repl_code(text: &str) -> Option<String> {
-    let start_markers = [
-        "```repl\n",
-        "```repl\r\n",
-        "```python\n",
-        "```py\n",
-        "```python\r\n",
-        "```py\r\n",
-    ];
-    let mut best_start: Option<(usize, &str)> = None;
-
-    for marker in &start_markers {
-        if let Some(idx) = text.find(marker) {
-            let end_pos = idx + marker.len();
-            match best_start {
-                Some((best_idx, _)) if idx < best_idx => {
-                    best_start = Some((idx, &text[end_pos..]));
-                }
-                None => {
-                    best_start = Some((idx, &text[end_pos..]));
-                }
-                _ => {}
-            }
+    let mut lines = text.split_inclusive('\n');
+    let mut offset = 0;
+    let code_start = loop {
+        let line = lines.next()?;
+        offset += line.len();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent <= 3
+            && line[indent..].strip_prefix("```").is_some_and(|info| {
+                matches!(info.trim(), "repl" | "python" | "py") && line.ends_with('\n')
+            })
+        {
+            break offset;
         }
-    }
-
-    let after_fence = best_start.map(|(_, rest)| rest)?;
-
-    let end_idx = after_fence
-        .find("\n```")
-        .or_else(|| after_fence.find("```"))?;
+    };
+    let after_fence = &text[code_start..];
+    let end_idx = if after_fence.starts_with("```") {
+        0
+    } else {
+        after_fence.find("\n```")?
+    };
 
     let code = after_fence[..end_idx].trim().to_string();
     if code.is_empty() {
@@ -1253,6 +1247,15 @@ mod tests {
         let text = "```\nfoo\n```\n```repl\nreal_code()\n```";
         let code = extract_repl_code(text).unwrap();
         assert_eq!(code, "real_code()");
+    }
+
+    #[test]
+    fn extract_repl_code_requires_a_line_anchored_fence() {
+        assert!(extract_repl_code("see ```python\nx = 1\n```").is_none());
+        assert!(extract_repl_code("a ```repl mention\nx = 1\n```").is_none());
+        assert!(extract_repl_code("```python-output\nx = 1\n```").is_none());
+        let text = "prose ```py inline\n```py\nreal()\n```";
+        assert_eq!(extract_repl_code(text).as_deref(), Some("real()"));
     }
 
     #[test]

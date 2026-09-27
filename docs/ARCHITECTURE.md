@@ -207,7 +207,7 @@ drives turns through Chat Completions.
     `agent_open`/`agent_eval`/`agent_close` lifecycle surface was retired
     (see the `subagent/coord.rs` module doc)
   - `spec.rs` - Tool specifications
-  - `rlm.rs` - Persistent Recursive Language Model (RLM) sessions — sandboxed Python REPLs with semantic helper calls and `var_handle` output support
+  - `rlm.rs` - Persistent Recursive Language Model (RLM) sessions — persistent local Python REPL subprocesses (environment-scrubbed, not OS-sandboxed) with semantic helper calls and `var_handle` output support
 
 ### Extension Systems
 
