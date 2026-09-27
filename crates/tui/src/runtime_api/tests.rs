@@ -21386,14 +21386,16 @@ mod thread_snapshot_ownership {
         let root = test_root("honest");
         let _home = EnvVarGuard::set("CODEWHALE_HOME", root.join("home"));
         let config = Config {
-            api_key: Some("runtime-api-test-key".to_string()),
-            base_url: Some("http://127.0.0.1:1/v1".to_string()),
             snapshots: Some(crate::config::SnapshotsConfig {
                 enabled: false,
                 ..crate::config::SnapshotsConfig::default()
             }),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("runtime-api-test-key".to_string()),
+            Some("http://127.0.0.1:1/v1".to_string()),
+        );
         let Some(fx) = fixture(
             &root,
             TestServerOverrides {
