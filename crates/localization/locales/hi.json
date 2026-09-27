@@ -1279,6 +1279,8 @@
   "BackgroundFinishedHeading": "समाप्त {count}",
   "BackgroundFinishedHint": "आउटपुट देखने के लिए पंक्ति खोलें",
   "BackgroundOutcomeDone": "पूरा",
+  "BackgroundOutcomeFailed": "विफल",
+  "BackgroundOutcomeCancelled": "रद्द",
   "BackgroundOutcomeKilled": "बलपूर्वक रोका गया",
   "BackgroundOutcomeTimedOut": "समय समाप्त",
   "BackgroundExitCode": "निकास कोड {code}",

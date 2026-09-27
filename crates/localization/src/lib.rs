@@ -1579,6 +1579,8 @@ pub enum MessageId {
     BackgroundFinishedHeading,
     BackgroundFinishedHint,
     BackgroundOutcomeDone,
+    BackgroundOutcomeFailed,
+    BackgroundOutcomeCancelled,
     BackgroundOutcomeKilled,
     BackgroundOutcomeTimedOut,
     BackgroundExitCode,
@@ -4053,6 +4055,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::BackgroundFinishedHeading,
     MessageId::BackgroundFinishedHint,
     MessageId::BackgroundOutcomeDone,
+    MessageId::BackgroundOutcomeFailed,
+    MessageId::BackgroundOutcomeCancelled,
     MessageId::BackgroundOutcomeKilled,
     MessageId::BackgroundOutcomeTimedOut,
     MessageId::BackgroundExitCode,
@@ -5547,7 +5551,7 @@ mod tests {
                 key.starts_with("Background") || key.as_str() == "NotificationBackgroundStopped"
             })
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 11);
+        assert_eq!(keys.len(), 13);
         for &locale in Locale::shipped_complete() {
             let pack = raw_locale_messages(locale);
             for key in &keys {

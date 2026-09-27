@@ -1300,6 +1300,8 @@
   "BackgroundFinishedHeading": "已结束 {count}",
   "BackgroundFinishedHint": "打开条目查看输出",
   "BackgroundOutcomeDone": "完成",
+  "BackgroundOutcomeFailed": "失败",
+  "BackgroundOutcomeCancelled": "已取消",
   "BackgroundOutcomeKilled": "已终止",
   "BackgroundOutcomeTimedOut": "已超时",
   "BackgroundExitCode": "退出码 {code}",

@@ -206,6 +206,12 @@ pub struct ShellJobSnapshot {
     pub command: String,
     pub cwd: PathBuf,
     pub status: ShellStatus,
+    /// Explicitly backgrounded or detached from the foreground waiter.
+    #[serde(default)]
+    pub background: bool,
+    /// First observed terminal time; legacy snapshots cannot trigger notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     pub exit_code: Option<i64>,
     pub elapsed_ms: u64,
     pub stdout_tail: String,
@@ -994,12 +1000,14 @@ pub struct BackgroundShell {
     pub command: String,
     pub working_dir: PathBuf,
     pub status: ShellStatus,
+    background: bool,
     pub exit_code: Option<i64>,
     pub started_at: Instant,
     /// When the job reached a terminal status. A finished job reports the
     /// duration it finished with; without this, `started_at.elapsed()` kept
     /// growing and `/jobs` showed "2m 07s" for a 12-second command (#5478).
     finished_at: Option<Instant>,
+    finished_at_utc: Option<chrono::DateTime<chrono::Utc>>,
     last_output_at: Instant,
     last_observed_output_len: usize,
     pub sandbox_type: SandboxType,
@@ -1169,6 +1177,7 @@ impl BackgroundShell {
     fn mark_finished(&mut self) {
         if self.finished_at.is_none() && self.status != ShellStatus::Running {
             self.finished_at = Some(Instant::now());
+            self.finished_at_utc = Some(chrono::Utc::now());
         }
     }
 
@@ -1609,6 +1618,8 @@ impl BackgroundShell {
             command: self.command.clone(),
             cwd: self.working_dir.clone(),
             status: self.status.clone(),
+            background: self.background,
+            finished_at: self.finished_at_utc,
             exit_code: self.exit_code,
             elapsed_ms: self.wall_millis(),
             stdout_tail,
@@ -1889,9 +1900,11 @@ impl ShellManager {
                 command: String::new(),
                 working_dir: self.default_workspace.clone(),
                 status: ShellStatus::Completed,
+                background: true,
                 exit_code: Some(0),
                 started_at,
                 finished_at: Some(now),
+                finished_at_utc: Some(chrono::Utc::now()),
                 last_output_at: now,
                 last_observed_output_len: 0,
                 sandbox_type: SandboxType::None,
@@ -1979,9 +1992,12 @@ impl ShellManager {
         self.foreground_background_requested = false;
     }
 
-    fn take_foreground_background_request(&mut self) -> bool {
+    fn take_foreground_background_request(&mut self, task_id: &str) -> bool {
         let requested = self.foreground_background_requested;
         self.foreground_background_requested = false;
+        if requested && let Some(shell) = self.processes.get_mut(task_id) {
+            shell.background = true;
+        }
         requested
     }
 
@@ -2717,9 +2733,11 @@ impl ShellManager {
             command: original_command.to_string(),
             working_dir: working_dir.to_path_buf(),
             status: ShellStatus::Running,
+            background: true,
             exit_code: None,
             started_at: started,
             finished_at: None,
+            finished_at_utc: None,
             last_output_at: started,
             last_observed_output_len: 0,
             sandbox_type,
@@ -3481,6 +3499,8 @@ impl ShellManager {
                 command: command.into(),
                 cwd,
                 status: ShellStatus::Killed,
+                background: true,
+                finished_at: None,
                 exit_code: None,
                 elapsed_ms: 0,
                 stdout_tail: String::new(),
@@ -4482,7 +4502,7 @@ async fn execute_foreground_via_background(
     let timeout_ms =
         timeout_ms.map(|timeout| timeout.clamp(timeout_bounds_ms.0, timeout_bounds_ms.1));
     let spawn_timeout_ms = timeout_ms.unwrap_or(timeout_bounds_ms.1);
-    let spawned = {
+    let task_id = {
         let mut manager = context
             .shell_manager
             .lock()
@@ -4490,7 +4510,7 @@ async fn execute_foreground_via_background(
         manager.clear_foreground_background_request();
         let owner = shell_job_owner_from_context(context);
         let lifecycle = shell_work_lifecycle_from_context(context);
-        manager.execute_with_options_env_for_owner_and_work(
+        let spawned = manager.execute_with_options_env_for_owner_and_work(
             command,
             working_dir.as_deref(),
             spawn_timeout_ms,
@@ -4507,11 +4527,19 @@ async fn execute_foreground_via_background(
             direct_argv.then_some(context.workspace.as_path()),
             false,
             timeout_bounds_ms,
-        )?
+        )?;
+        let task_id = spawned
+            .task_id
+            .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
+        // Classify before releasing the manager lock: even an immediately
+        // completed foreground command must never look like background work.
+        manager
+            .processes
+            .get_mut(&task_id)
+            .ok_or_else(|| anyhow!("foreground shell {task_id} is not tracked"))?
+            .background = false;
+        task_id
     };
-    let task_id = spawned
-        .task_id
-        .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
     let mut foreground = ForegroundShellGuard {
         manager: context.shell_manager.clone(),
         task_id: task_id.clone(),
@@ -4566,7 +4594,7 @@ async fn execute_foreground_via_background(
                 .shell_manager
                 .lock()
                 .map_err(|_| anyhow!("shell manager lock poisoned"))?;
-            if manager.take_foreground_background_request() {
+            if manager.take_foreground_background_request(&task_id) {
                 let snapshot = manager.get_output(&task_id, false, 0)?;
                 foreground.armed = false;
                 return Ok(snapshot);

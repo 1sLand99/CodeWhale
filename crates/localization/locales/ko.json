@@ -1302,6 +1302,8 @@
   "BackgroundFinishedHeading": "종료 {count}",
   "BackgroundFinishedHint": "행을 열어 출력 확인",
   "BackgroundOutcomeDone": "완료",
+  "BackgroundOutcomeFailed": "실패",
+  "BackgroundOutcomeCancelled": "취소됨",
   "BackgroundOutcomeKilled": "강제 종료됨",
   "BackgroundOutcomeTimedOut": "시간 초과",
   "BackgroundExitCode": "종료 코드 {code}",

@@ -51,13 +51,10 @@ pub(super) async fn refresh_active_task_panel(
         .filter_map(|task| {
             let (outcome, word) = match task.status {
                 TaskStatus::Completed => (FinishedOutcome::Done, MessageId::BackgroundOutcomeDone),
-                TaskStatus::Failed => (
-                    FinishedOutcome::Failed,
-                    MessageId::AutomationRunStatusFailed,
-                ),
+                TaskStatus::Failed => (FinishedOutcome::Failed, MessageId::BackgroundOutcomeFailed),
                 TaskStatus::Canceled => (
                     FinishedOutcome::Stopped,
-                    MessageId::SubagentsRowStatusCancelled,
+                    MessageId::BackgroundOutcomeCancelled,
                 ),
                 TaskStatus::Queued | TaskStatus::Running => return None,
             };
@@ -196,7 +193,7 @@ pub(super) fn project_shell_jobs(
     // #6565: every terminal status is a completion a person should hear
     // about (a failed, killed or timed-out shell used to vanish silently),
     // and a finished shell stays listed, muted, with how it ended.
-    let finished_now = newly_terminal(&mut app.notified_shell_ids, jobs);
+    let finished_now = newly_terminal(&mut app.notified_shell_ids, jobs, app.session_started_at);
     for job in &finished_now {
         let retained = app
             .finished_shell_ids
@@ -258,7 +255,9 @@ pub(super) fn project_shell_jobs(
         finished_order
             .iter()
             .filter_map(|id| jobs.iter().find(|job| &job.id == id))
-            .filter(|job| !matches!(job.status, crate::tools::shell::ShellStatus::Running))
+            .filter(|job| {
+                job.background && !matches!(job.status, crate::tools::shell::ShellStatus::Running)
+            })
             .map(shell_entry),
     );
     !finished_now.is_empty()
@@ -300,9 +299,9 @@ pub(crate) fn shell_outcome(
             match exit {
                 Some(exit) => format!(
                     "{} · {exit}",
-                    tr(locale, MessageId::AutomationRunStatusFailed)
+                    tr(locale, MessageId::BackgroundOutcomeFailed)
                 ),
-                None => tr(locale, MessageId::AutomationRunStatusFailed).into_owned(),
+                None => tr(locale, MessageId::BackgroundOutcomeFailed).into_owned(),
             },
         ),
         ShellStatus::Killed => (
@@ -316,13 +315,18 @@ pub(crate) fn shell_outcome(
     }
 }
 
-/// Every terminal shell once, including those first seen after finishing.
-/// A missed manager lock or an evicted visible row never resets this ledger.
+/// Every fresh background completion once, even when never observed running.
+/// A missed lock, session switch or evicted row never resets this ledger.
+/// The session-start cutoff suppresses restored history after a TUI restart.
+/// Finish time is the manager's first terminal observation, not OS exit time;
+/// legacy snapshots without it are history, never new completion receipts.
 pub(super) fn newly_terminal<'a>(
     notified_ids: &mut HashSet<String>,
     jobs: &'a [crate::tools::shell::ShellJobSnapshot],
+    session_started_at: chrono::DateTime<chrono::Utc>,
 ) -> Vec<&'a crate::tools::shell::ShellJobSnapshot> {
     jobs.iter()
+        .filter(|job| job.background && job.finished_at.is_some_and(|at| at >= session_started_at))
         .filter(|job| !matches!(job.status, crate::tools::shell::ShellStatus::Running))
         .filter(|job| notified_ids.insert(job.id.clone()))
         .collect()

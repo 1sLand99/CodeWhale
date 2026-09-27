@@ -1279,6 +1279,8 @@
   "BackgroundFinishedHeading": "Selesai {count}",
   "BackgroundFinishedHint": "Buka baris untuk melihat keluarannya",
   "BackgroundOutcomeDone": "selesai",
+  "BackgroundOutcomeFailed": "gagal",
+  "BackgroundOutcomeCancelled": "dibatalkan",
   "BackgroundOutcomeKilled": "dihentikan paksa",
   "BackgroundOutcomeTimedOut": "waktu habis",
   "BackgroundExitCode": "kode keluar {code}",

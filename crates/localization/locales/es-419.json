@@ -1300,6 +1300,8 @@
   "BackgroundFinishedHeading": "Finalizados {count}",
   "BackgroundFinishedHint": "Abre una fila para ver su salida",
   "BackgroundOutcomeDone": "listo",
+  "BackgroundOutcomeFailed": "error",
+  "BackgroundOutcomeCancelled": "cancelación",
   "BackgroundOutcomeKilled": "terminado a la fuerza",
   "BackgroundOutcomeTimedOut": "tiempo agotado",
   "BackgroundExitCode": "código de salida {code}",

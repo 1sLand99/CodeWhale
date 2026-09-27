@@ -225,6 +225,9 @@ quieter, and Fleet runs can be checked before they spend anything.
   appears on the rows, the notification and the runtime API alike, never its
   internal id ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
 - Background work tells you when it ends, even between refreshes. Batched
+  shell notices cover explicitly backgrounded or detached commands; foreground
+  results and old completions from before this TUI session stay quiet.
+  Switching sessions does not repeat a completion notice. Batched
   notices count completed, failed and stopped work separately; shell commands,
   task prompts and errors stay in the app, away from lock-screen notifications.
   A running dev server no longer holds the notice back. Failed, killed and

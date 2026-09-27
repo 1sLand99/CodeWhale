@@ -1316,6 +1316,8 @@
   "BackgroundFinishedHeading": "已結束 {count}",
   "BackgroundFinishedHint": "開啟項目查看輸出",
   "BackgroundOutcomeDone": "完成",
+  "BackgroundOutcomeFailed": "失敗",
+  "BackgroundOutcomeCancelled": "已取消",
   "BackgroundOutcomeKilled": "已終止",
   "BackgroundOutcomeTimedOut": "已逾時",
   "BackgroundExitCode": "結束代碼 {code}",

@@ -1302,6 +1302,8 @@
   "BackgroundFinishedHeading": "Finished {count}",
   "BackgroundFinishedHint": "Open a row for its output",
   "BackgroundOutcomeDone": "done",
+  "BackgroundOutcomeFailed": "failed",
+  "BackgroundOutcomeCancelled": "cancelled",
   "BackgroundOutcomeKilled": "killed",
   "BackgroundOutcomeTimedOut": "timed out",
   "BackgroundExitCode": "exit {code}",

@@ -1279,6 +1279,8 @@
   "BackgroundFinishedHeading": "Finalitzats {count}",
   "BackgroundFinishedHint": "Obre una fila per veure la sortida",
   "BackgroundOutcomeDone": "fet",
+  "BackgroundOutcomeFailed": "error",
+  "BackgroundOutcomeCancelled": "cancel·lació",
   "BackgroundOutcomeKilled": "finalitzat a la força",
   "BackgroundOutcomeTimedOut": "temps exhaurit",
   "BackgroundExitCode": "codi de sortida {code}",

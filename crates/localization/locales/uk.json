@@ -1279,6 +1279,8 @@
   "BackgroundFinishedHeading": "Завершено {count}",
   "BackgroundFinishedHint": "Відкрийте рядок, щоб побачити вивід",
   "BackgroundOutcomeDone": "готово",
+  "BackgroundOutcomeFailed": "помилка",
+  "BackgroundOutcomeCancelled": "скасовано",
   "BackgroundOutcomeKilled": "примусово зупинено",
   "BackgroundOutcomeTimedOut": "час вичерпано",
   "BackgroundExitCode": "код виходу {code}",

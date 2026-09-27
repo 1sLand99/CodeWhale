@@ -1279,6 +1279,8 @@
   "BackgroundFinishedHeading": "Terminés {count}",
   "BackgroundFinishedHint": "Ouvrez une ligne pour voir sa sortie",
   "BackgroundOutcomeDone": "terminé",
+  "BackgroundOutcomeFailed": "échec",
+  "BackgroundOutcomeCancelled": "annulation",
   "BackgroundOutcomeKilled": "arrêté de force",
   "BackgroundOutcomeTimedOut": "délai dépassé",
   "BackgroundExitCode": "code de sortie {code}",

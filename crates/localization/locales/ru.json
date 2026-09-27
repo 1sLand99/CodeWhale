@@ -1279,6 +1279,8 @@
   "BackgroundFinishedHeading": "Завершено {count}",
   "BackgroundFinishedHint": "Откройте строку, чтобы увидеть вывод",
   "BackgroundOutcomeDone": "готово",
+  "BackgroundOutcomeFailed": "сбой",
+  "BackgroundOutcomeCancelled": "отменено",
   "BackgroundOutcomeKilled": "принудительно остановлено",
   "BackgroundOutcomeTimedOut": "время истекло",
   "BackgroundExitCode": "код выхода {code}",

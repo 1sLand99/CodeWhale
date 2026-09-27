@@ -1033,9 +1033,9 @@ fn finished_background_rows(app: &App) -> Vec<WorkRow> {
                         tr(
                             app.ui_locale,
                             match entry.status.as_str() {
-                                "completed" => MessageId::AutomationRunStatusCompleted,
-                                "failed" => MessageId::AutomationRunStatusFailed,
-                                _ => MessageId::SubagentsRowStatusCancelled,
+                                "completed" => MessageId::BackgroundOutcomeDone,
+                                "failed" => MessageId::BackgroundOutcomeFailed,
+                                _ => MessageId::BackgroundOutcomeCancelled,
                             }
                         ),
                         entry.id
@@ -1085,7 +1085,7 @@ fn finished_shell_outcome(locale: Locale, entry: &TaskPanelEntry) -> String {
             )
         }
         "failed" => {
-            let failed = tr(locale, MessageId::AutomationRunStatusFailed);
+            let failed = tr(locale, MessageId::BackgroundOutcomeFailed);
             exit.map_or_else(|| failed.to_string(), |exit| format!("{failed} · {exit}"))
         }
         "killed" => tr(locale, MessageId::BackgroundOutcomeKilled).into_owned(),
@@ -4516,11 +4516,19 @@ mod tests {
         assert!(rows[1].detail.starts_with("arrêté de force"));
         for (status, expected) in [
             ("completed", "code de sortie 0"),
-            ("failed", "échouée"),
+            ("failed", "échec"),
             ("timed_out", "délai dépassé"),
         ] {
             let entry = finished_entry("shell", "shell: command", status, Some(0));
             assert!(finished_shell_outcome(Locale::Fr, &entry).contains(expected));
+        }
+        for (status, expected) in [("failed", "échec"), ("canceled", "annulation")] {
+            app.task_panel = vec![TaskPanelEntry {
+                kind: TaskPanelEntryKind::Background,
+                ..finished_entry("task", "vérifier", status, None)
+            }];
+            let rows = finished_background_rows(&app);
+            assert_eq!(rows[0].detail, format!("{expected} · 12s · task"));
         }
         let mut agent = running_agent("agent_quiet");
         agent.idle_ms = Some(125_000);

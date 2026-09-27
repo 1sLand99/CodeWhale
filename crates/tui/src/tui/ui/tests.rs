@@ -9525,6 +9525,8 @@ fn shell_live_output_update_matches_exact_task_id_only() {
             origin_tool_call_id: None,
             origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
+            background: true,
+            finished_at: Some(chrono::Utc::now()),
         },
     );
     jobs.insert(
@@ -9550,6 +9552,8 @@ fn shell_live_output_update_matches_exact_task_id_only() {
             origin_tool_call_id: None,
             origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
+            background: true,
+            finished_at: Some(chrono::Utc::now()),
         },
     );
 
@@ -9616,6 +9620,8 @@ fn shell_live_output_update_marks_stale_running_job_static() {
             origin_tool_call_id: None,
             origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
+            background: true,
+            finished_at: Some(chrono::Utc::now()),
         },
     );
 
@@ -9696,6 +9702,8 @@ fn shell_live_output_update_finalizes_background_exec_output() {
             origin_tool_call_id: None,
             origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
+            background: true,
+            finished_at: Some(chrono::Utc::now()),
         },
     );
 
@@ -9783,6 +9791,8 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
             origin_tool_call_id: None,
             origin_turn_id: None,
             owner_session_id: "session-test".to_string(),
+            background: true,
+            finished_at: Some(chrono::Utc::now()),
         },
     );
 
@@ -15436,6 +15446,8 @@ fn shell_job(
         origin_tool_call_id: None,
         origin_turn_id: None,
         owner_session_id: String::new(),
+        background: true,
+        finished_at: Some(chrono::Utc::now()),
     }
 }
 
@@ -15454,7 +15466,11 @@ fn every_terminal_shell_status_is_a_completion_with_its_exit_facts() {
         shell_job("shell_live", "npm run dev", ShellStatus::Running, None),
         shell_job("shell_old", "ls", ShellStatus::Completed, Some(0)),
     ];
-    let finished = newly_terminal(&mut notified, &jobs);
+    let finished = newly_terminal(
+        &mut notified,
+        &jobs,
+        chrono::Utc::now() - chrono::Duration::minutes(1),
+    );
     let ids = finished
         .iter()
         .map(|job| job.id.as_str())
@@ -31232,5 +31248,133 @@ fn background_review_finished_shell_retention_is_capped_per_session() {
         app.background_finished.len(),
         notices,
         "switching back does not re-announce"
+    );
+}
+
+#[tokio::test]
+async fn background_review_foreground_receipts_never_notify_but_fast_background_does() {
+    use super::task_projection::project_shell_jobs;
+    use crate::tools::shell::{BashTool, ShellStatus};
+    use crate::tools::spec::{ToolContext, ToolSpec};
+
+    let root = TempDir::new().unwrap();
+    let mut app = create_test_app();
+    app.current_session_id = Some("receipts".into());
+    let ctx = ToolContext::new(root.path()).with_state_namespace("receipts");
+    let mut entries = Vec::new();
+    let toasts_before = app.status_toasts.len();
+    for context in [
+        ctx.clone(),
+        ctx.clone().with_owner_agent("review", "review"),
+    ] {
+        let result = BashTool::new("Bash")
+            .execute(serde_json::json!({"command": "echo receipt"}), &context)
+            .await
+            .unwrap();
+        assert!(result.success, "{}", result.content);
+    }
+    let jobs = ctx
+        .shell_manager
+        .lock()
+        .unwrap()
+        .list_jobs_for_session("receipts");
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().all(|job| job.status == ShellStatus::Completed));
+    assert!(!project_shell_jobs(&mut app, &mut entries, &jobs));
+    assert!(entries.is_empty());
+    assert!(app.background_finished.is_empty());
+    assert!(app.finished_shell_ids.is_empty());
+    assert_eq!(app.status_toasts.len(), toasts_before);
+
+    let result = BashTool::new("Bash")
+        .execute(
+            serde_json::json!({"command": "echo background", "background": true}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.content);
+    let jobs = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let jobs = ctx
+                .shell_manager
+                .lock()
+                .unwrap()
+                .list_jobs_for_session("receipts");
+            if jobs.iter().all(|job| job.status != ShellStatus::Running) {
+                break jobs;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(project_shell_jobs(&mut app, &mut entries, &jobs));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].prompt_summary, "shell: echo background");
+    assert_eq!(app.background_finished.len(), 1);
+    assert_eq!(app.status_toasts.len(), toasts_before + 1);
+}
+
+#[test]
+fn background_review_old_shells_stay_quiet_after_restart_and_session_switch() {
+    use super::task_projection::project_shell_jobs;
+    use crate::tools::shell::ShellStatus;
+
+    let mut app = create_test_app();
+    let mut old = shell_job("old", "echo old", ShellStatus::Completed, Some(0));
+    old.finished_at = Some(app.session_started_at - chrono::Duration::seconds(1));
+    let mut unknown = shell_job("legacy", "echo legacy", ShellStatus::Failed, Some(2));
+    unknown.finished_at = None;
+    let mut fresh = shell_job("fresh", "echo fresh", ShellStatus::Completed, Some(0));
+    fresh.finished_at = Some(app.session_started_at); // inclusive boundary
+    let jobs = vec![old, unknown, fresh];
+    let toasts_before = app.status_toasts.len();
+    let mut entries = Vec::new();
+    app.current_session_id = Some("a".into());
+    assert!(project_shell_jobs(&mut app, &mut entries, &jobs));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "fresh");
+    assert_eq!(app.background_finished.len(), 1);
+    assert_eq!(app.status_toasts.len(), toasts_before + 1);
+
+    app.current_session_id = Some("b".into());
+    entries.clear();
+    assert!(!project_shell_jobs(&mut app, &mut entries, &[]));
+    app.current_session_id = Some("a".into());
+    assert!(!project_shell_jobs(&mut app, &mut entries, &jobs));
+    assert_eq!(app.background_finished.len(), 1);
+    assert_eq!(app.status_toasts.len(), toasts_before + 1);
+
+    // A fresh TUI has an empty notification ledger, but its cutoff still
+    // excludes the old session's terminal snapshots, including the fresh one.
+    let mut restarted = create_test_app();
+    restarted.current_session_id = Some("a".into());
+    restarted.session_started_at = app.session_started_at + chrono::Duration::seconds(1);
+    let toasts_before = restarted.status_toasts.len();
+    entries.clear();
+    assert!(!project_shell_jobs(&mut restarted, &mut entries, &jobs));
+    assert!(entries.is_empty());
+    assert!(restarted.background_finished.is_empty());
+    assert_eq!(restarted.status_toasts.len(), toasts_before);
+}
+
+#[test]
+fn background_review_failed_shell_receipt_uses_context_neutral_copy() {
+    use super::task_projection::project_shell_jobs;
+    use crate::tools::shell::ShellStatus;
+
+    let mut app = create_test_app();
+    app.ui_locale = codewhale_localization::Locale::Fr;
+    let job = shell_job("failed", "false", ShellStatus::Failed, Some(2));
+    let mut entries = Vec::new();
+    assert!(project_shell_jobs(&mut app, &mut entries, &[job]));
+    assert_eq!(
+        app.background_finished[0].summary.as_deref(),
+        Some("échec · code de sortie 2")
+    );
+    assert_eq!(
+        app.status_toasts.back().unwrap().text,
+        "shell · false · échec · code de sortie 2"
     );
 }

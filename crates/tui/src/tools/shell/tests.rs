@@ -2962,6 +2962,10 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     let mut manager = shell_manager.lock().expect("shell manager lock");
     let job = manager.inspect_job(&task_id).expect("inspect job");
     assert_eq!(job.snapshot.status, ShellStatus::Running);
+    assert!(
+        job.snapshot.background,
+        "detached foreground work needs a background receipt"
+    );
     let killed = manager.kill(&task_id).expect("kill");
     assert_eq!(killed.status, ShellStatus::Killed);
 }
@@ -3550,6 +3554,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         exit_code: None,
         started_at: now,
         finished_at: Some(now),
+        finished_at_utc: Some(chrono::Utc::now()),
+        background: true,
         last_output_at: now,
         last_observed_output_len: 0,
         sandbox_type: SandboxType::None,

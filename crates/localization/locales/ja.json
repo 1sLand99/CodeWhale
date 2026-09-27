@@ -1300,6 +1300,8 @@
   "BackgroundFinishedHeading": "終了 {count}",
   "BackgroundFinishedHint": "行を開くと出力を表示",
   "BackgroundOutcomeDone": "完了",
+  "BackgroundOutcomeFailed": "失敗",
+  "BackgroundOutcomeCancelled": "キャンセル",
   "BackgroundOutcomeKilled": "強制終了",
   "BackgroundOutcomeTimedOut": "タイムアウト",
   "BackgroundExitCode": "終了コード {code}",

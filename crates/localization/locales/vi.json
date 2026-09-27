@@ -1300,6 +1300,8 @@
   "BackgroundFinishedHeading": "Đã kết thúc {count}",
   "BackgroundFinishedHint": "Mở một hàng để xem đầu ra",
   "BackgroundOutcomeDone": "hoàn tất",
+  "BackgroundOutcomeFailed": "thất bại",
+  "BackgroundOutcomeCancelled": "đã hủy",
   "BackgroundOutcomeKilled": "đã buộc dừng",
   "BackgroundOutcomeTimedOut": "hết thời gian",
   "BackgroundExitCode": "mã thoát {code}",
