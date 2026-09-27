@@ -141,6 +141,9 @@ fn run_cargo(workspace: &Path, args: &[String]) -> Result<std::process::Output, 
         ));
     };
     cmd.args(args).current_dir(workspace);
+    // `cargo test` builds and runs workspace code; do not hand it parent
+    // credentials.
+    crate::child_env::apply_to_command(&mut cmd, std::iter::empty::<(&str, &str)>());
     cmd.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             ToolError::not_available("cargo is not installed or not in PATH")
@@ -372,5 +375,46 @@ mod tests {
         let message = missing.to_string();
         assert!(message.contains("not an existing directory"), "{message}");
         assert!(message.contains("drop `cwd`"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_cargo_does_not_inherit_parent_secret_env() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        use std::os::unix::fs::PermissionsExt;
+        if !cargo_available() {
+            return;
+        }
+        let _env_lock = lock_test_env();
+        let bin = tempdir().expect("bin dir");
+        // cargo resolves `cargo envprobe` to a `cargo-envprobe` on PATH, which
+        // lets the test observe the environment cargo hands its children.
+        let probe = bin.path().join("cargo-envprobe");
+        fs::write(
+            &probe,
+            "#!/bin/sh\nprintf 'secret=%s target=%s' \"${CODEWHALE_TEST_CARGO_SECRET-unset}\" \"${CARGO_TARGET_DIR-unset}\"\n",
+        )
+        .expect("write probe");
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("chmod probe");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![bin.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&path));
+        let _path = EnvVarGuard::set("PATH", std::env::join_paths(paths).expect("join PATH"));
+        let _secret = EnvVarGuard::set("CODEWHALE_TEST_CARGO_SECRET", "cargo-secret-value");
+        // Non-secret build configuration still reaches cargo.
+        let _target = EnvVarGuard::set("CARGO_TARGET_DIR", "/tmp/codewhale-fixture-target");
+        let workspace = tempdir().expect("workspace");
+
+        let output = run_cargo(workspace.path(), &["envprobe".to_string()]).expect("cargo runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            stdout.trim(),
+            "secret=unset target=/tmp/codewhale-fixture-target"
+        );
     }
 }

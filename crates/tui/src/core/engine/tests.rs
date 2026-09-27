@@ -21320,6 +21320,31 @@ async fn dropped_operation_span_completes_as_cancelled() {
 }
 
 #[tokio::test]
+async fn code_execution_does_not_inherit_parent_secret_env() {
+    use crate::dependencies::ExternalTool as _;
+    if !crate::dependencies::Python::available() {
+        // `dependencies::tests::runtime_commands_do_not_inherit_parent_secret_env`
+        // still covers the scrubbed Python constructor without Python.
+        return;
+    }
+    let _env_lock = lock_test_env();
+    let _secret = EnvVarGuard::set("CODEWHALE_TEST_FAKE_API_KEY", "sk-test-sentinel");
+    let tmp = tempdir().expect("tempdir");
+    let result = execute_code_execution_tool(
+        &json!({"code":"import os; print(os.environ.get('CODEWHALE_TEST_FAKE_API_KEY', 'absent'))"}),
+        tmp.path(),
+    )
+    .await
+    .expect("code execution should run");
+    let stdout = result.metadata.as_ref().expect("payload")["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(stdout.trim(), "absent", "{}", result.content);
+    assert!(!result.content.contains("sk-test-sentinel"));
+}
+
+#[tokio::test]
 async fn code_execution_scenario() {
     // Scenario consolidation of: code_execution_runs_python_and_returns_result_payload, code_execution_runs_through_common_executor_after_approval_gate
     // from code_execution_runs_python_and_returns_result_payload

@@ -456,14 +456,7 @@ pub trait ExternalTool {
     /// Callers should chain `.args(...)`, `.current_dir(...)`, and then
     /// call `.output()`, `.status()`, or `.spawn()`.
     fn command() -> Option<Command> {
-        let spec = Self::resolve()?;
-        let (program, fixed_args) = split_interpreter_spec(&spec);
-        let mut cmd = Command::new(&program);
-        crate::utils::suppress_console_window(&mut cmd);
-        for arg in &fixed_args {
-            cmd.arg(arg);
-        }
-        Some(cmd)
+        Some(command_for_spec(&Self::resolve()?))
     }
 
     /// The error a caller sees when the tool is not installed. It names the
@@ -508,6 +501,26 @@ pub trait ExternalTool {
         }
         Some(cmd)
     }
+}
+
+/// Build a `std::process::Command` for an interpreter spec such as `"py -3"`.
+fn command_for_spec(spec: &str) -> Command {
+    let (program, fixed_args) = split_interpreter_spec(spec);
+    let mut cmd = Command::new(&program);
+    crate::utils::suppress_console_window(&mut cmd);
+    for arg in &fixed_args {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
+/// [`command_for_spec`] started from the sanitized child environment. Used by
+/// the runtimes whose every caller runs model-authored code (Python, Node),
+/// so no constructor for them hands out the parent's credentials.
+fn scrubbed_command_for_spec(spec: &str) -> Command {
+    let mut cmd = command_for_spec(spec);
+    crate::child_env::apply_to_command(&mut cmd, std::iter::empty::<(&str, &str)>());
+    cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -643,14 +656,15 @@ impl ExternalTool for Git {
     /// agent-visible command string rendered by `tools::git::format_command`,
     /// and an unknown flag hard-fails on old git while an unknown environment
     /// variable is silently ignored.
+    ///
+    /// The child also starts from the sanitized environment (see
+    /// [`crate::child_env::apply_to_git_command`]): workspace config such as
+    /// `core.fsmonitor` or a clean filter makes even a read like `git status`
+    /// run a program the workspace chose, so no git child gets the parent's
+    /// credentials. The guards below are applied after the scrub.
     fn command() -> Option<Command> {
-        let spec = Self::resolve()?;
-        let (program, fixed_args) = split_interpreter_spec(&spec);
-        let mut cmd = Command::new(&program);
-        crate::utils::suppress_console_window(&mut cmd);
-        for arg in &fixed_args {
-            cmd.arg(arg);
-        }
+        let mut cmd = command_for_spec(&Self::resolve()?);
+        crate::child_env::apply_to_git_command(&mut cmd);
         cmd.env("GIT_OPTIONAL_LOCKS", "0");
         apply_git_noninteractive_env(&mut cmd);
         Some(cmd)
@@ -783,6 +797,20 @@ impl ExternalTool for Python {
         PYTHON_CANDIDATES
     }
 
+    /// Every Python caller runs model-authored code (`code_execution`, the
+    /// RLM REPL), so both constructors (and the `output`/`status` helpers
+    /// built on them) start the child from the sanitized environment instead
+    /// of inheriting provider credentials and other parent secrets. Callers
+    /// that need extra variables re-apply them through
+    /// [`crate::child_env::apply_to_tokio_command`] with explicit overrides.
+    fn command() -> Option<Command> {
+        Some(scrubbed_command_for_spec(&Self::resolve()?))
+    }
+
+    fn tokio_command() -> Option<tokio::process::Command> {
+        Self::command().map(tokio::process::Command::from)
+    }
+
     fn resolve() -> Option<String> {
         resolve_python_interpreter()
     }
@@ -796,6 +824,16 @@ pub struct Node;
 impl ExternalTool for Node {
     fn candidates() -> &'static [&'static str] {
         &["node"]
+    }
+
+    /// Node runs model-authored code (`js_execution`); like [`Python`], every
+    /// constructor starts from the sanitized environment.
+    fn command() -> Option<Command> {
+        Some(scrubbed_command_for_spec(&Self::resolve()?))
+    }
+
+    fn tokio_command() -> Option<tokio::process::Command> {
+        Self::command().map(tokio::process::Command::from)
     }
 
     fn resolve() -> Option<String> {
@@ -1196,6 +1234,84 @@ mod tests {
                 "only Git may set GIT_OPTIONAL_LOCKS"
             );
         }
+    }
+
+    /// The Python and Node constructors run model-authored code, so the
+    /// command they build must not carry the parent's environment. This
+    /// runs on every unix runner, with or without Python or Node installed.
+    #[cfg(unix)]
+    #[test]
+    fn runtime_commands_do_not_inherit_parent_secret_env() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _secret = crate::test_support::EnvVarGuard::set(
+            "CODEWHALE_TEST_RUNTIME_SECRET",
+            "runtime-secret-value",
+        );
+        let output = scrubbed_command_for_spec("env").output().expect("env runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(!stdout.contains("runtime-secret-value"), "{stdout}");
+        assert!(stdout.contains("PATH="), "{stdout}");
+
+        // Both constructors of each runtime are built on the scrubbed spec,
+        // which sets the sanitized environment explicitly.
+        let has_explicit_path = |cmd: &Command| {
+            cmd.get_envs()
+                .any(|(key, value)| key == std::ffi::OsStr::new("PATH") && value.is_some())
+        };
+        for cmd in [Python::command(), Node::command()].into_iter().flatten() {
+            assert!(has_explicit_path(&cmd), "{cmd:?}");
+        }
+        for cmd in [Python::tokio_command(), Node::tokio_command()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(has_explicit_path(cmd.as_std()), "{cmd:?}");
+        }
+    }
+
+    /// Workspace git config can make even `git status` run a program
+    /// (`core.fsmonitor`); that program must not see the parent's secrets.
+    #[cfg(unix)]
+    #[test]
+    fn git_command_does_not_inherit_parent_secret_env() {
+        use std::os::unix::fs::PermissionsExt;
+        if !Git::available() {
+            return;
+        }
+        let _env_lock = crate::test_support::lock_test_env();
+        let _secret =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_TEST_GIT_SECRET", "git-secret-value");
+        let repo = tempfile::tempdir().expect("repo");
+        let hooks = tempfile::tempdir().expect("hooks");
+        let marker = hooks.path().join("seen");
+        let hook = hooks.path().join("fsmonitor.sh");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nprintf 'leak=%s\\n' \"${{CODEWHALE_TEST_GIT_SECRET-unset}}\" >> '{}'\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .expect("write hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let run = |args: &[&str]| {
+            let status = Git::status(args, repo.path()).expect("git spawns");
+            assert!(status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        std::fs::write(repo.path().join("file.txt"), "hello\n").expect("write");
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        run(&["config", "core.fsmonitor", &hook.to_string_lossy()]);
+
+        let output = Git::output(&["status", "--porcelain"], repo.path()).expect("status");
+        assert!(output.status.success());
+        let seen = std::fs::read_to_string(&marker).expect("fsmonitor hook ran");
+        assert!(seen.contains("leak=unset"), "{seen}");
+        assert!(!seen.contains("git-secret-value"), "{seen}");
     }
 
     #[test]

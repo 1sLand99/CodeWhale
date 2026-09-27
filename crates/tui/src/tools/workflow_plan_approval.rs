@@ -158,6 +158,24 @@ pub fn analyze_workflow_plan_approval_with_config(
         return empty_summary(format!("workflow {action}"), None);
     }
 
+    let mut summary = analyze_workflow_launch(input, config);
+    // `verify: true` runs the workspace's detected gates (package scripts,
+    // `cargo check` build scripts, ...) when the run completes. That is shell
+    // execution of workspace code, so it leaves the read-only envelope.
+    if input.get("verify").and_then(Value::as_bool) == Some(true) {
+        summary.shell = true;
+        summary.elevated = true;
+        if !summary.reasons.iter().any(|r| r == "verify_gates") {
+            summary.reasons.push("verify_gates".into());
+        }
+    }
+    summary
+}
+
+fn analyze_workflow_launch(
+    input: &Value,
+    config: &WorkflowConfigToml,
+) -> WorkflowPlanApprovalSummary {
     if let Some(plan) = input.get("plan").filter(|v| v.is_object()) {
         return analyze_plan_object(plan, optional_u64(input, "token_budget"), config);
     }
@@ -1233,6 +1251,29 @@ mod tests {
         assert_eq!(
             workflow_approval_requirement_for(&input, &cfg),
             ApprovalRequirement::Auto
+        );
+    }
+
+    #[test]
+    fn verify_gates_leave_the_read_only_envelope() {
+        let plan = json!({
+            "goal": "scout crates",
+            "risk": "read_only",
+            "children": [{ "prompt": "look", "type": "explore" }]
+        });
+        let without = json!({ "action": "start", "plan": plan.clone() });
+        let with_verify = json!({ "action": "start", "plan": plan, "verify": true });
+        assert_eq!(
+            workflow_approval_requirement_for(&without, &config()),
+            ApprovalRequirement::Auto
+        );
+        let summary = analyze_workflow_plan_approval(&with_verify);
+        assert!(summary.elevated && summary.shell, "{summary:?}");
+        assert!(summary.reasons.iter().any(|r| r == "verify_gates"));
+        assert_eq!(
+            workflow_approval_requirement_for(&with_verify, &config()),
+            ApprovalRequirement::Required,
+            "completion gates run workspace code and need the approval card"
         );
     }
 

@@ -845,20 +845,10 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
+/// History reads share the read-only runner in `git.rs`, which disables the
+/// workspace's fsmonitor, hooks and filters.
 fn run_git_command(working_dir: &Path, args: &[String]) -> Result<Output, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::command() else {
-        return Err(ToolError::not_available(
-            "git is not installed or not in PATH",
-        ));
-    };
-    cmd.args(args).current_dir(working_dir);
-    cmd.output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ToolError::not_available("git is not installed or not in PATH")
-        } else {
-            ToolError::execution_failed(format!("Failed to run git: {e}"))
-        }
-    })
+    super::git::run_git_command(working_dir, args)
 }
 
 /// Async wrapper that offloads the blocking `git` invocation onto a
