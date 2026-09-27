@@ -423,9 +423,11 @@ try {
     // Always crops the last raster this backend captured; a caller-named
     // source file is not accepted.
     zoom: async ({ region, path: outPath }) => {
+      // Validate the caller's output path before anything else runs.
+      const explicitOut = recordingsOutputPath(outPath);
       const src = lastRaster?.file;
       if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
-      const out = recordingsOutputPath(outPath) ?? path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
+      const out = explicitOut ?? path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
       const script = `Add-Type -AssemblyName System.Drawing;
 $img = [System.Drawing.Image]::FromFile('${src.replace(/'/g, "''")}');
 $rect = New-Object System.Drawing.Rectangle(${Math.round(region[0])}, ${Math.round(region[1])}, ${Math.round(region[2])}, ${Math.round(region[3])});

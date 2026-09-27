@@ -1,12 +1,14 @@
 // Where screenshots, zoom crops and recordings are written, and the one check
 // every caller-chosen output path goes through.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { ExecError } from "./exec.mjs";
+import { stateDir } from "./registry.mjs";
 
+/** The one recordings directory: desktop and browser captures, zoom crops,
+ * recordings and trajectories all live under it. */
 export function recordingsDir() {
-  return path.resolve(process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings"));
+  return path.resolve(process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(stateDir(), "recordings"));
 }
 
 const badPath = (message) => Object.assign(new ExecError(message), { code: "bad_args" });

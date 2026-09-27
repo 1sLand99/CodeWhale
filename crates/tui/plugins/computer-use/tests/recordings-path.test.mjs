@@ -71,3 +71,29 @@ test("recordingsOutputPath refuses symlinks that lead out of the recordings dire
   fs.symlinkSync(path.join(outside, "target.png"), path.join(dir, "link.png"));
   assert.throws(() => recordingsOutputPath(path.join(dir, "link.png")), /symlink/);
 });
+
+// Every backend's screenshot and zoom must route a caller path through
+// recordingsOutputPath before running anything. The exec records calls, so a
+// backend that fell back to the raw path would reach it (or write a file).
+const BACKENDS = ["darwin", "linux", "win32", "harmonyos"];
+
+for (const name of BACKENDS) {
+  test(`${name} screenshot and zoom refuse output paths outside the recordings directory`, async (t) => {
+    const { root, dir } = withRecordingsDir(t);
+    const calls = [];
+    const fail = async (...args) => { calls.push(args); return { code: 1, stdout: "", stderr: "unexpected call" }; };
+    const exec = { targetArgs: [], run: fail, runOk: fail, shell: fail, pullFile: fail, readFile: fail };
+    const { create } = await import(`../src/backends/${name}.mjs`);
+    const backend = create({ exec });
+    const outside = path.join(root, "outside.png");
+    const notImage = path.join(dir, "inside.txt");
+    for (const file of [outside, notImage]) {
+      await assert.rejects(backend.screenshot({ path: file }), (err) => err.code === "bad_args", `${name} screenshot ${file}`);
+      if (name !== "harmonyos") {
+        await assert.rejects(backend.zoom({ region: [0, 0, 1, 1], path: file }), (err) => err.code === "bad_args", `${name} zoom ${file}`);
+      }
+      assert.equal(fs.existsSync(file), false, `${name} wrote ${file}`);
+    }
+    assert.deepEqual(calls, [], `${name} ran a command before refusing the path`);
+  });
+}

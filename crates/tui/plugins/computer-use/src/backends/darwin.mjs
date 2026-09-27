@@ -521,13 +521,15 @@ export function create({ exec }) {
   // Always crops the last raster this backend captured; a caller-named
   // source file is not accepted.
   async function zoom({ region, path: outPath }) {
+    // Validate the caller's output path before anything else runs.
+    const explicitOut = recordingsOutputPath(outPath);
     if (!state.lastRaster) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
     const [x, y, w, h] = region;
     if (![x, y, w, h].every((n) => Number.isInteger(n) && n >= 0) || !w || !h || x + w > state.lastRaster.pixels.w || y + h > state.lastRaster.pixels.h) throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
     const src = state.lastRaster.file;
     const dir = recordingsDir();
     fs.mkdirSync(dir, { recursive: true });
-    const out = recordingsOutputPath(outPath) ?? path.join(dir, `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
+    const out = explicitOut ?? path.join(dir, `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
     await runOk("sips", ["-s", "format", "png", "-c", String(Math.round(h)), String(Math.round(w)), "--cropOffset", String(Math.round(y)), String(Math.round(x)), src, "--out", out], { timeoutMs: 15_000 });
     const parent = state.lastRaster;
     state.lastRaster = { file: out, bytes: fs.statSync(out).size, source: src, region,

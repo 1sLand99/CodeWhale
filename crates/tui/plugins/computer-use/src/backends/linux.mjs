@@ -557,10 +557,12 @@ print(json.dumps({"found": True, "reason": None, "element": {
     // Always crops the last raster this backend captured; a caller-named
     // source file is not accepted.
     zoom: async ({ region, path: outPath }) => {
+      // Validate the caller's output path before anything else runs.
+      const explicitOut = recordingsOutputPath(outPath);
       need("ffmpeg", "zoom/crop");
       const src = lastRaster?.file;
       if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
-      const out = outputPath(recordingsOutputPath(outPath) ?? path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`));
+      const out = outputPath(explicitOut ?? path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`));
       await runOk("ffmpeg", ["-y", "-loglevel", "error", "-i", src, "-vf", `crop=${Math.round(region[2])}:${Math.round(region[3])}:${Math.round(region[0])}:${Math.round(region[1])}`, out], { timeoutMs: 20_000 });
       return { file: out, bytes: fs.statSync(out).size, region, source: src };
     },
