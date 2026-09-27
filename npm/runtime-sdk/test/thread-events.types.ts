@@ -1,4 +1,4 @@
-// Run with: tsc --noEmit --strict --target ES2022 --module NodeNext test/thread-events.types.ts
+// Checked by npm test (or npm run test:types).
 import { CodeWhaleRuntimeClient, isThreadStreamEnd } from '../index.js';
 import type { ThreadRuntimeEvent, ThreadStreamEnd } from '../index.js';
 
@@ -6,8 +6,8 @@ async function checkThreadEvents(client: CodeWhaleRuntimeClient, includeProgress
   for await (const item of client.threadEvents('thread')) {
     if (isThreadStreamEnd(item)) {
       const end: ThreadStreamEnd = item;
-      const cursor: number = end.last_seq;
-      const retryable: boolean = end.retryable;
+      const cursor: number = item.last_seq;
+      const retryable: boolean = item.retryable;
       if (retryable) client.threadEvents(end.thread_id, { sinceSeq: cursor });
     } else {
       const journal: ThreadRuntimeEvent = item;

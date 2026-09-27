@@ -10304,7 +10304,10 @@ fn cors_layer(extra_origins: &[String]) -> CorsLayer {
             HeaderName::from_static("x-codewhale-runtime-token"),
             HeaderName::from_static("x-deepseek-runtime-token"),
         ])
-        .expose_headers([HeaderName::from_static("x-codewhale-stream-end")])
+        .expose_headers([
+            HeaderName::from_static("x-codewhale-stream-end"),
+            HeaderName::from_static("x-codewhale-event-progress"),
+        ])
 }
 
 fn map_task_err(err: anyhow::Error) -> ApiError {
