@@ -304,12 +304,25 @@ const COMPACTION_CHECKPOINT_PROVENANCE: &str = "<!-- codewhale.compaction-checkp
 const COMPACTION_SUMMARY_BEGIN: &str = "<!-- compaction-summary:begin -->";
 const COMPACTION_SUMMARY_END: &str = "<!-- compaction-summary:end -->";
 
-/// Whether text starts with a legacy checkpoint header. A message that only
+/// Heading the pre-v0.9.6 builder wrote, optionally after a
+/// `## Pinned Facts (User Anchors)` section.
+const LEGACY_SUMMARY_HEADING: &str = "## 📋 Conversation Summary (Auto-Generated)";
+const LEGACY_ANCHORS_HEADING: &str = "## Pinned Facts (User Anchors)";
+
+/// Whether text opens the way a legacy checkpoint opened. A message that only
 /// quotes a marker later in its text is the user's, not a checkpoint (#6680).
+/// Pre-v0.9.6 checkpoints opened with [`LEGACY_SUMMARY_HEADING`], or with the
+/// pinned-anchors section followed by that heading on its own line.
 fn is_legacy_compaction_summary_text(text: &str) -> bool {
+    let text = text.trim_start();
     LEGACY_COMPACTION_SUMMARY_MARKERS
         .iter()
         .any(|marker| text.starts_with(marker))
+        || text.starts_with(LEGACY_SUMMARY_HEADING)
+        || (text.starts_with(LEGACY_ANCHORS_HEADING)
+            && text
+                .lines()
+                .any(|line| line.trim_end() == LEGACY_SUMMARY_HEADING))
 }
 
 /// Byte offset of the earliest legacy marker in `text`. New-format carriers
@@ -1962,6 +1975,25 @@ mod quota_tests;
 #[cfg(test)]
 mod tests {
     use codewhale_models::{ImageUrlContent, Message};
+
+    #[test]
+    fn legacy_checkpoint_headings_are_recognised_but_quotes_are_not() {
+        for text in [
+            "## 📋 Conversation Summary (Auto-Generated)\n\nkey facts.",
+            "## Pinned Facts (User Anchors)\n\n- keep tabs\n\n---\n\n## 📋 Conversation Summary (Auto-Generated)\n\nfacts",
+            "Conversation Summary (Auto-Generated)\nold",
+            "Another language model started to solve this problem\nold",
+        ] {
+            assert!(is_legacy_compaction_summary_text(text), "{text}");
+        }
+        for text in [
+            "Explain: ## 📋 Conversation Summary (Auto-Generated)",
+            "## Pinned Facts (User Anchors)\nsee Conversation Summary (Auto-Generated) above",
+            "Codewhale handoff note\nnot structural",
+        ] {
+            assert!(!is_legacy_compaction_summary_text(text), "{text}");
+        }
+    }
 
     #[test]
     fn restore_without_typed_checkpoint_preserves_user_marker_quotes() {

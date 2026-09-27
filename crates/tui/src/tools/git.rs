@@ -218,7 +218,7 @@ impl ToolSpec for GitDiffTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_review_command(&git_ctx.working_dir, &args)?;
+        let output = run_git_command(&git_ctx.working_dir, &args)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -321,7 +321,7 @@ impl ToolSpec for GitCommitPlanTool {
             diff_args.push(pathspec.display().to_string());
         }
         let command = format_command(working_dir, &diff_args);
-        let diff_output = run_git_review_command(working_dir, &diff_args)?;
+        let diff_output = run_git_command(working_dir, &diff_args)?;
         let mut files = match stdout_or_failure(working_dir, &diff_args, diff_output) {
             Ok(stdout) => parse_diff(&String::from_utf8_lossy(&stdout)),
             Err(failure) => return Ok(failure),
@@ -376,10 +376,8 @@ impl ToolSpec for GitCommitPlanTool {
             "--quiet".to_string(),
         ];
         staged_args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS.map(String::from));
-        let index_has_staged_changes = run_git_review_command(working_dir, &staged_args)?
-            .status
-            .code()
-            == Some(1);
+        let index_has_staged_changes =
+            run_git_command(working_dir, &staged_args)?.status.code() == Some(1);
 
         let commits = match plan_commits(files) {
             Ok(commits) => commits,
@@ -521,24 +519,6 @@ pub(super) fn run_git_command(
             ToolError::execution_failed(format!("Failed to run git: {e}"))
         }
     })
-}
-
-/// Run a content-reading `diff` under [`crate::dependencies::Git::review_command`],
-/// so repository-configured filters, fsmonitor and hooks do not execute.
-pub(super) fn run_git_review_command(
-    working_dir: &Path,
-    args: &[String],
-) -> Result<std::process::Output, ToolError> {
-    if crate::dependencies::Git::command().is_none() {
-        return Err(ToolError::not_available(
-            "git is not installed or not in PATH",
-        ));
-    }
-    let mut cmd = crate::dependencies::Git::review_command(working_dir)
-        .map_err(|e| ToolError::execution_failed(format!("Failed to prepare git: {e:#}")))?;
-    cmd.args(args);
-    cmd.output()
-        .map_err(|e| ToolError::execution_failed(format!("Failed to run git: {e}")))
 }
 
 fn format_command(working_dir: &Path, args: &[String]) -> String {

@@ -564,24 +564,25 @@ impl Engine {
                 },
                 "caller": "repl_fence",
             }));
-            match decision {
-                Ok(ApprovalResult::Approved) => true,
-                Ok(ApprovalResult::Denied) => return Some("not approved".to_string()),
-                // An expired card is not the user's denial (#6601): refund
-                // the budget slot and say the approval timed out.
+            let refusal = match decision {
+                Ok(ApprovalResult::Approved) => None,
+                Ok(ApprovalResult::Denied) => Some("not approved".to_string()),
+                // An expired card is not the user's denial (#6601).
                 Ok(ApprovalResult::TimedOut) => {
-                    tool_call_budget.refund();
-                    return Some(
-                        "the approval request timed out before anyone answered".to_string(),
-                    );
+                    Some("the approval request timed out before anyone answered".to_string())
                 }
                 Ok(ApprovalResult::RetryWithPolicy(_)) => {
-                    return Some(
-                        "inline REPL blocks cannot run under a changed sandbox policy".to_string(),
-                    );
+                    Some("inline REPL blocks cannot run under a changed sandbox policy".to_string())
                 }
-                Err(error) => return Some(error.to_string()),
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(refusal) = refusal {
+                // Admitted by planning but never executed: hand the slot
+                // back, as a direct call's refused approval does.
+                tool_call_budget.refund();
+                return Some(refusal);
             }
+            true
         } else {
             false
         };

@@ -233,11 +233,10 @@ impl ToolSpec for GitShowTool {
 
         let command_str = format_command(&git_ctx.working_dir, &args);
         let working_dir = git_ctx.working_dir.clone();
-        let output = tokio::task::spawn_blocking(move || {
-            super::git::run_git_review_command(&working_dir, &args)
-        })
-        .await
-        .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
+        let output =
+            tokio::task::spawn_blocking(move || super::git::run_git_command(&working_dir, &args))
+                .await
+                .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -373,11 +372,10 @@ impl ToolSpec for GitBlameTool {
 
         let command_str = format_command(working_dir, &args);
         let blame_dir = working_dir.to_path_buf();
-        let output = tokio::task::spawn_blocking(move || {
-            super::git::run_git_review_command(&blame_dir, &args)
-        })
-        .await
-        .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
+        let output =
+            tokio::task::spawn_blocking(move || super::git::run_git_command(&blame_dir, &args))
+                .await
+                .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(

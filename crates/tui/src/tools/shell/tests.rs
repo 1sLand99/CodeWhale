@@ -980,6 +980,18 @@ fn readonly_argv_is_shell_free_and_disables_git_helpers() {
             std::path::PathBuf::from("/abs")
         ]
     );
+    // Chains are split like the classifier splits them, so a `git` read
+    // after `&&`, `||` or `;` still gets filter overrides.
+    assert_eq!(
+        readonly_git_dirs(
+            "pwd && git diff; ls || git -C sub status",
+            std::path::Path::new("/ws")
+        ),
+        [
+            std::path::PathBuf::from("/ws"),
+            std::path::PathBuf::from("/ws/sub")
+        ]
+    );
 
     let (program, args) = hardened_readonly_argv("rg $PATTERN .").expect("literal argv");
     assert_eq!(program, "rg");

@@ -872,10 +872,9 @@ fn lex_readonly_command(command: &str) -> Result<Vec<ReadonlySegment>, ReadonlyR
             // checked the words (#6675). A glob behind a literal prefix
             // (`src/*.rs`, `./*`) only matches paths and stays admitted.
             // Empty quotes (`''*`) add no literal prefix, so they count as
-            // the start of the word too.
-            '*' if current[word_start..]
-                .chars()
-                .all(|quote| matches!(quote, '\'' | '"')) =>
+            // the start of the word too; a quoted character (`'"'*`) does.
+            '*' if shlex::split(&current[word_start..])
+                .is_some_and(|words| words.concat().is_empty()) =>
             {
                 return Err(operator(
                     "an unquoted `*` at the start of a word (quote it or give it a path prefix such as ./*)",
@@ -2638,7 +2637,14 @@ mod tests {
             let rejection = agent_readonly_verdict(command).expect_err(command);
             assert_eq!(rejection.rule, "operator", "{command}");
         }
-        for command in ["ls src/*.rs", "ls ./*", "find . -name '*.rs'", "rg 'a*b' ."] {
+        for command in [
+            "ls src/*.rs",
+            "ls ./*",
+            "find . -name '*.rs'",
+            "rg 'a*b' .",
+            "cat '\"'*",
+            "cat \"'\"*",
+        ] {
             assert!(is_agent_readonly_shell_command(command), "{command}");
         }
     }

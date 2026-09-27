@@ -4444,8 +4444,19 @@ fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
 /// The directory each `git` segment of a read-only command runs in: `cwd`
 /// followed through any leading `-C` hops, as git itself resolves them.
 fn readonly_git_dirs(command: &str, cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
-    command
-        .split('|')
+    // Split with the same lexer the classifier and executor use (#6637), so a
+    // `git` segment after `&&`, `||` or `;` gets its filter hardening too.
+    let segments = agent_readonly_verdict(command).map_or_else(
+        |_| command.split('|').map(str::to_string).collect::<Vec<_>>(),
+        |segments| {
+            segments
+                .into_iter()
+                .map(|segment| segment.command)
+                .collect()
+        },
+    );
+    segments
+        .iter()
         .filter_map(|segment| shell_words::split(&normalize_windows_command_paths(segment)).ok())
         .filter(|argv| argv.first().is_some_and(|program| program == "git"))
         .map(|argv| {
