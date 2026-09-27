@@ -351,40 +351,98 @@ fn shell_command_grant_scope(input: &serde_json::Value) -> String {
         && !shell_command_has_code_option(&tokens)
     {
         let family = classify_command(&tokens);
-        if command_family_is_known(&family) && !family_arguments_are_config(&family) {
+        if command_family_is_known(&family)
+            && !family_arguments_are_config(&family)
+            && !family_arguments_are_code(&family)
+        {
             return format!("shell:{family}");
         }
     }
     format!("shell:cmd:{}", normalize_shell_command(cmd))
 }
 
-/// Options that can make a known command run other code, read another
-/// program, or write anywhere: `git -ccore.fsmonitor=./x status`,
-/// `cargo build --config build.rustc-wrapper=…`, `git diff --output=<path>`,
-/// `make -f /tmp/x`. The family ignores flags, so any of these keys the
-/// grant on the full command instead.
+/// Whether any option could change what a known command runs, reads or
+/// writes. The family ignores flags, so a family grant is kept only when
+/// every option is on [`INERT_OPTIONS`]; anything else keys the grant on the
+/// full command.
+///
+/// An allow-list, not a deny-list: options take values in too many spellings
+/// (`-C../x`, `-f/tmp/x`, `--output out.patch`, `-x "cmd"`, `-exec ./x`,
+/// `-O<cmd>`) for a list of dangerous ones to be complete.
 fn shell_command_has_code_option(tokens: &[&str]) -> bool {
-    const CODE_OPTIONS: &[&str] = &[
-        "-c",
-        "-C",
-        "--config",
-        "--exec",
-        "--exec-path",
-        "--script-shell",
-        "-f",
-        "--file",
-        "--makefile",
-        "-e",
-        "--eval",
-        "--require",
-        "--upload-pack",
-        "--receive-pack",
-        "--manifest-path",
+    tokens.iter().skip(1).any(|token| {
+        token.contains('=') || (token.starts_with('-') && !INERT_OPTIONS.contains(token))
+    })
+}
+
+/// Value-free options that only change how much a command prints or which of
+/// its own outputs it builds, never what it runs or where it writes.
+const INERT_OPTIONS: &[&str] = &[
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+    "-v",
+    "-vv",
+    "--verbose",
+    "-q",
+    "--quiet",
+    "-s",
+    "--short",
+    "--porcelain",
+    "--oneline",
+    "--stat",
+    "--name-only",
+    "--name-status",
+    "--cached",
+    "--staged",
+    "--no-color",
+    "--release",
+    "-p",
+    "--package",
+    "--workspace",
+    "--all-targets",
+    "--all-features",
+    "--lib",
+    "--bins",
+    "--tests",
+    "--locked",
+    "--frozen",
+    "--offline",
+    "--no-fail-fast",
+    "--dry-run",
+];
+
+/// Families whose positional arguments beyond the family are themselves what
+/// runs or gets installed (`go run <file>`, `git bisect run <cmd>`,
+/// `make <target>`, `npm install <pkg>`), so one grant would cover any of
+/// them.
+fn family_arguments_are_code(family: &str) -> bool {
+    const FAMILIES: &[&str] = &[
+        "make",
+        "go run",
+        "go install",
+        "go get",
+        "go generate",
+        "deno run",
+        "bun run",
+        "cargo run",
+        "cargo install",
+        "cargo add",
+        "git bisect",
+        "git submodule",
+        "npm install",
+        "yarn add",
+        "pnpm add",
+        "bun add",
+        "pip install",
+        "pip3 install",
+        "docker compose run",
+        "docker compose exec",
+        "docker container run",
+        "docker container exec",
     ];
-    tokens
-        .iter()
-        .skip(1)
-        .any(|token| token.contains('=') || CODE_OPTIONS.contains(token))
+    FAMILIES.contains(&family)
 }
 
 /// Families whose arguments are settings, so one grant would cover every
@@ -750,6 +808,68 @@ mod tests {
         // A known, simple command keeps its family grant.
         assert_eq!(key("git status"), key("git status --porcelain"));
         assert_ne!(key("git status"), key("git push"));
+    }
+
+    #[test]
+    fn shell_family_grants_survive_only_inert_options() {
+        let key = |cmd: &str| build_approval_grouping_key("exec_shell", &json!({"command": cmd}));
+        // Options with an attached or separate value, and single-dash long
+        // options, key the full command.
+        for (granted, other) in [
+            ("git status", "git -C../other status"),
+            ("make", "make -f/tmp/x"),
+            ("git diff", "git diff --output out.patch"),
+            ("git rebase HEAD~1", "git rebase -x \"touch x\" HEAD~1"),
+            ("go test ./...", "go test -exec ./x ./..."),
+            ("go build ./...", "go build -toolexec ./x ./..."),
+            ("git clone ./repo", "git clone -u \"cmd\" ./repo"),
+            ("git grep pat", "git grep -Ocmd pat"),
+            ("git log", "git log --git-dir x"),
+            ("cargo test", "cargo test -- --nocapture"),
+        ] {
+            assert_ne!(key(granted), key(other), "{other}");
+            assert!(key(other).0.starts_with("shell:cmd:"), "{other}");
+        }
+        // Every option once listed as able to run code still keys the full
+        // command.
+        for option in [
+            "-c",
+            "-C",
+            "--config",
+            "--exec",
+            "--exec-path",
+            "--script-shell",
+            "-f",
+            "--file",
+            "--makefile",
+            "-e",
+            "--eval",
+            "--require",
+            "--upload-pack",
+            "--receive-pack",
+            "--manifest-path",
+        ] {
+            assert!(!INERT_OPTIONS.contains(&option), "{option}");
+        }
+        // Families whose arguments are the code that runs or is installed
+        // key the full command.
+        for (granted, other) in [
+            ("go run ./cmd/tool", "go run /tmp/other.go"),
+            ("deno run main.ts", "deno run https://host/x.ts"),
+            ("cargo run", "cargo run --bin other"),
+            ("git bisect start", "git bisect run ./x"),
+            ("git submodule update", "git submodule foreach ./x"),
+            ("make build", "make clean"),
+            ("npm install", "npm install left-pad"),
+            ("pip install requests", "pip install other"),
+            ("cargo install ripgrep", "cargo install other"),
+        ] {
+            assert_ne!(key(granted), key(other), "{other}");
+        }
+        // Inert options keep the family grant.
+        assert_eq!(key("cargo build"), key("cargo build --release --locked"));
+        assert_eq!(key("git status"), key("git status -s"));
+        assert_eq!(key("git diff"), key("git diff --stat --cached"));
     }
 
     #[test]

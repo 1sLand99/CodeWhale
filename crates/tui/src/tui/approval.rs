@@ -29,6 +29,9 @@
 
 #[cfg(test)]
 use crate::config::ApprovalDefaultSelection;
+use crate::tools::approval_summary::{
+    delegated_authority_fields, param_preview, truncate_string_value,
+};
 use crate::tools::canonical_action::canonical_action_alias;
 use codewhale_config::ToolAskRule;
 use codewhale_localization::{Locale, MessageId, tr};
@@ -378,38 +381,6 @@ fn description_is_repo_law_prompt(description: &str) -> bool {
         && description.contains(".codewhale/constitution.json")
 }
 
-fn param_preview(params: &Value, keys: &[&str], max_len: usize) -> Option<String> {
-    let Value::Object(map) = params else {
-        return None;
-    };
-
-    for key in keys {
-        let Some(value) = map.get(*key) else {
-            continue;
-        };
-        match value {
-            Value::String(text) => return Some(truncate_string_value(text, max_len)),
-            Value::Number(number) => return Some(number.to_string()),
-            Value::Bool(flag) => return Some(flag.to_string()),
-            Value::Array(items) if !items.is_empty() => {
-                let preview = items
-                    .iter()
-                    .take(3)
-                    .map(|item| match item {
-                        Value::String(text) => truncate_string_value(text, max_len / 2),
-                        other => truncate_string_value(&other.to_string(), max_len / 2),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Some(truncate_string_value(&preview, max_len));
-            }
-            other => return Some(truncate_string_value(&other.to_string(), max_len)),
-        }
-    }
-
-    None
-}
-
 fn mcp_target_hint(tool_name: &str) -> Option<String> {
     let remainder = tool_name.strip_prefix("mcp_")?;
     if remainder.is_empty() {
@@ -583,57 +554,6 @@ fn build_impact_summary_zh_hans(
 
 /// Tools that hand work to a later, unattended run (a durable task or a
 /// scheduled automation) and can ask for authority of their own.
-fn is_delegated_work_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "task_create" | "automation_create" | "automation_update"
-    )
-}
-
-fn flag_word(value: bool, zh: bool) -> &'static str {
-    match (value, zh) {
-        (true, false) => "on",
-        (false, false) => "off",
-        (true, true) => "开启",
-        (false, true) => "关闭",
-    }
-}
-
-/// Labeled authority fields a delegated-work call asks for: shell access,
-/// trust mode, auto-approval, mode and the directories it would run in.
-/// Shown for every such call, whatever its stakes or key order, so the card
-/// never hides what the later run is allowed to do.
-fn delegated_authority_fields(tool_name: &str, params: &Value, zh: bool) -> Vec<(String, String)> {
-    if !is_delegated_work_tool(tool_name) {
-        return Vec::new();
-    }
-    let mut fields = Vec::new();
-    let flags: [(&str, &str, &str); 3] = [
-        ("trust_mode", "Trust mode", "信任模式"),
-        ("allow_shell", "Shell", "Shell"),
-        ("auto_approve", "Auto-approve", "自动批准"),
-    ];
-    for (key, en, zh_label) in flags {
-        let Some(value) = params.get(key) else {
-            continue;
-        };
-        let rendered = match value.as_bool() {
-            Some(flag) => flag_word(flag, zh).to_string(),
-            None => truncate_string_value(&value.to_string(), 40),
-        };
-        fields.push((if zh { zh_label } else { en }.to_string(), rendered));
-    }
-    for (keys, en, zh_label) in [
-        (&["mode"][..], "Mode", "模式"),
-        (&["workspace", "cwds"][..], "Workspace", "工作区"),
-    ] {
-        if let Some(value) = param_preview(params, keys, 120) {
-            fields.push((if zh { zh_label } else { en }.to_string(), value));
-        }
-    }
-    fields
-}
-
 fn delegated_authority_impacts(tool_name: &str, params: &Value, zh: bool) -> Vec<String> {
     let separator = if zh { "：" } else { ": " };
     delegated_authority_fields(tool_name, params, zh)
@@ -786,14 +706,6 @@ fn truncate_params_value(value: &Value, max_len: usize) -> Value {
             }
         }
     }
-}
-
-fn truncate_string_value(value: &str, max_len: usize) -> String {
-    if value.chars().count() <= max_len {
-        return value.to_string();
-    }
-    let truncated: String = value.chars().take(max_len).collect();
-    format!("{truncated}...")
 }
 
 // ============================================================================
