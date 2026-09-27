@@ -11363,12 +11363,14 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
             .map(|receipt| receipt.tier),
         Some(crate::model_routing::AutoRouteTier::Strong)
     );
+    // GLM-5.3 publishes its own low/high/max ladder (#6612), so the Low
+    // preference reaches the wire as Low instead of being raised to High.
     assert_eq!(
         app.last_effective_reasoning_effort,
-        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::High)),
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Low)),
         "the post-turn receipt must retain exact route capability constraints"
     );
-    assert_eq!(app.reasoning_effort_display_label(), "low→high");
+    assert_eq!(app.reasoning_effort_display_label(), "low");
 }
 
 #[tokio::test]
