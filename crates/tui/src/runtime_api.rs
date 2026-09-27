@@ -113,6 +113,7 @@ mod secrets;
 mod sessions;
 mod targets;
 mod terminal;
+mod turn_artifacts;
 mod voice;
 mod web;
 mod workspace;
@@ -1373,6 +1374,14 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route(
             "/v1/threads/{id}/turns/{turn_id}/steer",
             post(steer_thread_turn),
+        )
+        .route(
+            "/v1/threads/{id}/turns/{turn_id}/artifacts",
+            get(turn_artifacts::list_turn_artifacts),
+        )
+        .route(
+            "/v1/threads/{id}/turns/{turn_id}/artifacts/{artifact_id}",
+            get(turn_artifacts::read_turn_artifact),
         )
         .route(
             "/v1/threads/{id}/turns/{turn_id}/interrupt",
@@ -10661,6 +10670,14 @@ impl ApiError {
     fn payload_too_large(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: message.into(),
+            code: None,
+        }
+    }
+
+    fn gone(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GONE,
             message: message.into(),
             code: None,
         }

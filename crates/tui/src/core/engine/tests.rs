@@ -141,6 +141,153 @@ fn snapshot_notice_precedes_first_provider_call_and_is_owned_by_session() {
     drop(runtime);
 }
 
+/// A recording host (`record_restore_points`) receives every workspace
+/// snapshot receipt of a turn before its `TurnComplete`: the pre-turn restore
+/// point, a `tool` snapshot naming the file-mutating call and the paths it
+/// declared, the `post_tool` snapshot closing it, and the post-turn state. A
+/// read-only call takes none. The pre/post-turn trees bracket exactly the
+/// turn's write, so a host derives the turn's workspace delta from them.
+#[test]
+fn recorded_snapshot_receipts_bracket_the_turn_and_its_file_writes() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::snapshot::WorkspaceSnapshotKind;
+    let _env = lock_test_env();
+    let root = tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _user_home = EnvVarGuard::set("HOME", root.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", root.path());
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let config = Config::default();
+        let client = std::sync::Arc::new(MockLlmClient::new(vec![
+            canned::tool_call_turn(
+                "call-write",
+                "File",
+                r#"{"action":"write","path":"out.md","content":"out\n"}"#,
+            ),
+            canned::tool_call_turn(
+                "call-read",
+                "File",
+                r#"{"action":"read","path":"README.md"}"#,
+            ),
+            canned::simple_text_turn("done"),
+        ]));
+        let (engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                session_id: Some("session-restore".into()),
+                snapshots_enabled: true,
+                snapshots_max_workspace_bytes: 0,
+                record_restore_points: true,
+                ..deterministic_engine_config(&workspace)
+            },
+            &config,
+            client,
+        );
+        let run = tokio::spawn(engine.run());
+        let Op::SendMessage(mut spec) =
+            external_user_message_op("write out.md", AppMode::Agent, &config)
+        else {
+            unreachable!("external_user_message_op builds a SendMessage");
+        };
+        spec.auto_approve = true;
+        spec.trust_mode = true;
+        spec.approval_mode = ApprovalMode::Bypass;
+        handle.send(Op::SendMessage(spec)).await.unwrap();
+
+        let mut completions = HashMap::new();
+        let mut receipts = Vec::new();
+        let mut rx = handle.rx_event.write().await;
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("turn events")
+        {
+            match event {
+                Event::ToolCallComplete { id, result, .. } => {
+                    completions.insert(id, result.expect("tool result"));
+                }
+                Event::WorkspaceSnapshotTaken { snapshot } => receipts.push(snapshot),
+                Event::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(rx);
+
+        assert!(completions.get("call-write").expect("write ran").success);
+        assert!(completions.get("call-read").expect("read ran").success);
+        // Every receipt, post-turn included, arrived before TurnComplete.
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| (receipt.kind, receipt.tool_call_id.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (WorkspaceSnapshotKind::PreTurn, None),
+                (WorkspaceSnapshotKind::Tool, Some("call-write")),
+                (WorkspaceSnapshotKind::PostTool, Some("call-write")),
+                (WorkspaceSnapshotKind::PostTurn, None),
+            ],
+            "a read-only call takes no restore point: {receipts:?}"
+        );
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.session_id == "session-restore")
+        );
+        assert_eq!(
+            receipts[1].write_paths.as_deref(),
+            Some(&["out.md".to_string()][..])
+        );
+        assert_eq!(
+            receipts[2].changed_paths.as_deref(),
+            Some(&["out.md".to_string()][..])
+        );
+
+        let repo = crate::snapshot::SnapshotRepo::open_existing(&workspace)
+            .unwrap()
+            .expect("snapshot repo");
+        let listed = repo.list(usize::MAX).unwrap();
+        assert!(
+            listed.iter().any(
+                |snapshot| receipts[1].matches(snapshot) && snapshot.label == "tool:call-write"
+            ),
+            "the tool receipt names a live snapshot"
+        );
+        let delta = repo
+            .diff_snapshots(
+                &crate::snapshot::SnapshotId::parse(&receipts[0].tree_id).unwrap(),
+                &crate::snapshot::SnapshotId::parse(&receipts[3].tree_id).unwrap(),
+                100,
+            )
+            .unwrap();
+        assert_eq!(
+            delta
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["out.md"],
+            "the pre/post-turn trees bracket exactly this turn's write"
+        );
+
+        handle.send(Op::Shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap();
+    });
+    // Await the owned blocking post-turn snapshots before restoring test home.
+    drop(runtime);
+}
+
 #[test]
 fn preview_request_error_preserves_non_semantic_context_chain() {
     let error = anyhow::Error::msg("root cause").context("request preparation failed");

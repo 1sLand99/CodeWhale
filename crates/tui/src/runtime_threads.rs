@@ -1207,6 +1207,14 @@ pub struct TurnRecord {
     /// turn queue; ordinary external-user turns leave it unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_mail_message_id: Option<String>,
+    /// What this turn produced, merged from its items' refs and, once
+    /// settled, the workspace snapshot delta. Empty until the turn ends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<TurnArtifactRef>,
+    /// Where the workspace-level accounting stands. `None` while the turn
+    /// runs (and on records written before this field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<TurnWorkspaceArtifacts>,
     /// Workspace snapshots the engine took while this turn ran, in the order
     /// the engine reported them (one FIFO event channel, one consumer per
     /// turn): the turn's `pre_turn` restore point, one `tool` snapshot before
@@ -1491,6 +1499,8 @@ fn settle_unaccepted_routed_usage(
             item_ids: Vec::new(),
             steer_count: 0,
             agent_mail_message_id: None,
+            artifacts: Vec::new(),
+            workspace: None,
             workspace_snapshots: Vec::new(),
         }
     };
@@ -1585,8 +1595,15 @@ pub struct TurnItemRecord {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// Legacy projection of `artifacts`: workspace-relative paths of the
+    /// files this item created, changed or renamed (never deleted files,
+    /// spills or media). Derived only by `legacy_artifact_refs`.
     #[serde(default)]
     pub artifact_refs: Vec<PathBuf>,
+    /// What this item produced, as typed references. The authority for a
+    /// single tool call's artifacts; the turn aggregate is merged from these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<TurnArtifactRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -8494,6 +8511,49 @@ impl RuntimeThreadManager {
         Ok(split)
     }
 
+    /// One turn's artifact references, read from the store: the turn's own
+    /// aggregate once it has ended, or its items' refs merged on the fly
+    /// while it runs. `Ok(None)` when the turn does not exist or belongs to
+    /// another thread.
+    pub async fn turn_artifacts(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<TurnArtifactsView>> {
+        let thread = self.get_thread(thread_id).await?;
+        if validated_record_id(turn_id, "turn id").is_err() {
+            return Ok(None);
+        }
+        let manager = self.clone();
+        let thread_id = thread_id.to_string();
+        let turn_id = turn_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if !manager.store.turn_path(&turn_id)?.exists() {
+                return Ok(None);
+            }
+            let turn = manager.store.load_turn(&turn_id)?;
+            if turn.thread_id != thread_id {
+                return Ok(None);
+            }
+            let item_artifacts = manager.item_artifact_refs(&turn);
+            let artifacts = if turn.workspace.is_some() {
+                turn.artifacts
+            } else {
+                turn_artifacts::merge_turn_artifacts(&item_artifacts, None).artifacts
+            };
+            Ok(Some(TurnArtifactsView {
+                thread_id,
+                turn_id,
+                workspace: turn.workspace,
+                artifacts,
+                item_artifacts,
+                thread_workspace: thread.workspace,
+            }))
+        })
+        .await
+        .context("turn artifact read task failed")?
+    }
+
     pub async fn get_thread(&self, id: &str) -> Result<ThreadRecord> {
         self.flush_recovery_receipts_for_thread(id).await?;
         self.store
@@ -10106,6 +10166,7 @@ impl RuntimeThreadManager {
                     detail: Some(turn_seed.user_text.clone()),
                     metadata: None,
                     artifact_refs: Vec::new(),
+                    artifacts: Vec::new(),
                     started_at: Some(item_at),
                     ended_at: Some(item_at),
                 };
@@ -10138,6 +10199,7 @@ impl RuntimeThreadManager {
                             detail: Some(text.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -10158,6 +10220,7 @@ impl RuntimeThreadManager {
                             detail: Some(thinking.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -10195,6 +10258,7 @@ impl RuntimeThreadManager {
                                 .clone(),
                             )),
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -10231,6 +10295,7 @@ impl RuntimeThreadManager {
                             detail: Some(content.clone()),
                             metadata: Some(Value::Object(metadata)),
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -10281,6 +10346,8 @@ impl RuntimeThreadManager {
                     item_ids,
                     steer_count: 0,
                     agent_mail_message_id: None,
+                    artifacts: Vec::new(),
+                    workspace: None,
                     workspace_snapshots: Vec::new(),
                 })?;
 
@@ -10625,6 +10692,15 @@ impl RuntimeThreadManager {
                         turn.ended_at = Some(now);
                         turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
                         turn.error = Some(reason.to_string());
+                    }
+                    if turn.workspace.is_none() {
+                        // The monitor died before the engine reported a
+                        // snapshot pair; keep what the tool receipts say.
+                        self.set_turn_artifacts(
+                            &mut turn,
+                            None,
+                            TurnWorkspaceArtifacts::unavailable(TurnWorkspaceReason::NotCaptured),
+                        );
                     }
                     (
                         matches!(
@@ -11429,6 +11505,8 @@ impl RuntimeThreadManager {
             item_ids: Vec::new(),
             steer_count: 0,
             agent_mail_message_id: input_source.mail_message_id().map(str::to_string),
+            artifacts: Vec::new(),
+            workspace: None,
             workspace_snapshots: Vec::new(),
         };
         append_initial_routed_usage_to_turn(&mut turn, &initial_routed_usage);
@@ -11447,6 +11525,7 @@ impl RuntimeThreadManager {
             detail: input_source.item_detail(&prompt),
             metadata: input_source.item_metadata(),
             artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
             started_at: Some(now),
             ended_at: Some(now),
         };
@@ -11751,6 +11830,7 @@ impl RuntimeThreadManager {
             detail: Some(prompt.clone()),
             metadata: None,
             artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
             started_at: Some(now),
             ended_at: None,
         };
@@ -11924,6 +12004,8 @@ impl RuntimeThreadManager {
             item_ids: Vec::new(),
             steer_count: 0,
             agent_mail_message_id: None,
+            artifacts: Vec::new(),
+            workspace: None,
             workspace_snapshots: Vec::new(),
         };
         let op = Op::CompactContext {
@@ -12942,6 +13024,7 @@ impl RuntimeThreadManager {
             metadata: (visibility == crate::core::events::StatusVisibility::Internal)
                 .then(|| json!({ "visibility": visibility.as_str() })),
             artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
             started_at: Some(Utc::now()),
             ended_at: Some(Utc::now()),
         };
@@ -13007,6 +13090,26 @@ impl RuntimeThreadManager {
         // final TurnComplete receipt. Goal settlement uses it to mirror the
         // engine's own `update_goal` precondition for continuation.
         let mut turn_tool_catalog: Option<Vec<codewhale_core::request::Tool>> = None;
+        // Every file path in a tool receipt is confined to the thread
+        // workspace.
+        let artifact_workspace = self
+            .store
+            .load_thread(&thread_id)
+            .map(|thread| thread.workspace)
+            .unwrap_or_else(|_| self.workspace.clone());
+        let artifact_workspace_roots = {
+            let mut roots = vec![artifact_workspace.clone()];
+            if let Ok(canonical) = tokio::fs::canonicalize(&artifact_workspace).await
+                && canonical != artifact_workspace
+            {
+                roots.push(canonical);
+            }
+            roots
+        };
+        // The `tool` restore point recorded on this turn for each call, by
+        // call id: a tool artifact names one only when this thread owns it
+        // (#6621), so file-revert accepts exactly what the ref advertises.
+        let mut tool_restore_points: HashMap<String, String> = HashMap::new();
 
         loop {
             let event = if let Some(event) = pending_event.take() {
@@ -13144,6 +13247,7 @@ impl RuntimeThreadManager {
                         detail: Some(String::new()),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -13217,6 +13321,7 @@ impl RuntimeThreadManager {
                         detail: Some(String::new()),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -13307,6 +13412,7 @@ impl RuntimeThreadManager {
                             meta
                         }),
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -13450,6 +13556,24 @@ impl RuntimeThreadManager {
                                         obj.insert("tool_result_for".to_string(), json!(id));
                                         obj.insert("is_error".to_string(), json!(!output.success));
                                     }
+                                    // Failed calls count too: a large error
+                                    // output spills like any other.
+                                    let refs = turn_artifacts::artifact_refs_from_tool_metadata(
+                                        &meta,
+                                        &turn_artifacts::ToolArtifactContext {
+                                            item_id: &item_id,
+                                            tool_call_id: &id,
+                                            tool_name: &name,
+                                            workspace_roots: &artifact_workspace_roots,
+                                            restore_snapshot_id: tool_restore_points
+                                                .get(&id)
+                                                .map(String::as_str),
+                                            recorded_at: now,
+                                        },
+                                    );
+                                    item.artifact_refs =
+                                        turn_artifacts::legacy_artifact_refs(&refs);
+                                    item.artifacts = refs;
                                     item.metadata = Some(meta);
                                 }
                             }
@@ -13514,6 +13638,7 @@ impl RuntimeThreadManager {
                         detail: Some(message.clone()),
                         metadata: Some(json!({ "compaction_id": id })),
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -13647,6 +13772,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -13682,6 +13808,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -13728,6 +13855,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -13797,6 +13925,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -14321,6 +14450,7 @@ impl RuntimeThreadManager {
                             "omitted_tool_count": omitted_tool_count,
                         })),
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -14349,6 +14479,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -14432,6 +14563,11 @@ impl RuntimeThreadManager {
                             "workspace snapshot receipt was not recorded; this turn has no such restore point: {err:#}"
                         );
                     } else {
+                        if snapshot.kind == crate::snapshot::WorkspaceSnapshotKind::Tool
+                            && let Some(call_id) = snapshot.tool_call_id.as_ref()
+                        {
+                            tool_restore_points.insert(call_id.clone(), snapshot.tree_id.clone());
+                        }
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
@@ -14606,6 +14742,7 @@ impl RuntimeThreadManager {
                 detail: Some(EMPTY_TURN_REASON.to_string()),
                 metadata: None,
                 artifact_refs: Vec::new(),
+                artifacts: Vec::new(),
                 started_at: Some(Utc::now()),
                 ended_at: Some(Utc::now()),
             };
@@ -14668,6 +14805,12 @@ impl RuntimeThreadManager {
                 .saturating_add(turn_routed_usage_dropped_records);
             turn.model_request_diagnostics = turn_model_request_diagnostics;
             turn.error = turn_error;
+            // Item refs are final now. The workspace delta derives from the
+            // pre/post-turn restore points recorded on this turn (every
+            // receipt arrives before TurnComplete) and settles off the
+            // monitor, since diffing them is git work.
+            let initial = self.initial_turn_workspace(&thread_id, &turn.workspace_snapshots);
+            self.set_turn_artifacts(&mut turn, None, initial);
             self.store.save_turn(&turn)?;
             turn
         };
@@ -14679,6 +14822,14 @@ impl RuntimeThreadManager {
             self.store.save_thread(&thread)?;
         }
         self.emit_turn_completed_if_missing(&turn, false).await?;
+        if let Some(pair) = turn_snapshot_pair(&turn.workspace_snapshots)
+            && turn
+                .workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.state == TurnWorkspaceState::Pending)
+        {
+            self.spawn_turn_workspace_settlement(thread_id.clone(), turn_id.clone(), pair);
+        }
 
         {
             let mut active = self.active.lock().await;
@@ -14714,6 +14865,193 @@ impl RuntimeThreadManager {
         // next one, keeping every wake explicit and bounded to one turn.
         self.spawn_agent_mail_safe_boundary_delivery(thread_id.clone());
 
+        Ok(())
+    }
+
+    /// Every artifact ref this turn's items recorded, in item order.
+    fn item_artifact_refs(&self, turn: &TurnRecord) -> Vec<TurnArtifactRef> {
+        turn.item_ids
+            .iter()
+            .filter_map(|item_id| self.store.load_item(item_id).ok())
+            .flat_map(|item| item.artifacts)
+            .collect()
+    }
+
+    /// Recompute a turn's aggregate through the one merge function.
+    fn set_turn_artifacts(
+        &self,
+        turn: &mut TurnRecord,
+        delta: Option<&turn_artifacts::WorkspaceDelta>,
+        mut workspace: TurnWorkspaceArtifacts,
+    ) {
+        let items = self.item_artifact_refs(turn);
+        let merged = turn_artifacts::merge_turn_artifacts(&items, delta);
+        workspace.truncated = merged.truncated;
+        workspace.omitted = merged.omitted;
+        turn.artifacts = merged.artifacts;
+        turn.workspace = Some(workspace);
+    }
+
+    fn spawn_turn_workspace_settlement(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        pair: TurnSnapshotPair,
+    ) {
+        let manager = self.clone();
+        let worker = tokio::spawn(async move {
+            if let Err(error) = manager
+                .settle_turn_workspace(&thread_id, &turn_id, pair)
+                .await
+            {
+                tracing::warn!(thread_id, turn_id, %error, "Failed to settle turn artifacts");
+            }
+        });
+        self.track_receipt_worker(worker);
+    }
+
+    /// A turn's workspace state at terminal settlement, before any delta,
+    /// from the restore points recorded on it. `pending` when it holds both a
+    /// pre-turn and a post-turn receipt; otherwise `unavailable`, with the
+    /// snapshot gate that refused the thread's engine when there is one.
+    fn initial_turn_workspace(
+        &self,
+        thread_id: &str,
+        snapshots: &[crate::snapshot::WorkspaceSnapshotRef],
+    ) -> TurnWorkspaceArtifacts {
+        if let Some(pair) = turn_snapshot_pair(snapshots) {
+            return TurnWorkspaceArtifacts::pending(pair.pre.tree_id);
+        }
+        let pre = snapshots
+            .iter()
+            .find(|snapshot| snapshot.kind == crate::snapshot::WorkspaceSnapshotKind::PreTurn);
+        let gated = || -> Option<TurnWorkspaceReason> {
+            if !self.config.read().snapshots_config().enabled {
+                return Some(TurnWorkspaceReason::SnapshotsDisabled);
+            }
+            let workspace = self.store.load_thread(thread_id).ok()?.workspace;
+            // The engine runs under the thread's own id (#6621), so its
+            // gate notice is keyed by it.
+            let status = crate::core::turn::snapshots_disabled_status(&workspace, Some(thread_id))?;
+            use crate::core::turn::SnapshotsDisabledScope;
+            match status.scope {
+                SnapshotsDisabledScope::WorkspaceTooLarge => {
+                    Some(TurnWorkspaceReason::WorkspaceTooLarge)
+                }
+                SnapshotsDisabledScope::TooManyFiles => Some(TurnWorkspaceReason::TooManyFiles),
+                SnapshotsDisabledScope::UnsafeLocation => Some(TurnWorkspaceReason::UnsafeLocation),
+                _ => Some(TurnWorkspaceReason::SnapshotFailed),
+            }
+        };
+        match pre {
+            // A pre-turn restore point without its post-turn pair: the
+            // closing snapshot failed or was gated.
+            Some(pre) => TurnWorkspaceArtifacts {
+                pre_turn_snapshot_id: Some(pre.tree_id.clone()),
+                ..TurnWorkspaceArtifacts::unavailable(
+                    gated().unwrap_or(TurnWorkspaceReason::SnapshotFailed),
+                )
+            },
+            // No pre-turn receipt: snapshots were off or gated, or the turn
+            // (a compaction, a purge, one that ended early) took none. A
+            // failed snapshot reports no receipt either.
+            None => TurnWorkspaceArtifacts::unavailable(
+                gated().unwrap_or(TurnWorkspaceReason::NotCaptured),
+            ),
+        }
+    }
+
+    /// Diff the turn's recorded pre-turn and post-turn restore points, merge
+    /// the delta into the turn's aggregate, and publish `turn.artifacts`.
+    /// Every outcome publishes, so a client waiting on a `pending` turn
+    /// always hears back.
+    async fn settle_turn_workspace(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        pair: TurnSnapshotPair,
+    ) -> Result<()> {
+        let thread = self.store.load_thread(thread_id)?;
+        let turn = self.store.load_turn(turn_id)?;
+        let item_paths: Vec<String> = self
+            .item_artifact_refs(&turn)
+            .into_iter()
+            .filter(|reference| reference.kind == TurnArtifactKind::File)
+            .flat_map(|reference| std::iter::once(reference.path).chain(reference.previous_path))
+            .collect();
+        // The pre-turn restore point is recorded on this turn, so this
+        // thread owns it and file-revert accepts it for every path the delta
+        // names (#6621). Trees, not commit ids: a prune rewrites commits.
+        let restore_snapshot_id = Some(pair.pre.tree_id.clone());
+        let TurnSnapshotPair { pre, post } = pair;
+        let workspace = thread.workspace.clone();
+        let (pre_tree, post_tree) = (pre.tree_id, post.tree_id);
+        let delta = tokio::task::spawn_blocking(move || {
+            workspace_delta(&workspace, &pre_tree, &post_tree, &item_paths)
+                .map(|(delta, tracked)| (post_tree, delta, tracked))
+        })
+        .await
+        .map_err(|error| anyhow!("turn delta task failed: {error}"))
+        .and_then(|result| result)
+        .map_err(|error| {
+            tracing::warn!(turn_id, %error, "Failed to diff turn snapshots");
+            TurnWorkspaceReason::DeltaFailed
+        });
+
+        let turn = {
+            let _turn_mutation = self.store.turn_mutation.lock();
+            let mut turn = self.store.load_turn(turn_id)?;
+            let Some(workspace) = turn
+                .workspace
+                .clone()
+                .filter(|workspace| workspace.state == TurnWorkspaceState::Pending)
+            else {
+                return Ok(());
+            };
+            match delta {
+                Ok((post, delta, tracked)) => {
+                    let refs = turn_artifacts::delta_refs(
+                        &delta,
+                        restore_snapshot_id.as_deref(),
+                        Utc::now(),
+                    );
+                    let delta = turn_artifacts::WorkspaceDelta {
+                        refs,
+                        tracked_item_paths: tracked,
+                        truncated: delta.truncated,
+                        omitted: delta.omitted,
+                    };
+                    let settled = TurnWorkspaceArtifacts {
+                        state: TurnWorkspaceState::Settled,
+                        post_turn_snapshot_id: Some(post),
+                        ..workspace
+                    };
+                    self.set_turn_artifacts(&mut turn, Some(&delta), settled);
+                }
+                Err(reason) => {
+                    let unavailable = TurnWorkspaceArtifacts {
+                        state: TurnWorkspaceState::Unavailable,
+                        reason: Some(reason),
+                        ..workspace
+                    };
+                    self.set_turn_artifacts(&mut turn, None, unavailable);
+                }
+            }
+            self.store.save_turn(&turn)?;
+            turn
+        };
+        self.emit_event(
+            thread_id,
+            Some(turn_id),
+            None,
+            "turn.artifacts",
+            json!({
+                "turn_id": turn.id,
+                "workspace": turn.workspace,
+                "artifacts": turn.artifacts,
+            }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -14855,8 +15193,23 @@ impl RuntimeThreadManager {
                     let elapsed = now.signed_duration_since(started_at);
                     turn.duration_ms = Some(elapsed.num_milliseconds().max(0) as u64);
                 }
+                self.set_turn_artifacts(
+                    &mut turn,
+                    None,
+                    TurnWorkspaceArtifacts::unavailable(TurnWorkspaceReason::RuntimeRestarted),
+                );
                 self.store.save_turn(&turn)?;
                 thread_changed = true;
+            } else if let Some(workspace) = turn
+                .workspace
+                .as_mut()
+                .filter(|workspace| workspace.state == TurnWorkspaceState::Pending)
+            {
+                // The post-turn snapshot id died with the process. Keep the
+                // item-derived aggregate rather than guess at a delta.
+                workspace.state = TurnWorkspaceState::Unavailable;
+                workspace.reason = Some(TurnWorkspaceReason::RuntimeRestarted);
+                self.store.save_turn(&turn)?;
             }
             if thread_changed && let Some(thread) = threads.get_mut(&turn.thread_id) {
                 thread.updated_at = now;
@@ -15720,6 +16073,74 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
         Err(err) => Err(err).with_context(|| format!("Failed to remove {}", path.display())),
     }
 }
+
+/// A turn's artifact references as the Runtime API serves them.
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnArtifactsView {
+    pub thread_id: String,
+    pub turn_id: String,
+    /// `null` while the turn is still running.
+    pub workspace: Option<TurnWorkspaceArtifacts>,
+    pub artifacts: Vec<TurnArtifactRef>,
+    /// Every item-level ref, including intermediate revisions of a file the
+    /// turn wrote more than once. The read route resolves `?revision=`
+    /// against these.
+    #[serde(skip)]
+    pub item_artifacts: Vec<TurnArtifactRef>,
+    /// The thread workspace every file ref is relative to.
+    #[serde(skip)]
+    pub thread_workspace: PathBuf,
+}
+
+/// The pre-turn and post-turn restore points recorded on one turn: the
+/// pair its workspace delta is diffed from.
+struct TurnSnapshotPair {
+    pre: crate::snapshot::WorkspaceSnapshotRef,
+    post: crate::snapshot::WorkspaceSnapshotRef,
+}
+
+/// The turn's first `pre_turn` and last `post_turn` receipts, when both were
+/// recorded.
+fn turn_snapshot_pair(
+    snapshots: &[crate::snapshot::WorkspaceSnapshotRef],
+) -> Option<TurnSnapshotPair> {
+    use crate::snapshot::WorkspaceSnapshotKind;
+    let pre = snapshots
+        .iter()
+        .find(|snapshot| snapshot.kind == WorkspaceSnapshotKind::PreTurn)?;
+    let post = snapshots
+        .iter()
+        .rev()
+        .find(|snapshot| snapshot.kind == WorkspaceSnapshotKind::PostTurn)?;
+    Some(TurnSnapshotPair {
+        pre: pre.clone(),
+        post: post.clone(),
+    })
+}
+
+/// Diff the turn's snapshot pair in the existing side repo, and report
+/// which item-recorded paths either snapshot can see.
+fn workspace_delta(
+    workspace: &Path,
+    pre: &str,
+    post: &str,
+    item_paths: &[String],
+) -> Result<(crate::snapshot::SnapshotDelta, HashSet<String>)> {
+    let repo = crate::snapshot::SnapshotRepo::open_existing(workspace)?
+        .context("workspace snapshot repo is missing")?;
+    let pre = crate::snapshot::SnapshotId::parse(pre)?;
+    let post = crate::snapshot::SnapshotId::parse(post)?;
+    let delta = repo.diff_snapshots(&pre, &post, turn_artifacts::MAX_TURN_ARTIFACTS)?;
+    let mut tracked = repo.tracked_paths(&pre, item_paths)?;
+    tracked.extend(repo.tracked_paths(&post, item_paths)?);
+    Ok((delta, tracked))
+}
+
+mod turn_artifacts;
+pub use turn_artifacts::{
+    FileChangeKind, TurnArtifactKind, TurnArtifactRef, TurnWorkspaceArtifacts, TurnWorkspaceReason,
+    TurnWorkspaceState,
+};
 
 #[cfg(test)]
 mod tests;

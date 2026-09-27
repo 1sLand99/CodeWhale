@@ -40,6 +40,7 @@
 //! `max_workspace_gb = 0` to disable the size gate). Scoped snapshot roots are
 //! not yet a first-class config; the practical opt-in today is the cap override.
 
+pub mod delta;
 pub mod paths;
 pub mod prune;
 pub mod repo;
@@ -54,6 +55,7 @@ pub use prune::{DEFAULT_MAX_AGE, prune_older_than};
 /// snapshots can never push out the restore points of the turns that took
 /// them (see [`SnapshotRepo::prune_keep_last_n`]).
 pub const DEFAULT_MAX_SNAPSHOTS: usize = 50;
+pub use delta::{DeltaChange, SnapshotDelta};
 #[allow(unused_imports)]
 pub use repo::{
     DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT, GATE_TOO_LARGE_MARKER, GATE_TOO_MANY_ENTRIES_MARKER,
