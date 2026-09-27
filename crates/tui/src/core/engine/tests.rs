@@ -18298,6 +18298,105 @@ fn over_budget_result_without_a_saved_copy_says_so_and_asks_for_one() {
 }
 
 #[test]
+fn oversized_tool_output_is_recoverable_before_serial_and_parallel_fanout() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::tools::spec::{ToolCapability, ToolSpec};
+
+    struct OutputTool {
+        parallel: bool,
+        content: String,
+    }
+    #[async_trait::async_trait]
+    impl ToolSpec for OutputTool {
+        fn name(&self) -> &str {
+            "fixture_output"
+        }
+        fn description(&self) -> &str {
+            "Return output below the spill threshold."
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![ToolCapability::ReadOnly]
+        }
+        fn supports_parallel(&self) -> bool {
+            self.parallel
+        }
+        async fn execute(&self, _: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::success(self.content.clone()))
+        }
+    }
+
+    with_artifact_home(|home| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let raw = format!("{}MIDDLE{}", "h".repeat(5_000), "t".repeat(5_000));
+                assert!(raw.len() < crate::tools::truncate::SPILLOVER_THRESHOLD_BYTES);
+                for (parallel, count) in [(true, 1), (true, 2), (false, 1)] {
+                    let calls = [
+                        ("call-one", "fixture_output", "{}"),
+                        ("call-two", "fixture_output", "{}"),
+                    ];
+                    let mock = Arc::new(MockLlmClient::new(vec![
+                        tool_batch_turn(&calls[..count]),
+                        canned::simple_text_turn("done"),
+                    ]));
+                    let (mut engine, handle) = Engine::new_with_model_client(
+                        deterministic_engine_config(home),
+                        &Config::default(),
+                        mock.clone(),
+                    );
+                    engine.active_route_limits = Some(codewhale_config::route::RouteLimits {
+                        context_tokens: Some(64_000),
+                        input_tokens: None,
+                        output_tokens: Some(4_096),
+                    });
+                    let mut registry = crate::tools::ToolRegistry::new(ToolContext::new(home));
+                    registry.register(Arc::new(OutputTool {
+                        parallel,
+                        content: raw.clone(),
+                    }));
+                    let tools = Some(registry.to_api_tools_with_cache(true));
+                    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+                    let mut turn = crate::core::turn::TurnContext::new(4);
+                    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+                    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                    let requests = mock.captured_requests();
+                    assert_eq!(requests.len(), 2);
+                    let mut events = handle.rx_event.write().await;
+                    let mut completed = 0;
+                    while let Ok(event) = events.try_recv() {
+                        let Event::ToolCallComplete { id, result, .. } = event else {
+                            continue;
+                        };
+                        let output = result.expect("tool succeeded");
+                        assert_eq!(output.content, raw, "UI keeps the complete output");
+                        let metadata = output
+                            .metadata
+                            .expect("output must be preserved before fanout");
+                        let path = metadata["artifact_path"].as_str().expect("artifact path");
+                        assert_eq!(fs::read_to_string(path).unwrap(), raw);
+                        let reference = metadata["artifact_id"].as_str().unwrap();
+                        let results = guardian_tool_results(&requests[1], &id);
+                        assert_eq!(results.len(), 1);
+                        let (text, _) = results[0];
+                        assert!(text.len() <= 7_680, "64K route inline budget");
+                        assert!(!text.contains("MIDDLE"));
+                        assert!(text.contains("retrieve_tool_result"));
+                        assert!(text.contains(reference), "model and UI share the artifact");
+                        completed += 1;
+                    }
+                    assert_eq!(completed, count);
+                }
+            });
+    });
+}
+
+#[test]
 fn over_budget_result_writes_the_full_output_and_names_its_ref() {
     with_artifact_home(|home| {
         let raw = format!("FIRST LINE\n{}LAST LINE", "shell line\n".repeat(4_000));

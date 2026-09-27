@@ -453,8 +453,8 @@ pub struct CacheRates {
     pub combined: Option<u8>,
 }
 
-fn hit_percent(hit: u64, miss: u64) -> Option<u8> {
-    let total = hit.saturating_add(miss);
+fn hit_percent(hit: u64, miss: u64, write: u64) -> Option<u8> {
+    let total = hit.saturating_add(miss).saturating_add(write);
     (total > 0).then(|| u8::try_from((hit.saturating_mul(100) + total / 2) / total).unwrap_or(100))
 }
 
@@ -462,17 +462,20 @@ fn hit_percent(hit: u64, miss: u64) -> Option<u8> {
 pub fn cache_rates(app: &crate::tui::app::App) -> CacheRates {
     let parent_hit = u64::from(app.session.displayed_total_cache_hit_tokens());
     let parent_miss = u64::from(app.session.displayed_total_cache_miss_tokens());
+    let parent_write = u64::from(app.session.displayed_total_cache_write_tokens());
+    let agent_write = app.session.subagent_cache_write_tokens.unwrap_or(0);
     let agents = app
         .session
         .subagent_cache_hit_tokens
         .zip(app.session.subagent_cache_miss_tokens);
     CacheRates {
-        parent: hit_percent(parent_hit, parent_miss),
-        agents: agents.and_then(|(hit, miss)| hit_percent(hit, miss)),
+        parent: hit_percent(parent_hit, parent_miss, parent_write),
+        agents: agents.and_then(|(hit, miss)| hit_percent(hit, miss, agent_write)),
         combined: agents.and_then(|(hit, miss)| {
             hit_percent(
                 parent_hit.saturating_add(hit),
                 parent_miss.saturating_add(miss),
+                parent_write.saturating_add(agent_write),
             )
         }),
     }
@@ -731,6 +734,51 @@ mod tests {
         metrics.clear_in_flight();
         metrics.record_tool_completed_at("b", t0 + Duration::from_secs(5));
         assert_eq!(metrics.tool_time, Duration::from_millis(1_500));
+    }
+
+    #[test]
+    fn cache_rates_count_writes_in_agent_and_combined_input() {
+        let mut app = crate::tui::app::App::new(
+            crate::test_support::test_tui_options(std::path::PathBuf::from(".")),
+            &crate::config::Config::default(),
+        );
+        assert_eq!(cache_rates(&app), CacheRates::default());
+        app.session.total_cache_hit_tokens = 800;
+        app.session.total_cache_miss_tokens = 200;
+        app.session.subagent_cache_hit_tokens = Some(600);
+        app.session.subagent_cache_miss_tokens = Some(0);
+        app.session.subagent_cache_write_tokens = Some(400);
+        assert_eq!(
+            cache_rates(&app),
+            CacheRates {
+                parent: Some(80),
+                agents: Some(60),
+                combined: Some(70),
+            }
+        );
+        // Writes are input in both scopes, including an in-flight parent call.
+        app.session.total_cache_write_tokens = 200;
+        app.session.pending_turn_cache_write_tokens = 400;
+        assert_eq!(
+            cache_rates(&app),
+            CacheRates {
+                parent: Some(50),
+                agents: Some(60),
+                combined: Some(54),
+            }
+        );
+        app.session.reset_token_breakdown();
+        app.session.subagent_cache_hit_tokens = Some(0);
+        app.session.subagent_cache_miss_tokens = Some(0);
+        app.session.subagent_cache_write_tokens = Some(400);
+        assert_eq!(
+            cache_rates(&app),
+            CacheRates {
+                parent: None,
+                agents: Some(0),
+                combined: Some(0),
+            }
+        );
     }
 
     #[test]

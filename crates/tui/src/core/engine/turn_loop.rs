@@ -101,6 +101,60 @@ pub(super) fn preview_request_error_user_message(
     format!("{error:#}")
 }
 
+/// Preserve text before either execution branch publishes it to the UI or history.
+/// Disk failures retain the existing honest "could not be saved" context footer.
+async fn preserve_tool_output_before_fanout(
+    result: Result<RichToolResult, ToolError>,
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<codewhale_config::route::RouteLimits>,
+    session_id: &str,
+    tool_id: &str,
+    tool_name: &str,
+) -> Result<RichToolResult, ToolError> {
+    let mut rich = result?;
+    let model = model.to_owned();
+    let session_id = session_id.to_owned();
+    let tool_id = tool_id.to_owned();
+    let tool_name = tool_name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        if let Some(path) = crate::tools::truncate::apply_spillover_with_artifact(
+            &mut rich.result,
+            &tool_id,
+            &tool_name,
+            &session_id,
+        ) {
+            emit_tool_audit(json!({
+                "event": "tool.spillover",
+                "tool_id": tool_id,
+                "tool_name": tool_name,
+                "path": path.display().to_string(),
+            }));
+        }
+        if super::context::tool_result_context_view(
+            provider,
+            &model,
+            route_limits,
+            &tool_name,
+            &rich.result,
+        )
+        .needs_full_output_artifact
+        {
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut rich.result,
+                &tool_id,
+                &tool_name,
+                &session_id,
+            );
+        }
+        rich
+    })
+    .await
+    .map_err(|error| {
+        ToolError::execution_failed(format!("Tool output preservation failed: {error}"))
+    })
+}
+
 fn approval_intent_summary(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -3978,6 +4032,9 @@ impl Engine {
                     let mcp_pool = mcp_pool.clone();
                     let tx_event = self.tx_event.clone();
                     let session_id = self.session.id.clone();
+                    let provider = self.api_provider;
+                    let model = self.session.model.clone();
+                    let route_limits = self.active_route_limits;
                     let started_at = Instant::now();
                     let shell_permits = shell_permits.clone();
                     let workspace = self.session.workspace.clone();
@@ -3992,7 +4049,7 @@ impl Engine {
                             } else {
                                 None
                             };
-                        let mut result = Engine::execute_tool_with_lock(
+                        let result = Engine::execute_tool_with_lock(
                             lock,
                             plan.supports_parallel || plan.detached_start,
                             plan.interactive,
@@ -4020,26 +4077,16 @@ impl Engine {
                                 )
                             });
 
-                        // #500: spill outsized output before fanout (mirror
-                        // of the sequential path below). Emit a
-                        // `tool.spillover` audit event so operators can
-                        // correlate large-output episodes with disk usage.
-                        if let Ok(tool_result) = result.as_mut()
-                            && let Some(path) =
-                                crate::tools::truncate::apply_spillover_with_artifact(
-                                    &mut tool_result.result,
-                                    &plan.id,
-                                    &plan.name,
-                                    &session_id,
-                                )
-                        {
-                            emit_tool_audit(json!({
-                                "event": "tool.spillover",
-                                "tool_id": plan.id.clone(),
-                                "tool_name": plan.name.clone(),
-                                "path": path.display().to_string(),
-                            }));
-                        }
+                        let result = preserve_tool_output_before_fanout(
+                            result,
+                            provider,
+                            &model,
+                            route_limits,
+                            &session_id,
+                            &plan.id,
+                            &plan.name,
+                        )
+                        .await;
 
                         let result = match result {
                             Ok(rich) => Ok(super::tool_media::project(
@@ -4583,52 +4630,16 @@ impl Engine {
                             )
                         });
 
-                    // #500: spill outsized tool outputs to disk before the
-                    // result fans out to the model context and the UI cell.
-                    // Both consumers see the same artifact reference block +
-                    // metadata pointing at the session-owned full file.
-                    // Emit a discrete `tool.spillover` audit event so
-                    // operators can correlate large-output episodes with
-                    // disk-usage growth in `~/.deepseek/tool_outputs/`.
-                    if let Ok(tool_result) = result.as_mut()
-                        && let Some(path) = crate::tools::truncate::apply_spillover_with_artifact(
-                            &mut tool_result.result,
-                            &tool_id,
-                            &tool_name,
-                            &self.session.id,
-                        )
-                    {
-                        emit_tool_audit(json!({
-                            "event": "tool.spillover",
-                            "tool_id": tool_id.clone(),
-                            "tool_name": tool_name.clone(),
-                            "path": path.display().to_string(),
-                        }));
-                    }
-
-                    // #6508: the model sees at most the route's inline budget
-                    // of any result. When its view would leave bytes out and
-                    // spillover saved nothing, save the full output now,
-                    // before the result fans out, so the view names a ref
-                    // `retrieve_tool_result` reads the rest back with and the
-                    // UI registers the artifact.
-                    if let Ok(tool_result) = result.as_mut()
-                        && super::context::tool_result_context_view(
-                            self.api_provider,
-                            &self.session.model,
-                            self.active_route_limits,
-                            &tool_name,
-                            &tool_result.result,
-                        )
-                        .needs_full_output_artifact
-                    {
-                        crate::tools::truncate::preserve_full_output_for_model_context(
-                            &mut tool_result.result,
-                            &tool_id,
-                            &tool_name,
-                            &self.session.id,
-                        );
-                    }
+                    let result = preserve_tool_output_before_fanout(
+                        result,
+                        self.api_provider,
+                        &self.session.model,
+                        self.active_route_limits,
+                        &self.session.id,
+                        &tool_id,
+                        &tool_name,
+                    )
+                    .await;
 
                     let result = match result {
                         Ok(rich) => Ok(super::tool_media::project(

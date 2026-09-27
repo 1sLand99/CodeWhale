@@ -86,7 +86,8 @@ quieter, and Fleet runs can be checked before they spend anything.
 - Tool output is no longer cut off where you can't get it back. Search
   answers, test runs, git, verifier and web results reach the model whole up
   to one budget sized to the model's context window, and anything beyond it
-  can be read back with `retrieve_tool_result`. Restored raw results use the
+  can be read back with `retrieve_tool_result`, including read-only tools
+  executed alone or in parallel. Restored raw results use the
   active route's same inline budget; existing recovery receipts stay intact.
   Native search now asks for answers up to 8,192 tokens (was 2,048–4,096)
   and waits long enough for
@@ -278,7 +279,8 @@ quieter, and Fleet runs can be checked before they spend anything.
   state, and what it is doing or what it found, rebuilt when the page
   reconnects. Sub-agent prompt caching now counts toward the session, including
   cache-write-only reports. PRICE and `/cache` show the parent, agents and
-  combined hit rates, each labelled,
+  combined hit rates, each labelled and weighted by all input tokens,
+  including cache writes,
   and the footer `cache N%` still means this conversation's own requests
   ([#6565](https://github.com/Hmbown/Codewhale/issues/6565)).
 - The dock's GIT, FILES and NOTES views are real. GIT shows the branch and
@@ -288,7 +290,8 @@ quieter, and Fleet runs can be checked before they spend anything.
   only when that is true, counts every unmerged path as a conflict, and only
   says there are more changed paths when the list is capped. FILES lists the
   files this session edited, including writes without diff receipts, and the
-  files it read. Edits with receipts show their size and open their diff.
+  files it read, with every unique path retained beyond the activity summary's
+  twelve-path preview. Edits with receipts show their size and open their diff.
   NOTES lists your `/note` notes. The git
   badge, the Git view and the model's git line now share one
   `git status --porcelain=v2` call, so there are fewer git processes than

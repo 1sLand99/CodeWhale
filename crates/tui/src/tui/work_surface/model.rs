@@ -1091,6 +1091,7 @@ struct RankedWorkRow {
     row: WorkRow,
 }
 
+/// Complete unique targets; only the aggregate summary presentation is capped.
 #[derive(Default, Clone)]
 pub(super) struct SettledFileActivity {
     pub(super) summary: FileActivitySummary,
@@ -2128,7 +2129,6 @@ pub(super) fn settled_file_activity(app: &App) -> SettledFileActivity {
             FileActivityKind::Write => &mut activity.write,
         };
         if let Some(target) = target
-            && details.len() < 12
             && !details.contains(&target)
         {
             details.push(target);
@@ -2172,7 +2172,10 @@ fn aggregate_activity_row(activity: &SettledFileActivity) -> Option<RankedWorkRo
         if details.is_empty() {
             continue;
         }
-        body_parts.push(format!("{kind}:\n{}", details.join("\n")));
+        body_parts.push(format!(
+            "{kind}:\n{}",
+            details[..details.len().min(12)].join("\n")
+        ));
     }
     if body_parts.is_empty() {
         body_parts.push("No safe target detail retained".to_string());
@@ -3927,6 +3930,47 @@ mod tests {
         );
         assert!(rows.iter().any(|row| row.label == "operation blocked"));
         assert!(rows.iter().any(|row| row.label == "operation ready"));
+    }
+
+    #[test]
+    fn files_keep_all_unique_paths_while_activity_summary_is_capped() {
+        use super::super::views::{files_rows, files_touched_count};
+        let mut app = test_app();
+        for action in ["read", "write"] {
+            // Repeat the thirteenth path under a new call ID to check uniqueness.
+            for index in 0..14 {
+                let id = format!("{action}-{index}");
+                let path = format!("{action}-{:02}.rs", index.min(12));
+                let input = serde_json::json!({"action": action, "path": path, "content": "new"});
+                handle_tool_call_started(&mut app, &id, "File", &input);
+                handle_tool_call_complete(&mut app, &id, "File", &Ok(ToolResult::success("ok")));
+                app.flush_active_cell();
+            }
+        }
+        app.work_surface.file_activity = settled_file_activity(&app);
+        assert!(app.work_surface.file_activity.mutations.is_empty());
+        assert_eq!(files_touched_count(&mut app), 26);
+        let rows = files_rows(&mut app);
+        assert!(rows.iter().any(|row| row.label == "Read 13"));
+        assert!(rows.iter().any(|row| row.label == "Edited 13"));
+        for action in ["read", "write"] {
+            for index in 0..13 {
+                let path = format!("{action}-{index:02}.rs");
+                assert_eq!(
+                    rows.iter().filter(|row| row.label == path).count(),
+                    1,
+                    "{path}"
+                );
+            }
+        }
+        let summary = aggregate_activity_row(&app.work_surface.file_activity).unwrap();
+        let Some(SidebarRowAction::InspectWork { body, .. }) = summary.row.primary_action else {
+            panic!("activity summary opens its preview");
+        };
+        for action in ["read", "write"] {
+            assert!(body.contains(&format!("{action}-11.rs")));
+            assert!(!body.contains(&format!("{action}-12.rs")));
+        }
     }
 
     #[test]
