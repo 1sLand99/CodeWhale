@@ -160,6 +160,28 @@ quieter, and Fleet runs can be checked before they spend anything.
   resend without the image and a message saying so
   ([#6396](https://github.com/Hmbown/Codewhale/issues/6396)).
 
+### Security
+
+- A project's `.codewhale/config.toml` can no longer set `notes_path`; it is
+  ignored with the other user-only keys. The `note` tool and `/note` refuse a
+  notes file that is a symlink or whose directory resolves outside the
+  workspace, and a note is flushed to disk before the tool reports success.
+- Diffs and shows that read repository content (`codewhale review`, the
+  `git_diff`/`git_show` tools, verification, delivery and the runtime API diff
+  routes) share one flag set: no external diff, no textconv, and submodules
+  compared by commit only, so a submodule's configured filters and diff
+  drivers never run. `git_diff`, `git_show` and commit planning also read
+  through the hardened review command.
+- `git_fetch` accepts a `src:dst` refspec only when the destination is under
+  `refs/remotes/`; local branches and tags are never written.
+- Opening a URL on Windows goes through the URL protocol handler instead of
+  `cmd /C start`, so characters in the URL are not interpreted by the shell.
+- Skill downloads and the skills registry index are read through a streaming
+  size cap shared with the MCP HTTP transport, instead of buffering the whole
+  body before checking its size.
+- Durable runtime thread, turn and item ids carry a full UUID instead of 32
+  random bits, so two records can no longer collide and overwrite each other.
+
 ### Removed
 
 - Flags, settings and tool parameters that did nothing are gone

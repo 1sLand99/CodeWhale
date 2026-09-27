@@ -681,7 +681,8 @@ async fn run_git_diff(workspace: &Path, args: &[String]) -> Result<Option<String
         // git not installed: degrade gracefully rather than failing the tool.
         return Ok(None);
     };
-    cmd.args(["diff", "--no-ext-diff", "--no-textconv"]);
+    cmd.arg("diff")
+        .args(crate::dependencies::Git::REVIEW_DIFF_ARGS);
     for arg in args {
         cmd.arg(arg);
     }

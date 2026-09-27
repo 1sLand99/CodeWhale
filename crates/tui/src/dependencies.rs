@@ -539,8 +539,20 @@ pub(crate) fn apply_git_noninteractive_env(cmd: &mut Command) {
 }
 
 impl Git {
+    /// Flags every `diff`, `show` or patch `log` that collects repository
+    /// content passes, so the output never runs a repository-configured
+    /// command. `--no-ext-diff`/`--no-textconv` skip diff drivers; a dirty
+    /// check or `diff.submodule=diff` spawns a child git inside each submodule
+    /// that inherits neither flag, so submodules compare by commit only.
+    pub(crate) const REVIEW_DIFF_ARGS: [&'static str; 4] = [
+        "--no-ext-diff",
+        "--no-textconv",
+        "--submodule=short",
+        "--ignore-submodules=dirty",
+    ];
+
     /// Construct a read-only review command with content conversion disabled.
-    /// Review callers also pass `--no-ext-diff` and `--no-textconv` for diffs.
+    /// Review callers also pass [`Self::REVIEW_DIFF_ARGS`] for diffs.
     /// Configured filters otherwise execute even when those flags are present.
     pub(crate) fn review_command(workspace: &Path) -> anyhow::Result<Command> {
         use anyhow::{Context, bail};

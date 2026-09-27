@@ -144,7 +144,7 @@ impl ToolSpec for GitTool {
                 "refspecs": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional refspecs to fetch, e.g. pull/123/head (action=fetch). Empty fetches the remote's defaults."
+                    "description": "Optional refspecs to fetch, e.g. pull/123/head (action=fetch); a `src:dst` destination must be under refs/remotes/. Empty fetches the remote's defaults."
                 },
                 "ours": {
                     "type": "string",

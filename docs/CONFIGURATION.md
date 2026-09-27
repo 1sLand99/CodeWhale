@@ -318,7 +318,6 @@ Supported keys in the project overlay (top-level fields only):
 | `reasoning_effort` | force `"high"` / `"max"` for a complex repo |
 | `approval_policy` | only values that tighten the user's current permission posture |
 | `sandbox_mode` | only values that tighten the user's current sandbox posture |
-| `notes_path` | keep notes in-repo |
 | `max_subagents` | clamp sub-agent concurrency for a constrained repo (clamped to 1..=128) |
 | `allow_shell` | `false` can disable shell access; `true` is ignored |
 
@@ -327,7 +326,7 @@ maintainer is most likely to want to standardize across contributors.
 Credential, endpoint, provider-selection, MCP config, hooks, skills,
 retry, hotbar bindings, and `instructions = [...]` settings stay user-global.
 If a repo-local config declares `api_key`, `base_url`, `providers`, `provider`,
-`mcp_config_path`, `hotbar`, `allow_shell = true`, or `instructions`,
+`mcp_config_path`, `notes_path`, `hotbar`, `allow_shell = true`, or `instructions`,
 Codewhale ignores that key and keeps the user's global setting.
 
 The consolidated `codewhale` runtime uses one config file for DeepSeek auth

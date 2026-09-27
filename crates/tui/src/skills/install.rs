@@ -76,6 +76,8 @@ pub const DEFAULT_REGISTRY_URL: &str =
 /// gzip bomb can't blow up RAM.
 pub const DEFAULT_MAX_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 const SYNC_REGISTRY_CONCURRENCY: usize = 8;
+/// Upper bound on a registry index document.
+const MAX_REGISTRY_BYTES: usize = 4 * 1024 * 1024;
 
 /// File written under each installed skill so [`update`] / [`uninstall`] can
 /// recover the original [`InstallSource`] without re-parsing user input.
@@ -554,17 +556,17 @@ pub async fn fetch_registry(
         Decision::Deny => return Ok(RegistryFetchResult::Denied(host)),
         Decision::Prompt => return Ok(RegistryFetchResult::NeedsApproval(host)),
     }
-    let body = reqwest_client()
+    let response = reqwest_client()
         .get(registry_url)
         .send()
         .await
         .with_context(|| format!("failed to fetch registry {registry_url}"))?
         .error_for_status()
-        .with_context(|| format!("registry {registry_url} returned an error status"))?
-        .text()
+        .with_context(|| format!("registry {registry_url} returned an error status"))?;
+    let body = crate::utils::read_response_body_capped(response, MAX_REGISTRY_BYTES)
         .await
         .with_context(|| format!("failed to read registry body from {registry_url}"))?;
-    let parsed: RegistryDocument = serde_json::from_str(&body)
+    let parsed: RegistryDocument = serde_json::from_slice(&body)
         .with_context(|| format!("failed to parse registry json from {registry_url}"))?;
     Ok(RegistryFetchResult::Loaded(parsed))
 }
@@ -764,24 +766,18 @@ async fn sync_one_skill(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let compressed_cap = max_size.saturating_mul(4);
-        let bytes = match resp.bytes().await {
+        let compressed_cap = compressed_download_cap(max_size);
+        let bytes = match crate::utils::read_response_body_capped(resp, compressed_cap).await {
             Ok(b) => b,
             Err(err) => {
                 return SkillSyncOutcome::Failed {
                     name: name.to_string(),
-                    reason: format!("failed to read body from {url}: {err:#}"),
+                    reason: format!(
+                        "failed to read body from {url} (compressed size cap {compressed_cap} bytes): {err:#}"
+                    ),
                 };
             }
         };
-        if bytes.len() as u64 > compressed_cap {
-            return SkillSyncOutcome::Failed {
-                name: name.to_string(),
-                reason: format!(
-                    "download from {url} exceeds compressed size cap ({compressed_cap} bytes)"
-                ),
-            };
-        }
 
         // Compute SHA-256 of the downloaded bytes.
         let sha256 = sha256_hex(&bytes);
@@ -1158,17 +1154,19 @@ async fn download_with_cap(url: &str, max_size: u64) -> Result<DownloadAttempt> 
         }
         bail!("download {url} returned {status}");
     }
-    // Soft cap on the *compressed* download — well above max_size to allow
-    // for highly compressible payloads but still bounded.
-    let compressed_cap = max_size.saturating_mul(4);
-    let bytes = resp
-        .bytes()
+    let compressed_cap = compressed_download_cap(max_size);
+    let bytes = crate::utils::read_response_body_capped(resp, compressed_cap)
         .await
-        .with_context(|| format!("failed to read body of {url}"))?;
-    if (bytes.len() as u64) > compressed_cap {
-        bail!("download {url} exceeds compressed size cap of {compressed_cap} bytes");
-    }
-    Ok(DownloadAttempt::Bytes(bytes.to_vec()))
+        .with_context(|| {
+            format!("failed to read body of {url} (compressed size cap {compressed_cap} bytes)")
+        })?;
+    Ok(DownloadAttempt::Bytes(bytes))
+}
+
+/// Soft cap on the *compressed* download — well above `max_size` to allow for
+/// highly compressible payloads but still bounded.
+fn compressed_download_cap(max_size: u64) -> usize {
+    usize::try_from(max_size.saturating_mul(4)).unwrap_or(usize::MAX)
 }
 
 struct StagedSkill {
@@ -1667,6 +1665,70 @@ fn hex_bytes(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serve one response per connection: an endless chunked body, or a
+    /// small body that declares an oversized `Content-Length`.
+    async fn oversized_body_server() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = socket.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    if request.starts_with(b"GET /declared ") {
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\nxx")
+                            .await;
+                        return;
+                    }
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                        .await;
+                    let chunk = [b'x'; 4096];
+                    // Never terminates: only a streaming cap ends this read.
+                    loop {
+                        if socket.write_all(b"1000\r\n").await.is_err()
+                            || socket.write_all(&chunk).await.is_err()
+                            || socket.write_all(b"\r\n").await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn download_with_cap_stops_reading_at_the_cap() {
+        let addr = oversized_body_server().await;
+        for path in ["endless", "declared"] {
+            let url = format!("http://{addr}/{path}");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                download_with_cap(&url, 16 * 1024),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{path}: the size cap must end the read"));
+            let err = match result {
+                Ok(_) => panic!("{path}: an oversized body must be refused"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("exceeds"), "{path}: {err}");
+        }
+    }
 
     #[test]
     fn parse_github_source() {

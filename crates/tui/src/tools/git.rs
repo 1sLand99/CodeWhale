@@ -209,9 +209,9 @@ impl ToolSpec for GitDiffTool {
             "core.quotepath=false".to_string(),
             "diff".to_string(),
             "--no-color".to_string(),
-            "--no-ext-diff".to_string(),
-            format!("--unified={unified}"),
         ];
+        args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS.map(String::from));
+        args.push(format!("--unified={unified}"));
         if cached {
             args.push("--cached".to_string());
         }
@@ -221,7 +221,7 @@ impl ToolSpec for GitDiffTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command(&git_ctx.working_dir, &args)?;
+        let output = run_git_review_command(&git_ctx.working_dir, &args)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -318,15 +318,16 @@ impl ToolSpec for GitCommitPlanTool {
             "diff".to_string(),
             "HEAD".to_string(),
             "--no-color".to_string(),
-            "--no-ext-diff".to_string(),
             "-U3".to_string(),
         ];
+        diff_args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS.map(String::from));
         if let Some(pathspec) = &git_ctx.pathspec {
             diff_args.push("--".to_string());
             diff_args.push(pathspec.display().to_string());
         }
         let command = format_command(working_dir, &diff_args);
-        let mut files = match git_stdout(working_dir, &diff_args)? {
+        let diff_output = run_git_review_command(working_dir, &diff_args)?;
+        let mut files = match stdout_or_failure(working_dir, &diff_args, diff_output) {
             Ok(stdout) => parse_diff(&String::from_utf8_lossy(&stdout)),
             Err(failure) => return Ok(failure),
         };
@@ -374,13 +375,16 @@ impl ToolSpec for GitCommitPlanTool {
             );
         }
 
-        let staged_args = vec![
+        let mut staged_args = vec![
             "diff".to_string(),
             "--cached".to_string(),
             "--quiet".to_string(),
         ];
-        let index_has_staged_changes =
-            run_git_command(working_dir, &staged_args)?.status.code() == Some(1);
+        staged_args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS.map(String::from));
+        let index_has_staged_changes = run_git_review_command(working_dir, &staged_args)?
+            .status
+            .code()
+            == Some(1);
 
         let commits = match plan_commits(files) {
             Ok(commits) => commits,
@@ -510,6 +514,24 @@ fn run_git_command(working_dir: &Path, args: &[String]) -> Result<std::process::
             ToolError::execution_failed(format!("Failed to run git: {e}"))
         }
     })
+}
+
+/// Run a content-reading `diff` under [`crate::dependencies::Git::review_command`],
+/// so repository-configured filters, fsmonitor and hooks do not execute.
+pub(super) fn run_git_review_command(
+    working_dir: &Path,
+    args: &[String],
+) -> Result<std::process::Output, ToolError> {
+    if crate::dependencies::Git::command().is_none() {
+        return Err(ToolError::not_available(
+            "git is not installed or not in PATH",
+        ));
+    }
+    let mut cmd = crate::dependencies::Git::review_command(working_dir)
+        .map_err(|e| ToolError::execution_failed(format!("Failed to prepare git: {e:#}")))?;
+    cmd.args(args);
+    cmd.output()
+        .map_err(|e| ToolError::execution_failed(format!("Failed to run git: {e}")))
 }
 
 fn format_command(working_dir: &Path, args: &[String]) -> String {
@@ -643,15 +665,23 @@ fn git_stdout(
     args: &[String],
 ) -> Result<Result<Vec<u8>, ToolResult>, ToolError> {
     let output = run_git_command(working_dir, args)?;
+    Ok(stdout_or_failure(working_dir, args, output))
+}
+
+fn stdout_or_failure(
+    working_dir: &Path,
+    args: &[String],
+    output: std::process::Output,
+) -> Result<Vec<u8>, ToolResult> {
     if output.status.success() {
-        return Ok(Ok(output.stdout));
+        return Ok(output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(Err(ToolResult::error(format!(
+    Err(ToolResult::error(format!(
         "{} failed: {}",
         format_command(working_dir, args),
         stderr.trim()
-    ))))
+    )))
 }
 
 /// Parse `git diff` output into per-file hunks. Every `diff --git` section
@@ -1720,6 +1750,124 @@ Binary files a/image.png and b/image.png differ
             result.content.contains("No changes to plan"),
             "{}",
             result.content
+        );
+    }
+
+    /// Diff and show reads must not run commands a repository configures:
+    /// a superproject textconv driver, or — through a child git spawned in a
+    /// submodule for its dirty check or `diff.submodule=diff` — a submodule's
+    /// clean filter or external diff driver.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diff_and_show_reads_run_no_repository_configured_commands() {
+        use std::os::unix::fs::PermissionsExt;
+        if !git_available() {
+            return;
+        }
+        let tmp = tempdir().expect("tempdir");
+        let marker = tmp.path().join("marker");
+        let script = |name: &str, body: &str| {
+            let path = tmp.path().join(name);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\necho {name} >> '{}'\n{body}", marker.display()),
+            )
+            .expect("write script");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+            path.display().to_string()
+        };
+        let clean = script("clean.sh", "cat\n");
+        let external = script("external.sh", "");
+        let textconv = script("textconv.sh", "cat \"$1\"\n");
+        let git = |dir: &Path, args: &[&str]| {
+            let status = crate::dependencies::Git::status(args, dir).expect("git should spawn");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        let identity = ["-c", "user.email=test@example.com", "-c", "user.name=Test"];
+
+        let upstream = tmp.path().join("upstream");
+        fs::create_dir_all(&upstream).expect("mkdir upstream");
+        init_git_repo(&upstream);
+        fs::write(upstream.join("f.txt"), "a\n").expect("write");
+        commit_all(&upstream, "init");
+
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).expect("mkdir repo");
+        init_git_repo(&repo);
+        fs::write(repo.join(".gitattributes"), "a.md diff=conv\n").expect("attrs");
+        fs::write(repo.join("a.md"), "one\n").expect("write");
+        let upstream_arg = upstream.display().to_string();
+        git(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &upstream_arg,
+                "sub",
+            ],
+        );
+        commit_all(&repo, "init");
+
+        let sub = repo.join("sub");
+        fs::write(sub.join(".gitattributes"), "* filter=evil\n").expect("sub attrs");
+        git(&sub, &[&identity[..], &["add", "."]].concat());
+        git(
+            &sub,
+            &[&identity[..], &["commit", "-q", "-m", "attrs"]].concat(),
+        );
+        git(&sub, &["config", "filter.evil.clean", &clean]);
+        git(&sub, &["config", "diff.external", &external]);
+        let edited = sub.join("f.txt");
+        fs::write(&edited, "c\n").expect("same-size edit");
+        fs::File::options()
+            .write(true)
+            .open(&edited)
+            .and_then(|file| file.set_modified(std::time::UNIX_EPOCH))
+            .expect("age the edit so git re-reads it");
+        git(&repo, &["config", "diff.submodule", "diff"]);
+        git(&repo, &["config", "submodule.sub.ignore", "none"]);
+        git(&repo, &["config", "diff.conv.textconv", &textconv]);
+        fs::write(repo.join("a.md"), "two\n").expect("modify");
+
+        let no_marker = |step: &str| {
+            assert!(
+                !marker.exists(),
+                "{step} ran a repository-configured command: {}",
+                fs::read_to_string(&marker).unwrap_or_default()
+            );
+        };
+        let ctx = ToolContext::new(&repo);
+        let diff = GitDiffTool
+            .execute(json!({}), &ctx)
+            .await
+            .expect("git_diff");
+        no_marker("git_diff");
+        assert!(diff.success, "{}", diff.content);
+        assert!(
+            diff.content.contains("Subproject commit"),
+            "{}",
+            diff.content
+        );
+        assert!(diff.content.contains("+two"), "{}", diff.content);
+
+        git(&repo, &["add", "sub"]);
+        git(
+            &repo,
+            &[&identity[..], &["commit", "-q", "-m", "bump", "--", "sub"]].concat(),
+        );
+        let show = super::super::git_history::GitShowTool
+            .execute(json!({"rev": "HEAD"}), &ctx)
+            .await
+            .expect("git_show");
+        no_marker("git_show");
+        assert!(show.success, "{}", show.content);
+        assert!(
+            show.content.contains("Subproject commit"),
+            "{}",
+            show.content
         );
     }
 }
