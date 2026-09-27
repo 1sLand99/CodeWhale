@@ -160,6 +160,19 @@ quieter, and Fleet runs can be checked before they spend anything.
   resend without the image and a message saying so
   ([#6396](https://github.com/Hmbown/Codewhale/issues/6396)).
 
+### Security
+
+- Model-run code no longer inherits provider credentials or other secrets
+  from Codewhale's environment. Python `code_execution` (and every other
+  Python runner), `gate_run` task gates, custom and completion verifier gates,
+  persistent `terminal` sessions, and `run_tests` now start from the same
+  scrubbed child environment as `exec_shell`; variables a gate declares are
+  still passed through. `gate_run` also runs `/bin/sh -c` instead of a login
+  shell, so profile files cannot re-export what was removed.
+- A `workflow` start with `verify: true` now needs approval even for a
+  read-only plan, because the completion gates run workspace build and test
+  scripts.
+
 ### Removed
 
 - Flags, settings and tool parameters that did nothing are gone

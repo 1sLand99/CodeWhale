@@ -33,7 +33,7 @@ const MAX_GATE_TIMEOUT_MS: u64 = 600_000;
 fn build_gate_command_parts(command: &str) -> (String, Vec<String>) {
     (
         "/bin/sh".to_string(),
-        vec!["-lc".to_string(), command.to_string()],
+        vec!["-c".to_string(), command.to_string()],
     )
 }
 
@@ -44,6 +44,9 @@ fn build_gate_command(command: &str, cwd: &Path) -> Command {
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Gate commands run workspace code; start them from the sanitized child
+    // environment, like `exec_shell`, so parent credentials are not inherited.
+    crate::child_env::apply_to_tokio_command(&mut cmd, std::iter::empty::<(&str, &str)>());
     cmd
 }
 
@@ -1626,9 +1629,32 @@ mod tests {
     }
 
     #[test]
-    fn gate_command_uses_login_shell_invocation() {
+    fn gate_command_uses_non_login_shell_invocation() {
+        // A login shell would source profile files that can re-export
+        // credentials the sanitized child environment just removed.
         let (program, args) = build_gate_command_parts("echo hello");
         assert_eq!(program, "/bin/sh");
-        assert_eq!(args, vec!["-lc".to_string(), "echo hello".to_string()]);
+        assert_eq!(args, vec!["-c".to_string(), "echo hello".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gate_command_does_not_inherit_parent_secret_env() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _env_lock = lock_test_env();
+        let _secret = EnvVarGuard::set("CODEWHALE_TEST_GATE_SECRET", "gate-secret-value");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output = build_gate_command(
+            "printf 'secret=%s\\n' \"${CODEWHALE_TEST_GATE_SECRET-unset}\"; printf 'path-ok\\n'",
+            tmp.path(),
+        )
+        .output()
+        .await
+        .expect("gate command runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("secret=unset"), "{stdout}");
+        assert!(!stdout.contains("gate-secret-value"), "{stdout}");
+        assert!(stdout.contains("path-ok"), "{stdout}");
     }
 }

@@ -1217,9 +1217,14 @@ async fn run_gate(gate: VerifierGate) -> GateResult {
     // gate started (headless Chrome forks several), not just the leader.
     #[cfg(unix)]
     cmd.process_group(0);
-    for (key, value) in &gate.env {
-        cmd.env(key, value);
-    }
+    // Gates run workspace code: start from the sanitized child environment
+    // and layer only the gate's own declared variables on top.
+    crate::child_env::apply_to_tokio_command(
+        &mut cmd,
+        gate.env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -2014,5 +2019,30 @@ mod tests {
         }
         let jobs = ctx.shell_manager.lock().expect("shell manager").list_jobs();
         assert!(jobs.is_empty(), "nothing may start: {jobs:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_gate_does_not_inherit_parent_secret_env_but_keeps_gate_env() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _env_lock = lock_test_env();
+        let _secret = EnvVarGuard::set("CODEWHALE_TEST_VERIFIER_SECRET", "verifier-secret-value");
+        let tmp = tempdir().expect("tempdir");
+        let gate = VerifierGate {
+            name: "env-probe".to_string(),
+            ecosystem: "custom".to_string(),
+            cwd: tmp.path().to_path_buf(),
+            program: Some("/bin/sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                "printf '%s|%s' \"${CODEWHALE_TEST_VERIFIER_SECRET-unset}\" \"${GATE_DECLARED-missing}\""
+                    .to_string(),
+            ],
+            env: vec![("GATE_DECLARED".to_string(), "declared".to_string())],
+            skipped_reason: None,
+            timeout: Duration::from_secs(30),
+        };
+        let result = run_gate(gate).await;
+        assert_eq!(result.stdout.trim(), "unset|declared", "{result:?}");
     }
 }

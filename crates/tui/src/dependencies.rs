@@ -783,6 +783,17 @@ impl ExternalTool for Python {
         PYTHON_CANDIDATES
     }
 
+    /// Every async Python caller runs model-authored code (`code_execution`,
+    /// the RLM REPL), so the child starts from the sanitized environment
+    /// instead of inheriting provider credentials and other parent secrets.
+    /// Callers that need extra variables re-apply them through
+    /// [`crate::child_env::apply_to_tokio_command`] with explicit overrides.
+    fn tokio_command() -> Option<tokio::process::Command> {
+        let mut cmd = tokio::process::Command::from(Self::command()?);
+        crate::child_env::apply_to_tokio_command(&mut cmd, std::iter::empty::<(&str, &str)>());
+        Some(cmd)
+    }
+
     fn resolve() -> Option<String> {
         resolve_python_interpreter()
     }
