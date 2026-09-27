@@ -301,6 +301,39 @@ pub fn classify_command(tokens: &[&str]) -> String {
     positional[0].clone()
 }
 
+/// True when `tokens` begin with the words of `canonical` literally.
+///
+/// Classification drops flags, so `git -c core.fsmonitor=x status` and
+/// `git --exec-path=/x status` both classify as `git status` even though
+/// options placed before the subcommand change what runs. An allow rule
+/// names the command as written: it covers options *after* the words it
+/// names (`git status -s`), never options wedged between them.
+///
+/// The one flag that may sit inside a canonical prefix is the `-m` of
+/// `python -m <module>`, which names the module runner rather than tuning it;
+/// a canonical form that omits it (`python http.server`) still matches.
+pub fn canonical_prefix_is_leading(tokens: &[&str], canonical: &str) -> bool {
+    let words: Vec<&str> = canonical.split_whitespace().collect();
+    let python_module = tokens.get(1) == Some(&"-m")
+        && matches!(
+            tokens[0].to_ascii_lowercase().as_str(),
+            "python" | "python3"
+        )
+        && words.get(1) != Some(&"-m");
+    let tokens: Vec<&str> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !(python_module && *index == 1))
+        .map(|(_, token)| *token)
+        .collect();
+    !words.is_empty()
+        && words.len() <= tokens.len()
+        && words
+            .iter()
+            .zip(&tokens)
+            .all(|(word, token)| token.eq_ignore_ascii_case(word))
+}
+
 /// Return `true` when an allow-rule `pattern` (a command-prefix string such
 /// as `"git status"`) matches the concrete `command` string using the
 /// arity-aware prefix classification from [`classify_command`].
@@ -343,7 +376,7 @@ pub fn prefix_allow_matches(pattern: &str, command: &str) -> bool {
 
     // Primary path: arity-aware classification.
     let canonical = classify_command(&tokens);
-    if canonical == pattern_norm {
+    if canonical == pattern_norm && canonical_prefix_is_leading(&tokens, &canonical) {
         return true;
     }
 
@@ -502,6 +535,11 @@ pub fn is_parallel_readonly_command(command: &str) -> bool {
                 | ']'
                 | '{'
                 | '}'
+                // Grouping and, depending on the user's shell, glob
+                // qualifiers (`zsh`: `.(e:'cmd':)`) or command substitution
+                // (`fish`: `(cmd)`): never a literal read.
+                | '('
+                | ')'
         )
     }) {
         return false;
@@ -582,8 +620,9 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 /// - the redirect words `2>/dev/null`, `>/dev/null` and `2>&1`, which only
 ///   discard or merge output;
 /// - quoted shell metacharacters, which are data (`rg 'a && b; c' src`);
-/// - literal `*` arguments (for tools such as `find -name '*.rs'`); shell
-///   expansion is never allowed to introduce operands after validation;
+/// - `*` arguments that are quoted (`find -name '*.rs'`) or follow a literal
+///   prefix (`src/*.rs`); a word that starts with an unquoted `*` could expand
+///   to an option after validation, so it rejects;
 /// - `git -C <dir> <subcommand>` and `git --no-pager <subcommand>`, whose
 ///   remainder re-enters the existing per-subcommand option tables;
 /// - `find` without any mutating primary (`-delete`, `-exec`, `-execdir`,
@@ -827,6 +866,20 @@ fn lex_readonly_command(command: &str) -> Result<Vec<ReadonlySegment>, ReadonlyR
             }
             '#' if current[word_start..].is_empty() => {
                 return Err(operator("an unquoted `#` comment"));
+            }
+            // Its matches can begin with `-`, so a file named `--pre=./x.sh`
+            // would turn `rg foo *` into an option after the option allowlist
+            // checked the words (#6675). A glob behind a literal prefix
+            // (`src/*.rs`, `./*`) only matches paths and stays admitted.
+            // Empty quotes (`''*`) add no literal prefix, so they count as
+            // the start of the word too.
+            '*' if current[word_start..]
+                .chars()
+                .all(|quote| matches!(quote, '\'' | '"')) =>
+            {
+                return Err(operator(
+                    "an unquoted `*` at the start of a word (quote it or give it a path prefix such as ./*)",
+                ));
             }
             ch if ch.is_whitespace() => {
                 current.push(ch);
@@ -2557,18 +2610,36 @@ mod tests {
             "git log --oneline | head -20",
             "cat Cargo.toml | wc -l",
             "rg enum crates/ | sort | uniq -c | head",
-            "find . -name *.rs -maxdepth 3",
-            "find crates -type f -name *.toml | head",
+            "find . -name '*.rs' -maxdepth 3",
+            "find crates -type f -name '*.toml' | head",
             "sed -n 10p Cargo.toml",
             "sed -n 1,5p README.md",
             "npm view codewhale version",
             "sort deps.txt | uniq -c",
-            "ls -la *.md",
+            "ls -la docs/*.md",
         ] {
             assert!(
                 is_agent_readonly_shell_command(command),
                 "{command} should be agent read-only"
             );
+        }
+    }
+
+    #[test]
+    fn agent_readonly_shell_refuses_word_leading_unquoted_glob() {
+        // #6675 on #6637's lexer: a leading `*` can expand to an option.
+        for command in [
+            "rg foo *",
+            "ls *.md",
+            "git log | grep x *",
+            "cat a && ls *",
+            "git log ''*",
+        ] {
+            let rejection = agent_readonly_verdict(command).expect_err(command);
+            assert_eq!(rejection.rule, "operator", "{command}");
+        }
+        for command in ["ls src/*.rs", "ls ./*", "find . -name '*.rs'", "rg 'a*b' ."] {
+            assert!(is_agent_readonly_shell_command(command), "{command}");
         }
     }
 
@@ -2730,7 +2801,7 @@ mod tests {
         for command in [
             "git log | head -5",
             "grep TODO crates/ | head",
-            "find . -name *.rs",
+            "find . -name '*.rs'",
             "git -C crates/tui log",
             "sed -n 10p Cargo.toml",
             "npm view codewhale version",
@@ -2988,7 +3059,10 @@ mod tests {
             ("gh pr create", "subcommand", "gh pr create"),
             ("npm install x", "subcommand", "npm view"),
             ("sort -o out f", "option", "`sort`"),
-            ("echo *", "option", "literal"),
+            // #6675: a word-leading unquoted `*` is refused by the lexer
+            // before the echo literal rule sees it.
+            ("echo *", "operator", "unquoted `*`"),
+            ("echo a*", "option", "literal"),
             ("FOO=1 ls", "env_prefix", "environment"),
             ("ls && cd b && ls", "cd", "first command"),
         ] {

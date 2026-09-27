@@ -57,7 +57,7 @@ use std::fmt::Write as _;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use codewhale_execpolicy::command_safety::classify_command;
+use codewhale_execpolicy::command_safety::{canonical_prefix_is_leading, classify_command};
 
 /// The fingerprint of a tool call — stable enough to match repeated
 /// calls but specific enough to avoid privilege confusion.
@@ -351,9 +351,17 @@ fn shell_command_grant_scope(input: &serde_json::Value) -> String {
         && !shell_command_has_code_option(&tokens)
     {
         let family = classify_command(&tokens);
+        // Options wedged before a subcommand (`git -c k=v status`), a chain,
+        // or code that runs nested or resolves only at run time also keep
+        // the grant to this exact command (#6675).
+        let expansion = codewhale_execpolicy::shell_expand::expand_command(cmd);
         if command_family_is_known(&family)
             && !family_arguments_are_config(&family)
             && !family_arguments_are_code(&family)
+            && !expansion.dynamic
+            && !expansion.nested
+            && expansion.commands.len() == 1
+            && canonical_prefix_is_leading(&tokens, &family)
         {
             return format!("shell:{family}");
         }
@@ -1010,6 +1018,25 @@ mod tests {
         let key_a = build_approval_grouping_key("exec_shell", &json!({"command": "git status"}));
         let key_b = build_approval_grouping_key("exec_shell", &json!({"command": "git push"}));
         assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn grouping_key_does_not_cover_interposed_options_chains_or_nested_code() {
+        let key =
+            |command: &str| build_approval_grouping_key("exec_shell", &json!({"command": command}));
+        let granted = key("git status");
+        assert_eq!(granted, key("git status -s"));
+        for command in [
+            "git --git-dir=/tmp/e/.git status",
+            "git --exec-path=/x status",
+            "git status $(touch p)",
+            "git status && rm x",
+        ] {
+            assert_ne!(granted, key(command), "{command}");
+        }
+        // Such a command still matches an identical repeat, and only that.
+        assert_eq!(key("git status && ls"), key("git status && ls"));
+        assert_ne!(key("git status && ls"), key("git status && pwd"));
     }
 
     /// #6247. The `path` override is the documented way to patch without

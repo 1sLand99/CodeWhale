@@ -7790,18 +7790,26 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
-    if policy_tool_name != "exec_shell" {
+    // Task tools that hand a command string to the shell answer to the same
+    // shell deny and ask rules. Their own approval requirement stays: a shell
+    // allow rule does not waive it.
+    let runs_shell_command = matches!(policy_tool_name, "task_shell_start" | "task_gate_run");
+    if policy_tool_name != "exec_shell" && !runs_shell_command {
         return None;
     }
     let command = tool_input.get("command").and_then(Value::as_str)?;
-    tool_ask_rule_decision_for_context(
+    let decision = tool_ask_rule_decision_for_context(
         exec_policy_engine,
-        policy_tool_name,
+        "exec_shell",
         command,
         None,
         workspace,
         approval_mode,
-    )
+    );
+    if runs_shell_command && matches!(decision, Some(ToolAskRuleDecision::Allow)) {
+        return None;
+    }
+    decision
 }
 
 pub(super) fn file_tool_ask_rule_decision(
