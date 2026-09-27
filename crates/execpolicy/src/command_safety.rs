@@ -301,6 +301,39 @@ pub fn classify_command(tokens: &[&str]) -> String {
     positional[0].clone()
 }
 
+/// True when `tokens` begin with the words of `canonical` literally.
+///
+/// Classification drops flags, so `git -c core.fsmonitor=x status` and
+/// `git --exec-path=/x status` both classify as `git status` even though
+/// options placed before the subcommand change what runs. An allow rule
+/// names the command as written: it covers options *after* the words it
+/// names (`git status -s`), never options wedged between them.
+///
+/// The one flag that may sit inside a canonical prefix is the `-m` of
+/// `python -m <module>`, which names the module runner rather than tuning it;
+/// a canonical form that omits it (`python http.server`) still matches.
+pub(crate) fn canonical_prefix_is_leading(tokens: &[&str], canonical: &str) -> bool {
+    let words: Vec<&str> = canonical.split_whitespace().collect();
+    let python_module = tokens.get(1) == Some(&"-m")
+        && matches!(
+            tokens[0].to_ascii_lowercase().as_str(),
+            "python" | "python3"
+        )
+        && words.get(1) != Some(&"-m");
+    let tokens: Vec<&str> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !(python_module && *index == 1))
+        .map(|(_, token)| *token)
+        .collect();
+    !words.is_empty()
+        && words.len() <= tokens.len()
+        && words
+            .iter()
+            .zip(&tokens)
+            .all(|(word, token)| token.eq_ignore_ascii_case(word))
+}
+
 /// Return `true` when an allow-rule `pattern` (a command-prefix string such
 /// as `"git status"`) matches the concrete `command` string using the
 /// arity-aware prefix classification from [`classify_command`].
@@ -343,7 +376,7 @@ pub fn prefix_allow_matches(pattern: &str, command: &str) -> bool {
 
     // Primary path: arity-aware classification.
     let canonical = classify_command(&tokens);
-    if canonical == pattern_norm {
+    if canonical == pattern_norm && canonical_prefix_is_leading(&tokens, &canonical) {
         return true;
     }
 
@@ -495,6 +528,11 @@ pub fn is_parallel_readonly_command(command: &str) -> bool {
                 | ']'
                 | '{'
                 | '}'
+                // Grouping and, depending on the user's shell, glob
+                // qualifiers (`zsh`: `.(e:'cmd':)`) or command substitution
+                // (`fish`: `(cmd)`): never a literal read.
+                | '('
+                | ')'
         )
     }) {
         return false;

@@ -160,6 +160,27 @@ quieter, and Fleet runs can be checked before they spend anything.
   resend without the image and a message saying so
   ([#6396](https://github.com/Hmbown/Codewhale/issues/6396)).
 
+### Security
+
+- Deny rules now hold when the command word is only known when the shell runs
+  it: a variable (`$v`), a substitution, a glob or brace list, escaped ANSI-C
+  quoting, or a shell reading its script from a pipe, here-string or process
+  substitution. While any deny rule is configured, such a command is refused
+  instead of being checked against text the shell will rewrite. Commands after
+  `if`, `then`, `while`, `do`, `!` and similar words, `function f { … }`
+  bodies, and `find -exec` payloads are now checked like any other command.
+- Wrapper commands are unwrapped by their real option grammar, so
+  `chroot DIR cmd`, `sudo --user NAME cmd` and `timeout -s SIG N cmd` expose
+  `cmd` (and any `-c` payload) to deny rules.
+- A trusted or allow prefix such as `git status` no longer covers options
+  placed before the subcommand (`git -c key=value status`,
+  `git --exec-path=… status`), nor a command that runs nested code or whose
+  command word is resolved at run time. Such commands ask instead. Typed deny
+  rules also match a path-qualified command word (`/bin/rm`).
+- Commands containing parentheses are no longer auto-approved as parallel
+  read-only commands, since some shells treat them as glob qualifiers or
+  command substitution.
+
 ### Removed
 
 - Flags, settings and tool parameters that did nothing are gone
