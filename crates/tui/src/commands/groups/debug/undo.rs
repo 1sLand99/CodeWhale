@@ -241,6 +241,13 @@ pub(in crate::commands) struct UndoStep {
     pub(in crate::commands) end: crate::snapshot::SnapshotId,
     /// The paths the step changed that are still as it left them.
     pub(in crate::commands) restore: Vec<PathBuf>,
+    /// Changed paths `/undo` leaves in place because they are not regular
+    /// files (a symlink, a directory, a submodule), in this step or in a
+    /// newer one it walked past.
+    pub(in crate::commands) skipped: Vec<PathBuf>,
+    /// The `pre-restore:` snapshot planning took of the workspace, when the
+    /// step ends now; the restore reuses it as its safety backup.
+    pub(in crate::commands) backup: Option<crate::snapshot::SnapshotId>,
 }
 
 /// Why no step can be undone.
@@ -260,18 +267,28 @@ pub(in crate::commands) enum UndoRefusal {
 /// are never touched. A path the step changed that changed again since is
 /// refused rather than overwritten. A step whose paths are all back at its
 /// restore point is already undone, so `/undo` walks back one tool call (or
-/// turn) at a time (#384).
+/// turn) at a time (#384). A changed path that is not a regular file is
+/// left in place and reported (file-scoped restore never writes symlinks or
+/// directories); it does not block the step's other paths or older steps.
+///
+/// Planning writes nothing, except when the newest step ends now: the
+/// workspace is then snapshotted, and only when `trusted`, since `/undo`
+/// outside trusted mode refuses to touch files anyway.
 ///
 /// Known limits: the TUI records no per-tool receipts (the Runtime's
 /// `post-tool:` spans and declared write paths), so a step owns everything
 /// that changed between its restore point and the next one this
 /// conversation owns, including a write another session made in that window.
-/// The newest step, when no later restore point exists yet, ends at the
-/// workspace as it is now.
+/// The newest step, when no later restore point exists yet (the turn is still
+/// running, or its post-turn snapshot failed), ends at the workspace as it
+/// is now, so an edit made since the step's restore point counts as the
+/// step's. [`patch_undo`] first waits for a post-turn snapshot this process
+/// is still taking, so this is not the case right after a turn.
 pub(in crate::commands) fn plan_undo_step(
     repo: &crate::snapshot::SnapshotRepo,
     snapshots: Vec<crate::snapshot::Snapshot>,
     owners: &[SnapshotOwner],
+    trusted: bool,
 ) -> Result<UndoStep, UndoRefusal> {
     let owned: Vec<crate::snapshot::Snapshot> = snapshots
         .into_iter()
@@ -288,22 +305,20 @@ pub(in crate::commands) fn plan_undo_step(
     }
 
     let compare_failed = |error: std::io::Error| {
-        UndoRefusal::Refused(Box::new(
-            if error.kind() == std::io::ErrorKind::InvalidInput {
-                CommandResult::message(format!(
-                    "A path the undone step changed cannot be restored file by file: {error}. \
-                 Nothing was changed; use /restore for a whole-workspace rollback."
-                ))
-            } else {
-                CommandResult::error(format!("Failed to compare snapshot: {error}"))
-            },
-        ))
+        UndoRefusal::Refused(Box::new(CommandResult::error(format!(
+            "Failed to compare snapshot: {error}"
+        ))))
     };
+    // `InvalidInput` from a path comparison: the path is not a regular file
+    // (or not a safe workspace path) on one side, so it is left alone.
+    let unrestorable = |error: &std::io::Error| error.kind() == std::io::ErrorKind::InvalidInput;
 
+    let mut skipped: Vec<PathBuf> = Vec::new();
     for (index, target) in owned.iter().enumerate() {
         if !is_undo_step_label(&target.label) {
             continue;
         }
+        let mut backup = None;
         let end = match index.checked_sub(1) {
             Some(newer) => owned[newer].tree.clone(),
             // The newest step has no later restore point (the turn is still
@@ -316,14 +331,19 @@ pub(in crate::commands) fn plan_undo_step(
                 {
                     continue;
                 }
+                if !trusted {
+                    return Err(UndoRefusal::Refused(Box::new(untrusted_refusal())));
+                }
                 let short = &target.id.as_str()[..target.id.as_str().len().min(12)];
-                repo.take_snapshot(&format!("pre-restore:{short}"), None)
+                let taken = repo
+                    .take_snapshot(&format!("pre-restore:{short}"), None)
                     .map_err(|error| {
                         UndoRefusal::Refused(Box::new(CommandResult::error(format!(
                             "Failed to snapshot the workspace before undo: {error}"
                         ))))
-                    })?
-                    .tree
+                    })?;
+                backup = Some(taken.id);
+                taken.tree
             }
         };
         let changed = repo
@@ -332,21 +352,38 @@ pub(in crate::commands) fn plan_undo_step(
         let mut restore = Vec::new();
         let mut changed_since = Vec::new();
         'paths: for path in changed {
-            if repo
-                .path_matches_snapshot(&end, &path)
-                .map_err(compare_failed)?
-            {
-                restore.push(path);
-                continue;
+            match repo.path_matches_snapshot(&end, &path) {
+                // Still as the step left it. Comparing the step's start too
+                // proves it holds a regular file (or nothing) to restore.
+                Ok(true) => match repo.path_same_in_snapshots(&target.tree, &end, &path) {
+                    Ok(_) => {
+                        restore.push(path);
+                        continue;
+                    }
+                    Err(error) if unrestorable(&error) => {
+                        skipped.push(path);
+                        continue;
+                    }
+                    Err(error) => return Err(compare_failed(error)),
+                },
+                Ok(false) => {}
+                Err(error) if unrestorable(&error) => {
+                    skipped.push(path);
+                    continue;
+                }
+                Err(error) => return Err(compare_failed(error)),
             }
             // Back at the step's start, or at an older restore point that an
             // earlier `/undo` walked it back to: already undone.
             for older in &owned[index..] {
-                if repo
-                    .path_matches_snapshot(&older.tree, &path)
-                    .map_err(compare_failed)?
-                {
-                    continue 'paths;
+                match repo.path_matches_snapshot(&older.tree, &path) {
+                    Ok(true) => continue 'paths,
+                    Ok(false) => {}
+                    Err(error) if unrestorable(&error) => {
+                        skipped.push(path);
+                        continue 'paths;
+                    }
+                    Err(error) => return Err(compare_failed(error)),
                 }
             }
             changed_since.push(path.display().to_string());
@@ -363,18 +400,33 @@ pub(in crate::commands) fn plan_undo_step(
             ))));
         }
         if restore.is_empty() {
-            // Already undone, or the step changed nothing: keep walking back.
+            // Already undone, changed nothing, or changed only paths `/undo`
+            // cannot restore: keep walking back.
             continue;
         }
+        skipped.sort();
+        skipped.dedup();
         return Ok(UndoStep {
             target: target.clone(),
             end,
             restore,
+            skipped,
+            backup,
         });
     }
     Err(UndoRefusal::Nothing(
         "No undoable snapshot differs from the current workspace — nothing to revert.".to_string(),
     ))
+}
+
+/// How long `/undo` waits for a post-turn snapshot still being written.
+const POST_TURN_SNAPSHOT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn untrusted_refusal() -> CommandResult {
+    CommandResult::message(
+        "Refusing to undo workspace files outside trusted mode.\n\
+         Run `/trust on` or select Full Access with Shift+Tab, then re-run `/undo`.",
+    )
 }
 
 /// Revert the most recent write tool (apply_patch/edit_file/write_file) or turn.
@@ -400,6 +452,16 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
         }
     };
 
+    // A post-turn snapshot this process is still taking is the newest step's
+    // end: without it, every edit since the step's restore point would count
+    // as the step's.
+    if !crate::snapshot::wait_for_pending_post_turn_snapshots(POST_TURN_SNAPSHOT_WAIT) {
+        return CommandResult::message(
+            "The last turn's workspace snapshot is still being written; nothing was changed. \
+             Run /undo again in a moment.",
+        );
+    }
+
     // The whole store: an older restore point that is still stored must not
     // be mistaken for a pruned one.
     let snapshots = match repo.list(usize::MAX) {
@@ -424,21 +486,19 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
         );
     }
 
-    let step = match plan_undo_step(&repo, snapshots, &owners) {
+    // Restoring workspace files is a mutation. Apply the trust gate only
+    // after finding a real, owned step so chat-only `/undo` can still fall
+    // back to conversation history in ordinary mode; planning itself writes
+    // nothing outside trusted mode.
+    let trusted = app.yolo || app.trust_mode;
+    let step = match plan_undo_step(&repo, snapshots, &owners, trusted) {
         Ok(step) => step,
         Err(UndoRefusal::Nothing(message)) => return CommandResult::message(message),
         Err(UndoRefusal::Refused(result)) => return *result,
     };
     let target = &step.target;
-
-    // Restoring workspace files is a mutation. Apply the trust gate only
-    // after finding a real, owned step so chat-only `/undo` can still fall
-    // back to conversation history in ordinary mode.
-    if !(app.yolo || app.trust_mode) {
-        return CommandResult::message(
-            "Refusing to undo workspace files outside trusted mode.\n\
-             Run `/trust on` or select Full Access with Shift+Tab, then re-run `/undo`.",
-        );
+    if !trusted {
+        return untrusted_refusal();
     }
 
     let plan: Vec<(PathBuf, crate::snapshot::SnapshotId)> = step
@@ -446,30 +506,43 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
         .iter()
         .map(|path| (path.clone(), target.tree.clone()))
         .collect();
-    let backup_short = &target.id.as_str()[..target.id.as_str().len().min(12)];
-    let outcomes =
-        match repo.restore_path_plan(&plan, &format!("pre-restore:{backup_short}"), true, || {
-            // Re-verify after the safety snapshot, immediately before the
-            // first write: a change that landed meanwhile is refused.
-            for path in &step.restore {
-                if !repo.path_matches_snapshot(&step.end, path)? {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        format!(
-                            "'{}' changed while the undo was being prepared; nothing was changed.",
-                            path.display()
-                        ),
-                    ));
-                }
+    // Re-verify after the safety snapshot, immediately before the first
+    // write: a change that landed meanwhile is refused.
+    let preflight = || {
+        for path in &step.restore {
+            if !repo.path_matches_snapshot(&step.end, path)? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "'{}' changed while the undo was being prepared; nothing was changed.",
+                        path.display()
+                    ),
+                ));
             }
-            Ok(())
-        }) {
-            Ok(outcomes) => outcomes,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                return CommandResult::message(e.to_string());
-            }
-            Err(e) => return CommandResult::error(format!("Restore failed: {e}")),
-        };
+        }
+        Ok(())
+    };
+    let restored = match &step.backup {
+        // Planning already snapshotted the workspace (and `preflight` proves
+        // every planned path is still as that snapshot holds it).
+        Some(backup) => repo.restore_path_plan_with_backup(&plan, backup, true, preflight),
+        None => {
+            let backup_short = &target.id.as_str()[..target.id.as_str().len().min(12)];
+            repo.restore_path_plan(
+                &plan,
+                &format!("pre-restore:{backup_short}"),
+                true,
+                preflight,
+            )
+        }
+    };
+    let outcomes = match restored {
+        Ok(outcomes) => outcomes,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            return CommandResult::message(e.to_string());
+        }
+        Err(e) => return CommandResult::error(format!("Restore failed: {e}")),
+    };
 
     if let Some(tool_id) = target.label.strip_prefix("tool:") {
         prune_undone_tool_context(app, tool_id);
@@ -482,13 +555,25 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
         .iter()
         .map(|outcome| format!("{} {}", outcome.action.as_str(), outcome.path.display()))
         .collect();
-    let summary = format!(
+    let mut summary = format!(
         "Restored {} file(s) to snapshot '{}' ({}):\n{}",
         outcomes.len(),
         target.label,
         short,
         lines.join("\n")
     );
+    if !step.skipped.is_empty() {
+        let skipped: Vec<String> = step
+            .skipped
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        summary.push_str(&format!(
+            "\nLeft in place (not a regular file, which /undo does not restore; use /restore \
+             for a whole-workspace rollback): {}",
+            skipped.join(", ")
+        ));
+    }
 
     // Post a system cell so the reverted state is visible in the transcript.
     app.push_history_cell(HistoryCell::System {

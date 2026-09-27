@@ -2382,3 +2382,111 @@ fn patch_undo_restores_turns_a_fork_inherited() {
     assert!(!result.is_error, "{:?}", result.message);
     assert_eq!(fx.read("a.txt"), "a0", "{:?}", result.message);
 }
+
+/// `/undo` typed while the post-turn snapshot is still being written waits
+/// for it (#6644). Before, the two raced on the side repo: the post-turn
+/// snapshot landed after the undo and recorded the reverted workspace as
+/// the turn's end, and the undone step ended at "now".
+#[test]
+fn patch_undo_waits_for_a_pending_post_turn_snapshot() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.snapshot("tool:call-1", "s1");
+    fx.write("a.txt", "a1");
+
+    // The turn has completed; its post-turn snapshot is still in flight.
+    let pending = crate::snapshot::PendingPostTurnSnapshot::reserve();
+    let writer = {
+        let repo = crate::snapshot::SnapshotRepo::open_or_init(&fx.workspace).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let taken = repo.take_snapshot("post-turn:1", Some("s1")).unwrap();
+            drop(pending);
+            taken
+        })
+    };
+
+    let mut app = fx.app("s1");
+    let result = patch_undo(&mut app);
+    let post_turn = writer.join().unwrap();
+
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", result.message);
+    let tool = fx
+        .repo
+        .list(usize::MAX)
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.label == "tool:call-1")
+        .unwrap();
+    assert_eq!(
+        fx.repo
+            .changed_paths_between(&tool.tree, &post_turn.tree)
+            .unwrap(),
+        vec![PathBuf::from("a.txt")],
+        "the post-turn snapshot must record the turn's end, not the undone workspace"
+    );
+}
+
+/// A step that changed a symlink restores its regular files and reports the
+/// symlink, and it does not block older steps.
+#[cfg(unix)]
+#[test]
+fn patch_undo_skips_non_regular_paths_without_blocking_older_steps() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.snapshot("pre-turn:2", "s1");
+    fx.write("a.txt", "a2");
+    std::os::unix::fs::symlink("a.txt", fx.workspace.join("current")).unwrap();
+    fx.snapshot("post-turn:2", "s1");
+
+    let mut app = fx.app("s1");
+    let first = patch_undo(&mut app);
+    assert!(!first.is_error, "{:?}", first.message);
+    assert_eq!(fx.read("a.txt"), "a1");
+    let message = first.message.unwrap_or_default();
+    assert!(
+        message.contains("Left in place") && message.contains("current"),
+        "{message}"
+    );
+    assert!(
+        std::fs::symlink_metadata(fx.workspace.join("current"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let second = patch_undo(&mut app);
+    assert!(!second.is_error, "{:?}", second.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", second.message);
+}
+
+/// Outside trusted mode `/undo` refuses before writing anything: planning
+/// the newest step does not add a snapshot to the side repo.
+#[test]
+fn patch_undo_outside_trusted_mode_writes_no_snapshot() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    let before = fx.repo.list(usize::MAX).unwrap().len();
+
+    let mut app = fx.app("s1");
+    app.yolo = false;
+    app.trust_mode = false;
+    let result = patch_undo(&mut app);
+
+    assert!(
+        result
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("Refusing to undo workspace files outside trusted mode")),
+        "{:?}",
+        result.message
+    );
+    assert_eq!(fx.repo.list(usize::MAX).unwrap().len(), before);
+    assert_eq!(fx.read("a.txt"), "a1");
+}

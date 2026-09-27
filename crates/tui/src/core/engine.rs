@@ -2165,6 +2165,7 @@ impl Engine {
         }
         self.post_turn_snapshot_before_complete(&snapshot_prompt)
             .await;
+        let pending_post_turn = self.reserve_post_turn_snapshot();
         drop(turn_control);
         let _ = self
             .tx_event
@@ -2179,7 +2180,11 @@ impl Engine {
             })
             .await;
 
-        self.post_turn_snapshot_after_complete("post-shell-turn-snapshot", snapshot_prompt);
+        self.post_turn_snapshot_after_complete(
+            "post-shell-turn-snapshot",
+            snapshot_prompt,
+            pending_post_turn,
+        );
     }
 
     /// Take one workspace snapshot for the running turn and report it as an
@@ -2249,14 +2254,29 @@ impl Engine {
             .await;
     }
 
-    /// Without [`EngineConfig::record_restore_points`], take the post-turn
-    /// snapshot fire-and-forget: `TurnComplete` is already emitted, so the UI
-    /// is unblocked and the user can type / select / paste immediately
-    /// (#234). The git work proceeds on the blocking pool.
-    fn post_turn_snapshot_after_complete(&self, task: &'static str, prompt: String) {
-        if !self.config.snapshots_enabled || self.config.record_restore_points {
+    /// Without [`EngineConfig::record_restore_points`], reserve the post-turn
+    /// snapshot [`Self::post_turn_snapshot_after_complete`] takes. Called
+    /// before `TurnComplete`, so a `/undo` the user types as soon as the
+    /// turn ends waits for that snapshot instead of racing it (#6644).
+    fn reserve_post_turn_snapshot(&self) -> Option<crate::snapshot::PendingPostTurnSnapshot> {
+        (self.config.snapshots_enabled && !self.config.record_restore_points)
+            .then(crate::snapshot::PendingPostTurnSnapshot::reserve)
+    }
+
+    /// Take the post-turn snapshot reserved by
+    /// [`Self::reserve_post_turn_snapshot`] fire-and-forget: `TurnComplete`
+    /// is already emitted, so the UI is unblocked and the user can type /
+    /// select / paste immediately (#234). The git work proceeds on the
+    /// blocking pool, and the reservation is released once it is done.
+    fn post_turn_snapshot_after_complete(
+        &self,
+        task: &'static str,
+        prompt: String,
+        pending: Option<crate::snapshot::PendingPostTurnSnapshot>,
+    ) {
+        let Some(pending) = pending else {
             return;
-        }
+        };
         let post_workspace = self.session.workspace.clone();
         let post_seq = self.turn_counter;
         let post_cap = self.config.snapshots_max_workspace_bytes;
@@ -2269,6 +2289,7 @@ impl Engine {
                 Some(&prompt),
                 Some(&post_sid),
             );
+            drop(pending);
         });
     }
 
@@ -5848,6 +5869,7 @@ impl Engine {
         }
         self.post_turn_snapshot_before_complete(&snapshot_prompt_post)
             .await;
+        let pending_post_turn = self.reserve_post_turn_snapshot();
         drop(turn_control);
         // `event_sent` means the TurnComplete event reached the UI channel —
         // never that the user saw model output. (#6184: the old `delivered`
@@ -5875,7 +5897,11 @@ impl Engine {
 
         // Post-turn snapshot, unless it was already taken before
         // TurnComplete (see `EngineConfig::record_restore_points`).
-        self.post_turn_snapshot_after_complete("post-turn-snapshot", snapshot_prompt_post);
+        self.post_turn_snapshot_after_complete(
+            "post-turn-snapshot",
+            snapshot_prompt_post,
+            pending_post_turn,
+        );
 
         // ── Background advisor watcher (#3982) ────────────────────────────
         // Fire-and-forget: TurnComplete is already emitted. The advisor
