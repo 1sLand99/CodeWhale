@@ -643,6 +643,10 @@ impl SshFleetHostAdapter {
             args.push("-o".to_string());
             args.push("GlobalKnownHostsFile=none".to_string());
             args.push("-o".to_string());
+            // IgnoreUnknown predates OpenSSH 7.x. Older clients have no
+            // KnownHostsCommand; newer ones must disable that extra trust source.
+            args.push("IgnoreUnknown=KnownHostsCommand".to_string());
+            args.push("-o".to_string());
             args.push("KnownHostsCommand=none".to_string());
             args.push("-o".to_string());
             args.push("VerifyHostKeyDNS=no".to_string());
@@ -2129,7 +2133,20 @@ mod tests {
                         .args
                         .contains(&"GlobalKnownHostsFile=none".to_string())
                 );
-                assert!(command.args.contains(&"KnownHostsCommand=none".to_string()));
+                let ignore = command
+                    .args
+                    .iter()
+                    .position(|arg| arg == "IgnoreUnknown=KnownHostsCommand")
+                    .expect("OpenSSH 7.x must ignore the newer KnownHostsCommand option");
+                let command_option = command
+                    .args
+                    .iter()
+                    .position(|arg| arg == "KnownHostsCommand=none")
+                    .expect("disable additional known-host sources on newer clients");
+                assert!(
+                    ignore < command_option,
+                    "IgnoreUnknown applies only to later options"
+                );
                 assert!(command.args.contains(&"VerifyHostKeyDNS=no".to_string()));
             }
         }
@@ -2138,6 +2155,26 @@ mod tests {
         let err = SshFleetHostAdapter::new(tmp.path(), config).unwrap_err();
         assert_eq!(err.kind, FleetHostErrorKind::Configuration);
         assert!(err.message.contains("configure known_hosts"));
+    }
+
+    #[test]
+    fn runtime_surface_review_documented_ssh_host_loads() {
+        let docs = include_str!("../../../../docs/zh_hans/FLEET.md");
+        let example = docs
+            .split_once("### Worker 认证")
+            .expect("worker authentication guidance")
+            .1
+            .split("```json\n")
+            .skip(1)
+            .filter_map(|block| {
+                serde_json::from_str::<serde_json::Value>(block.split("```").next()?).ok()
+            })
+            .find(|value| value["id"] == "builder-1")
+            .expect("documented SSH worker example");
+        let host: FleetHostSpec = serde_json::from_value(example["host"].clone()).unwrap();
+        let config = SshFleetHostConfig::from_host_spec(&host)
+            .expect("documented host must load without migration errors");
+        assert!(config.known_hosts.is_some());
     }
 
     #[test]

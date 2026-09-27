@@ -1914,7 +1914,7 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
         )
         .await?
     else {
-        eprintln!("needs socket run: loopback listener is unavailable");
+        tracing::warn!("needs socket run: loopback listener is unavailable");
         return Ok(());
     };
     let client = crate::tls::reqwest_client_builder()
@@ -1989,6 +1989,18 @@ async fn web_bootstrap_sets_strict_cookie_once_and_preserves_v1_auth() -> Result
         .split(';')
         .next()
         .context("missing web session cookie pair")?;
+    for site in ["same-origin", "none"] {
+        let reloaded = client
+            .get(format!("http://{addr}/"))
+            .header(header::COOKIE, cookie_pair)
+            .header("sec-fetch-site", site)
+            .send()
+            .await?;
+        assert_eq!(reloaded.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(reloaded.text().await?.contains(&format!(
+            "name=\"codewhale-web-request\" content=\"{proof}\""
+        )));
+    }
     for method in [reqwest::Method::GET, reqwest::Method::POST] {
         for metadata in [false, true] {
             for presented in [None, Some("wrong-proof")] {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
@@ -34,7 +34,7 @@ pub(super) struct RuntimeWebState {
     bootstrap: Arc<Mutex<Option<BootstrapCapability>>>,
     session_token: Arc<str>,
     request_proof: Arc<Mutex<Option<String>>>,
-    stream_ticket: Arc<Mutex<Option<BootstrapCapability>>>,
+    stream_tickets: Arc<Mutex<Vec<BootstrapCapability>>>,
     session_expires_at: Instant,
 }
 
@@ -69,7 +69,7 @@ impl RuntimeWebState {
             }))),
             session_token: session_token.into(),
             request_proof: Arc::new(Mutex::new(None)),
-            stream_ticket: Arc::new(Mutex::new(None)),
+            stream_tickets: Arc::new(Mutex::new(Vec::new())),
             session_expires_at: Instant::now() + session_ttl,
         };
         (state, nonce)
@@ -123,8 +123,9 @@ impl RuntimeWebState {
             })
     }
 
-    // Like mobile streams, reconnects consume a new short-lived ticket. Only
-    // one pending ticket is retained for this single browser session.
+    // Reconnects consume short-lived, single-use tickets. Retain up to 32
+    // pending tickets so independent tabs do not replace each other's ticket;
+    // excess requests evict the oldest pending ticket.
     pub(super) fn refresh_stream_ticket(
         &self,
         cookie_header: Option<&str>,
@@ -138,9 +139,18 @@ impl RuntimeWebState {
             Uuid::new_v4().simple(),
             Uuid::new_v4().simple()
         );
-        *self.stream_ticket.lock().unwrap_or_else(|p| p.into_inner()) = Some(BootstrapCapability {
+        let mut tickets = self
+            .stream_tickets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        tickets.retain(|issued| now < issued.expires_at);
+        if tickets.len() == 32 {
+            tickets.remove(0);
+        }
+        tickets.push(BootstrapCapability {
             nonce: ticket.clone(),
-            expires_at: Instant::now() + super::mobile::STREAM_TICKET_TTL,
+            expires_at: now + super::mobile::STREAM_TICKET_TTL,
         });
         Some(ticket)
     }
@@ -153,17 +163,20 @@ impl RuntimeWebState {
         if !self.matches_session_cookie(cookie_header) {
             return false;
         }
-        let mut slot = self.stream_ticket.lock().unwrap_or_else(|p| p.into_inner());
-        let matches = slot.as_ref().is_some_and(|issued| {
-            Instant::now() < issued.expires_at
-                && ticket.is_some_and(|ticket| {
-                    constant_time_eq(ticket.as_bytes(), issued.nonce.as_bytes())
-                })
-        });
-        if matches {
-            *slot = None;
-        }
-        matches
+        let mut tickets = self
+            .stream_tickets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        tickets.retain(|issued| now < issued.expires_at);
+        let Some(index) = tickets.iter().position(|issued| {
+            ticket
+                .is_some_and(|ticket| constant_time_eq(ticket.as_bytes(), issued.nonce.as_bytes()))
+        }) else {
+            return false;
+        };
+        tickets.remove(index);
+        true
     }
 
     pub(super) fn matches_session_cookie(&self, cookie_header: Option<&str>) -> bool {
@@ -235,11 +248,35 @@ pub(super) async fn refresh_stream_ticket(
     response
 }
 
-pub(super) async fn web_page(State(state): State<RuntimeApiState>) -> Response {
-    if state.web.is_none() {
+pub(super) async fn web_page(State(state): State<RuntimeApiState>, headers: HeaderMap) -> Response {
+    let Some(web) = state.web.as_ref() else {
         return not_found();
+    };
+    web_page_response(web, &headers)
+}
+
+fn web_page_response(web: &RuntimeWebState, headers: &HeaderMap) -> Response {
+    let mut html = WEB_HTML.to_owned();
+    // Recover the origin-scoped proof for reloads and independent tabs. A
+    // cookie alone is insufficient: require same-origin or direct navigation
+    // Fetch Metadata. Older clients without it still use the bootstrap proof.
+    // Proofs are generated hex strings, so no HTML escaping is needed here.
+    if headers
+        .get("sec-fetch-site")
+        .is_some_and(|site| site == "same-origin" || site == "none")
+        && web.matches_session_cookie(headers.get(header::COOKIE).and_then(|v| v.to_str().ok()))
+        && let Some(proof) = web
+            .request_proof
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref()
+    {
+        html = html.replace(
+            "name=\"codewhale-web-request\" content=\"\"",
+            &format!("name=\"codewhale-web-request\" content=\"{proof}\""),
+        );
     }
-    secured_asset("text/html; charset=utf-8", WEB_HTML)
+    secured_asset("text/html; charset=utf-8", html)
 }
 
 pub(super) async fn web_styles(State(state): State<RuntimeApiState>) -> Response {
@@ -296,7 +333,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn secured_asset(content_type: &'static str, body: &'static str) -> Response {
+fn secured_asset(content_type: &'static str, body: impl IntoResponse) -> Response {
     let mut response = body.into_response();
     secure_headers(&mut response, content_type);
     response
@@ -352,12 +389,7 @@ mod tests {
             .unwrap();
         assert!(!web.consume_stream_ticket(None, Some(&ticket)));
         assert!(!web.consume_stream_ticket(Some(&cookie), Some("wrong-ticket")));
-        web.stream_ticket
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .expires_at = Instant::now();
+        web.stream_tickets.lock().unwrap()[0].expires_at = Instant::now();
         assert!(!web.consume_stream_ticket(Some(&cookie), Some(&ticket)));
         let ticket = web
             .refresh_stream_ticket(Some(&cookie), Some(&proof))
@@ -366,6 +398,90 @@ mod tests {
         expired.session_expires_at = Instant::now();
         assert!(!expired.matches_request(Some(&cookie), Some(&proof)));
         assert!(!expired.consume_stream_ticket(Some(&cookie), Some(&ticket)));
+    }
+
+    #[tokio::test]
+    async fn runtime_surface_review_web_page_recovers_proof_for_reload_and_second_tab() {
+        let (web, nonce) = RuntimeWebState::new();
+        let (token, proof) = web.consume(&nonce, "127.0.0.1".parse().unwrap()).unwrap();
+        let cookie = web_session_cookie(&token);
+        for site in [
+            None,
+            Some("same-origin"),
+            Some("none"),
+            Some("same-site"),
+            Some("cross-site"),
+        ] {
+            for valid_cookie in [false, true] {
+                for expired in [false, true] {
+                    let mut session = web.clone();
+                    if expired {
+                        session.session_expires_at = Instant::now();
+                    }
+                    let mut headers = HeaderMap::new();
+                    if valid_cookie {
+                        headers.insert(header::COOKIE, cookie.parse().unwrap());
+                    }
+                    if let Some(site) = site {
+                        headers.insert("sec-fetch-site", site.parse().unwrap());
+                    }
+                    let response = web_page_response(&session, &headers);
+                    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                    assert!(
+                        response.headers()[header::CONTENT_SECURITY_POLICY]
+                            .to_str()
+                            .unwrap()
+                            .contains("frame-ancestors 'none'")
+                    );
+                    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let html = std::str::from_utf8(&body).unwrap();
+                    let recovered = html.contains(&format!(
+                        "name=\"codewhale-web-request\" content=\"{proof}\""
+                    ));
+                    assert_eq!(
+                        recovered,
+                        valid_cookie && !expired && matches!(site, Some("same-origin" | "none")),
+                        "site={site:?}, valid_cookie={valid_cookie}, expired={expired}"
+                    );
+                    assert!(!html.contains(&token));
+                    if recovered {
+                        assert!(session.matches_request(Some(&cookie), Some(&proof)));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            web.consume(&nonce, "127.0.0.1".parse().unwrap()),
+            Err(BootstrapError::Invalid)
+        );
+    }
+
+    #[test]
+    fn runtime_surface_review_web_tabs_keep_independent_bounded_tickets() {
+        let (web, nonce) = RuntimeWebState::new();
+        let (token, proof) = web.consume(&nonce, "127.0.0.1".parse().unwrap()).unwrap();
+        let cookie = web_session_cookie(&token);
+        let first = web
+            .refresh_stream_ticket(Some(&cookie), Some(&proof))
+            .unwrap();
+        let second = web
+            .refresh_stream_ticket(Some(&cookie), Some(&proof))
+            .unwrap();
+        assert!(web.consume_stream_ticket(Some(&cookie), Some(&first)));
+        assert!(web.consume_stream_ticket(Some(&cookie), Some(&second)));
+        assert!(!web.consume_stream_ticket(Some(&cookie), Some(&first)));
+        assert!(!web.consume_stream_ticket(Some(&cookie), Some(&second)));
+        let oldest = web
+            .refresh_stream_ticket(Some(&cookie), Some(&proof))
+            .unwrap();
+        for _ in 0..32 {
+            web.refresh_stream_ticket(Some(&cookie), Some(&proof))
+                .unwrap();
+        }
+        assert_eq!(web.stream_tickets.lock().unwrap().len(), 32);
+        assert!(!web.consume_stream_ticket(Some(&cookie), Some(&oldest)));
     }
 
     #[test]

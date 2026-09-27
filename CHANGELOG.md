@@ -20,7 +20,11 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 - Harden local runtime browser sessions, fleet SSH trust, agent continuation
   ownership, task gate approval, plugin tool registration, bridge action tokens,
-  and release metadata credential forwarding.
+  and release metadata credential forwarding. Browser sessions recover across
+  reloads and new tabs, and stream tickets retry after transient failures.
+  Fleet SSH known-host checks support OpenSSH 7.x and later. SSH host configs
+  using `host_key_fingerprint` must migrate to `known_hosts` with verified host
+  keys; the unsupported fingerprint field now fails at configuration load.
 
 ### Contributors
 
