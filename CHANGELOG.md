@@ -179,6 +179,10 @@ quieter, and Fleet runs can be checked before they spend anything.
   before reporting remaining credentials with a non-zero exit status.
 - `doctor --fix` keeps temporary files modified within the last hour.
 - Provider streams stop with a clear error if an SSE line exceeds 8 MiB.
+- Recursive `rlm_query` turns now stop at the existing child wall-clock budget,
+  including stalled model requests and Python work, and return the last response
+  with an incomplete-result error instead of waiting indefinitely
+  ([#6511](https://github.com/Hmbown/Codewhale/issues/6511)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you
