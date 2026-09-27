@@ -533,6 +533,41 @@ fn cjk_composer_cursor_and_mouse_geometry_agree_in_compact_and_wide_frames() {
 }
 
 #[test]
+fn composer_caret_hides_while_a_view_covers_the_composer() {
+    // #6545: a modal owns the keyboard and paints over the composer, so the
+    // terminal caret must not keep blinking at the hidden composer position.
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    app.launch.visible = false;
+    app.input = "draft".to_string();
+    app.cursor_position = app.input.chars().count();
+    let config = Config::default();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    let mut cursor = None;
+    terminal
+        .draw(|frame| cursor = super::frame::render(frame, &mut app, &config))
+        .unwrap();
+    assert!(cursor.is_some(), "the bare composer exposes its caret");
+
+    app.view_stack.push(HelpView::new_for_locale(app.ui_locale));
+    frame::prepare_frame_cursor(&mut terminal).unwrap();
+    let mut covered = Some((0, 0));
+    terminal
+        .draw(|frame| covered = super::frame::render(frame, &mut app, &config))
+        .unwrap();
+    frame::finish_frame_cursor(&mut terminal, covered).unwrap();
+    assert_eq!(
+        covered, None,
+        "a covered composer must not expose its caret"
+    );
+    assert!(
+        !terminal.backend().cursor_visible(),
+        "the terminal caret stays hidden while a view is open"
+    );
+}
+
+#[test]
 fn remote_control_escape_commands_match_dispatcher_case_rules() {
     // Mirror mode removed the input gate entirely (and with it
     // `is_remote_control_command`), but the /rc command surface itself is

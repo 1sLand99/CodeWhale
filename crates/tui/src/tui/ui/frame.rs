@@ -1959,6 +1959,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         }
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);
+        // Any view on the stack owns the keyboard and paints over the
+        // composer, and no view draws its own text caret, so the composer's
+        // caret must not surface through the modal (#6545).
+        return None;
     }
 
     cursor_pos

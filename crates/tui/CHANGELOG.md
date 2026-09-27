@@ -111,6 +111,9 @@ quieter, and Fleet runs can be checked before they spend anything.
   changed. The pinned-prompt lookup also searches from the newest row
   instead of the oldest. Other per-frame work still grows with session
   length ([#6652](https://github.com/Hmbown/Codewhale/issues/6652)).
+- The terminal caret no longer blinks at the hidden composer while a picker,
+  settings screen or other view covers it; it returns when the view closes
+  ([#6545](https://github.com/Hmbown/Codewhale/issues/6545)).
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
   every frame on focus loss, so on Windows Terminal, macOS and other
   terminals a window sitting behind another one looked frozen until you
