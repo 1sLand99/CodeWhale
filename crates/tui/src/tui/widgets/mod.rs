@@ -3821,10 +3821,7 @@ pub(crate) fn should_render_empty_state(app: &App) -> bool {
         && !app.is_compacting
         && !app.is_purging
         && !app.attention_hold_active()
-        && !app
-            .task_panel
-            .iter()
-            .any(|task| task.kind == crate::tui::app::TaskPanelEntryKind::Background)
+        && app.task_panel.is_empty()
         // Live work suppresses the empty state. On lock contention, treat
         // the todo store as non-empty rather than flash the empty ocean.
         && !app
@@ -7497,6 +7494,7 @@ mod tests {
     fn durable_tasks_suppress_the_launch_tableau() {
         let mut app = create_test_app();
         app.task_panel.push(TaskPanelEntry {
+            exit_code: None,
             id: "shell_1".to_string(),
             status: "running".to_string(),
             prompt_summary: "cargo test".to_string(),

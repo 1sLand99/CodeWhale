@@ -553,6 +553,11 @@ pub struct AgentProgressMeta {
     /// The engine's name for this agent from its spawn or completion event
     /// (`subagent_display_name`), used until a manager snapshot arrives.
     pub display_name: Option<String>,
+    /// When the TUI last received any mailbox envelope from this child. The
+    /// manager's `idle_ms` is only as fresh as the last `AgentList` snapshot,
+    /// and ordinary progress does not refresh that snapshot, so the quiet
+    /// readout caps the engine's clock with this one.
+    pub last_progress_at: Option<Instant>,
 }
 
 /// Per-turn LSP repair-loop summary for the Turn Inspector (#4107).
@@ -1952,6 +1957,21 @@ pub struct App {
     /// Maps raw agent_id to a stable user-facing label (#3030).
     /// Populated when `AgentSpawned` fires; read by sidebar rendering.
     pub agent_label_map: HashMap<String, String>,
+    /// Background work (agents, shells, durable tasks) that finished since
+    /// the last notice, named the way every surface names it. Drained by one
+    /// batched notice (#6565).
+    pub background_finished: Vec<crate::tui::background_finished::FinishedWork>,
+    /// Background shells by owning session, oldest first, capped per session
+    /// at [`crate::tui::background_finished::MAX_FINISHED_SHELLS`]. They stay listed, muted, so
+    /// a person can see what ran and how it ended (#6565).
+    pub finished_shell_ids: HashMap<String, VecDeque<String>>,
+    /// Completion deduplication is independent of visible rows and their cap.
+    /// IDs are manager-unique; these sets live only for this TUI process.
+    pub notified_shell_ids: HashSet<String>,
+    pub notified_task_ids: HashSet<String>,
+    /// When the latest `AgentList` snapshot arrived, so a running agent's
+    /// engine idle clock keeps counting between snapshots.
+    pub subagent_cache_received_at: Option<Instant>,
     /// The child whose full transcript currently owns the main conversation
     /// area and whose fork the composer addresses (`None` = main session).
     pub agent_focus: Option<crate::tui::agent_focus::AgentFocus>,

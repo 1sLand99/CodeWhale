@@ -1579,6 +1579,28 @@ pub enum MessageId {
     NotificationSubagentInterrupted,
     NotificationSubagentCancelled,
     NotificationSubagentBudgetExhausted,
+    NotificationShellFinished,
+    NotificationShellFailed,
+    NotificationShellStopped,
+    NotificationTaskFinished,
+    NotificationTaskFailed,
+    NotificationTaskStopped,
+    NotificationBackgroundFinished,
+    NotificationBackgroundMixed,
+    BackgroundFinishedHeading,
+    BackgroundFinishedHint,
+    BackgroundOutcomeDone,
+    BackgroundOutcomeFailed,
+    BackgroundOutcomeCancelled,
+    BackgroundOutcomeKilled,
+    BackgroundOutcomeTimedOut,
+    BackgroundExitCode,
+    BackgroundQuiet,
+    BackgroundUsingTool,
+    BackgroundStep,
+    BackgroundFilesChanged,
+    NotificationBackgroundStopped,
+    NotificationFullResultPointer,
     // Footer chips.
     FooterWorkedChip,
     FooterPermissionKeyHint,
@@ -4044,6 +4066,28 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::NotificationSubagentInterrupted,
     MessageId::NotificationSubagentCancelled,
     MessageId::NotificationSubagentBudgetExhausted,
+    MessageId::NotificationShellFinished,
+    MessageId::NotificationShellFailed,
+    MessageId::NotificationShellStopped,
+    MessageId::NotificationTaskFinished,
+    MessageId::NotificationTaskFailed,
+    MessageId::NotificationTaskStopped,
+    MessageId::NotificationBackgroundFinished,
+    MessageId::NotificationBackgroundMixed,
+    MessageId::BackgroundFinishedHeading,
+    MessageId::BackgroundFinishedHint,
+    MessageId::BackgroundOutcomeDone,
+    MessageId::BackgroundOutcomeFailed,
+    MessageId::BackgroundOutcomeCancelled,
+    MessageId::BackgroundOutcomeKilled,
+    MessageId::BackgroundOutcomeTimedOut,
+    MessageId::BackgroundExitCode,
+    MessageId::BackgroundQuiet,
+    MessageId::BackgroundUsingTool,
+    MessageId::BackgroundStep,
+    MessageId::BackgroundFilesChanged,
+    MessageId::NotificationBackgroundStopped,
+    MessageId::NotificationFullResultPointer,
     MessageId::FooterWorkedChip,
     MessageId::FooterPermissionKeyHint,
     MessageId::ApprovalSummaryRunCommand,
@@ -5517,6 +5561,37 @@ mod tests {
                 "{} fell back to the English parked recovery line",
                 locale.tag()
             );
+        }
+    }
+
+    #[test]
+    fn background_review_complete_packs_translate_copy_and_preserve_placeholders() {
+        let english = raw_locale_messages(Locale::En);
+        let keys = english
+            .keys()
+            .filter(|key| {
+                key.starts_with("Background") || key.as_str() == "NotificationBackgroundStopped"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 13);
+        for &locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(locale);
+            for key in &keys {
+                let source = english[*key].as_str().unwrap();
+                let translated = pack
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .expect("translated background key");
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(source),
+                    "{} {key}",
+                    locale.tag()
+                );
+                if locale != Locale::En {
+                    assert_ne!(translated, source, "{} {key}", locale.tag());
+                }
+            }
         }
     }
 
