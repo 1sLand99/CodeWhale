@@ -17,10 +17,20 @@ pub(super) fn is_mcp_stale_session_body(body: &str) -> bool {
     body.contains("session") && (body.contains("expired") || body.contains("invalid"))
 }
 
-/// A tool call worth replaying after drop→reconnect: either the server
-/// rejected the session id, or the transport itself is gone (dead
-/// pipe/socket) rather than merely idle.
-pub(super) fn is_retriable_mcp_call_error(err: &anyhow::Error) -> bool {
+/// The server answered the request by refusing its session id, so it
+/// provably did not run it. This is the only failure after which a
+/// non-idempotent `tools/call` may be replayed on a fresh connection.
+pub(super) fn is_mcp_session_rejected_error(err: &anyhow::Error) -> bool {
+    let err = format!("{err:#}");
+    err.contains("MCP Streamable HTTP session expired") || err.contains("MCP session expired")
+}
+
+/// The connection is unusable: either the server rejected the session id,
+/// or the transport itself is gone (dead pipe/socket) rather than merely
+/// idle. The connection must be rebuilt, but a request already written to
+/// a transport that then died may have run, so this alone does not make a
+/// `tools/call` safe to replay.
+pub(super) fn is_mcp_connection_lost_error(err: &anyhow::Error) -> bool {
     if is_mcp_stale_session_error(err) {
         return true;
     }

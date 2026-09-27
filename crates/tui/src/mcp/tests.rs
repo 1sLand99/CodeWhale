@@ -6036,7 +6036,7 @@ async fn legacy_sse_session_expiry_is_marked_stale() {
 }
 
 #[tokio::test]
-async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
+async fn legacy_sse_closed_stream_reports_unknown_outcome_and_reconnects_without_replay() {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -6244,11 +6244,24 @@ async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
     );
     let mut pool = McpPool::new(cfg);
 
+    // The server received the call and then closed the stream: it may have
+    // run the tool, so the call must fail as unknown instead of replaying.
+    let err = pool
+        .call_tool("mcp_dephy_search", serde_json::json!({ "query": "dephy" }))
+        .await
+        .expect_err("a call whose transport closed mid-flight must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(tool_call_count.load(AtomicOrdering::SeqCst), 1);
+    assert!(!success_seen.load(AtomicOrdering::SeqCst));
+
+    // The dead connection was dropped, so the next call reconnects.
     let result = pool
         .call_tool("mcp_dephy_search", serde_json::json!({ "query": "dephy" }))
         .await
         .unwrap();
-
     assert_eq!(
         result,
         serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
@@ -8349,22 +8362,34 @@ async fn manual_retry_clears_supervision_marks() {
     assert!(!pool.supervised_parked.contains("alpha"));
 }
 
-/// #6187: tool-call retry covers a dead pipe/socket, not just stale sessions.
+/// #6187: a dead pipe/socket rebuilds the connection, not just a stale
+/// session. Only a refused session id proves the server never ran the
+/// request, so only that class may replay a tool call.
 #[test]
-fn retriable_call_error_covers_closed_transports() {
-    use super::wire::is_retriable_mcp_call_error;
-    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "MCP session expired"
-    )));
-    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "connection reset by peer"
-    )));
-    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "Stdio transport closed"
-    )));
-    assert!(!is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "tool returned an application error"
-    )));
+fn connection_lost_covers_closed_transports_but_only_rejected_sessions_replay() {
+    use super::wire::{is_mcp_connection_lost_error, is_mcp_session_rejected_error};
+    for rejected in [
+        "MCP session expired",
+        "MCP Streamable HTTP session expired; retry with a new session required (404)",
+    ] {
+        let err = anyhow::anyhow!("{rejected}");
+        assert!(is_mcp_connection_lost_error(&err), "{rejected}");
+        assert!(is_mcp_session_rejected_error(&err), "{rejected}");
+    }
+    for ambiguous in [
+        "connection reset by peer",
+        "Stdio transport closed",
+        "Stdio transport closed (exit status: 1)\nsession invalid",
+        "SSE transport closed",
+        "MCP SSE POST send failed (transport=sse endpoint=x): connection closed",
+    ] {
+        let err = anyhow::anyhow!("{ambiguous}");
+        assert!(is_mcp_connection_lost_error(&err), "{ambiguous}");
+        assert!(!is_mcp_session_rejected_error(&err), "{ambiguous}");
+    }
+    let app = anyhow::anyhow!("tool returned an application error");
+    assert!(!is_mcp_connection_lost_error(&app));
+    assert!(!is_mcp_session_rejected_error(&app));
 }
 
 // Executed both as an ordinary no-op test and as an isolated OS-process worker.

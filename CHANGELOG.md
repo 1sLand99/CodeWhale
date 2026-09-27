@@ -49,6 +49,20 @@ quieter, and Fleet runs can be checked before they spend anything.
   ([#6562](https://github.com/Hmbown/Codewhale/issues/6562),
   [#6509](https://github.com/Hmbown/Codewhale/issues/6509)).
 
+### Security
+
+- `codewhale serve --mcp` now exposes only read-only tools by default
+  (`file_read`, `search`). Tools that write files or run commands are
+  neither listed nor run unless the operator sets `require_approval = false`
+  in the MCP server config; a client's own `approved` flag no longer counts
+  as approval.
+- A `Bash` entry in the disallowed tools now also blocks `start_mcp_server`
+  and `start_registry_mcp_server`, which launch local processes.
+- An MCP tool call whose connection closes before it answers is no longer
+  sent again on a new connection, since the server may already have run it.
+  The call reports an unknown outcome and the next call reconnects. A call
+  whose session the server refused is still retried once.
+
 ### Fixed
 
 - The TUI keeps redrawing while its terminal is unfocused. v0.10.0 held
