@@ -224,6 +224,10 @@ pub struct RuntimeApiState {
     /// Fires when the server stops on purpose, so open thread event streams
     /// end with a typed `stream.end` rather than a bare EOF.
     shutdown: RuntimeServerShutdown,
+    /// Serializes this runtime's git writes (stage/unstage/discard/commit/
+    /// branch) so a precondition check and its write are atomic with respect
+    /// to other windows on the same server (#6647).
+    git_writes: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     compat_stream_test_hook: Option<tokio::sync::mpsc::UnboundedSender<CompatStreamTestPoint>>,
 }
@@ -1140,6 +1144,7 @@ pub async fn run_http_server(
         lsp_manager: Arc::new(std::sync::OnceLock::new()),
         computer: computer_display::ComputerState::from_env(),
         shutdown: shutdown.clone(),
+        git_writes: Arc::new(tokio::sync::Mutex::new(())),
         #[cfg(test)]
         compat_stream_test_hook: None,
     };
@@ -11068,6 +11073,7 @@ base_url = "http://127.0.0.1:9/v1"
             lsp_manager: Arc::new(std::sync::OnceLock::new()),
             computer: computer_display::ComputerState::from_env(),
             shutdown: RuntimeServerShutdown::default(),
+            git_writes: Arc::new(tokio::sync::Mutex::new(())),
             compat_stream_test_hook: None,
         };
         let router = build_router(state.clone());

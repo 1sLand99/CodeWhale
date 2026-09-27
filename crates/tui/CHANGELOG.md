@@ -42,6 +42,24 @@ quieter, and Fleet runs can be checked before they spend anything.
   - The legacy `artifact_refs` field is now filled with the workspace files a
     tool call wrote, so Preview in current desktop builds shows them
   ([#6653](https://github.com/Hmbown/Codewhale/issues/6653)).
+- Runtime API: git stage, unstage, discard and commit accept optional
+  `expect` preconditions (full HEAD id, an index token, per-file `rev`, or a
+  whole-tree `revision`, all read from `GET /v1/git`). When the repository
+  changed since the client read it, the write does nothing and answers 409
+  `git_state_changed` with the current state, so a Review sheet can no
+  longer stage bytes, discard edits or commit an index the user never saw.
+  Requests without `expect` behave as before. Path writes now use literal
+  pathspecs, as the docs already said, and `files[].path` is
+  workspace-relative in a subdirectory workspace. Guards cover executable
+  mode, submodule HEAD and changes outside that workspace; oversized or
+  budget-limited stat-only revisions cannot authorize a guarded write.
+  Status stays best-effort: unreadable paths, symlinked ancestors, special
+  files and broken nested repositories withhold only affected row tokens
+  and the whole-tree revision. Normal Git filters and untracked settings
+  apply, with directory inventories scoped to the rows or paths that need
+  them. Untracked workspace files and renames leaving the workspace remain
+  visible, and broken HEADs cannot satisfy an unborn-HEAD guard
+  ([#6647](https://github.com/Hmbown/Codewhale/issues/6647)).
 - Runtime API: `POST /v1/threads/{id}/fork-at-turn` forks a thread at a named
   user turn, keeping that turn and every turn before it. The receipt matches
   `/undo` and returns the first dropped prompt so a client can put it back in
