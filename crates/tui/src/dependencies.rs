@@ -1277,7 +1277,6 @@ mod tests {
     fn git_command_does_not_inherit_parent_secret_env() {
         use std::os::unix::fs::PermissionsExt;
         if !Git::available() {
-            eprintln!("skipping: git not available");
             return;
         }
         let _env_lock = crate::test_support::lock_test_env();

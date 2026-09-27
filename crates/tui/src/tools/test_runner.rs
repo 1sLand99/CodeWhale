@@ -388,7 +388,6 @@ mod tests {
         use crate::test_support::{EnvVarGuard, lock_test_env};
         use std::os::unix::fs::PermissionsExt;
         if !cargo_available() {
-            eprintln!("skipping: cargo not available");
             return;
         }
         let _env_lock = lock_test_env();

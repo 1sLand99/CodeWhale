@@ -1244,7 +1244,6 @@ mod tests {
     async fn read_only_git_tools_do_not_run_workspace_fsmonitor() {
         use std::os::unix::fs::PermissionsExt;
         if !git_available() {
-            eprintln!("skipping: git not available");
             return;
         }
         let tmp = tempdir().expect("tempdir");
