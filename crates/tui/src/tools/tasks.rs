@@ -473,10 +473,21 @@ impl TasksTool {
             .task_manager
             .as_ref()
             .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
-        let workspace = optional_str(input, "workspace")?
-            .map(PathBuf::from)
-            .unwrap_or_else(|| context.workspace.clone());
+        // A task may run in another directory only where this session could
+        // already reach: inside its workspace, or anywhere in trust mode.
+        let workspace = match optional_str(input, "workspace")? {
+            Some(raw) => context.resolve_path(raw)?,
+            None => context.workspace.clone(),
+        };
         let prompt = required_str(input, "prompt")?.to_string();
+        // Authority declarations: read strictly (a malformed value that
+        // silently reads as "unset" is a restriction that evaporates), then
+        // capped at what this session holds.
+        let (allow_shell, trust_mode, auto_approve) = context.cap_delegated_authority(
+            optional_bool_opt(input, "allow_shell")?,
+            optional_bool_opt(input, "trust_mode")?,
+            optional_bool_opt(input, "auto_approve")?,
+        );
         let req = NewTaskRequest {
             prompt: prompt.clone(),
             name: optional_str(input, "name")?.map(ToString::to_string),
@@ -485,11 +496,9 @@ impl TasksTool {
             model_provider_id: optional_str(input, "model_provider_id")?.map(ToString::to_string),
             workspace: Some(workspace),
             mode: optional_str(input, "mode")?.map(ToString::to_string),
-            // Authority declarations: read strictly. A malformed value that
-            // silently reads as "unset" is a restriction that evaporates.
-            allow_shell: optional_bool_opt(input, "allow_shell")?,
-            trust_mode: optional_bool_opt(input, "trust_mode")?,
-            auto_approve: optional_bool_opt(input, "auto_approve")?,
+            allow_shell,
+            trust_mode,
+            auto_approve,
             // The task runs on the posture this session is in. The bits above
             // are declarations the engine only reads when no posture is given,
             // and a task started from a session must not run under authority
@@ -1606,11 +1615,19 @@ mod tests {
 
         let mut context = ToolContext::new(workspace.path());
         context.approval_mode = codewhale_execpolicy::ApprovalMode::Auto;
+        context.shell_policy = crate::worker_profile::ShellPolicy::None;
         context.runtime.task_manager = Some(manager.clone());
 
         TasksTool::new("tasks")
             .execute(
-                json!({"action": "create", "prompt": "run the sweep", "auto_approve": true}),
+                json!({
+                    "action": "create",
+                    "prompt": "run the sweep",
+                    "auto_approve": true,
+                    "trust_mode": true,
+                    "allow_shell": true,
+                    "mode": "yolo"
+                }),
                 &context,
             )
             .await
@@ -1622,6 +1639,35 @@ mod tests {
             created.permission_posture.as_deref(),
             Some("auto_review"),
             "the task runs under its session's posture, not the model's legacy bit"
+        );
+        // Requested authority the session does not hold is not stored.
+        assert!(!created.auto_approve);
+        assert!(!created.trust_mode);
+        assert!(!created.allow_shell);
+
+        // The turn the task starts runs under the pinned posture: neither the
+        // legacy bit nor a legacy full-access mode alias can re-derive one.
+        let turn = crate::task_manager::ExecutionTask::from(&created).turn_request();
+        assert_eq!(turn.permission_posture.as_deref(), Some("auto_review"));
+        assert_eq!(turn.auto_approve, None);
+        let policy = crate::runtime_policy::RuntimePolicyProjection::from_request(
+            turn.mode.as_deref().expect("mode"),
+            turn.permission_posture.as_deref(),
+            turn.auto_approve,
+        )
+        .expect("policy");
+        assert_eq!(policy.permission, codewhale_execpolicy::ApprovalMode::Auto);
+
+        // A workspace outside what the session can reach is refused.
+        let outside = TasksTool::new("tasks")
+            .execute(
+                json!({"action": "create", "prompt": "look", "workspace": "/"}),
+                &context,
+            )
+            .await;
+        assert!(
+            outside.is_err(),
+            "a workspace outside the session is refused"
         );
     }
 

@@ -420,7 +420,7 @@ fn mcp_target_hint(tool_name: &str) -> Option<String> {
 }
 
 fn build_impact_summary(tool_name: &str, category: ToolCategory, params: &Value) -> Vec<String> {
-    match category {
+    let mut impacts = match category {
         ToolCategory::Safe => {
             let mut impacts = vec!["Read-only operation.".to_string()];
             if let Some(path) = param_preview(params, &["path", "ref_id", "uri"], 72) {
@@ -492,7 +492,9 @@ fn build_impact_summary(tool_name: &str, category: ToolCategory, params: &Value)
             }
             impacts
         }
-    }
+    };
+    impacts.extend(delegated_authority_impacts(tool_name, params, false));
+    impacts
 }
 
 fn localized_description_zh_hans(category: ToolCategory) -> String {
@@ -515,7 +517,7 @@ fn build_impact_summary_zh_hans(
     params: &Value,
 ) -> Vec<String> {
     let locale = Locale::ZhHans;
-    match category {
+    let mut impacts = match category {
         ToolCategory::Safe => {
             let mut impacts = vec![tr(locale, MessageId::ApprovalImpactSafe).to_string()];
             if let Some(path) = param_preview(params, &["path", "ref_id", "uri"], 72) {
@@ -574,7 +576,70 @@ fn build_impact_summary_zh_hans(
             }
             impacts
         }
+    };
+    impacts.extend(delegated_authority_impacts(tool_name, params, true));
+    impacts
+}
+
+/// Tools that hand work to a later, unattended run (a durable task or a
+/// scheduled automation) and can ask for authority of their own.
+fn is_delegated_work_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "task_create" | "automation_create" | "automation_update"
+    )
+}
+
+fn flag_word(value: bool, zh: bool) -> &'static str {
+    match (value, zh) {
+        (true, false) => "on",
+        (false, false) => "off",
+        (true, true) => "开启",
+        (false, true) => "关闭",
     }
+}
+
+/// Labeled authority fields a delegated-work call asks for: shell access,
+/// trust mode, auto-approval, mode and the directories it would run in.
+/// Shown for every such call, whatever its stakes or key order, so the card
+/// never hides what the later run is allowed to do.
+fn delegated_authority_fields(tool_name: &str, params: &Value, zh: bool) -> Vec<(String, String)> {
+    if !is_delegated_work_tool(tool_name) {
+        return Vec::new();
+    }
+    let mut fields = Vec::new();
+    let flags: [(&str, &str, &str); 3] = [
+        ("trust_mode", "Trust mode", "信任模式"),
+        ("allow_shell", "Shell", "Shell"),
+        ("auto_approve", "Auto-approve", "自动批准"),
+    ];
+    for (key, en, zh_label) in flags {
+        let Some(value) = params.get(key) else {
+            continue;
+        };
+        let rendered = match value.as_bool() {
+            Some(flag) => flag_word(flag, zh).to_string(),
+            None => truncate_string_value(&value.to_string(), 40),
+        };
+        fields.push((if zh { zh_label } else { en }.to_string(), rendered));
+    }
+    for (keys, en, zh_label) in [
+        (&["mode"][..], "Mode", "模式"),
+        (&["workspace", "cwds"][..], "Workspace", "工作区"),
+    ] {
+        if let Some(value) = param_preview(params, keys, 120) {
+            fields.push((if zh { zh_label } else { en }.to_string(), value));
+        }
+    }
+    fields
+}
+
+fn delegated_authority_impacts(tool_name: &str, params: &Value, zh: bool) -> Vec<String> {
+    let separator = if zh { "：" } else { ": " };
+    delegated_authority_fields(tool_name, params, zh)
+        .into_iter()
+        .map(|(label, value)| format!("{label}{separator}{value}"))
+        .collect()
 }
 
 fn build_prominent_details(
@@ -582,7 +647,14 @@ fn build_prominent_details(
     category: ToolCategory,
     params: &Value,
 ) -> Vec<ApprovalDetail> {
-    let mut details = Vec::new();
+    let mut details: Vec<ApprovalDetail> = delegated_authority_fields(tool_name, params, false)
+        .into_iter()
+        .map(|(label, value)| ApprovalDetail {
+            label,
+            value,
+            shell_lines: None,
+        })
+        .collect();
     match category {
         ToolCategory::Shell => {
             if let Some(command) = param_text(params, &["command", "cmd"]) {

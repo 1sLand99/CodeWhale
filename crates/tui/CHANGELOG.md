@@ -160,6 +160,26 @@ quieter, and Fleet runs can be checked before they spend anything.
   resend without the image and a message saying so
   ([#6396](https://github.com/Hmbown/Codewhale/issues/6396)).
 
+### Security
+
+- Durable tasks and scheduled automations created by the agent no longer
+  carry more authority than the session that created them: requested
+  `auto_approve`, `trust_mode` and `allow_shell` are capped at what that
+  session holds, a task's workspace and an automation's directories must be
+  reachable from the session, and a task's turn runs under the posture pinned
+  when it was created instead of re-deriving one from the legacy bit or a
+  legacy mode alias.
+- The approval card for creating a task or creating/updating an automation
+  now lists the requested trust mode, shell, auto-approve, mode and
+  workspace as labeled lines.
+- "Approve for session" on a shell command now covers only a simple, known
+  command family (`git status` still covers `git status -s`). Compound,
+  wrapper, interpreter, unrecognised and option-configured commands are
+  granted as the exact command, and interact/wait calls on a running shell as
+  the exact call.
+- Workflow plan approval flags shell, network and file-write capability for
+  the `Bash`, `Web` and `File` tool families regardless of letter case.
+
 ### Removed
 
 - Flags, settings and tool parameters that did nothing are gone

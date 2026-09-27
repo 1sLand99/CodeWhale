@@ -581,21 +581,34 @@ fn collect_children(
             .and_then(Value::as_array)
         {
             for tool in tools {
-                let name = tool.as_str().unwrap_or_default();
-                if name.contains("shell") || name.contains("exec") {
+                // Tool names are matched case-insensitively: the model-facing
+                // families are spelled `Bash`, `Web`, `File` and `Run`, and a
+                // plan naming them must raise the same flags as the
+                // lower-case per-action names.
+                let name = tool.as_str().unwrap_or_default().to_ascii_lowercase();
+                let name = name.as_str();
+                if name.contains("shell")
+                    || name.contains("exec")
+                    || name.contains("bash")
+                    || name == "run"
+                {
                     *shell = true;
                 }
                 if name.contains("secret") || name.contains("credential") || name == "read_env" {
                     *secrets = true;
                 }
-                if matches!(name, "web_search" | "web_run" | "fetch_url")
-                    || name.starts_with("mcp_")
+                if matches!(
+                    name,
+                    "web" | "web_search" | "web_run" | "web.run" | "fetch_url" | "rlm"
+                ) || name.starts_with("mcp_")
                 {
                     *network = true;
                 }
+                // `File` carries write/edit/patch actions as well as reads;
+                // an allow-list entry for the family grants all of them.
                 if matches!(
                     name,
-                    "write" | "edit" | "write_file" | "edit_file" | "apply_patch"
+                    "file" | "write" | "edit" | "write_file" | "edit_file" | "apply_patch"
                 ) {
                     *writes = true;
                 }
@@ -689,6 +702,7 @@ fn script_suggests_writes(script: &str) -> bool {
         || lower.contains("write_file")
         || lower.contains("\"write\"")
         || lower.contains("\"edit\"")
+        || lower.contains("\"file\"")
         || lower.contains("apply_patch")
 }
 
@@ -703,7 +717,10 @@ fn script_suggests_shell(script: &str) -> bool {
 
 fn script_suggests_network(script: &str) -> bool {
     let lower = script.to_ascii_lowercase();
-    lower.contains("allow_network") || lower.contains("web_search") || lower.contains("fetch_url")
+    lower.contains("allow_network")
+        || lower.contains("web_search")
+        || lower.contains("fetch_url")
+        || lower.contains("\"web\"")
 }
 
 fn count_script_tasks(script: &str) -> usize {
@@ -839,6 +856,29 @@ mod tests {
         assert_eq!(receipt.goal, "land the fix");
         assert!(receipt.elevated);
         assert!(receipt.writes);
+    }
+
+    #[test]
+    fn capability_flags_match_tool_family_names_case_insensitively() {
+        let input = json!({
+            "action": "start",
+            "plan": {
+                "goal": "scout",
+                "children": [{
+                    "prompt": "look",
+                    "type": "explore",
+                    "permissions": { "allowed_tools": ["Bash", "Web", "File"] }
+                }]
+            }
+        });
+        let summary = analyze_workflow_plan_approval(&input);
+        assert!(summary.shell, "{summary:?}");
+        assert!(summary.network, "{summary:?}");
+        assert!(summary.writes, "{summary:?}");
+
+        let script = r#"task({ allowedTools: ["Web", "File"] })"#;
+        assert!(script_suggests_network(script));
+        assert!(script_suggests_writes(script));
     }
 
     #[test]
