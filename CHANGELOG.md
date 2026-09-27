@@ -366,6 +366,41 @@ quieter, and Fleet runs can be checked before they spend anything.
   still at the older $5, $0.50 and $30
   ([#6396](https://github.com/Hmbown/Codewhale/issues/6396)).
 
+### Security
+
+- Durable tasks and scheduled automations created by the agent no longer
+  carry more authority than the session that created them: requested
+  `auto_approve`, `trust_mode` and `allow_shell` are capped at what that
+  session holds, a task's workspace and an automation's directories must be
+  reachable from the session, and a task's turn runs under the posture pinned
+  when it was created instead of re-deriving one from the legacy bit or a
+  legacy mode alias.
+- The approval card for creating a task or creating/updating an automation
+  now lists the requested trust mode, shell, auto-approve, mode and
+  workspace as labeled lines.
+- "Approve for session" on a shell command now covers only a simple, known
+  command family (`git status` still covers `git status -s`). Compound,
+  wrapper, interpreter, unrecognised and option-configured commands are
+  granted as the exact command, and interact/wait calls on a running shell as
+  the exact call.
+- Workflow plan approval flags shell, network and file-write capability for
+  the `Bash`, `Web` and `File` tool families regardless of letter case.
+- An agent session can no longer update, resume or run an automation whose
+  stored `auto_approve`, `trust_mode` or `allow_shell` is more than the
+  session holds, unless the same update lowers those fields.
+- The approval summary every Runtime client receives for task and
+  automation create/update now names the requested trust mode, shell,
+  auto-approve, mode and workspace, from the same fields the TUI card shows.
+- A shell session grant keeps its command family only when every option is a
+  known value-free option such as `--release` or `--porcelain`; other options,
+  in any spelling, grant the exact command. Families whose arguments are what
+  runs or is installed (`go run`, `deno run`, `cargo run`, `make`,
+  `git bisect`, `git submodule`, package installs) grant the exact command.
+- Workflow plan approval recognises tool names in any quote style and with a
+  pattern suffix (`'Web'`, `` `File` ``, `Web(*)`), and flags `rlm`, Git and
+  GitHub, computer and browser control, and task/automation tools with the
+  capabilities they carry.
+
 ### Removed
 
 - Flags, settings and tool parameters that did nothing are gone

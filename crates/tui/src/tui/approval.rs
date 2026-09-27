@@ -29,6 +29,9 @@
 
 #[cfg(test)]
 use crate::config::ApprovalDefaultSelection;
+use crate::tools::approval_summary::{
+    delegated_authority_fields, param_preview, truncate_string_value,
+};
 use crate::tools::canonical_action::canonical_action_alias;
 use codewhale_config::ToolAskRule;
 use codewhale_localization::{Locale, MessageId, tr};
@@ -367,38 +370,6 @@ fn description_is_repo_law_prompt(description: &str) -> bool {
         && description.contains(".codewhale/constitution.json")
 }
 
-fn param_preview(params: &Value, keys: &[&str], max_len: usize) -> Option<String> {
-    let Value::Object(map) = params else {
-        return None;
-    };
-
-    for key in keys {
-        let Some(value) = map.get(*key) else {
-            continue;
-        };
-        match value {
-            Value::String(text) => return Some(truncate_string_value(text, max_len)),
-            Value::Number(number) => return Some(number.to_string()),
-            Value::Bool(flag) => return Some(flag.to_string()),
-            Value::Array(items) if !items.is_empty() => {
-                let preview = items
-                    .iter()
-                    .take(3)
-                    .map(|item| match item {
-                        Value::String(text) => truncate_string_value(text, max_len / 2),
-                        other => truncate_string_value(&other.to_string(), max_len / 2),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Some(truncate_string_value(&preview, max_len));
-            }
-            other => return Some(truncate_string_value(&other.to_string(), max_len)),
-        }
-    }
-
-    None
-}
-
 fn mcp_target_hint(tool_name: &str) -> Option<String> {
     let remainder = tool_name.strip_prefix("mcp_")?;
     if remainder.is_empty() {
@@ -409,7 +380,7 @@ fn mcp_target_hint(tool_name: &str) -> Option<String> {
 }
 
 fn build_impact_summary(tool_name: &str, category: ToolCategory, params: &Value) -> Vec<String> {
-    match category {
+    let mut impacts = match category {
         ToolCategory::Safe => {
             let mut impacts = vec!["Read-only operation.".to_string()];
             if let Some(path) = param_preview(params, &["path", "ref_id", "uri"], 72) {
@@ -481,7 +452,9 @@ fn build_impact_summary(tool_name: &str, category: ToolCategory, params: &Value)
             }
             impacts
         }
-    }
+    };
+    impacts.extend(delegated_authority_impacts(tool_name, params, false));
+    impacts
 }
 
 fn localized_description_zh_hans(category: ToolCategory) -> String {
@@ -504,7 +477,7 @@ fn build_impact_summary_zh_hans(
     params: &Value,
 ) -> Vec<String> {
     let locale = Locale::ZhHans;
-    match category {
+    let mut impacts = match category {
         ToolCategory::Safe => {
             let mut impacts = vec![tr(locale, MessageId::ApprovalImpactSafe).to_string()];
             if let Some(path) = param_preview(params, &["path", "ref_id", "uri"], 72) {
@@ -563,7 +536,19 @@ fn build_impact_summary_zh_hans(
             }
             impacts
         }
-    }
+    };
+    impacts.extend(delegated_authority_impacts(tool_name, params, true));
+    impacts
+}
+
+/// Tools that hand work to a later, unattended run (a durable task or a
+/// scheduled automation) and can ask for authority of their own.
+fn delegated_authority_impacts(tool_name: &str, params: &Value, zh: bool) -> Vec<String> {
+    let separator = if zh { "：" } else { ": " };
+    delegated_authority_fields(tool_name, params, zh)
+        .into_iter()
+        .map(|(label, value)| format!("{label}{separator}{value}"))
+        .collect()
 }
 
 fn build_prominent_details(
@@ -571,7 +556,14 @@ fn build_prominent_details(
     category: ToolCategory,
     params: &Value,
 ) -> Vec<ApprovalDetail> {
-    let mut details = Vec::new();
+    let mut details: Vec<ApprovalDetail> = delegated_authority_fields(tool_name, params, false)
+        .into_iter()
+        .map(|(label, value)| ApprovalDetail {
+            label,
+            value,
+            shell_lines: None,
+        })
+        .collect();
     match category {
         ToolCategory::Shell => {
             if let Some(command) = param_text(params, &["command", "cmd"]) {
@@ -703,14 +695,6 @@ fn truncate_params_value(value: &Value, max_len: usize) -> Value {
             }
         }
     }
-}
-
-fn truncate_string_value(value: &str, max_len: usize) -> String {
-    if value.chars().count() <= max_len {
-        return value.to_string();
-    }
-    let truncated: String = value.chars().take(max_len).collect();
-    format!("{truncated}...")
 }
 
 // ============================================================================

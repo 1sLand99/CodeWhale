@@ -1108,11 +1108,18 @@ where `id` is the capability above. `summary` (also on `approval.required`) is
 a one-line description of the gated call built from the tool name and its
 arguments only, never from model text ("Search the web for 'espresso'",
 "Write notes/espresso.md"); paths inside the workspace are workspace-relative.
-Clients show it first and keep the raw arguments behind it.
+Clients show it first and keep the raw arguments behind it. For task and
+automation create/update, `summary` also names the requested trust mode,
+shell, auto-approve, mode and workspace.
 
 `"remember": true` on an `allow` records a **session grant** for that tool and
-argument class (the approval grouping key: a shell command family, a patch's
-file set, a `fetch_url` host, an MCP tool, a `web.run` action kind — for
+argument class (the approval grouping key: a shell command family for a
+simple, known command such as `git status` whose only options are value-free
+ones like `-s` or `--porcelain` — a compound, wrapper, interpreter or
+unrecognised command, one with any other option, or one whose arguments are
+what runs or is installed (`go run`, `make`, `git bisect`, package installs)
+is granted as its full normalized command, and a
+shell interact or wait call as the exact call — a patch's file set, a `fetch_url` host, an MCP tool, a `web.run` action kind — for
 `open`, the hosts it opened). Computer Use consent and `app_script` calls, and
 any tool without a class, are granted for the exact call only. A grant never
 changes the thread's permission posture. Later matching calls on the thread are

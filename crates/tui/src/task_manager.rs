@@ -698,6 +698,26 @@ impl ExecutionTask {
             ..Default::default()
         }
     }
+
+    /// The turn request for this task. A task that carries a pinned posture
+    /// runs its turn under that posture: the legacy `auto_approve` bit is only
+    /// sent for records that predate the pinned posture, because a per-turn
+    /// `auto_approve` without a posture re-derives the permission from the
+    /// bit alone and would override what the thread was created with.
+    pub(crate) fn turn_request(&self) -> StartTurnRequest {
+        let pinned = self.permission_posture.is_some();
+        StartTurnRequest {
+            prompt: self.prompt.clone(),
+            input_summary: Some(summarize_text(&self.prompt, TIMELINE_SUMMARY_LIMIT)),
+            model: Some(self.model.clone()),
+            mode: Some(self.mode_label.clone()),
+            permission_posture: self.permission_posture.clone(),
+            allow_shell: Some(self.allow_shell),
+            trust_mode: Some(self.trust_mode),
+            auto_approve: (!pinned).then_some(self.auto_approve),
+            ..Default::default()
+        }
+    }
 }
 
 /// Event stream produced by an executor while a task runs.
@@ -828,19 +848,7 @@ impl TaskExecutor for EngineTaskExecutor {
         }
         let turn = match self
             .runtime_threads
-            .start_turn(
-                &thread.id,
-                StartTurnRequest {
-                    prompt: task.prompt.clone(),
-                    input_summary: Some(summarize_text(&task.prompt, TIMELINE_SUMMARY_LIMIT)),
-                    model: Some(task.model.clone()),
-                    mode: Some(task.mode_label.clone()),
-                    allow_shell: Some(task.allow_shell),
-                    trust_mode: Some(task.trust_mode),
-                    auto_approve: Some(task.auto_approve),
-                    ..Default::default()
-                },
-            )
+            .start_turn(&thread.id, task.turn_request())
             .await
         {
             Ok(turn) => turn,
