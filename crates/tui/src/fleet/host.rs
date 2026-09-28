@@ -2159,7 +2159,8 @@ mod tests {
 
     #[test]
     fn runtime_surface_review_documented_ssh_host_loads() {
-        let docs = include_str!("../../../../docs/zh_hans/FLEET.md");
+        // Windows checkouts may carry CRLF line endings.
+        let docs = include_str!("../../../../docs/zh_hans/FLEET.md").replace("\r\n", "\n");
         let example = docs
             .split_once("### Worker 认证")
             .expect("worker authentication guidance")
