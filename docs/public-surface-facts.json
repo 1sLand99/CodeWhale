@@ -227,24 +227,12 @@
       "web/lib/release-credits.ts"
     ],
     "requiredCandidateCredits": [
-      "@aboimpinto",
-      "@7jrxt42BxFZo4iAnN4CX",
-      "@BX166",
-      "@Lstarsky0",
-      "@Lujc0523",
-      "@Statter",
-      "@sequico",
-      "@bevis-wong",
-      "@AdityaVG13",
       "@gaord",
-      "@zhuowp",
-      "@h3c-hexin",
-      "@asto18089",
-      "@yrk111222",
-      "@xiechimon",
-      "@VincentCorleone",
-      "@Serendo",
-      "@yetuge"
+      "@Lstarsky0",
+      "@aboimpinto",
+      "@dajiaohuang",
+      "@Water-Run",
+      "@BX166"
     ]
   },
   "screenshot": {
