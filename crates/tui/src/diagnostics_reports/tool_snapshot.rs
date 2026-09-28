@@ -212,8 +212,6 @@ const fn visibility_label(value: DebugToolVisibility) -> &'static str {
         DebugToolVisibility::Active => "active",
         DebugToolVisibility::Deferred => "deferred",
         DebugToolVisibility::InRequest => "in-request",
-        DebugToolVisibility::RegistryOnly => "registry-only",
-        DebugToolVisibility::Hidden => "hidden",
     }
 }
 

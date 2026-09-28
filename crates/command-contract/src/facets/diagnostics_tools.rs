@@ -48,8 +48,6 @@ pub enum DebugToolVisibility {
     Active,
     Deferred,
     InRequest,
-    RegistryOnly,
-    Hidden,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

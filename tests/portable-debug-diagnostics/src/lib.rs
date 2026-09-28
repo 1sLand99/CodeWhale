@@ -13,5 +13,8 @@ pub mod tui {
 
 pub mod commands;
 
-#[path = "../../../crates/tui/src/elapsed.rs"]
+#[path = "../../../crates/runtime/src/elapsed.rs"]
 pub mod elapsed;
+
+#[path = "../../../crates/tui/src/diagnostics_reports/mod.rs"]
+pub mod diagnostics_reports;

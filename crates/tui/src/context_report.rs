@@ -10,6 +10,9 @@
 //! guard, never as the headline. Per-source entries keep the conservative
 //! per-text heuristic.
 
+mod portable_projection;
+pub(crate) use portable_projection::source_map as project_source_map;
+
 use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
@@ -862,22 +865,16 @@ fn pressure_label(percent: Option<f64>) -> &'static str {
 
 #[cfg(test)]
 pub fn format_context_report(report: &PromptSourceMap) -> String {
-    crate::commands::portable_reports::format_context_report(
-        &crate::commands::project_debug_context_source_map(report.clone()),
-    )
+    crate::diagnostics_reports::format_context_report(&project_source_map(report.clone()))
 }
 
 #[cfg(test)]
 pub fn format_context_summary(report: &PromptSourceMap) -> String {
-    crate::commands::portable_reports::format_context_summary(
-        &crate::commands::project_debug_context_source_map(report.clone()),
-    )
+    crate::diagnostics_reports::format_context_summary(&project_source_map(report.clone()))
 }
 
 pub fn context_report_json(report: &PromptSourceMap) -> String {
-    crate::commands::portable_reports::context_report_json(
-        &crate::commands::project_debug_context_source_map(report.clone()),
-    )
+    crate::diagnostics_reports::context_report_json(&project_source_map(report.clone()))
 }
 
 #[cfg(test)]

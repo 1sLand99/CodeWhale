@@ -2758,7 +2758,7 @@ pub fn format_cost_amount_precise(cost: f64, currency: CostCurrency) -> String {
         CostCurrency::Usd => codewhale_command_contract::types::CommandCurrency::Usd,
         CostCurrency::Cny => codewhale_command_contract::types::CommandCurrency::Cny,
     };
-    crate::commands::portable_reports::format_cost_amount_precise(cost, selected)
+    crate::diagnostics_reports::format_cost_amount_precise(cost, selected)
 }
 
 /// Format a dual-currency estimate using the selected display currency.

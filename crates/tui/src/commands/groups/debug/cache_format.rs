@@ -1,7 +1,7 @@
 //! Pure cache inspection, history and status formatting for `/cache`.
 //! Route resolution, pricing classes and elapsed observation stay host-owned.
 
-use crate::commands::portable_reports::format_cost_amount_precise;
+use crate::diagnostics_reports::format_cost_amount_precise;
 use codewhale_command_contract::facets::{
     CommandPresentationContext, DebugCacheTelemetry, DebugCacheTurn, DebugCostProjection,
     DebugPromptInspection, DebugWarmupKey,
@@ -623,6 +623,10 @@ pub(crate) fn format_cache_history(
         );
     }
     footer.push_str(&presentation.translate("cmd_cache_advice", &[])?);
+    if let Some(line) = session_cache_rates_line(telemetry, presentation)? {
+        footer.push_str("\n\n");
+        footer.push_str(&line);
+    }
 
     Ok(format!("{header}{body}{footer}"))
 }
@@ -655,4 +659,23 @@ fn truncate_route_cell(route: &str, max_chars: usize) -> String {
     let mut out: String = route.chars().take(max_chars - 3).collect();
     out.push_str("...");
     out
+}
+
+/// Preserve the upstream session-rate labels without exposing host state.
+pub(super) fn session_cache_rates_line(
+    telemetry: &DebugCacheTelemetry,
+    presentation: &dyn CommandPresentationContext,
+) -> Result<Option<String>, String> {
+    let rates = telemetry.session_cache_rates;
+    if rates.agents.is_none() {
+        return Ok(None);
+    }
+    let labelled = rates.labelled(
+        &presentation.translate("cmd_cache_rate_parent", &[])?,
+        &presentation.translate("cmd_cache_rate_agents", &[])?,
+        &presentation.translate("cmd_cache_rate_combined", &[])?,
+    );
+    labelled
+        .map(|rates| presentation.translate("cmd_cache_session_rates", &[("rates", &rates)]))
+        .transpose()
 }

@@ -119,8 +119,9 @@ class CiWiringTests(unittest.TestCase):
         next_step = ci.index("- name:", start + 1)
         block = ci[start:next_step]
         self.assertIn(
-            "sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-tui "
-            "--lib --locked -- auto_review authority sandbox", block
+            "sh scripts/with-hermetic-test-home.sh cargo nextest run "
+            "-p codewhale-tui -p codewhale-runtime --lib --locked --no-tests=fail "
+            "-E 'test(auto_review) | test(authority) | test(sandbox)'", block
         )
         self.assertIn(
             "sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-execpolicy --locked",

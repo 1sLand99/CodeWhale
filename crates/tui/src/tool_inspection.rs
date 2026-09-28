@@ -22,6 +22,9 @@
 //! What stays unknowable stays unknown regardless: nothing here observes the
 //! provider adapter's wire payload, so it is always reported as unavailable.
 
+mod portable_projection;
+pub(crate) use portable_projection::tool_snapshot as project_snapshot;
+
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
@@ -169,19 +172,6 @@ pub enum ToolProvenance {
     Unknown,
 }
 
-impl ToolProvenance {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Builtin => "builtin",
-            Self::Plugin => "plugin",
-            Self::Mcp => "mcp",
-            Self::Synthetic => "synthetic",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
 /// A tool's state relative to the request that was prepared for this step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -195,15 +185,6 @@ pub enum ToolVisibility {
 }
 
 impl ToolVisibility {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Deferred => "deferred",
-            Self::InRequest => "in-request",
-        }
-    }
-
     /// Whether this state means the tool's bytes are carried by the prepared
     /// request. The only honest source of this answer is the request itself.
     #[must_use]
@@ -464,15 +445,11 @@ impl ToolInspectionSnapshot {
 
     #[must_use]
     pub fn render_text(&self) -> String {
-        crate::commands::portable_reports::render_tool_snapshot_text(
-            &crate::commands::project_debug_tool_snapshot(self),
-        )
+        crate::diagnostics_reports::render_tool_snapshot_text(&project_snapshot(self))
     }
 
     pub fn render_json(&self) -> Result<String, serde_json::Error> {
-        crate::commands::portable_reports::render_tool_snapshot_json(
-            &crate::commands::project_debug_tool_snapshot(self),
-        )
+        crate::diagnostics_reports::render_tool_snapshot_json(&project_snapshot(self))
     }
 }
 

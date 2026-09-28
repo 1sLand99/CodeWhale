@@ -200,6 +200,7 @@ impl CommandDebugDiagnosticsContext for DebugDiagnostics {
     fn cache_telemetry(&self) -> DebugCacheTelemetry {
         DebugCacheTelemetry {
             model: "example".into(),
+            session_cache_rates: DebugCacheRates::default(),
             history: vec![],
             history_capacity: 50,
             prefix_stability_pct: None,

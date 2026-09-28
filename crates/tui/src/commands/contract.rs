@@ -38,9 +38,6 @@ pub(crate) use debug_diagnostics::CostComponents as DebugCostComponents;
 use debug_diagnostics::DebugDiagnosticsAdapter;
 #[cfg(test)]
 pub(crate) use debug_diagnostics::warmup_key as project_debug_warmup_key;
-pub(crate) use debug_diagnostics::{
-    source_map as project_debug_context_source_map, tool_snapshot as project_debug_tool_snapshot,
-};
 
 use codewhale_command_contract::facets::{
     CommandApprovalState, CommandCostContext, CommandMediaContext, CommandMemoryContext,

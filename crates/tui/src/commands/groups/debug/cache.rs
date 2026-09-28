@@ -8,6 +8,7 @@ use super::CommandResult;
 use super::cache_format::{
     format_cache_history, format_cache_stats, format_cache_zones, format_first_divergence,
     format_static_prefix_status, format_verbose_diff, format_warmup_status,
+    session_cache_rates_line,
 };
 use crate::tui::app::AppAction;
 use codewhale_command_contract::facets::{
@@ -97,7 +98,15 @@ fn cache_portable(
     };
     let telemetry = diagnostics.cache_telemetry();
     if telemetry.history.is_empty() {
-        return match presentation.translate("cmd_cache_no_data", &[]) {
+        let message = (|| {
+            let mut text = presentation.translate("cmd_cache_no_data", &[])?;
+            if let Some(line) = session_cache_rates_line(&telemetry, presentation)? {
+                text.push_str("\n\n");
+                text.push_str(&line);
+            }
+            Ok::<_, String>(text)
+        })();
+        return match message {
             Ok(text) => CommandResult::message(text),
             Err(error) => CommandResult::error(error),
         };

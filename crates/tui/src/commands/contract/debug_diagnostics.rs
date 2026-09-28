@@ -16,7 +16,9 @@ use crate::client::{
     CacheWarmupKey, PromptInspection, PromptLayerStability, inspect_prompt_for_request,
 };
 use crate::config::provider_has_balance_api;
+use crate::context_report::project_source_map as source_map;
 use crate::pricing::{CostCurrency, token_usage_for_pricing};
+use crate::tool_inspection::project_snapshot as tool_snapshot;
 use crate::tui::app::App;
 
 pub(super) struct DebugDiagnosticsAdapter<'a> {
@@ -140,6 +142,7 @@ impl CommandDebugDiagnosticsContext for DebugDiagnosticsAdapter<'_> {
             .collect();
         DebugCacheTelemetry {
             model: app.model.clone(),
+            session_cache_rates: crate::tui::session_metrics::cache_rates(&app),
             history,
             history_capacity: App::TURN_CACHE_HISTORY_CAP,
             prefix_stability_pct: app.prefix_stability_pct,
@@ -415,81 +418,6 @@ pub(crate) fn prompt_context(context: crate::context_report::PromptContext) -> D
     }
 }
 
-pub(crate) fn source_map(report: crate::context_report::PromptSourceMap) -> DebugPromptSourceMap {
-    use crate::context_budget::PressureLevel;
-    use crate::context_report::{ActivationReason as A, CountingConfidence as C, SourceKind as S};
-    use crate::route_runtime::ContextWindowSource;
-    let pressure_label = report
-        .budget_used_percent
-        .map(|percent| PressureLevel::from_usage_percent(percent).label())
-        .unwrap_or("unknown")
-        .to_string();
-    let source_label = report
-        .context_window_source
-        .as_deref()
-        .unwrap_or_else(|| ContextWindowSource::Fallback.label());
-    let context_window_verified =
-        ContextWindowSource::from_label(source_label).is_some_and(ContextWindowSource::is_verified);
-    let kind = |kind| match kind {
-        S::Constitution => DebugSourceKind::Constitution,
-        S::UserConstitution => DebugSourceKind::UserConstitution,
-        S::RepoConstitution => DebugSourceKind::RepoConstitution,
-        S::ProjectContext => DebugSourceKind::ProjectContext,
-        S::ProjectContextWarning => DebugSourceKind::ProjectContextWarning,
-        S::ProjectContextPack => DebugSourceKind::ProjectContextPack,
-        S::SkillsBlock => DebugSourceKind::SkillsBlock,
-        S::ContextManagement => DebugSourceKind::ContextManagement,
-        S::CompactionRelayTemplate => DebugSourceKind::CompactionRelayTemplate,
-        S::RuntimePolicy => DebugSourceKind::RuntimePolicy,
-        S::AuthorityRecap => DebugSourceKind::AuthorityRecap,
-        S::EnvironmentBlock => DebugSourceKind::EnvironmentBlock,
-        S::UserMemory => DebugSourceKind::UserMemory,
-        S::SessionGoal => DebugSourceKind::SessionGoal,
-        S::HandoffRelay => DebugSourceKind::HandoffRelay,
-        S::ToolSchemas => DebugSourceKind::ToolSchemas,
-        S::UserRequest => DebugSourceKind::UserRequest,
-        S::ConversationHistory => DebugSourceKind::ConversationHistory,
-        S::ToolResult => DebugSourceKind::ToolResult,
-        S::ModelProviderFact => DebugSourceKind::ModelProviderFact,
-    };
-    DebugPromptSourceMap {
-        entries: report
-            .entries
-            .into_iter()
-            .map(|entry| DebugSourceEntry {
-                source_kind: kind(entry.source_kind),
-                label: entry.label,
-                source_path: entry.source_path,
-                activation_reason: match entry.activation_reason {
-                    A::AlwaysOn => DebugActivationReason::AlwaysOn,
-                    A::FilePresent => DebugActivationReason::FilePresent,
-                    A::ConfigEnabled => DebugActivationReason::ConfigEnabled,
-                    A::RuntimeState => DebugActivationReason::RuntimeState,
-                    A::PerRequest => DebugActivationReason::PerRequest,
-                    A::Omitted => DebugActivationReason::Omitted,
-                },
-                estimated_tokens: entry.estimated_tokens,
-                counting_confidence: match entry.counting_confidence {
-                    C::High => DebugCountingConfidence::High,
-                    C::Approximate => DebugCountingConfidence::Approximate,
-                },
-                authority_tier: entry.authority_tier,
-                truncation_reason: entry.truncation_reason,
-            })
-            .collect(),
-        total_estimated_tokens: report.total_estimated_tokens,
-        active_context_estimated_tokens: report.active_context_estimated_tokens,
-        overflow_guard_estimated_tokens: report.overflow_guard_estimated_tokens,
-        context_window_tokens: report.context_window_tokens,
-        context_window_source: report.context_window_source,
-        budget_used_percent: report.budget_used_percent,
-        pressure_label,
-        context_window_verified,
-        generated_at: report.generated_at,
-        note: report.note,
-    }
-}
-
 fn prompt_inspection(inspection: PromptInspection) -> DebugPromptInspection {
     DebugPromptInspection {
         base_static_prefix_hash: inspection.base_static_prefix_hash,
@@ -572,159 +500,5 @@ pub(crate) fn warmup_key(key: CacheWarmupKey) -> DebugWarmupKey {
         tool_catalog_hash: key.tool_catalog_hash,
         project_pack_hash: key.project_pack_hash,
         skills_hash: key.skills_hash,
-    }
-}
-
-fn bounded(value: &crate::tool_inspection::BoundedString) -> DebugBoundedString {
-    DebugBoundedString {
-        value: value.value.clone(),
-        truncated: value.truncated,
-    }
-}
-
-fn evidence<T, U>(
-    value: &crate::tool_inspection::Evidence<T>,
-    convert: impl Fn(&T) -> U,
-) -> DebugEvidence<U> {
-    match value {
-        crate::tool_inspection::Evidence::Known { value } => DebugEvidence::Known {
-            value: convert(value),
-        },
-        crate::tool_inspection::Evidence::Unknown { reason } => DebugEvidence::Unknown {
-            reason: reason.clone(),
-        },
-    }
-}
-
-fn bounded_list(value: &crate::tool_inspection::BoundedList) -> DebugBoundedList {
-    DebugBoundedList {
-        count: value.count,
-        rendered: value.rendered.iter().map(bounded).collect(),
-        omitted: value.omitted,
-    }
-}
-
-pub(crate) fn tool_snapshot(
-    value: &crate::tool_inspection::ToolInspectionSnapshot,
-) -> DebugToolSnapshot {
-    use crate::tool_inspection::{
-        ProviderAvailability as P, ToolProvenance as R, ToolVisibility as V, TurnStopReason as S,
-    };
-    DebugToolSnapshot {
-        schema_version: value.schema_version,
-        capture_source: value.capture_source.to_string(),
-        delivery_status: value.delivery_status.to_string(),
-        turn_id: bounded(&value.turn_id),
-        step: value.step,
-        terminal: value
-            .terminal
-            .as_ref()
-            .map(|terminal| DebugTurnStopDiagnostics {
-                status: terminal.status.map(|status| match status {
-                    crate::core::events::TurnOutcomeStatus::Completed => {
-                        DebugTurnOutcomeStatus::Completed
-                    }
-                    crate::core::events::TurnOutcomeStatus::Interrupted => {
-                        DebugTurnOutcomeStatus::Interrupted
-                    }
-                    crate::core::events::TurnOutcomeStatus::Failed => {
-                        DebugTurnOutcomeStatus::Failed
-                    }
-                }),
-                reason: terminal.reason.map(|reason| match reason {
-                    S::ProviderNoToolCall => DebugTurnStopReason::ProviderNoToolCall,
-                    S::ProviderToolCallMissing => DebugTurnStopReason::ProviderToolCallMissing,
-                    S::StepBudgetExhausted => DebugTurnStopReason::StepBudgetExhausted,
-                    S::NoProgress => DebugTurnStopReason::NoProgress,
-                    S::Interrupted => DebugTurnStopReason::Interrupted,
-                    S::Failed => DebugTurnStopReason::Failed,
-                }),
-                effective_max_steps: terminal.effective_max_steps,
-                step_budget_source: terminal.step_budget_source.to_string(),
-                model_step_index: terminal.model_step_index,
-                model_requests_started: terminal.model_requests_started,
-                transparent_stream_retries: terminal.transparent_stream_retries,
-                stream_resumes: terminal.stream_resumes,
-                reasoning_only_reprompts: terminal.reasoning_only_reprompts,
-                empty_stop_retries: terminal.empty_stop_retries,
-                soft_landing_sent: terminal.soft_landing_sent,
-                final_report_requested: terminal.final_report_requested,
-                permission_strategy_switches: terminal.permission_strategy_switches,
-                permission_denial_rounds_without_progress: terminal
-                    .permission_denial_rounds_without_progress,
-                last_provider_finish_reason: terminal
-                    .last_provider_finish_reason
-                    .as_ref()
-                    .map(bounded),
-                last_response_tool_calls: terminal.last_response_tool_calls,
-                last_response_tool_calls_suppressed: terminal.last_response_tool_calls_suppressed,
-                last_reported_input_tokens: terminal.last_reported_input_tokens,
-                route_context_window_tokens: terminal.route_context_window_tokens,
-                last_prepared_output_limit_tokens: terminal.last_prepared_output_limit_tokens,
-                automatic_compaction_attempts: terminal.automatic_compaction_attempts,
-                emergency_compaction_attempts: terminal.emergency_compaction_attempts,
-            }),
-        tools_field_present: value.tools_field_present,
-        tool_count: value.tool_count,
-        rendered_tool_count: value.rendered_tool_count,
-        omitted_tool_count: value.omitted_tool_count,
-        payload_json_bytes: value.payload_json_bytes,
-        payload_measurement_status: value.payload_measurement_status.clone(),
-        active_tool_catalog_sha256: value.active_tool_catalog_sha256.clone(),
-        unavailable_for_this_request: value
-            .unavailable_for_this_request
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect(),
-        provider: match &value.provider {
-            P::Unknown => DebugProviderAvailability::Unknown,
-            P::Available { provider, model } => DebugProviderAvailability::Available {
-                provider: provider.clone(),
-                model: model.clone(),
-            },
-            P::Unavailable { reason } => DebugProviderAvailability::Unavailable {
-                reason: reason.clone(),
-            },
-        },
-        registry_facts_present: value.registry_facts_present,
-        registry_tool_count: evidence(&value.registry_tool_count, |count| *count),
-        registry_only_tools: evidence(&value.registry_only_tools, bounded_list),
-        tools: value
-            .tools
-            .iter()
-            .map(|tool| DebugToolProjection {
-                ordinal: tool.ordinal,
-                name: bounded(&tool.name),
-                tool_type: evidence(&tool.tool_type, bounded),
-                description: bounded(&tool.description),
-                input_schema_json: bounded(&tool.input_schema_json),
-                allowed_callers: evidence(&tool.allowed_callers, bounded_list),
-                defer_loading: evidence(&tool.defer_loading, |flag| *flag),
-                input_examples: evidence(&tool.input_examples, |count| DebugCountOnly {
-                    count: count.count,
-                    values: count.values.to_string(),
-                }),
-                strict: evidence(&tool.strict, |flag| *flag),
-                cache_control_type: evidence(&tool.cache_control_type, bounded),
-                provenance: evidence(&tool.provenance, |origin| match origin {
-                    R::Builtin => DebugToolProvenance::Builtin,
-                    R::Plugin => DebugToolProvenance::Plugin,
-                    R::Mcp => DebugToolProvenance::Mcp,
-                    R::Synthetic => DebugToolProvenance::Synthetic,
-                    R::Unknown => DebugToolProvenance::Unknown,
-                }),
-                mcp_server: evidence(&tool.mcp_server, bounded),
-                capabilities: evidence(&tool.capabilities, bounded_list),
-                approval: evidence(&tool.approval, bounded),
-                model_visible: evidence(&tool.model_visible, |flag| *flag),
-                visibility: match tool.visibility {
-                    V::Active => DebugToolVisibility::Active,
-                    V::Deferred => DebugToolVisibility::Deferred,
-                    V::InRequest => DebugToolVisibility::InRequest,
-                    V::RegistryOnly => DebugToolVisibility::RegistryOnly,
-                    V::Hidden => DebugToolVisibility::Hidden,
-                },
-            })
-            .collect(),
     }
 }

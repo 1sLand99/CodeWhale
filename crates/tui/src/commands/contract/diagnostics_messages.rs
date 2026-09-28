@@ -34,6 +34,10 @@ pub(super) fn resolve(key: &str) -> Option<MessageId> {
         "cmd_cache_unpriced_note" => MessageId::CmdCacheUnpricedNote,
         "cmd_cache_advice" => MessageId::CmdCacheAdvice,
         "cmd_cache_footnote" => MessageId::CmdCacheFootnote,
+        "cmd_cache_rate_parent" => MessageId::CmdCacheRateParent,
+        "cmd_cache_rate_agents" => MessageId::CmdCacheRateAgents,
+        "cmd_cache_rate_combined" => MessageId::CmdCacheRateCombined,
+        "cmd_cache_session_rates" => MessageId::CmdCacheSessionRates,
         _ => return None,
     })
 }

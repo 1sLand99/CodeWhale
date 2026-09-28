@@ -275,7 +275,7 @@ fn diagnostics_registrations_expose_exact_facets_and_preview_is_pure() {
             }
         }
     }
-    for name in ["change", "edit", "diff", "undo", "retry"] {
+    for name in ["receipts", "change", "edit", "diff", "undo", "retry"] {
         assert!(
             crate::commands::registry()
                 .get(name)
@@ -306,6 +306,7 @@ fn diagnostics_registry_position_matches_baseline() {
     let order = [
         "tokens",
         "cost",
+        "receipts",
         "balance",
         "cache",
         "preview-request",

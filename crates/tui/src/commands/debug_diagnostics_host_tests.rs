@@ -1829,3 +1829,66 @@ mod preview_host_tests {
         );
     }
 }
+
+/// FEAT-029 must retain main's newer per-scope cache display when moving
+/// formatting behind the facet. Parent writes (including in-flight writes)
+/// and agent writes belong in their own denominators, never as invented hits.
+#[test]
+fn cache_report_preserves_upstream_scoped_session_rates() {
+    for with_history in [false, true] {
+        let mut harness = super::debug_diagnostics_test_support::DiagnosticsHarness::new();
+        let app = &mut harness.app;
+        app.ui_locale = codewhale_localization::Locale::En;
+        if with_history {
+            app.push_turn_cache_record(TurnCacheRecord {
+                provider: None,
+                provider_identity: None,
+                model: None,
+                auto_model: false,
+                input_tokens: 1000,
+                output_tokens: 10,
+                cache_hit_tokens: Some(800),
+                cache_miss_tokens: Some(200),
+                reasoning_replay_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+                cost_audit: None,
+                recorded_at: Instant::now(),
+            });
+        }
+        app.session.total_cache_hit_tokens = 800;
+        app.session.total_cache_miss_tokens = 200;
+        let parent_only = cache(app, None).message.expect("cache report");
+        assert!(
+            !parent_only.contains("Session cache hit rate:"),
+            "{parent_only}"
+        );
+
+        app.session.subagent_cache_hit_tokens = Some(600);
+        app.session.subagent_cache_miss_tokens = Some(0);
+        app.session.subagent_cache_write_tokens = Some(400);
+        let scopes = cache(app, None).message.expect("cache report");
+        assert!(
+            scopes.ends_with("\n\nSession cache hit rate: parent 80% · agents 60% · combined 70%"),
+            "{scopes}"
+        );
+
+        app.session.total_cache_write_tokens = 200;
+        app.session.pending_turn_cache_write_tokens = 400;
+        let writes = cache(app, None).message.expect("cache report");
+        assert!(
+            writes.ends_with("\n\nSession cache hit rate: parent 50% · agents 60% · combined 54%"),
+            "{writes}"
+        );
+
+        app.session.reset_token_breakdown();
+        app.session.subagent_cache_hit_tokens = Some(0);
+        app.session.subagent_cache_miss_tokens = Some(0);
+        app.session.subagent_cache_write_tokens = Some(400);
+        let no_parent = cache(app, None).message.expect("cache report");
+        assert!(
+            no_parent.ends_with("\n\nSession cache hit rate: agents 0% · combined 0%"),
+            "{no_parent}"
+        );
+    }
+}

@@ -310,11 +310,49 @@ pub struct DebugCacheTurn {
     pub age_seconds: u64,
 }
 
+/// Prompt-cache hit rates, each labelled by whose requests it covers (#6565).
+///
+/// `parent` is this conversation's own requests: the footer `cache N%` and it
+/// never change meaning. `agents` covers sub-agent and other background
+/// requests. `combined` weights both by their tokens. Each is `None` when its
+/// requests reported no cache telemetry; no report is never 0%.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DebugCacheRates {
+    pub parent: Option<u8>,
+    pub agents: Option<u8>,
+    pub combined: Option<u8>,
+}
+
+impl DebugCacheRates {
+    /// `parent 82% · agents 64% · combined 75%` with the given words, or just
+    /// `82%` when only the parent reported. `None` when nothing did.
+    #[must_use]
+    pub fn labelled(&self, parent: &str, agents: &str, combined: &str) -> Option<String> {
+        match (self.parent, self.agents) {
+            (Some(pct), None) => Some(format!("{pct}%")),
+            (None, None) => None,
+            _ => Some(
+                [
+                    (parent, self.parent),
+                    (agents, self.agents),
+                    (combined, self.combined),
+                ]
+                .into_iter()
+                .filter_map(|(word, pct)| pct.map(|pct| format!("{word} {pct}%")))
+                .collect::<Vec<_>>()
+                .join(" · "),
+            ),
+        }
+    }
+}
+
 /// Shared source for `/cache [count|stats|zones]` branches. One host read
 /// preserves ring order, optional telemetry and prefix stability evidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DebugCacheTelemetry {
     pub model: String,
+    /// Parent/agent/combined percentages computed once by the host.
+    pub session_cache_rates: DebugCacheRates,
     pub history: Vec<DebugCacheTurn>,
     pub history_capacity: usize,
     pub prefix_stability_pct: Option<u32>,

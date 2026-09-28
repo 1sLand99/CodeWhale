@@ -1,5 +1,5 @@
 use crate::commands::CommandResult;
-use crate::commands::portable_reports::{render_tool_snapshot_json, render_tool_snapshot_text};
+use crate::diagnostics_reports::{render_tool_snapshot_json, render_tool_snapshot_text};
 use crate::tui::app::AppAction;
 use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
 use codewhale_command_contract::metadata::{

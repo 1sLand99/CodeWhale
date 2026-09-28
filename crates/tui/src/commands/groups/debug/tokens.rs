@@ -12,7 +12,7 @@ use codewhale_command_contract::metadata::{
 };
 
 use super::CommandResult;
-use crate::commands::portable_reports as reports;
+use crate::diagnostics_reports as reports;
 use crate::tui::app::AppAction;
 
 pub(in crate::commands) struct TokensCmd;
