@@ -781,6 +781,17 @@ pub async fn run_tui(
     );
     crate::startup_trace::mark("app_constructed");
     sync_config_provider_from_app(config, &app);
+    if let Err(error) = crate::tui::setup::record_configured_route(&app).await {
+        app.push_status_toast(
+            format!(
+                "{} · {}: {error}",
+                app.tr(MessageId::SetupStepProviderModelTitle),
+                app.tr(MessageId::SetupStatusFailed),
+            ),
+            StatusToastLevel::Error,
+            Some(App::STICKY_ERROR_TTL_MS),
+        );
+    }
     surface_prompt_override_notices(&mut app);
 
     if options.resume_session_id.is_none() && !app.launch.visible {
@@ -1036,9 +1047,9 @@ pub async fn run_tui(
     }
 
     // A launch without a usable key opens the picker immediately (#6566).
-    // A returning user's picker focuses the saved route so recovery cannot
-    // silently replace it; a new user has no saved route, so the picker opens
-    // on the provider list rather than on the built-in default's missing key.
+    // A configured user's picker focuses the saved route so recovery cannot
+    // silently replace it; an unconfigured user sees the provider list rather
+    // than the built-in default's missing key.
     if app.onboarding == OnboardingState::Provider && app.onboarding_missing_key_recovery {
         let recover_configured_route = app.onboarding_recovers_configured_route();
         open_onboarding_provider_picker(&mut app, config, &engine_handle, recover_configured_route)

@@ -5628,14 +5628,16 @@ async fn run_doctor(
 /// is the setup lane's own verdict; doctor never probes credential values to
 /// decide it.
 fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
-    // NeedsAction means a route is named but no credential is confirmed for
-    // it, which is still "no provider set up" from where the user sits.
+    // NeedsAction means a named route needs repair (missing credentials or a
+    // failed check). Configured routes can be used without a prior probe.
     // `first_run_ready` accepts NeedsAction (a failed key still reaches the
     // wizard's ready screen), so check the provider first: finished setup
-    // with an unconfirmed key is not "Ready".
-    let provider_verified = state.status(codewhale_config::SetupStep::ProviderModel)
-        == codewhale_config::StepStatus::Verified;
-    if !provider_verified {
+    // with a route needing repair is not "Ready".
+    let provider_configured = matches!(
+        state.status(codewhale_config::SetupStep::ProviderModel),
+        codewhale_config::StepStatus::Configured | codewhale_config::StepStatus::Verified
+    );
+    if !provider_configured {
         "Not ready: no model provider set up → run /provider in Codewhale, or `codewhale setup`."
     } else if state.first_run_ready() {
         "Ready: setup is complete."
@@ -7179,6 +7181,7 @@ fn setup_status_id(status: codewhale_config::StepStatus) -> &'static str {
         codewhale_config::StepStatus::Optional => "optional",
         codewhale_config::StepStatus::Deferred => "deferred",
         codewhale_config::StepStatus::InProgress => "in_progress",
+        codewhale_config::StepStatus::Configured => "configured",
         codewhale_config::StepStatus::Verified => "verified",
         codewhale_config::StepStatus::NeedsAction => "needs_action",
         codewhale_config::StepStatus::Failed => "failed",

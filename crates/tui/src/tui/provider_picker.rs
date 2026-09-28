@@ -7861,6 +7861,150 @@ mod tests {
         );
     }
 
+    fn with_first_run_config(document: &str, check: impl FnOnce(crate::tui::app::App, Config)) {
+        let _lock = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().expect("fresh home");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let config_path = home.path().join("config.toml");
+        let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+        let _env: Vec<_> = [
+            "CODEWHALE_PROVIDER",
+            "DEEPSEEK_PROVIDER",
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "DEEPSEEK_BASE_URL",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect();
+        std::fs::write(&config_path, document).expect("config only");
+        let config = Config::load(Some(config_path.clone()), None).expect("load route");
+        let mut options = crate::test_support::test_tui_options(home.path());
+        options.config_path = Some(config_path);
+        options.skip_onboarding = false;
+        check(crate::tui::app::App::new(options, &config), config);
+    }
+
+    #[test]
+    fn first_run_configured_route_skips_picker_and_records_configuration() {
+        for key in ["api_key = \"fixture-not-a-key\"", ""] {
+            let document = format!(
+                "provider = \"openai\"\ndefault_text_model = \"gpui-fixture\"\n\
+                 [providers.openai]\n{key}\nbase_url = \"http://127.0.0.1:4880/v1\"\n"
+            );
+            with_first_run_config(&document, |mut app, _config| {
+                assert_eq!(app.api_provider, ApiProvider::Openai);
+                assert_eq!(app.model, "gpui-fixture");
+                assert_eq!(app.active_route_base_url, "http://127.0.0.1:4880/v1");
+                assert_eq!(app.onboarding, crate::tui::app::OnboardingState::None);
+                assert!(!crate::local_ollama::should_adopt_live_local_ollama(
+                    &mut app
+                ));
+
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                runtime
+                    .block_on(crate::tui::setup::record_configured_route(&app))
+                    .unwrap();
+                let state = codewhale_config::SetupState::load().unwrap().unwrap();
+                let entry = &state.steps[&codewhale_config::SetupStep::ProviderModel];
+                assert_eq!(entry.status, codewhale_config::StepStatus::Configured);
+                assert!(entry.status.is_settled());
+                let result = entry.result.as_deref().unwrap();
+                assert!(result.contains("provider=openai, model=gpui-fixture"));
+                assert!(result.contains("not checked"));
+                assert!(!result.contains("fixture-not-a-key"));
+            });
+        }
+    }
+
+    #[test]
+    fn first_run_configured_provider_is_preselected_when_picker_is_needed() {
+        with_first_run_config(
+            "provider = \"openai\"\ndefault_text_model = \"gpui-fixture\"\n\
+             [providers.openai]\nbase_url = \"https://fixture.invalid/v1\"\nauth_mode = \"api_key\"\n",
+            |app, config| {
+                assert_eq!(app.onboarding, crate::tui::app::OnboardingState::Provider);
+                assert!(app.onboarding_recovers_configured_route());
+                let picker = ProviderPickerView::new_for_onboarding(
+                    app.api_provider,
+                    app.onboarding_recovers_configured_route()
+                        .then_some(app.onboarding_provider),
+                    &config,
+                    None,
+                );
+                assert_eq!(picker.stage, Stage::List);
+                assert_eq!(picker.selected_provider(), ApiProvider::Openai);
+            },
+        );
+    }
+
+    #[test]
+    fn first_run_unconfigured_route_keeps_picker_and_local_discovery() {
+        with_first_run_config("", |mut app, config| {
+            assert_eq!(app.onboarding, crate::tui::app::OnboardingState::Provider);
+            assert!(!app.onboarding_recovers_configured_route());
+            assert!(crate::local_ollama::should_adopt_live_local_ollama(
+                &mut app
+            ));
+            let picker =
+                ProviderPickerView::new_for_onboarding(app.api_provider, None, &config, None);
+            assert_eq!(picker.stage, Stage::List);
+            assert_eq!(picker.selected_provider(), ApiProvider::Deepseek);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime
+                .block_on(crate::tui::setup::record_configured_route(&app))
+                .unwrap();
+            assert!(codewhale_config::SetupState::load().unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn first_run_configured_receipt_preserves_decisions_and_rejects_corrupt_state() {
+        use codewhale_config::{SetupState, SetupStep, StepEntry, StepStatus};
+        with_first_run_config(
+            "provider = \"openai\"\ndefault_text_model = \"gpui-fixture\"\n\
+             [providers.openai]\nbase_url = \"http://127.0.0.1:4880/v1\"\n",
+            |app, _config| {
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let mut state = SetupState::default();
+                state.record_telemetry_notice("4", false);
+                state.save().unwrap();
+                runtime
+                    .block_on(crate::tui::setup::record_configured_route(&app))
+                    .unwrap();
+                let saved = SetupState::load().unwrap().unwrap();
+                assert!(saved.telemetry_opted_out());
+                assert_eq!(
+                    saved.status(SetupStep::ProviderModel),
+                    StepStatus::Configured
+                );
+
+                for status in [StepStatus::Verified, StepStatus::NeedsAction] {
+                    state.set_step(
+                        SetupStep::ProviderModel,
+                        StepEntry::new(status, true, "test"),
+                    );
+                    state.save().unwrap();
+                    runtime
+                        .block_on(crate::tui::setup::record_configured_route(&app))
+                        .unwrap();
+                    assert_eq!(SetupState::load().unwrap().unwrap(), state);
+                }
+                let path = SetupState::path().unwrap();
+                std::fs::write(&path, "not-json").unwrap();
+                assert!(
+                    runtime
+                        .block_on(crate::tui::setup::record_configured_route(&app))
+                        .is_err()
+                );
+                assert_eq!(std::fs::read_to_string(path).unwrap(), "not-json");
+            },
+        );
+    }
+
     #[test]
     fn first_run_onboarding_shows_all_providers_including_hosted() {
         let _lock = crate::test_support::lock_test_env();
