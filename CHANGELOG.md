@@ -35,7 +35,8 @@ quieter, and Fleet runs can be checked before they spend anything.
   with the provider it belongs to. Switching away and back (`/provider` in the
   TUI, or the desktop app's model chip) used to land on the provider's catalog
   default such as `gpt-5.6`, and a pass-through provider switched to in between
-  inherited the other provider's model
+  inherited the other provider's model, or a stale legacy root `model` that the
+  root default had been shadowing
   ([#6693](https://github.com/Hmbown/Codewhale/pull/6693)).
 
 ### Contributors

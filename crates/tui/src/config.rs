@@ -6249,12 +6249,22 @@ impl Config {
     /// and value: the choice belongs to the outgoing route and must follow it
     /// onto its own leaf, rather than stay at the root where the incoming route
     /// would inherit it and the outgoing route would forget it (falling back to
-    /// its catalog default on the way back).
+    /// its catalog default on the way back). The alias is `default_text_model`
+    /// or, when that is unset, the legacy root `model` it falls back to. A
+    /// persisted writer that moves it clears both roots
+    /// (`config_persistence::unset_root_model_aliases`); clearing only the
+    /// first would resurrect the second on the incoming route after reload.
     pub(crate) fn root_model_alias_owned_by_outgoing(
         &self,
         incoming: &ProviderIdentity,
     ) -> Option<(ProviderIdentity, String)> {
-        let value = self.default_text_model.as_deref()?.trim();
+        // `default_model` reads the legacy root `model` whenever
+        // `default_text_model` is unset, so the effective alias is either one.
+        let value = self
+            .default_text_model
+            .as_deref()
+            .or(self.legacy_model.as_deref())?
+            .trim();
         if value.is_empty()
             || value.eq_ignore_ascii_case("auto")
             || value.chars().any(char::is_control)

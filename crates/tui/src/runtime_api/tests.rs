@@ -23471,3 +23471,55 @@ api_key = "sk-or-test"
     handle.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn switch_provider_does_not_resurrect_a_shadowed_legacy_root_model() -> Result<()> {
+    // Review regression (#6693): the legacy root `model` was shadowed by
+    // `default_text_model`. Moving only the alias off the root let the
+    // pass-through openrouter route resolve `deepseek-v4-flash`.
+    let root = std::env::temp_dir().join(format!("codewhale-switch-legacy-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        r#"model = "deepseek-v4-flash"
+default_text_model = "gpui-fixture"
+provider = "openai"
+
+[providers.openai]
+api_key = "sk-test"
+base_url = "http://127.0.0.1:9/v1"
+
+[providers.openrouter]
+api_key = "sk-or-test"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let (status, away) =
+        post_switch_provider(&client, &addr, "openrouter", &serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "body: {away}");
+    // OpenRouter normalizes the stale value to `deepseek/deepseek-v4-flash`.
+    assert!(
+        !away["model"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("deepseek-v4-flash"),
+        "body: {away}"
+    );
+    assert_ne!(away["model"].as_str(), Some("gpui-fixture"), "body: {away}");
+
+    let (status, back) =
+        post_switch_provider(&client, &addr, "openai", &serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "body: {back}");
+    assert_eq!(back["model"].as_str(), Some("gpui-fixture"), "body: {back}");
+
+    handle.abort();
+    Ok(())
+}
