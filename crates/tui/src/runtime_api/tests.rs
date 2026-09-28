@@ -23399,3 +23399,75 @@ mod thread_snapshot_ownership {
         Ok(())
     }
 }
+
+#[tokio::test]
+async fn switch_provider_away_and_back_keeps_the_root_default_with_its_route() -> Result<()> {
+    // Device-test regression: `provider = "openai"` with the model only in the
+    // root `default_text_model`. Switching to a pass-through route used to leave
+    // the alias at the root, so that route inherited `gpui-fixture`, the
+    // provider list advertised OpenAI's catalog default (`gpt-5.6`), and the
+    // desktop model chip landed there.
+    let root = std::env::temp_dir().join(format!("codewhale-switch-root-alias-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "openai"
+default_text_model = "gpui-fixture"
+
+[providers.openai]
+api_key = "sk-test"
+base_url = "http://127.0.0.1:9/v1"
+
+[providers.openrouter]
+api_key = "sk-or-test"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let (status, away) =
+        post_switch_provider(&client, &addr, "openrouter", &serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "body: {away}");
+    assert_ne!(
+        away["model"].as_str(),
+        Some("gpui-fixture"),
+        "openrouter must not inherit openai's root default: {away}"
+    );
+    let persisted = fs::read_to_string(&config_file)?;
+    assert!(
+        !persisted.contains("default_text_model"),
+        "the alias must move off the root. Actual config:\n{persisted}"
+    );
+
+    let providers: serde_json::Value = client
+        .get(format!("http://{addr}/v1/providers"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let openai = providers["providers"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["id"] == "openai"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        openai["default_model"].as_str(),
+        Some("gpui-fixture"),
+        "the inactive openai entry must keep its configured model, not the catalog default: {openai}"
+    );
+
+    let (status, back) =
+        post_switch_provider(&client, &addr, "openai", &serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "body: {back}");
+    assert_eq!(back["model"].as_str(), Some("gpui-fixture"), "body: {back}");
+    assert_eq!(get_config(&client, &addr).await["model"], "gpui-fixture");
+
+    handle.abort();
+    Ok(())
+}

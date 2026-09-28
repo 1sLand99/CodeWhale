@@ -624,6 +624,20 @@ pub(crate) async fn switch_provider(
         previous_api_key_env_only: app.api_key_env_only,
     });
 
+    // A session-local switch keeps the same ownership rule the persisted
+    // writers apply (`reconcile_root_model_aliases`): the root alias the
+    // outgoing route was using moves onto that route's own leaf, so coming
+    // back lands on it instead of the catalog default. Every failure path
+    // below restores `previous_config`.
+    if let Some((outgoing, value)) = config
+        .active_provider_identity(target)
+        .ok()
+        .and_then(|incoming| config.root_model_alias_owned_by_outgoing(&incoming))
+    {
+        config.set_provider_model_override(outgoing.provider, Some(value));
+        config.default_text_model = None;
+    }
+
     let resolved_route = match resolve_runtime_route(config, target, model_override.as_deref()) {
         Ok(route) => route,
         Err(reason) => {

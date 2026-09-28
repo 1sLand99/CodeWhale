@@ -6243,6 +6243,43 @@ impl Config {
         deepseek_alias_deprecation(&alias)
     }
 
+    /// The root `default_text_model` alias is the *active* route's fallback.
+    /// When a switch to `incoming` leaves a route that has no model leaf of its
+    /// own and was actually resolving the alias, return that outgoing identity
+    /// and value: the choice belongs to the outgoing route and must follow it
+    /// onto its own leaf, rather than stay at the root where the incoming route
+    /// would inherit it and the outgoing route would forget it (falling back to
+    /// its catalog default on the way back).
+    pub(crate) fn root_model_alias_owned_by_outgoing(
+        &self,
+        incoming: &ProviderIdentity,
+    ) -> Option<(ProviderIdentity, String)> {
+        let value = self.default_text_model.as_deref()?.trim();
+        if value.is_empty()
+            || value.eq_ignore_ascii_case("auto")
+            || value.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let outgoing = self.active_provider_identity(self.api_provider()).ok()?;
+        // An unnamed custom route stores its model in the alias itself.
+        if outgoing == *incoming
+            || (outgoing.provider == ApiProvider::Custom && outgoing.persisted_id().is_none())
+        {
+            return None;
+        }
+        let mut scoped = self.clone();
+        scoped.scope_to_provider_identity(&outgoing);
+        if scoped
+            .provider_config_for(outgoing.provider)
+            .and_then(|entry| entry.model.as_deref())
+            .is_some()
+        {
+            return None;
+        }
+        (scoped.default_model() == value).then(|| (outgoing, value.to_string()))
+    }
+
     #[must_use]
     pub fn default_model(&self) -> String {
         if self.default_text_model.is_none() && self.legacy_model.is_some() {

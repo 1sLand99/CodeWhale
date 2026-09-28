@@ -248,13 +248,16 @@ pub(crate) fn persist_provider_selection(
 /// when the selected route has no model of its own. A switch that leaves the
 /// incoming route without a leaf therefore hands it an alias naming the route
 /// on its way out, and `Config::load` rejects the file the caller just wrote —
-/// a committed switch that produces an unloadable config.
+/// a committed switch that produces an unloadable config — or, on a
+/// pass-through incoming route that loads it, a model the incoming route never
+/// chose while the outgoing route comes back on its catalog default.
 ///
-/// Relocate that value onto the outgoing route's own canonical leaf, because
-/// it is real saved state, and only then clear the alias. An alias the
-/// incoming route already shadows with its own leaf is inert and stays:
-/// deleting a saved choice to satisfy validation of a value nothing resolves
-/// is data loss, not a repair. Likewise an unnamed custom route stores its
+/// When the outgoing route has no leaf and was resolving the alias, relocate
+/// that value onto the outgoing route's own canonical leaf, because it is real
+/// saved state, and only then clear the alias. Any other alias the incoming
+/// route already shadows with its own leaf is inert and stays: deleting a
+/// saved choice to satisfy validation of a value nothing resolves is data
+/// loss, not a repair. Likewise an unnamed custom route stores its
 /// model in the alias itself and has no leaf to receive it. If the incoming
 /// route cannot shadow that value, refuse the switch atomically and ask for an
 /// explicit destination model instead of saving an unloadable configuration.
@@ -271,6 +274,20 @@ pub(crate) fn reconcile_root_model_aliases(
     // own model slot (see `set_provider_model_document`), never the outgoing
     // route's leftovers.
     if incoming.provider == ApiProvider::Custom && incoming.persisted_id().is_none() {
+        return Ok(());
+    }
+    // The outgoing route was resolving the alias as its own model. Move it
+    // onto that route's leaf even when the incoming route could load it: a
+    // pass-through incoming route would otherwise inherit a model it never
+    // chose, and the outgoing route would come back on its catalog default.
+    if let Some((outgoing, value)) = previous.root_model_alias_owned_by_outgoing(incoming) {
+        set_provider_model_document(
+            doc,
+            outgoing.provider,
+            outgoing.persisted_id().unwrap_or(&outgoing.key),
+            &value,
+        )?;
+        unset_document_value(doc, &["default_text_model"])?;
         return Ok(());
     }
     // Only `default_text_model` is read here. The legacy root `model` key is
@@ -1847,14 +1864,24 @@ slot = 1
                 )
                 .unwrap();
                 let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-                // The incoming route owns its own leaf, so the outgoing root
-                // alias is inert. It is a saved choice: deleting it to satisfy
-                // validation of a value nothing resolves would be data loss.
-                assert_eq!(
-                    doc[root_key].as_str(),
-                    Some("GLM-4.6"),
-                    "an inert root fallback must survive the switch"
-                );
+                // The outgoing route was resolving the root alias only when it
+                // had no leaf; then the choice moves onto that leaf. Otherwise
+                // the alias is inert saved state and stays. Neither case may
+                // delete it.
+                if root_key == "default_text_model" && existing.is_none() {
+                    assert!(doc.get(root_key).is_none(), "{doc:?}");
+                    assert_eq!(
+                        doc["providers"]["zai"]["model"].as_str(),
+                        Some("GLM-4.6"),
+                        "the outgoing route's choice must follow it onto its leaf"
+                    );
+                } else {
+                    assert_eq!(
+                        doc[root_key].as_str(),
+                        Some("GLM-4.6"),
+                        "an inert root fallback must survive the switch"
+                    );
+                }
                 assert_eq!(
                     doc["providers"]["deepseek"]["model"].as_str(),
                     Some("deepseek-v4-pro")
