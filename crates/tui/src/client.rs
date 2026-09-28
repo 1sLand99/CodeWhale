@@ -2795,6 +2795,29 @@ impl CodewhaleClient {
         .with_openrouter_vendor(self.openrouter_vendor.as_deref())
     }
 
+    /// The operator-declared `[[custom_models]]` rate for `model` on this
+    /// client's exact endpoint, frozen at `dispatched_at`. Every dispatch
+    /// boundary (background envelopes and main interactive turns alike) asks
+    /// this before the provider lake, so a declared rate is honored the same
+    /// way on each (#6690).
+    #[must_use]
+    pub(crate) fn configured_pricing_quote_at(
+        &self,
+        provider: ApiProvider,
+        provider_identity: &str,
+        model: &str,
+        dispatched_at: u64,
+    ) -> Option<crate::provider_catalog_live::ProviderLivePricingQuote> {
+        crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
+            &self.configured_models,
+            provider,
+            provider_identity,
+            model,
+            &self.base_url,
+            dispatched_at,
+        )
+    }
+
     /// Capture the immutable, redacted route envelope at the caller's
     /// application-dispatch/admission time. This is not proof of network
     /// delivery or provider invoice-time pricing. The wire model is normalized
@@ -2811,12 +2834,10 @@ impl CodewhaleClient {
         let provider_live_pricing = u64::try_from(dispatched_at.timestamp())
             .ok()
             .and_then(|at| {
-                crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
-                    &self.configured_models,
+                self.configured_pricing_quote_at(
                     self.api_provider,
                     &self.provider_identity,
                     &model,
-                    &self.base_url,
                     at,
                 )
                 .or_else(|| {
@@ -4426,10 +4447,14 @@ fn parse_openrouter_models_response(
     let parsed: OpenRouterModelsResponse =
         serde_json::from_str(payload).map_err(|_| CatalogRefreshError::InvalidResponse)?;
     let mut seen = std::collections::HashSet::new();
+    // `~`-prefixed ids (`~deepseek/deepseek-pro-latest`) are OpenRouter's
+    // moving "latest" aliases, not billing identities. They fail the catalog
+    // id validator, and one such row used to fail the whole roster closed, so
+    // no OpenRouter route could ever be priced from the lake (#6690).
     let models: Vec<_> = parsed
         .data
         .into_iter()
-        .filter(|item| seen.insert(item.id.clone()))
+        .filter(|item| !item.id.starts_with('~') && seen.insert(item.id.clone()))
         .collect();
     Ok(models)
 }
@@ -12749,6 +12774,40 @@ mod tests {
             assert_eq!(offering.cost, None);
             assert!(offering.reasoning.is_none());
         }
+    }
+
+    /// #6690: OpenRouter's roster lists `~`-prefixed "latest" aliases. One
+    /// such row used to fail the whole refresh closed (`invalid_response`), so
+    /// the lake never went fresh and no OpenRouter turn could be priced.
+    #[tokio::test]
+    async fn fetch_catalog_delta_skips_openrouter_latest_aliases_and_keeps_prices() {
+        let server = MockServer::start().await;
+        mount_models_json(
+            &server,
+            200,
+            json!({"data": [
+                {"id": "~deepseek/deepseek-pro-latest",
+                 "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+                {"id": "deepseek/deepseek-v4-pro",
+                 "pricing": {"prompt": "0.000001", "completion": "0.000002"}}
+            ]}),
+        )
+        .await;
+        let client = openrouter_client_for(&server);
+
+        let delta = client
+            .fetch_catalog_delta()
+            .await
+            .expect("an alias row must not fail the whole roster");
+        let ids: Vec<&str> = delta
+            .offerings
+            .iter()
+            .map(|offering| offering.wire_model_id.as_str())
+            .collect();
+        assert_eq!(ids, ["deepseek/deepseek-v4-pro"]);
+        let cost = delta.offerings[0].cost.as_ref().expect("served price");
+        assert_eq!(cost.input, Some(1.0));
+        assert_eq!(cost.output, Some(2.0));
     }
 
     #[tokio::test]

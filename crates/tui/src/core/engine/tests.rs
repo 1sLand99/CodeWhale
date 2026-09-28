@@ -1167,6 +1167,121 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
     run_task.await.expect("engine task");
 }
 
+/// #6690: the main interactive turn froze its dispatch quote only from the
+/// provider lake, so an operator's `[[custom_models]]` rate never priced it
+/// even though background/review envelopes honored the same row.
+#[tokio::test]
+async fn main_turn_dispatch_freezes_declared_custom_model_rate() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let custom_server = MockServer::start().await;
+    let custom_base_url = format!("{}/v1", custom_server.uri());
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-declared-rate\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"priced\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-declared-rate\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .mount(&custom_server)
+        .await;
+
+    let mut custom = HashMap::new();
+    custom.insert(
+        "custom-a".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some(custom_base_url.clone()),
+            model: Some("local-model".to_string()),
+            api_key: Some("local-test-key".to_string()),
+            ..crate::config::ProviderConfig::default()
+        },
+    );
+    let declared: codewhale_config::catalog::configured::ConfiguredModel =
+        toml::from_str(&format!(
+            "provider = \"custom-a\"\nbase_url = \"{custom_base_url}\"\n\
+             id = \"local-model\"\ncost = {{ input = 1.0, output = 2.0 }}\n"
+        ))
+        .expect("declared model row");
+    let config = Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..crate::config::ProvidersConfig::default()
+        }),
+        custom_models: Some(vec![declared]),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        max_steps: 1,
+        snapshots_enabled: false,
+        ..EngineConfig::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &config);
+    let run_task = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: "price this turn".to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: Box::new(
+                resolve_runtime_route(&config, ApiProvider::Custom, Some("local-model"))
+                    .expect("resolve declared custom route"),
+            ),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        }))
+        .await
+        .expect("send declared custom turn");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut rx = handle.rx_event.write().await;
+    let quote = loop {
+        let event = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("timed out waiting for route dispatch")
+            .expect("engine event channel closed before dispatch");
+        if let Event::RouteDispatched { route, .. } = event {
+            break route
+                .billing
+                .and_then(|billing| billing.provider_live_pricing)
+                .expect("declared custom_models rate must be frozen at main-turn dispatch");
+        }
+    };
+    drop(rx);
+    assert_eq!(
+        quote.provenance,
+        codewhale_config::pricing::PricingProvenance::UserOverride
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
 struct GatedGoalModelClient {
     calls: std::sync::atomic::AtomicUsize,
     requests: std::sync::Mutex<Vec<codewhale_models::MessageRequest>>,

@@ -1829,15 +1829,35 @@ impl Engine {
                     billing.provider_live_pricing = u64::try_from(dispatched_at.timestamp())
                         .ok()
                         .and_then(|dispatched_at_unix| {
-                            billing.endpoint_fingerprint.as_deref().and_then(|fingerprint| {
-                                crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
-                                    route.provider,
-                                    &route.provider_identity,
-                                    &route.model,
-                                    fingerprint,
-                                    dispatched_at_unix,
-                                )
-                            })
+                            // An operator-declared `[[custom_models]]` rate
+                            // wins, exactly as on the background envelope
+                            // path; the fingerprint check keeps it scoped to
+                            // the endpoint this turn was installed on (#6690).
+                            let fingerprint = billing.endpoint_fingerprint.as_deref()?;
+                            self.codewhale_client
+                                .as_ref()
+                                .filter(|client| {
+                                    crate::cost_status::endpoint_fingerprint(client.base_url())
+                                        .as_deref()
+                                        == Some(fingerprint)
+                                })
+                                .and_then(|client| {
+                                    client.configured_pricing_quote_at(
+                                        route.provider,
+                                        &route.provider_identity,
+                                        &route.model,
+                                        dispatched_at_unix,
+                                    )
+                                })
+                                .or_else(|| {
+                                    crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
+                                        route.provider,
+                                        &route.provider_identity,
+                                        &route.model,
+                                        fingerprint,
+                                        dispatched_at_unix,
+                                    )
+                                })
                         });
                 }
                 let _ = self
