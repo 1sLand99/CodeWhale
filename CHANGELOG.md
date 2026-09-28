@@ -161,9 +161,12 @@ quieter, and Fleet runs can be checked before they spend anything.
   first launch is still detected. Usable configured routes skip the provider
   picker and record the provider step as configured, without claiming a
   successful check; missing-key recovery focuses the configured provider even
-  on a fresh home. Empty sessions no longer show a full context
-  window from the startup prompt; a submitted first turn or reported usage
-  still shows real pressure.
+  on a fresh home. Switching from that recovery picker (or after Esc) to a
+  provider that has its key clears the launch "needs a key" state, so the
+  footer names the route instead of "model not connected" and a detected local
+  Ollama can no longer take over the provider just chosen. Empty sessions no
+  longer show a full context window from the startup prompt; a submitted first
+  turn or reported usage still shows real pressure.
 - `/trust on|off` changes file-tool trust for this session. Add `--save` to
   persist workspace trust for project skills, commands, hooks, MCP servers,
   and project context. Skipped-skill notices stay out of conversation titles
