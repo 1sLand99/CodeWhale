@@ -161,7 +161,7 @@ MCP 工具以 `mcp_<server>_<tool>` 暴露，使用与内置工具相同的审�
 
 - `-p, --prompt <TEXT>`:一次性提示模式(打印并退出)
 - `codewhale exec --auto --output-format stream-json <PROMPT>`:运行工具支持的非交互式智能体，为 harness 和后端包装器每行发出一个 JSON 对象。退出码:`0` 成功,`1` 真正的任务/智能体失败,`75`(`EX_TEMPFAIL`)当回合因可重试的基础设施失败结束(所有会话内重试之后的 provider/transport `network`/`timeout`),让 harness 能把可重试的 infra 退出与任务失败区分开；终端流 `metadata` 事件的 `error_category` 携带相同的分类
-- `codewhale exec --prompt-file <PATH>` / `cat prompt.txt | codewhale exec -`:从文件或 stdin 读取提示词而不是命令行参数,用于超过操作系统单个参数上限(Linux 约 128 KiB)的提示词。不能与位置参数提示词同时使用;`--parent-death-watch` 占用 stdin,因此与 `-` 冲突
+- `codewhale exec --prompt-file <PATH>` / `cat prompt.txt | codewhale exec --prompt-file -`:从文件或 stdin 读取提示词而不是命令行参数,用于超过操作系统单个参数上限(Linux 约 128 KiB)的提示词。不能与位置参数提示词同时使用，位置参数 `-` 按字面文本处理;`--parent-death-watch` 占用 stdin,因此与 `--prompt-file -` 冲突
 - `codewhale exec --resume <ID|PREFIX> <PROMPT>` / `--session-id <ID|PREFIX>`:非交互式继续一个已保存的会话
 - `codewhale exec --continue <PROMPT>`:非交互式继续此工作区最近的已保存会话
 - `codewhale fork <ID|PREFIX>` / `codewhale fork --last`:把已保存的会话复制到新的兄弟会话；分叉的会话保留附加的父会话元数据，并在会话列表中显示该谱系

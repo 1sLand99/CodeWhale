@@ -538,7 +538,8 @@ struct ExecArgs {
     /// prompts past the OS per-argument limit (~128 KiB on Linux).
     #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
     prompt_file: Option<PathBuf>,
-    /// Prompt to send to the model. A lone `-` reads the prompt from stdin.
+    /// Prompt to send to the model. Taken literally, including a lone `-`;
+    /// use `--prompt-file -` to read stdin.
     #[arg(
         value_name = "PROMPT",
         required_unless_present = "prompt_file",
@@ -988,13 +989,12 @@ fn join_prompt_parts(parts: &[String]) -> String {
 const MAX_EXEC_PROMPT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The effective exec prompt: argv words, or the body of `--prompt-file`
-/// / a lone `-` (stdin). Runs before any model call so a missing or empty
-/// source fails loudly (#6688).
+/// (`-` = stdin). A positional `-` stays literal text: raw-prompt callers
+/// such as cloud dispatch pass a job prompt verbatim as argv. Runs before
+/// any model call so a missing or empty source fails loudly (#6688).
 fn resolve_exec_prompt(args: &ExecArgs) -> Result<String> {
-    let path = match &args.prompt_file {
-        Some(path) => path.clone(),
-        None if matches!(args.prompt.as_slice(), [only] if only == "-") => PathBuf::from("-"),
-        None => return Ok(join_prompt_parts(&args.prompt)),
+    let Some(path) = &args.prompt_file else {
+        return Ok(join_prompt_parts(&args.prompt));
     };
     let prompt = if path.as_os_str() == "-" {
         if args.parent_death_watch {
@@ -1002,11 +1002,11 @@ fn resolve_exec_prompt(args: &ExecArgs) -> Result<String> {
         }
         let stdin = io::stdin();
         if stdin.is_terminal() {
-            bail!("exec prompt `-` reads stdin, but stdin is a terminal; pipe the prompt in.");
+            bail!("--prompt-file - reads stdin, but stdin is a terminal; pipe the prompt in.");
         }
         read_capped_text(stdin.lock(), MAX_EXEC_PROMPT_BYTES, "exec prompt on stdin")?
     } else {
-        let file = std::fs::File::open(&path)
+        let file = std::fs::File::open(path)
             .with_context(|| format!("failed to open --prompt-file {}", path.display()))?;
         read_capped_text(file, MAX_EXEC_PROMPT_BYTES, "--prompt-file")
             .with_context(|| format!("failed to read --prompt-file {}", path.display()))?
@@ -16453,7 +16453,13 @@ reasoning = "high"
         let err = resolve_exec_prompt(&args).expect_err("missing file fails");
         assert!(err.to_string().contains("--prompt-file"), "{err:#}");
 
-        let cli = parse_cli(&["codewhale", "exec", "--parent-death-watch", "-"]);
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--parent-death-watch",
+            "--prompt-file",
+            "-",
+        ]);
         let Some(Commands::Exec(args)) = cli.command else {
             panic!("expected exec command");
         };
@@ -16468,6 +16474,14 @@ reasoning = "high"
             resolve_exec_prompt(&args).expect("argv prompt"),
             "explain this"
         );
+
+        // A positional `-` is prompt text, never a stdin read: cloud dispatch
+        // passes job prompts verbatim as argv.
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "-"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(resolve_exec_prompt(&args).expect("literal dash"), "-");
     }
 
     #[test]
