@@ -39,10 +39,9 @@ impl ToolSpec for RevertTurnTool {
     fn description(&self) -> &str {
         "Roll back the workspace files to the snapshot taken before a recent turn. \
          Use when the user explicitly asks to undo, revert, or roll back the most recent edits. \
-         `turn_offset` is 1-based: 1 reverts the most recent turn, 2 reverts the previous one, \
-         and so on (max 50). Conversation history is NOT modified — only working-tree files are \
-         restored from the side-git snapshot repo. This restores the whole workspace, so any \
-         edit made after that turn, including the user's own, is overwritten as well."
+         `turn_offset` is 1-based: 1 reverts the most recent turn (max 50). Conversation \
+         history is NOT modified. The whole workspace is restored, so later edits, including \
+         the user's own, are overwritten."
     }
 
     fn input_schema(&self) -> Value {
