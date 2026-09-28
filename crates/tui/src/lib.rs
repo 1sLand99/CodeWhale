@@ -534,10 +534,15 @@ struct ExecArgs {
     /// operator hooks.
     #[arg(long, default_value_t = false)]
     hooks: bool,
-    /// Prompt to send to the model
+    /// Read the prompt from a file (`-` reads stdin) instead of argv, for
+    /// prompts past the OS per-argument limit (~128 KiB on Linux).
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+    prompt_file: Option<PathBuf>,
+    /// Prompt to send to the model. Taken literally, including a lone `-`;
+    /// use `--prompt-file -` to read stdin.
     #[arg(
         value_name = "PROMPT",
-        required = true,
+        required_unless_present = "prompt_file",
         trailing_var_arg = true,
         allow_hyphen_values = true
     )]
@@ -976,6 +981,45 @@ impl TerminatingSignals {
 
 fn join_prompt_parts(parts: &[String]) -> String {
     parts.join(" ")
+}
+
+/// Maximum bytes accepted for an exec prompt read from `--prompt-file` or
+/// stdin. Far past argv's per-argument ceiling; the model's context window
+/// stays the real limit (#6688).
+const MAX_EXEC_PROMPT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The effective exec prompt: argv words, or the body of `--prompt-file`
+/// (`-` = stdin). A positional `-` stays literal text: raw-prompt callers
+/// such as cloud dispatch pass a job prompt verbatim as argv. Runs before
+/// any model call so a missing or empty source fails loudly (#6688).
+fn resolve_exec_prompt(args: &ExecArgs) -> Result<String> {
+    let Some(path) = &args.prompt_file else {
+        return Ok(join_prompt_parts(&args.prompt));
+    };
+    let prompt = if path.as_os_str() == "-" {
+        if args.parent_death_watch {
+            bail!("--parent-death-watch owns stdin; pass the prompt with --prompt-file <PATH>");
+        }
+        let stdin = io::stdin();
+        if stdin.is_terminal() {
+            bail!("--prompt-file - reads stdin, but stdin is a terminal; pipe the prompt in.");
+        }
+        read_capped_text(stdin.lock(), MAX_EXEC_PROMPT_BYTES, "exec prompt on stdin")?
+    } else {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("failed to open --prompt-file {}", path.display()))?;
+        read_capped_text(file, MAX_EXEC_PROMPT_BYTES, "--prompt-file")
+            .with_context(|| format!("failed to read --prompt-file {}", path.display()))?
+    };
+    if prompt.trim().is_empty() {
+        let source = if path.as_os_str() == "-" {
+            "stdin".to_string()
+        } else {
+            path.display().to_string()
+        };
+        bail!("exec prompt from {source} is empty");
+    }
+    Ok(prompt)
 }
 
 fn resolve_exec_model(config: &Config, explicit_model: Option<&str>) -> String {
@@ -2507,7 +2551,7 @@ async fn run_async_main_dispatch(
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
                 initialize_cloud_facts(&config);
-                let prompt = join_prompt_parts(&args.prompt);
+                let prompt = resolve_exec_prompt(&args)?;
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
                 validate_exec_tool_authority_resume(
                     args.tool_authority_json.as_deref(),
@@ -10404,12 +10448,16 @@ fn read_patch_from_stdin() -> Result<String> {
     if stdin.is_terminal() {
         bail!("No patch file provided and stdin is empty.");
     }
+    read_capped_text(stdin.lock(), MAX_STDIN_PATCH_BYTES, "patch on stdin")
+}
+
+/// Read UTF-8 text, refusing more than `limit` bytes with a message that
+/// names the limit in bytes.
+fn read_capped_text(reader: impl Read, limit: u64, what: &str) -> Result<String> {
     let mut buffer = String::new();
-    stdin
-        .take(MAX_STDIN_PATCH_BYTES + 1)
-        .read_to_string(&mut buffer)?;
-    if buffer.len() as u64 > MAX_STDIN_PATCH_BYTES {
-        bail!("patch on stdin exceeds the 16 MiB limit");
+    reader.take(limit + 1).read_to_string(&mut buffer)?;
+    if buffer.len() as u64 > limit {
+        bail!("{what} exceeds the {limit}-byte limit");
     }
     Ok(buffer)
 }
@@ -16370,6 +16418,87 @@ reasoning = "high"
 
         assert!(args.json);
         assert_eq!(args.prompt, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn exec_prompt_file_carries_prompts_past_the_argv_ceiling() {
+        // #6688: argv caps one argument at 128 KiB; the file transport does not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big-prompt.txt");
+        let body = "стих ".repeat(60_000);
+        assert!(body.len() > 512 * 1024);
+        std::fs::write(&path, &body).expect("write prompt");
+        let path_arg = path.to_str().expect("utf-8 path");
+
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "--prompt-file", path_arg]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert!(args.auto);
+        assert!(args.prompt.is_empty());
+        assert_eq!(resolve_exec_prompt(&args).expect("prompt"), body);
+
+        let conflict =
+            Cli::try_parse_from(["codewhale", "exec", "--prompt-file", path_arg, "also argv"])
+                .expect_err("positional prompt and --prompt-file conflict");
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let missing = dir.path().join("missing.txt");
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--prompt-file",
+            missing.to_str().expect("utf-8 path"),
+        ]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        let err = resolve_exec_prompt(&args).expect_err("missing file fails");
+        assert!(err.to_string().contains("--prompt-file"), "{err:#}");
+
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--parent-death-watch",
+            "--prompt-file",
+            "-",
+        ]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        let err = resolve_exec_prompt(&args).expect_err("stdin is owned by the watcher");
+        assert!(err.to_string().contains("--parent-death-watch"), "{err:#}");
+
+        let cli = parse_cli(&["codewhale", "exec", "explain", "this"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(
+            resolve_exec_prompt(&args).expect("argv prompt"),
+            "explain this"
+        );
+
+        // A positional `-` is prompt text, never a stdin read: cloud dispatch
+        // passes job prompts verbatim as argv.
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "-"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(resolve_exec_prompt(&args).expect("literal dash"), "-");
+    }
+
+    #[test]
+    fn read_capped_text_names_the_limit_in_bytes() {
+        let err =
+            read_capped_text(&b"abcdef"[..], 4, "exec prompt on stdin").expect_err("over the cap");
+        assert_eq!(
+            err.to_string(),
+            "exec prompt on stdin exceeds the 4-byte limit"
+        );
+        assert_eq!(
+            read_capped_text(&b"abcd"[..], 4, "x").expect("at the cap"),
+            "abcd"
+        );
     }
 
     #[test]

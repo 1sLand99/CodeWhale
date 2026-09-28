@@ -136,6 +136,11 @@ quieter, and Fleet runs can be checked before they spend anything.
   longer hides the catalog price, and an explicit declared rate prices a
   vendor-pinned OpenRouter route
   ([#6690](https://github.com/Hmbown/Codewhale/issues/6690)).
+- `codewhale exec` can take prompts past the OS argument limit (~128 KiB on
+  Linux, where larger prompts failed with `Argument list too long` before
+  Codewhale started): `--prompt-file <PATH>` reads the prompt from a file, and
+  `--prompt-file -` reads it from stdin; a positional `-` stays literal text
+  ([#6688](https://github.com/Hmbown/Codewhale/issues/6688)).
 - Keep reasoning effort labels, including `xhigh` and `ultra`, visible beside
   short model names in the 80-column terminal footer.
 - First-run TUI startup keeps explicitly configured providers, models and
