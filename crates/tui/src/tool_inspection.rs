@@ -188,6 +188,7 @@ impl ToolVisibility {
     /// Whether this state means the tool's bytes are carried by the prepared
     /// request. The only honest source of this answer is the request itself.
     #[must_use]
+    #[cfg(test)]
     pub const fn in_request(self) -> bool {
         matches!(self, Self::Active | Self::Deferred | Self::InRequest)
     }
@@ -444,10 +445,12 @@ impl ToolInspectionSnapshot {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn render_text(&self) -> String {
         crate::diagnostics_reports::render_tool_snapshot_text(&project_snapshot(self))
     }
 
+    #[cfg(test)]
     pub fn render_json(&self) -> Result<String, serde_json::Error> {
         crate::diagnostics_reports::render_tool_snapshot_json(&project_snapshot(self))
     }
