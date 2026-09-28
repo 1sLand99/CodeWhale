@@ -31744,3 +31744,55 @@ fn background_review_failed_shell_receipt_uses_context_neutral_copy() {
         "shell · false · échec · code de sortie 2"
     );
 }
+
+#[tokio::test]
+async fn provider_switch_back_lands_on_root_default_owned_by_that_provider() {
+    // Device-test regression: with the openai model only in the root
+    // `default_text_model`, a session-local `/provider deepseek` left the alias
+    // at the root, so `/provider openai` came back on the catalog default.
+    let _home = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Openai;
+    app.model = "gpui-fixture".to_string();
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        provider: Some("openai".to_string()),
+        default_text_model: Some("gpui-fixture".to_string()),
+        providers: Some(ProvidersConfig {
+            openai: ProviderConfig {
+                api_key: Some("sk-test".to_string()),
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .with_legacy_root(Some("deepseek-key".to_string()), None);
+
+    assert!(
+        switch_provider(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            ApiProvider::Deepseek,
+            None,
+        )
+        .await
+    );
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_ne!(app.model, "gpui-fixture");
+
+    assert!(
+        switch_provider(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            ApiProvider::Openai,
+            None,
+        )
+        .await
+    );
+    assert_eq!(app.api_provider, ApiProvider::Openai);
+    assert_eq!(app.model, "gpui-fixture");
+}

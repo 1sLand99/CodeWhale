@@ -29,6 +29,16 @@ quieter, and Fleet runs can be checked before they spend anything.
   no-follow reads and writes. Compaction loads pinned anchors only from
   trusted workspaces. Validate registry skill names before selecting cache paths.
 
+### Fixed
+
+- Switching providers keeps a model set only in the root `default_text_model`
+  with the provider it belongs to. Switching away and back (`/provider` in the
+  TUI, or the desktop app's model chip) used to land on the provider's catalog
+  default such as `gpt-5.6`, and a pass-through provider switched to in between
+  inherited the other provider's model, or a stale legacy root `model` that the
+  root default had been shadowing
+  ([#6693](https://github.com/Hmbown/Codewhale/pull/6693)).
+
 ### Contributors
 
 - **[@gaord](https://github.com/gaord)** — let a client fork a thread at a named turn ([#6580](https://github.com/Hmbown/Codewhale/pull/6580)), let undo roll back files for the turn it is undoing ([#6483](https://github.com/Hmbown/Codewhale/pull/6483)), stopped resume and fork from duplicating threads and sessions ([#6406](https://github.com/Hmbown/Codewhale/pull/6406)), and exposed user-defined provider routes to native clients ([#6404](https://github.com/Hmbown/Codewhale/pull/6404)).
