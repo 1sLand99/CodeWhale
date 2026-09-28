@@ -127,6 +127,11 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- `codewhale exec` can take prompts past the OS argument limit (~128 KiB on
+  Linux, where larger prompts failed with `Argument list too long` before
+  Codewhale started): `--prompt-file <PATH>` reads the prompt from a file, and
+  `-` (as the prompt or the path) reads it from stdin
+  ([#6688](https://github.com/Hmbown/Codewhale/issues/6688)).
 - Keep reasoning effort labels, including `xhigh` and `ultra`, visible beside
   short model names in the 80-column terminal footer.
 - First-run TUI startup keeps explicitly configured providers, models and
