@@ -26157,21 +26157,17 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
 }
 
 // ---------------------------------------------------------------------------
-// Explicit step limits and finite wall-clock/stream budgets remain enforceable.
+// Explicit step and wall-clock limits and finite stream budgets remain enforceable.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn engine_config_defaults_keep_wall_clock_and_stream_budgets() {
+fn engine_config_defaults_leave_wall_clock_open_and_keep_stream_budgets() {
     use crate::core::engine::turn_budget;
 
     let config = EngineConfig::default();
     assert_eq!(config.max_steps, turn_budget::DEFAULT_MAX_MODEL_STEPS);
     assert_eq!(TurnContext::new(config.max_steps).step_limit(), None);
-    assert_eq!(
-        config.turn_wall_clock,
-        std::time::Duration::from_secs(turn_budget::DEFAULT_TURN_WALL_CLOCK_SECS),
-    );
-    assert!(config.turn_wall_clock > std::time::Duration::ZERO);
+    assert_eq!(config.turn_wall_clock, turn_budget::DEFAULT_TURN_WALL_CLOCK);
     assert_eq!(
         config.stream_max_content_bytes,
         turn_budget::DEFAULT_STREAM_MAX_CONTENT_BYTES

@@ -7983,8 +7983,8 @@ impl Config {
     /// R1: resolved cumulative per-turn wall-clock budget.
     ///
     /// Reads `[tui].turn_wall_clock_secs`, falling back to the
-    /// `CODEWHALE_TURN_WALL_CLOCK_SECS` env var, then to the finite
-    /// default. `0` resolves to the default; it never means "unlimited".
+    /// `CODEWHALE_TURN_WALL_CLOCK_SECS` env var, then to no limit. `0`
+    /// also means no limit.
     #[must_use]
     pub fn turn_wall_clock(&self) -> std::time::Duration {
         let raw = self

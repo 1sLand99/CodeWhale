@@ -84,10 +84,10 @@ const EXECUTE_TOOLS_TOOL_TYPE: &str = "execute_tools_20260918";
 const MAX_CODE_BYTES: usize = 64 * 1024;
 /// Run deadline when no engine turn serves the program (sub-agents, direct
 /// unit calls). Those callers bound the whole call themselves (the sub-agent
-/// tool timeout), so this is the turn-sized backstop rather than an invented
-/// short cap. A gated run takes the remaining turn wall clock instead.
-const FALLBACK_RUN_DEADLINE: Duration =
-    Duration::from_secs(crate::core::engine::turn_budget::DEFAULT_TURN_WALL_CLOCK_SECS);
+/// tool timeout), so this is an hour-long backstop rather than an invented
+/// short cap. A gated run takes the remaining turn wall clock instead, which
+/// is unbounded unless `[tui].turn_wall_clock_secs` is set.
+const FALLBACK_RUN_DEADLINE: Duration = Duration::from_secs(3_600);
 /// How often the run watchdog re-checks while the program is paused on the
 /// gate (approval card, hook, review). Bounds the overrun after a pause.
 const PAUSED_WATCHDOG_POLL: Duration = Duration::from_millis(200);

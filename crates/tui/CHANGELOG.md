@@ -38,6 +38,9 @@ quieter, and Fleet runs can be checked before they spend anything.
   inherited the other provider's model, or a stale legacy root `model` that the
   root default had been shadowing
   ([#6693](https://github.com/Hmbown/Codewhale/pull/6693)).
+- A turn no longer stops after an hour of work. The cumulative per-turn wall
+  clock is unlimited by default, like model steps; set
+  `[tui].turn_wall_clock_secs` to cap it.
 
 ### Contributors
 
