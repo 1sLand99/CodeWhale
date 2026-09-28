@@ -1,8 +1,10 @@
 //! Turn budgets shared by interactive hosts and headless execution.
 //!
-//! Model steps are uncapped by default. Explicit positive limits still
-//! apply; a fixed step counter is not a measure of useful progress.
-//! Cumulative wall-clock and per-step stream budgets remain finite.
+//! Model steps and the cumulative per-turn wall clock are uncapped by
+//! default. Explicit positive limits still apply; neither a step counter nor
+//! elapsed time is a measure of useful progress, and a long autonomous turn
+//! should not stop at an arbitrary hour. Per-step stream budgets remain
+//! finite: they bound one stuck request, not the whole turn.
 //!
 //! `EngineConfig` retains its integer representation for embedders:
 //! `u32::MAX` represents no model-step limit. `TurnContext::step_limit`
@@ -27,13 +29,16 @@ pub const MIN_MAX_MODEL_STEPS: u32 = 1;
 /// Largest explicitly configured model-step ceiling.
 pub const MAX_MAX_MODEL_STEPS: u32 = 100_000;
 
-/// Default cumulative per-turn wall-clock budget, in seconds.
+/// No per-turn wall-clock limit unless the caller configures one.
 ///
-/// Measured across every model step of one turn, not per request. Time the
-/// turn spends blocked on a human approval decision is excluded (see
-/// [`TurnWallClock::begin_human_wait`]) so an unanswered prompt cannot
-/// consume the budget.
-pub const DEFAULT_TURN_WALL_CLOCK_SECS: u64 = 3_600;
+/// `Duration::MAX` is the representation, mirroring
+/// [`DEFAULT_MAX_MODEL_STEPS`]: [`TurnWallClock::exhausted`] can never reach
+/// it, and callers turning it into an absolute deadline must use
+/// `checked_add` (see `exec_agent`). When configured, the budget is measured
+/// across every model step of one turn, not per request, and time blocked on
+/// a human approval decision is excluded (see
+/// [`TurnWallClock::begin_human_wait`]).
+pub const DEFAULT_TURN_WALL_CLOCK: Duration = Duration::MAX;
 /// Smallest accepted per-turn wall-clock budget. Below this a single slow
 /// reasoning request would trip the budget before it could finish.
 pub const MIN_TURN_WALL_CLOCK_SECS: u64 = 30;
@@ -70,22 +75,19 @@ pub fn resolve_max_model_steps(raw: Option<u32>) -> u32 {
     }
 }
 
-/// Resolve a configured per-turn wall-clock budget, in seconds.
+/// Resolve a configured per-turn wall-clock budget.
 ///
-/// `None` and `0` both resolve to [`DEFAULT_TURN_WALL_CLOCK_SECS`]; `0` is
-/// invalid, not "unlimited".
-#[must_use]
-pub fn resolve_turn_wall_clock_secs(raw: Option<u64>) -> u64 {
-    match raw {
-        None | Some(0) => DEFAULT_TURN_WALL_CLOCK_SECS,
-        Some(value) => value.clamp(MIN_TURN_WALL_CLOCK_SECS, MAX_TURN_WALL_CLOCK_SECS),
-    }
-}
-
-/// Resolve a configured per-turn wall-clock budget as a [`Duration`].
+/// `None` and `0` select the uncapped default ([`DEFAULT_TURN_WALL_CLOCK`]).
+/// Explicit positive values, in seconds, clamp into
+/// `MIN_TURN_WALL_CLOCK_SECS..=MAX_TURN_WALL_CLOCK_SECS`.
 #[must_use]
 pub fn resolve_turn_wall_clock(raw: Option<u64>) -> Duration {
-    Duration::from_secs(resolve_turn_wall_clock_secs(raw))
+    match raw {
+        None | Some(0) => DEFAULT_TURN_WALL_CLOCK,
+        Some(value) => {
+            Duration::from_secs(value.clamp(MIN_TURN_WALL_CLOCK_SECS, MAX_TURN_WALL_CLOCK_SECS))
+        }
+    }
 }
 
 /// Resolve a configured per-step stream content cap, given megabytes.
@@ -137,7 +139,7 @@ pub(crate) struct TurnWallClock {
 impl TurnWallClock {
     /// Start a fresh budget. A zero budget is legal here (and only here):
     /// it is how tests assert the stop path without sleeping. Configuration
-    /// never produces one — [`resolve_turn_wall_clock`] rejects `0`.
+    /// never produces one — [`resolve_turn_wall_clock`] reads `0` as no limit.
     pub(crate) fn start(budget: Duration) -> Self {
         Self {
             budget,
@@ -225,31 +227,24 @@ mod tests {
     }
 
     #[test]
-    fn turn_wall_clock_defaults_are_finite_and_reject_the_zero_sentinel() {
-        assert_eq!(
-            resolve_turn_wall_clock_secs(None),
-            DEFAULT_TURN_WALL_CLOCK_SECS
-        );
-        assert_eq!(
-            resolve_turn_wall_clock_secs(Some(0)),
-            DEFAULT_TURN_WALL_CLOCK_SECS
-        );
-        assert_eq!(
-            resolve_turn_wall_clock(None),
-            Duration::from_secs(DEFAULT_TURN_WALL_CLOCK_SECS)
-        );
+    fn turn_wall_clock_defaults_to_no_limit() {
+        assert_eq!(resolve_turn_wall_clock(None), DEFAULT_TURN_WALL_CLOCK);
+        assert_eq!(resolve_turn_wall_clock(Some(0)), DEFAULT_TURN_WALL_CLOCK);
+        let mut clock = TurnWallClock::start(resolve_turn_wall_clock(None));
+        clock.rewind_for_test(Duration::from_secs(10 * MAX_TURN_WALL_CLOCK_SECS));
+        assert!(!clock.exhausted(), "the default never stops a turn");
     }
 
     #[test]
     fn turn_wall_clock_is_overridable_and_clamped() {
-        assert_eq!(resolve_turn_wall_clock_secs(Some(120)), 120);
+        assert_eq!(resolve_turn_wall_clock(Some(120)), Duration::from_secs(120));
         assert_eq!(
-            resolve_turn_wall_clock_secs(Some(1)),
-            MIN_TURN_WALL_CLOCK_SECS
+            resolve_turn_wall_clock(Some(1)),
+            Duration::from_secs(MIN_TURN_WALL_CLOCK_SECS)
         );
         assert_eq!(
-            resolve_turn_wall_clock_secs(Some(u64::MAX)),
-            MAX_TURN_WALL_CLOCK_SECS
+            resolve_turn_wall_clock(Some(u64::MAX)),
+            Duration::from_secs(MAX_TURN_WALL_CLOCK_SECS)
         );
     }
 
