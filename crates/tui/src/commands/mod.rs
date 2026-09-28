@@ -74,66 +74,17 @@ mod debug_diagnostics_surface_tests;
 #[cfg(test)]
 mod debug_diagnostics_test_support;
 
+#[cfg(test)]
+mod debug_change_host_tests;
+mod debug_group;
+#[cfg(test)]
+mod debug_mutation_host_tests;
+
 use crate::tui::app::{App, AppAction};
 use codewhale_config::AppMode;
 
-/// Result of executing a command
-#[derive(Debug, Clone)]
-pub struct CommandResult {
-    /// Optional message to display to the user
-    pub message: Option<String>,
-    /// Optional action for the app to take
-    pub action: Option<AppAction>,
-    /// Whether the command failed.
-    pub is_error: bool,
-}
-
-impl CommandResult {
-    /// Create an empty result (command succeeded with no output)
-    pub fn ok() -> Self {
-        Self {
-            message: None,
-            action: None,
-            is_error: false,
-        }
-    }
-
-    /// Create a result with just a message
-    pub fn message(msg: impl Into<String>) -> Self {
-        Self {
-            message: Some(msg.into()),
-            action: None,
-            is_error: false,
-        }
-    }
-
-    /// Create a result with an action
-    pub fn action(action: AppAction) -> Self {
-        Self {
-            message: None,
-            action: Some(action),
-            is_error: false,
-        }
-    }
-
-    /// Create a result with both message and action
-    pub fn with_message_and_action(msg: impl Into<String>, action: AppAction) -> Self {
-        Self {
-            message: Some(msg.into()),
-            action: Some(action),
-            is_error: false,
-        }
-    }
-
-    /// Create an error message result
-    pub fn error(msg: impl Into<String>) -> Self {
-        Self {
-            message: Some(format!("Error: {}", msg.into())),
-            action: None,
-            is_error: true,
-        }
-    }
-}
+/// Shared result shape; host actions remain consumed by the existing event loop.
+pub type CommandResult = codewhale_command_contract::outcome::CommandResult<AppAction>;
 
 static REGISTRY: OnceLock<traits::CommandRegistry> = OnceLock::new();
 
@@ -2134,15 +2085,21 @@ mod tests {
             "title",
             // FEAT-025 session export slice.
             "export",
-            // FEAT-029 debug diagnostics slice (mutation stays legacy).
+            // FEAT-029 complete debug group, including receipts and mutation.
             "tokens",
             "cost",
+            "receipts",
             "balance",
             "cache",
             "preview-request",
             "tools",
+            "change",
             "system",
             "context",
+            "edit",
+            "diff",
+            "undo",
+            "retry",
         ];
         for info in command_infos() {
             if info.name == "feat015ctx" || MIGRATED_GROUPS.contains(&info.name) {

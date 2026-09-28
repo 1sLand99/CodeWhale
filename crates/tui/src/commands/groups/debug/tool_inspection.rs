@@ -1,6 +1,6 @@
-use crate::commands::CommandResult;
+use super::CommandResult;
+use super::DebugAction as AppAction;
 use crate::diagnostics_reports::{render_tool_snapshot_json, render_tool_snapshot_text};
-use crate::tui::app::AppAction;
 use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
 use codewhale_command_contract::metadata::{
     CommandInfo as ContractInfo, RegisterCommand as ContractRegisterCommand,

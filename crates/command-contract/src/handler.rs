@@ -5,12 +5,13 @@
 //! `CommandHandler<crate::commands::CommandResult>`.
 
 use crate::facets::{
-    CommandCostContext, CommandDebugDiagnosticsContext, CommandMediaContext, CommandMemoryContext,
-    CommandModePolicyContext, CommandModelContext, CommandPluginContext,
-    CommandPresentationContext, CommandProjectContext, CommandSessionContext,
-    CommandSessionControlContext, CommandSessionExportContext, CommandSessionLifecycleContext,
-    CommandSkillGroupContext, CommandSkillsContext, CommandSystemPromptContext,
-    CommandWorkspaceContext,
+    CommandCostContext, CommandDebugChangeContext, CommandDebugDiagnosticsContext,
+    CommandDebugDiffContext, CommandDebugHistoryContext, CommandDebugReceiptsContext,
+    CommandDebugUndoContext, CommandMediaContext, CommandMemoryContext, CommandModePolicyContext,
+    CommandModelContext, CommandPluginContext, CommandPresentationContext, CommandProjectContext,
+    CommandSessionContext, CommandSessionControlContext, CommandSessionExportContext,
+    CommandSessionLifecycleContext, CommandSkillGroupContext, CommandSkillsContext,
+    CommandSystemPromptContext, CommandWorkspaceContext,
 };
 
 /// Exact host capabilities exposed to one contextual command handler.
@@ -63,9 +64,20 @@ impl CommandCapabilities {
     /// the published identity of this bit remains unchanged.
     pub const SESSION_EXPORT: Self = Self(1 << 15);
     /// Debug diagnostics host data (FEAT-029 D3/D4). This is the first bit in
-    /// the widened backing storage; mutation commands retain their own future
+    /// the widened backing storage; other debug commands retain their own independent
     /// authority and do not borrow this facet.
     pub const DEBUG_DIAGNOSTICS: Self = Self(1 << 16);
+
+    /// Debug receipts authority; independent from diagnostics and other debug operations.
+    pub const DEBUG_RECEIPTS: Self = Self(1 << 17);
+    /// Debug change authority; independent from diagnostics and other debug operations.
+    pub const DEBUG_CHANGE: Self = Self(1 << 18);
+    /// Debug history authority; independent from diagnostics and other debug operations.
+    pub const DEBUG_HISTORY: Self = Self(1 << 19);
+    /// Debug diff authority; independent from diagnostics and other debug operations.
+    pub const DEBUG_DIFF: Self = Self(1 << 20);
+    /// Debug undo authority; independent from diagnostics and other debug operations.
+    pub const DEBUG_UNDO: Self = Self(1 << 21);
 
     /// Raw bit pattern, for tests that pin the capability-space capacity.
     ///
@@ -125,6 +137,11 @@ pub struct CommandContexts<'a> {
     lifecycle: Option<&'a mut dyn CommandSessionLifecycleContext>,
     control: Option<&'a mut dyn CommandSessionControlContext>,
     export: Option<&'a mut dyn CommandSessionExportContext>,
+    debug_receipts: Option<&'a mut dyn CommandDebugReceiptsContext>,
+    debug_change: Option<&'a mut dyn CommandDebugChangeContext>,
+    debug_history: Option<&'a mut dyn CommandDebugHistoryContext>,
+    debug_diff: Option<&'a mut dyn CommandDebugDiffContext>,
+    debug_undo: Option<&'a mut dyn CommandDebugUndoContext>,
     debug_diagnostics: Option<&'a mut dyn CommandDebugDiagnosticsContext>,
 }
 
@@ -146,6 +163,11 @@ pub struct ContextParts<'a> {
     pub lifecycle: Option<&'a mut dyn CommandSessionLifecycleContext>,
     pub control: Option<&'a mut dyn CommandSessionControlContext>,
     pub export: Option<&'a mut dyn CommandSessionExportContext>,
+    pub debug_receipts: Option<&'a mut dyn CommandDebugReceiptsContext>,
+    pub debug_change: Option<&'a mut dyn CommandDebugChangeContext>,
+    pub debug_history: Option<&'a mut dyn CommandDebugHistoryContext>,
+    pub debug_diff: Option<&'a mut dyn CommandDebugDiffContext>,
+    pub debug_undo: Option<&'a mut dyn CommandDebugUndoContext>,
     pub debug_diagnostics: Option<&'a mut dyn CommandDebugDiagnosticsContext>,
 }
 
@@ -168,6 +190,11 @@ impl<'a> CommandContexts<'a> {
             lifecycle: None,
             control: None,
             export: None,
+            debug_receipts: None,
+            debug_change: None,
+            debug_history: None,
+            debug_diff: None,
+            debug_undo: None,
             debug_diagnostics: None,
         }
     }
@@ -190,6 +217,11 @@ impl<'a> CommandContexts<'a> {
             lifecycle: self.lifecycle,
             control: self.control,
             export: self.export,
+            debug_receipts: self.debug_receipts,
+            debug_change: self.debug_change,
+            debug_history: self.debug_history,
+            debug_diff: self.debug_diff,
+            debug_undo: self.debug_undo,
             debug_diagnostics: self.debug_diagnostics,
         }
     }
@@ -315,6 +347,46 @@ impl<'a> CommandContexts<'a> {
         assert!(
             self.export.replace(value).is_none(),
             "export facet already set"
+        );
+        self
+    }
+
+    pub fn with_debug_receipts(mut self, value: &'a mut dyn CommandDebugReceiptsContext) -> Self {
+        assert!(
+            self.debug_receipts.replace(value).is_none(),
+            "debug_receipts facet already set"
+        );
+        self
+    }
+
+    pub fn with_debug_change(mut self, value: &'a mut dyn CommandDebugChangeContext) -> Self {
+        assert!(
+            self.debug_change.replace(value).is_none(),
+            "debug_change facet already set"
+        );
+        self
+    }
+
+    pub fn with_debug_history(mut self, value: &'a mut dyn CommandDebugHistoryContext) -> Self {
+        assert!(
+            self.debug_history.replace(value).is_none(),
+            "debug_history facet already set"
+        );
+        self
+    }
+
+    pub fn with_debug_diff(mut self, value: &'a mut dyn CommandDebugDiffContext) -> Self {
+        assert!(
+            self.debug_diff.replace(value).is_none(),
+            "debug_diff facet already set"
+        );
+        self
+    }
+
+    pub fn with_debug_undo(mut self, value: &'a mut dyn CommandDebugUndoContext) -> Self {
+        assert!(
+            self.debug_undo.replace(value).is_none(),
+            "debug_undo facet already set"
         );
         self
     }

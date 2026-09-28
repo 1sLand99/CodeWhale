@@ -3442,3 +3442,23 @@ fn envelope_export_slot_is_independent_and_rejects_duplicates() {
     let export = inserted.into_parts().export.expect("inserted export");
     assert!(export.clipboard_requires_terminal_paste());
 }
+
+#[test]
+fn whole_debug_capabilities_extend_published_bits_without_aliasing_authority() {
+    let old = (1u32 << 17) - 1;
+    let capabilities = [
+        CommandCapabilities::DEBUG_RECEIPTS,
+        CommandCapabilities::DEBUG_CHANGE,
+        CommandCapabilities::DEBUG_HISTORY,
+        CommandCapabilities::DEBUG_DIFF,
+        CommandCapabilities::DEBUG_UNDO,
+    ];
+    let mut seen = old;
+    for (index, capability) in capabilities.into_iter().enumerate() {
+        assert_eq!(capability.bits_for_test(), 1 << (17 + index));
+        assert_eq!(seen & capability.bits_for_test(), 0);
+        assert!(!capability.contains(CommandCapabilities::DEBUG_DIAGNOSTICS));
+        seen |= capability.bits_for_test();
+    }
+    assert_eq!(seen, (1u32 << 22) - 1);
+}

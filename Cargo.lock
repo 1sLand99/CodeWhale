@@ -874,6 +874,7 @@ dependencies = [
 name = "codewhale-command-contract"
 version = "0.10.0"
 dependencies = [
+ "chrono",
  "codewhale-core",
  "serde",
  "serde_json",

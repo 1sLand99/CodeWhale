@@ -42,7 +42,7 @@
 //! from PR #1099 by TaoMu (GTC2080); no code from that PR is reused.
 
 use super::CommandResult;
-use crate::tui::app::AppAction;
+use super::DebugAction as AppAction;
 use codewhale_command_contract::handler::CommandHandler;
 use codewhale_command_contract::metadata::{
     CommandInfo as ContractInfo, RegisterCommand as ContractRegisterCommand,

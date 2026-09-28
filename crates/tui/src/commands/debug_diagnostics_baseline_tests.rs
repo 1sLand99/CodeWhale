@@ -387,7 +387,7 @@ fn cache_inspect_json_and_previous_state_match_baseline() {
 }
 
 /// The slice inventory is exactly the eight declared commands plus the five
-/// mutation commands that stay behind for FEAT-030; no diagnostics command may
+/// mutation commands now adopted by the same debug group; no diagnostics command may
 /// lose its registration.
 #[test]
 fn diagnostics_slice_inventory_is_exactly_the_declared_eight() {

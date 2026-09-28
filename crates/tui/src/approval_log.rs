@@ -26,24 +26,8 @@ pub(crate) enum ApprovalOutcome {
     },
 }
 
-/// Who resolved an approval request. Recorded on the decision half so a
-/// receipt says "approved by you" only when a person answered. Records
-/// written before this field existed carry no decider; readers report it as
-/// not recorded rather than guessing.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ApprovalDecider {
-    /// A person answered the prompt: the terminal card, the app, the web
-    /// mirror, or a Runtime API client acting for them.
-    User,
-    /// A remembered "allow/deny for this session" rule answered it.
-    SessionRule,
-    /// The active mode or permission posture answered it without a prompt.
-    Posture,
-    /// The host resolved it without a person: the turn had ended, was
-    /// cancelled, or the decision channel closed.
-    Host,
-}
+// Shared data ownership; persisted approval serialization remains unchanged.
+pub(crate) use codewhale_command_contract::facets::ApprovalDecider;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "phase", rename_all = "snake_case")]

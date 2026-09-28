@@ -2,8 +2,8 @@
 //! `groups/debug` source closure. Selected by CW-SLICE's
 //! `commands::debug_diagnostics` filter; mutation-only tests stay in the group.
 
+use super::debug_mutation_host_tests::{create_test_app, test_tool};
 use super::groups::debug::cache_format::format_tokens;
-use super::groups::debug::tests::{create_test_app, test_tool};
 use crate::client::CacheWarmupKey;
 use crate::tui::app::{App, AppAction, TurnCacheRecord};
 use crate::tui::history::HistoryCell;

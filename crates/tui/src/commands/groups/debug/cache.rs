@@ -5,12 +5,12 @@
 //! no prompt builder or App state is reachable from the command leaf.
 
 use super::CommandResult;
+use super::DebugAction as AppAction;
 use super::cache_format::{
     format_cache_history, format_cache_stats, format_cache_zones, format_first_divergence,
     format_static_prefix_status, format_verbose_diff, format_warmup_status,
     session_cache_rates_line,
 };
-use crate::tui::app::AppAction;
 use codewhale_command_contract::facets::{
     CommandDebugDiagnosticsContext, CommandPresentationContext, DebugCacheInspectionObservation,
     DebugCacheInspectionUnavailable,

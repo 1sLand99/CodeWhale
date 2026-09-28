@@ -1,6 +1,6 @@
 //! Balance: query the active provider's remaining prepaid credit.
 
-use crate::tui::app::AppAction;
+use super::DebugAction as AppAction;
 use codewhale_command_contract::facets::CommandDebugDiagnosticsContext;
 use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
 use codewhale_command_contract::metadata::{

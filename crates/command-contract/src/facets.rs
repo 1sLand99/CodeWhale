@@ -7,6 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
+mod debug_operations;
+pub mod debug_receipts;
+pub use debug_operations::*;
+pub use debug_receipts::*;
+
 mod diagnostics_report;
 mod diagnostics_tools;
 pub use diagnostics_report::*;
@@ -372,7 +377,7 @@ pub struct DebugCacheTelemetry {
 ///
 /// No concrete provider, App, completed message, or network operation crosses
 /// this interface. Add operations only when their live branches require them.
-/// These projections do not yet migrate either command.
+/// Portable handlers consume these facts without concrete host access.
 pub trait CommandDebugDiagnosticsContext {
     fn balance_projection(&self) -> DebugBalanceProjection;
     fn system_projection(&self) -> DebugSystemProjection;

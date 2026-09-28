@@ -102,7 +102,7 @@ fn observation() -> DebugCacheInspectionObservation {
     }
 }
 
-fn cache_with(fake: &mut FakeDiagnostics, arg: Option<&str>) -> crate::commands::CommandResult {
+fn cache_with(fake: &mut FakeDiagnostics, arg: Option<&str>) -> super::CommandResult {
     let mut presentation = FakePresentation;
     cache::cache(
         CommandContexts::empty()
@@ -228,7 +228,7 @@ fn balance_and_tool_snapshot_branches_observe_only_their_declared_facts() {
     assert!(supported.message.is_none());
     assert!(matches!(
         supported.action,
-        Some(crate::tui::app::AppAction::FetchBalance)
+        Some(super::DebugAction::FetchBalance)
     ));
     let unavailable = tool_inspection::tools(
         CommandContexts::empty().with_debug_diagnostics(&mut fake),

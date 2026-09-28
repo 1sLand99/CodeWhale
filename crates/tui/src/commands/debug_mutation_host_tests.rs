@@ -1,4 +1,20 @@
-use super::undo::{patch_undo, prune_undone_tool_context, retry, undo_conversation};
+//! Preserved snapshot/history safety tests outside the portable debug group.
+use super::CommandResult;
+use super::contract::debug_operations::prune_undone_tool_context;
+use super::groups::debug::undo;
+fn patch_undo(app: &mut App) -> CommandResult {
+    super::debug_group::host_result(undo::patch_result(
+        super::contract::debug_operations::undo_files(app),
+    ))
+}
+fn undo_conversation(app: &mut App) -> CommandResult {
+    super::debug_group::host_result(undo::conversation_result(
+        super::contract::debug_operations::undo_conversation(app),
+    ))
+}
+fn retry(app: &mut App) -> CommandResult {
+    super::execute("/retry", app)
+}
 use crate::config::Config;
 use crate::tui::app::{App, AppAction, TuiOptions};
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
@@ -16,6 +32,81 @@ pub(in crate::commands) fn create_test_app() -> App {
     app.cost_currency = crate::pricing::CostCurrency::Usd;
     app.api_provider = crate::config::ApiProvider::Deepseek;
     app
+}
+
+#[test]
+fn edit_dispatch_loads_unicode_composer_without_truncating_history() {
+    let mut app = create_test_app();
+    app.push_history_cell(HistoryCell::User {
+        content: "edit 漢字🙂".into(),
+    });
+    let count = app.history.len();
+    let result = super::execute("/edit", &mut app);
+    assert_eq!(
+        result.message.as_deref(),
+        Some("Last message loaded into composer — edit and press Enter to resubmit")
+    );
+    assert_eq!(app.input, "edit 漢字🙂");
+    assert_eq!(app.cursor_position, "edit 漢字🙂".chars().count());
+    assert!(app.edit_in_progress);
+    assert_eq!(app.history.len(), count);
+    assert!(result.action.is_none());
+    assert!(!result.is_error);
+}
+
+#[test]
+fn diff_dispatch_reads_only_the_apps_workspace_without_changing_files() {
+    let workspace = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let result = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap()
+    };
+    git(&["init", "--quiet"]);
+    std::fs::write(workspace.path().join("tracked.txt"), "before\n").unwrap();
+    git(&["add", "tracked.txt"]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+    ]);
+    let mut app = create_test_app();
+    app.workspace = workspace.path().to_path_buf();
+    assert_eq!(
+        super::execute("/diff", &mut app).message.as_deref(),
+        Some("No changes since session start")
+    );
+    std::fs::write(workspace.path().join("tracked.txt"), "after\n").unwrap();
+    let stat = git(&["diff", "--stat"]);
+    let result = super::execute("/diff", &mut app);
+    assert_eq!(
+        result.message,
+        Some(format!(
+            "Changed files (1):\ntracked.txt\n\n── Stat ──\n{}",
+            stat.trim()
+        ))
+    );
+    assert!(!result.is_error);
+    assert!(result.action.is_none());
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("tracked.txt")).unwrap(),
+        "after\n"
+    );
 }
 
 pub(in crate::commands) fn test_tool(name: &str) -> Tool {
@@ -256,7 +347,7 @@ fn test_undo_legacy_chain_falls_back_to_conversation_only() {
         streaming: false,
     });
 
-    let result = super::dispatch(&mut app, "undo", None).expect("registered command");
+    let result = super::execute("/undo", &mut app);
     assert!(!result.is_error);
     assert!(
         result
@@ -768,18 +859,18 @@ fn test_undo_reports_that_files_were_not_reverted_when_the_repo_is_unavailable()
         }],
     });
 
-    let result = super::dispatch(&mut app, "undo", None).expect("undo is dispatched here");
+    let result = super::execute("/undo", &mut app);
     let message = result.message.as_deref().unwrap_or_default();
     assert!(
         message.contains("Removed 1 message(s)"),
         "conversation undo still runs: {message}"
     );
     assert!(
-        message.contains(super::undo::FILES_NOT_REVERTED_NOTE),
+        message.contains(undo::FILES_NOT_REVERTED_NOTE),
         "the user must be told files were not reverted: {message}"
     );
     assert!(
-        message.contains(super::undo::SNAPSHOT_REPO_UNAVAILABLE_PREFIX),
+        message.contains(undo::SNAPSHOT_REPO_UNAVAILABLE_PREFIX),
         "the reason must travel with the fallback: {message}"
     );
 }
@@ -884,7 +975,7 @@ fn patch_undo_refuses_when_a_changed_path_changed_since() {
     fx.write("a.txt", "a-user");
 
     let mut app = fx.app("s1");
-    let result = super::dispatch(&mut app, "undo", None).expect("registered command");
+    let result = super::execute("/undo", &mut app);
 
     let message = result.message.unwrap_or_default();
     assert!(
@@ -973,7 +1064,7 @@ fn patch_undo_restores_turns_a_fork_inherited() {
         app
     };
 
-    let owners = super::undo::snapshot_owners(&fork(chrono::Utc::now()));
+    let owners = super::contract::debug_operations::snapshot_owners(&fork(chrono::Utc::now()));
     assert_eq!(owners.len(), 2);
     assert_eq!(owners[1].session_id, "source");
 
@@ -1205,4 +1296,113 @@ fn receipts_command_is_registered_and_reads_the_transcript() {
     );
     let bad = crate::commands::execute("/receipts nope", &mut app);
     assert!(bad.is_error);
+}
+
+#[test]
+fn whole_debug_registry_matches_portable_inventory_and_exact_host_authority() {
+    use codewhale_command_contract::handler::{
+        CommandCapabilities as Caps, CommandHandler, ContextParts,
+    };
+    let mut app = create_test_app();
+    let portable = super::groups::debug::portable_handlers();
+    assert_eq!(portable.len(), 14);
+    for (info, portable_handler) in portable {
+        for spelling in std::iter::once(info.name).chain(info.aliases.iter().copied()) {
+            let registered = super::registry()
+                .get(spelling)
+                .expect("registered debug command");
+            assert_eq!(registered.info().name, info.name);
+            assert_eq!(registered.info().aliases, info.aliases);
+            assert_eq!(registered.info().usage, info.usage);
+            let handler = registered
+                .contextual_handler()
+                .expect("portable host registration");
+            match (portable_handler.clone(), handler) {
+                (CommandHandler::Pure(_), CommandHandler::Pure(_)) => {
+                    assert_eq!(info.name, "preview-request")
+                }
+                (
+                    CommandHandler::Contextual {
+                        capabilities: expected,
+                        ..
+                    },
+                    CommandHandler::Contextual { capabilities, .. },
+                ) => {
+                    assert_eq!(capabilities, expected, "/{spelling}");
+                    let mut bundle = app.command_contexts();
+                    let ContextParts {
+                        session,
+                        model,
+                        cost,
+                        mode_policy,
+                        system_prompt,
+                        skills,
+                        workspace,
+                        presentation,
+                        media,
+                        memory,
+                        project,
+                        skill_group,
+                        plugin,
+                        lifecycle,
+                        control,
+                        export,
+                        debug_diagnostics,
+                        debug_receipts,
+                        debug_change,
+                        debug_history,
+                        debug_diff,
+                        debug_undo,
+                    } = bundle.contexts(capabilities).into_parts();
+                    for (name, present, capability) in [
+                        ("session", session.is_some(), Caps::SESSION),
+                        ("model", model.is_some(), Caps::MODEL),
+                        ("cost", cost.is_some(), Caps::COST),
+                        ("mode_policy", mode_policy.is_some(), Caps::MODE_POLICY),
+                        (
+                            "system_prompt",
+                            system_prompt.is_some(),
+                            Caps::SYSTEM_PROMPT,
+                        ),
+                        ("skills", skills.is_some(), Caps::SKILLS),
+                        ("workspace", workspace.is_some(), Caps::WORKSPACE),
+                        ("presentation", presentation.is_some(), Caps::PRESENTATION),
+                        ("media", media.is_some(), Caps::MEDIA),
+                        ("memory", memory.is_some(), Caps::MEMORY),
+                        ("project", project.is_some(), Caps::PROJECT),
+                        ("skill_group", skill_group.is_some(), Caps::SKILL_GROUP),
+                        ("plugin", plugin.is_some(), Caps::PLUGIN),
+                        ("lifecycle", lifecycle.is_some(), Caps::SESSION_LIFECYCLE),
+                        ("control", control.is_some(), Caps::SESSION_CONTROL),
+                        ("export", export.is_some(), Caps::SESSION_EXPORT),
+                        (
+                            "debug_diagnostics",
+                            debug_diagnostics.is_some(),
+                            Caps::DEBUG_DIAGNOSTICS,
+                        ),
+                        (
+                            "debug_receipts",
+                            debug_receipts.is_some(),
+                            Caps::DEBUG_RECEIPTS,
+                        ),
+                        ("debug_change", debug_change.is_some(), Caps::DEBUG_CHANGE),
+                        (
+                            "debug_history",
+                            debug_history.is_some(),
+                            Caps::DEBUG_HISTORY,
+                        ),
+                        ("debug_diff", debug_diff.is_some(), Caps::DEBUG_DIFF),
+                        ("debug_undo", debug_undo.is_some(), Caps::DEBUG_UNDO),
+                    ] {
+                        assert_eq!(
+                            present,
+                            capabilities.contains(capability),
+                            "/{spelling}: {name}"
+                        );
+                    }
+                }
+                _ => panic!("host changed /{spelling} handler shape"),
+            }
+        }
+    }
 }

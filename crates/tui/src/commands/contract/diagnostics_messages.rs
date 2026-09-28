@@ -8,6 +8,10 @@ pub(super) fn resolve(key: &str) -> Option<MessageId> {
         return Some(crate::pricing::UnpricedReason::from_label(reason).message_id());
     }
     Some(match key {
+        "cmd_change_header" => MessageId::CmdChangeHeader,
+        "cmd_change_previous_version" => MessageId::CmdChangePreviousVersion,
+        "cmd_change_translation_unavailable" => MessageId::CmdChangeTranslationUnavailable,
+        "cmd_change_translation_queued" => MessageId::CmdChangeTranslationQueued,
         "cmd_tokens_not_reported" => MessageId::CmdTokensNotReported,
         "cmd_tokens_context_with_window" => MessageId::CmdTokensContextWithWindow,
         "cmd_tokens_cache_both" => MessageId::CmdTokensCacheBoth,

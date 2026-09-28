@@ -17,3 +17,4 @@ codewhale-core = { path = "../core", version = "0.10.0" }
 # adds no new external dependency to the graph.
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde = { workspace = true, features = ["derive"] }
+chrono.workspace = true

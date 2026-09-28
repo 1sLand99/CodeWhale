@@ -244,6 +244,11 @@ fn diagnostics_registrations_expose_exact_facets_and_preview_is_pure() {
                         lifecycle,
                         control,
                         export,
+                        debug_receipts,
+                        debug_change,
+                        debug_history,
+                        debug_diff,
+                        debug_undo,
                         debug_diagnostics,
                     } = parts;
                     assert!(debug_diagnostics.is_some(), "/{spelling} needs diagnostics");
@@ -268,6 +273,11 @@ fn diagnostics_registrations_expose_exact_facets_and_preview_is_pure() {
                         ("lifecycle", lifecycle.is_some()),
                         ("control", control.is_some()),
                         ("export", export.is_some()),
+                        ("debug_receipts", debug_receipts.is_some()),
+                        ("debug_change", debug_change.is_some()),
+                        ("debug_history", debug_history.is_some()),
+                        ("debug_diff", debug_diff.is_some()),
+                        ("debug_undo", debug_undo.is_some()),
                     ] {
                         assert!(!exposed, "/{spelling} must not expose {facet}");
                     }
@@ -281,15 +291,15 @@ fn diagnostics_registrations_expose_exact_facets_and_preview_is_pure() {
                 .get(name)
                 .unwrap()
                 .contextual_handler()
-                .is_none(),
-            "/{name} must remain unmigrated"
+                .is_some(),
+            "/{name} must use its portable registration"
         );
     }
 }
 
 /// Registry position inside the debug group is preserved: the eight
 /// diagnostics commands stay in their original relative order and the five
-/// FEAT-030 mutation commands remain registered around them.
+/// The other debug commands remain registered around these diagnostics.
 #[test]
 fn diagnostics_registry_position_matches_baseline() {
     let names: Vec<&str> = crate::commands::command_infos()

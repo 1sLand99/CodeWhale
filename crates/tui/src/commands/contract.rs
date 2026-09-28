@@ -14,7 +14,7 @@
 //!
 //! ## Authoritative host-proxy design (D1)
 //!
-//! `CommandContexts` has seventeen independently optional facet slots, all
+//! `CommandContexts` has twenty-two independently optional facet slots, all
 //! constructed here. The diagnostics adapter joins the host bundle in FEAT-029. Important behavior (mode transitions, model
 //! invalidation, cost accounting, skill refresh) is authoritative on `App`. The adapters therefore share a
 //! synchronous TUI-owned host proxy. Each trait call borrows `App` only for the
@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 mod debug_diagnostics;
+pub(in crate::commands) mod debug_operations;
+use debug_operations::DebugOperationsAdapter;
 mod diagnostics_messages;
 #[cfg(test)]
 pub(crate) use debug_diagnostics::CostComponents as DebugCostComponents;
@@ -99,7 +101,7 @@ use codewhale_localization::{MessageId, tr};
 /// (`scripts/check-command-migration-manifest.py`) reads this exact
 /// declaration by source regex and the Rust frontier tests assert it.
 #[cfg_attr(not(test), expect(dead_code))]
-pub(crate) const PENDING_GROUPS: &[&str] = &["config", "core", "debug", "session"];
+pub(crate) const PENDING_GROUPS: &[&str] = &["config", "core", "session"];
 
 // ---------------------------------------------------------------------------
 // Boundary-value mappings (D8)
@@ -226,6 +228,7 @@ pub(crate) fn key_to_message_id(key: &'static str) -> Option<MessageId> {
         "cmd_rename_description" => MessageId::CmdRenameDescription,
         "cmd_restore_description" => MessageId::CmdRestoreDescription,
         "cmd_resume_description" => MessageId::CmdResumeDescription,
+        "cmd_receipts_description" => MessageId::CmdReceiptsDescription,
         "cmd_retry_description" => MessageId::CmdRetryDescription,
         "cmd_review_description" => MessageId::CmdReviewDescription,
         "cmd_rlm_description" => MessageId::CmdRlmDescription,
@@ -271,7 +274,7 @@ pub(crate) fn key_to_message_id(key: &'static str) -> Option<MessageId> {
 
 /// Shared TUI host hidden behind the portable command facets.
 ///
-/// The envelope has seventeen optional facet slots; authoritative mutation methods live on `App`. Each adapter therefore owns
+/// The envelope has twenty-two optional facet slots; authoritative mutation methods live on `App`. Each adapter therefore owns
 /// an `Rc` clone of this synchronous host proxy. Trait calls borrow `App` only
 /// for the duration of one method, delegate to the real TUI authority, and
 /// return owned values. Command handlers never receive or name `App`.
@@ -4313,7 +4316,7 @@ fn default_codewhale_tools_dir() -> Option<PathBuf> {
 // Envelope construction (D1)
 // ---------------------------------------------------------------------------
 
-/// Owns seventeen facet objects sharing one synchronous TUI host proxy.
+/// Owns twenty-two facet objects sharing one synchronous TUI host proxy.
 ///
 /// Handlers borrow only these adapters. Every method delegates to the real App
 /// authority and releases its `RefCell` borrow before returning, so facets can
@@ -4335,6 +4338,11 @@ pub(crate) struct CommandContextBundle<'a> {
     lifecycle: SessionLifecycleAdapter<'a>,
     control: SessionControlAdapter<'a>,
     export: SessionExportAdapter<'a>,
+    debug_receipts: DebugOperationsAdapter<'a>,
+    debug_change: DebugOperationsAdapter<'a>,
+    debug_history: DebugOperationsAdapter<'a>,
+    debug_diff: DebugOperationsAdapter<'a>,
+    debug_undo: DebugOperationsAdapter<'a>,
     debug_diagnostics: DebugDiagnosticsAdapter<'a>,
 }
 
@@ -4390,6 +4398,21 @@ impl<'a> CommandContextBundle<'a> {
         if capabilities.contains(CommandCapabilities::SESSION_EXPORT) {
             contexts = contexts.with_export(&mut self.export);
         }
+        if capabilities.contains(CommandCapabilities::DEBUG_RECEIPTS) {
+            contexts = contexts.with_debug_receipts(&mut self.debug_receipts);
+        }
+        if capabilities.contains(CommandCapabilities::DEBUG_CHANGE) {
+            contexts = contexts.with_debug_change(&mut self.debug_change);
+        }
+        if capabilities.contains(CommandCapabilities::DEBUG_HISTORY) {
+            contexts = contexts.with_debug_history(&mut self.debug_history);
+        }
+        if capabilities.contains(CommandCapabilities::DEBUG_DIFF) {
+            contexts = contexts.with_debug_diff(&mut self.debug_diff);
+        }
+        if capabilities.contains(CommandCapabilities::DEBUG_UNDO) {
+            contexts = contexts.with_debug_undo(&mut self.debug_undo);
+        }
         if capabilities.contains(CommandCapabilities::DEBUG_DIAGNOSTICS) {
             contexts = contexts.with_debug_diagnostics(&mut self.debug_diagnostics);
         }
@@ -4415,6 +4438,11 @@ impl<'a> CommandContextBundle<'a> {
             .union(CommandCapabilities::SESSION_LIFECYCLE)
             .union(CommandCapabilities::SESSION_CONTROL)
             .union(CommandCapabilities::SESSION_EXPORT)
+            .union(CommandCapabilities::DEBUG_RECEIPTS)
+            .union(CommandCapabilities::DEBUG_CHANGE)
+            .union(CommandCapabilities::DEBUG_HISTORY)
+            .union(CommandCapabilities::DEBUG_DIFF)
+            .union(CommandCapabilities::DEBUG_UNDO)
             .union(CommandCapabilities::DEBUG_DIAGNOSTICS);
         self.contexts(all_test_capabilities).into_parts()
     }
@@ -4444,6 +4472,11 @@ impl App {
             lifecycle: SessionLifecycleAdapter { host: host.clone() },
             control: SessionControlAdapter { host: host.clone() },
             export: SessionExportAdapter { host: host.clone() },
+            debug_receipts: DebugOperationsAdapter { host: host.clone() },
+            debug_change: DebugOperationsAdapter { host: host.clone() },
+            debug_history: DebugOperationsAdapter { host: host.clone() },
+            debug_diff: DebugOperationsAdapter { host: host.clone() },
+            debug_undo: DebugOperationsAdapter { host: host.clone() },
             debug_diagnostics: DebugDiagnosticsAdapter { host },
         }
     }
