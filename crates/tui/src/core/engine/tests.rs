@@ -1278,6 +1278,9 @@ async fn main_turn_dispatch_freezes_declared_custom_model_rate() {
         quote.provenance,
         codewhale_config::pricing::PricingProvenance::UserOverride
     );
+    assert_eq!(quote.input_per_million.as_deref(), Some("1"));
+    assert_eq!(quote.output_per_million.as_deref(), Some("2"));
+    assert_eq!(quote.cache_read_per_million, None);
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
 }
