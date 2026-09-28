@@ -45,7 +45,7 @@ class CatalogModelsDevScriptTests(unittest.TestCase):
             },
             "token": "nope",
         }
-        clean = mod.scrub_secrets(dirty)
+        clean = mod.strip_sensitive_fields(dirty)
         self.assertNotIn("token", clean)
         self.assertNotIn("api_key", clean["providers"]["deepseek"])
         self.assertIn("models", clean["providers"]["deepseek"])

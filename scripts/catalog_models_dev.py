@@ -153,17 +153,17 @@ def is_credential_key(key: str) -> bool:
     return lowered in banned_exact or lowered.endswith("_api_key") or lowered.endswith("_secret")
 
 
-def scrub_secrets(node: Any) -> Any:
+def strip_sensitive_fields(node: Any) -> Any:
     """Drop keys that look like credentials; never persist auth material."""
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         for key, value in node.items():
             if not isinstance(key, str) or is_credential_key(key):
                 continue
-            out[key] = scrub_secrets(value)
+            out[key] = strip_sensitive_fields(value)
         return out
     if isinstance(node, list):
-        return [scrub_secrets(item) for item in node]
+        return [strip_sensitive_fields(item) for item in node]
     if isinstance(node, (str, int, float, bool)) or node is None:
         return node
     # Drop non-JSON-scalar oddities rather than serializing them.
@@ -174,11 +174,11 @@ def public_models_dev_document(data: dict[str, Any]) -> dict[str, Any]:
     """Construct a write-safe Models.dev-shaped document (public metadata only)."""
     out: dict[str, Any] = {}
     if isinstance(data.get("_meta"), dict):
-        out["_meta"] = scrub_secrets(data["_meta"])
+        out["_meta"] = strip_sensitive_fields(data["_meta"])
     if isinstance(data.get("models"), dict):
-        out["models"] = scrub_secrets(data["models"])
+        out["models"] = strip_sensitive_fields(data["models"])
     if isinstance(data.get("providers"), dict):
-        out["providers"] = scrub_secrets(data["providers"])
+        out["providers"] = strip_sensitive_fields(data["providers"])
     return out
 
 
@@ -295,7 +295,7 @@ def refresh_openrouter(args: argparse.Namespace) -> None:
         projected: dict[str, Any] = {}
         for key in allowed:
             if key in row and not is_credential_key(key):
-                projected[key] = scrub_secrets(row[key])
+                projected[key] = strip_sensitive_fields(row[key])
         if projected.get("id"):
             public_rows.append(projected)
     payload = {
@@ -424,7 +424,7 @@ def project_fields(row: Any, fields: tuple[str, ...]) -> dict[str, Any]:
     for field in fields:
         if field not in row or row[field] is None:
             continue
-        value = scrub_secrets(row[field])
+        value = strip_sensitive_fields(row[field])
         nested = NESTED_FIELDS.get(field)
         if nested is not None:
             if not isinstance(value, dict):
