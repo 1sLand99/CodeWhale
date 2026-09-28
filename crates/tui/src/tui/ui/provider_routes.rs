@@ -719,6 +719,15 @@ pub(crate) async fn switch_provider(
         || previous_identity != target_identity
         || previous_model != new_model;
     app.set_provider_identity_record(target_identity_record);
+    // Launch computed "needs a key" for the launch provider. A switch to a
+    // route that has its credential answers that, even when the user left the
+    // picker with Esc first; otherwise the stale flag keeps the info line on
+    // "model not connected" and keeps local-Ollama adoption armed against the
+    // provider the user just chose. An auth-failure rollback restores it.
+    app.onboarding_needs_api_key = !crate::config::has_api_key(config);
+    if !app.onboarding_needs_api_key {
+        app.onboarding_missing_key_recovery = false;
+    }
     app.billing_presentation = crate::route_billing::for_route(config, target);
     app.max_subagents = config
         .max_subagents_for_provider(target)

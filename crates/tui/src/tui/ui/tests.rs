@@ -10513,6 +10513,7 @@ fn first_run_route_context_keeps_reported_usage_without_messages() {
 
 fn first_run_route_env_guards() -> Vec<crate::test_support::EnvVarGuard> {
     [
+        "CODEWHALE_PROVIDER",
         "CODEWHALE_MODEL",
         "DEEPSEEK_MODEL",
         "CODEWHALE_BASE_URL",
@@ -10621,6 +10622,61 @@ async fn first_run_route_endpoint_only_keeps_route_when_credentials_are_missing(
         assert_eq!(app.api_provider, provider, "{document:?}");
         assert_eq!(config.api_provider(), provider, "{document:?}");
     }
+}
+
+/// Launch through a keyless route (here an inherited `CODEWHALE_PROVIDER` /
+/// `CODEWHALE_MODEL` pair outranks the file's keyed `openai` route), leave the picker with Esc, then
+/// `/provider openai`. The switch lands on a route that has its key, so the
+/// launch-time "needs a key" state must not survive it: the info line would
+/// keep saying "model not connected" and local Ollama would stay armed to
+/// take over the route the user just chose.
+#[tokio::test]
+async fn first_run_switch_to_keyed_route_clears_launch_missing_key_state() {
+    use crate::test_support::EnvVarGuard;
+
+    let _home = SettingsHomeGuard::new();
+    let _env = first_run_route_env_guards();
+    let _provider = EnvVarGuard::set("CODEWHALE_PROVIDER", "deepseek");
+    let _model = EnvVarGuard::set("CODEWHALE_MODEL", "deepseek-v4-flash");
+    let path = crate::config::home_config_path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "provider = \"openai\"\n\
+         default_text_model = \"gpui-fixture\"\n\
+         [providers.openai]\n\
+         api_key = \"sk-fixture-0000000000000000000000000000\"\n\
+         base_url = \"http://127.0.0.1:4880/v1\"\n",
+    )
+    .unwrap();
+    let mut config = Config::load(None, None).expect("load configured route");
+    let mut options = create_test_options();
+    options.model = config.default_model();
+    let mut app = App::new(options, &config);
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert!(app.onboarding_needs_api_key);
+    assert!(app.onboarding_missing_key_recovery);
+    assert_eq!(app.onboarding, OnboardingState::Provider);
+    app.onboarding = OnboardingState::None;
+
+    let mut engine = mock_engine_handle();
+    assert!(
+        switch_provider(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            ApiProvider::Openai,
+            None,
+        )
+        .await
+    );
+
+    assert_eq!(app.api_provider, ApiProvider::Openai);
+    assert!(!app.onboarding_needs_api_key);
+    assert!(!app.onboarding_missing_key_recovery);
+    assert!(!crate::local_ollama::should_adopt_live_local_ollama(
+        &mut app
+    ));
 }
 
 /// A key supplied only through the environment is a working hosted route:
