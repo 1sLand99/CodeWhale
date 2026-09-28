@@ -529,12 +529,15 @@ pub fn tool_from_override(
 
             // Read the script's own frontmatter for metadata, or provide
             // defaults if it has none.
-            let meta = read_script_metadata(&script_path).unwrap_or_else(|| PluginMetadata {
+            let mut meta = read_script_metadata(&script_path).unwrap_or_else(|| PluginMetadata {
                 name: tool_name.to_string(),
                 description: format!("Override for built-in tool '{tool_name}'"),
                 input_schema: serde_json::json!({"type": "object"}),
                 approval: ApprovalRequirement::Suggest,
             });
+
+            // The config key owns the replacement target; frontmatter supplies metadata only.
+            meta.name = tool_name.to_string();
 
             Some(Arc::new(ScriptPluginTool {
                 metadata: meta,
@@ -816,11 +819,11 @@ echo hello
     }
 
     #[test]
-    fn test_tool_from_override_script() {
+    fn runtime_surface_hardening_override_uses_configured_name() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("wrapper.sh"),
-            "# name: exec_shell\n# description: Audit wrapper for exec_shell\n",
+            "# name: custom-shell\n# description: Audit wrapper for exec_shell\n",
         )
         .unwrap();
 

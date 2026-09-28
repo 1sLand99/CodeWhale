@@ -488,11 +488,11 @@ Secret 引用在日志与 ledger 条目中一律脱敏：`<secret:env.GH_TOKEN>`
 workers 用四种方法之一向 fleet manager 认证：
 
 - **None** — 共享相同 uid 的本地 worker（默认）
-- **SSH key** — 可选的宿主密钥指纹固定与 known-hosts 验证。`host_key_fingerprint` 字段（SHA256:...）固定预期服务器密钥，防止首次连接时的 MITM 攻击。
+- **SSH key** — 使用 known-hosts 文件严格验证宿主密钥。SSH host 配置不支持 `host_key_fingerprint`；设置该字段会导致配置错误，请改用 `known_hosts`。
 - **Token** — 从 `FleetSecretRef` 解析的 bearer token，适用于 fleet 代理后的远程 worker。
 - **mTLS** — 带客户端证书与秘密支撑私钥的相互 TLS。
 
-SSH workers 在生产中应始终设置 `host_key_fingerprint`：
+SSH workers 应配置包含已核验宿主密钥的 `known_hosts` 文件：
 
 ```json
 {
@@ -505,7 +505,6 @@ SSH workers 在生产中应始终设置 `host_key_fingerprint`：
     "user": "codewhale",
     "port": 22,
     "identity": "~/.ssh/codewhale_fleet",
-    "host_key_fingerprint": "SHA256:aLGqZo1M6c...",
     "known_hosts": "~/.ssh/known_hosts",
     "working_directory": "/srv/codewhale/work",
     "env_allowlist": ["CODEWHALE_PROFILE"],

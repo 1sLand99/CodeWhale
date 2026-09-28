@@ -13,6 +13,7 @@ use super::headers::{apply_safe_custom_headers, with_default_mcp_http_headers};
 use super::http_client::McpHttpClient;
 use super::sse::SseTransport;
 use super::streamable_http::{StreamableHttpTransport, StreamableSendError};
+use super::wire::McpSessionRejected;
 use super::{McpServerConfig, McpTransport, ReviewedPluginMcpSource, oauth};
 pub(super) struct HttpTransport {
     mode: HttpTransportMode,
@@ -278,9 +279,10 @@ impl McpTransport for HttpTransport {
                         );
                         transport.session_id = None;
                     }
-                    Err(anyhow::anyhow!(
+                    Err(McpSessionRejected(format!(
                         "MCP Streamable HTTP session expired; retry with a new session required ({detail})"
                     ))
+                    .into())
                 }
                 Err(StreamableSendError::Other(err)) => Err(err),
             },

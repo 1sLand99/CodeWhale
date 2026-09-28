@@ -101,6 +101,60 @@ pub(super) fn preview_request_error_user_message(
     format!("{error:#}")
 }
 
+/// Preserve text before either execution branch publishes it to the UI or history.
+/// Disk failures retain the existing honest "could not be saved" context footer.
+async fn preserve_tool_output_before_fanout(
+    result: Result<RichToolResult, ToolError>,
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<codewhale_config::route::RouteLimits>,
+    session_id: &str,
+    tool_id: &str,
+    tool_name: &str,
+) -> Result<RichToolResult, ToolError> {
+    let mut rich = result?;
+    let model = model.to_owned();
+    let session_id = session_id.to_owned();
+    let tool_id = tool_id.to_owned();
+    let tool_name = tool_name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        if let Some(path) = crate::tools::truncate::apply_spillover_with_artifact(
+            &mut rich.result,
+            &tool_id,
+            &tool_name,
+            &session_id,
+        ) {
+            emit_tool_audit(json!({
+                "event": "tool.spillover",
+                "tool_id": tool_id,
+                "tool_name": tool_name,
+                "path": path.display().to_string(),
+            }));
+        }
+        if super::context::tool_result_context_view(
+            provider,
+            &model,
+            route_limits,
+            &tool_name,
+            &rich.result,
+        )
+        .needs_full_output_artifact
+        {
+            crate::tools::truncate::preserve_full_output_for_model_context(
+                &mut rich.result,
+                &tool_id,
+                &tool_name,
+                &session_id,
+            );
+        }
+        rich
+    })
+    .await
+    .map_err(|error| {
+        ToolError::execution_failed(format!("Tool output preservation failed: {error}"))
+    })
+}
+
 fn approval_intent_summary(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -405,6 +459,148 @@ pub(super) fn replace_runtime_mcp_tools(
 }
 
 impl Engine {
+    /// Inline ```repl blocks run model-written Python in the session kernel,
+    /// so they are admitted exactly like a `code_execution` call carrying
+    /// the same code: planned by `plan_tool_calls` (mode, allow/deny lists,
+    /// before-tool hooks, Auto-Review floor and reviewer, repo law, the
+    /// registry approval) and, when the plan still needs it, approved through
+    /// the same card. Returns `None` when the blocks may run, otherwise why
+    /// they may not.
+    #[allow(clippy::too_many_arguments)] // mirrors `gate_nested_call`
+    async fn repl_fence_blocked_reason(
+        &mut self,
+        blocks: &[crate::repl::ReplBlock],
+        approval_id: &str,
+        client: &dyn crate::core::model_client::ModelClient,
+        turn: &mut TurnContext,
+        tool_policy: &ToolSurfacePolicy,
+        tool_catalog: &[codewhale_models::Tool],
+        tool_registry: Option<&crate::tools::ToolRegistry>,
+        active_tool_names: &mut std::collections::HashSet<String>,
+        tool_call_budget: &mut ToolCallBudget,
+        mode: AppMode,
+        fleet_denial_guard: Option<&FleetDenialGuard>,
+    ) -> Option<String> {
+        let tool_name = super::tool_catalog::CODE_EXECUTION_TOOL_NAME;
+        let code = blocks
+            .iter()
+            .map(|block| block.code.trim_matches('\n'))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut uses = [ToolUseState {
+            id: approval_id.to_string(),
+            name: tool_name.to_string(),
+            input: json!({ "code": code }),
+            caller: None,
+            thought_signature: None,
+            input_buffer: String::new(),
+            input_parse_error: None,
+        }];
+        let PlannedToolCalls { plans, .. } = self
+            .plan_tool_calls(
+                client,
+                turn,
+                tool_policy,
+                &mut uses,
+                tool_catalog,
+                tool_registry,
+                active_tool_names,
+                tool_call_budget,
+                mode,
+                fleet_denial_guard,
+                ToolCallSource::CodeMode,
+            )
+            .await;
+        let Some(plan) = plans.into_iter().next() else {
+            return Some("the code could not be planned".to_string());
+        };
+        if let Some(error) = plan.blocked_error {
+            return Some(error.to_string());
+        }
+        // The kernel runs the fenced blocks as written. A hook that rewrote
+        // the code (or a guard that answered in its place) would make the
+        // admitted input differ from what runs, so nothing runs.
+        if plan.guard_result.is_some()
+            || plan.name != tool_name
+            || plan.input.get("code").and_then(Value::as_str) != Some(code.as_str())
+        {
+            tool_call_budget.refund();
+            return Some("a before-tool hook changed the code".to_string());
+        }
+        let approved = if plan.approval_required {
+            let event = Event::ApprovalRequired {
+                id: approval_id.to_string(),
+                tool_name: tool_name.to_string(),
+                approval_key: crate::tools::approval_cache::build_approval_key(
+                    tool_name,
+                    &plan.input,
+                )
+                .0,
+                approval_grouping_key: crate::tools::approval_cache::build_approval_grouping_key(
+                    tool_name,
+                    &plan.input,
+                )
+                .0,
+                input: plan.input,
+                description: format!(
+                    "Run the reply's ```repl block(s) in the session REPL kernel (a local \
+                     subprocess, not OS-sandboxed): {}",
+                    plan.approval_description
+                ),
+                intent_summary: None,
+                approval_force_prompt: plan.approval_force_prompt,
+            };
+            let decision = self
+                .request_tool_approval(approval_id, tool_name, event)
+                .await;
+            emit_tool_audit(json!({
+                "event": "tool.approval_decision",
+                "tool_id": approval_id,
+                "tool_name": tool_name,
+                "decision": match decision {
+                    Ok(ApprovalResult::Approved) => "approved",
+                    Ok(ApprovalResult::TimedOut) => "timeout",
+                    _ => "denied",
+                },
+                "caller": "repl_fence",
+            }));
+            let refusal = match decision {
+                Ok(ApprovalResult::Approved) => None,
+                Ok(ApprovalResult::Denied) => Some("not approved".to_string()),
+                // An expired card is not the user's denial (#6601).
+                Ok(ApprovalResult::TimedOut) => {
+                    Some("the approval request timed out before anyone answered".to_string())
+                }
+                Ok(ApprovalResult::RetryWithPolicy(_)) => {
+                    Some("inline REPL blocks cannot run under a changed sandbox policy".to_string())
+                }
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(refusal) = refusal {
+                // Admitted by planning but never executed: hand the slot
+                // back, as a direct call's refused approval does.
+                tool_call_budget.refund();
+                return Some(refusal);
+            }
+            true
+        } else {
+            false
+        };
+        // Planning (hooks, Auto-Review) and an approval wait can outlive a
+        // posture switch. Same rule as a direct call: an approval survives an
+        // equal or broader posture; anything else does not run.
+        let posture_before_drain = self.applied_runtime_authority();
+        if self.apply_pending_runtime_authority().await
+            && (!approved
+                || self
+                    .applied_runtime_authority()
+                    .narrows(&posture_before_drain))
+        {
+            return Some("permissions changed before the code ran".to_string());
+        }
+        None
+    }
+
     /// A connection completed during inference must be discoverable in this
     /// turn, without widening its command policy or making every MCP tool eager.
     pub(super) async fn refresh_boot_mcp_catalog(
@@ -1633,15 +1829,14 @@ impl Engine {
                     billing.provider_live_pricing = u64::try_from(dispatched_at.timestamp())
                         .ok()
                         .and_then(|dispatched_at_unix| {
-                            billing.endpoint_fingerprint.as_deref().and_then(|fingerprint| {
-                                crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
-                                    route.provider,
-                                    &route.provider_identity,
-                                    &route.model,
-                                    fingerprint,
-                                    dispatched_at_unix,
-                                )
-                            })
+                            crate::client::main_turn_pricing_quote_at(
+                                self.codewhale_client.as_ref(),
+                                route.provider,
+                                &route.provider_identity,
+                                &route.model,
+                                billing.endpoint_fingerprint.as_deref()?,
+                                dispatched_at_unix,
+                            )
                         });
                 }
                 let _ = self
@@ -2313,13 +2508,51 @@ impl Engine {
                 // same command gate as `code_execution`: a narrowed tool
                 // surface (`exec --allowed-tools …`, or plain `exec`'s zero-tool
                 // surface, #6510) must not execute code through a fence.
-                if has_sendable_assistant_content
+                // Plan mode withholds `code_execution` from the catalog, and a
+                // fence is not a way around that: it runs only when the tool is
+                // on this turn's surface, and only after the same approval.
+                let repl_fence_present = has_sendable_assistant_content
+                    && crate::repl::sandbox::has_repl_block(&current_text_visible);
+                let repl_fence_offered = mode != AppMode::Plan
+                    && tool_catalog
+                        .iter()
+                        .any(|tool| tool.name == super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
                     && tool_policy.passes_allow_list(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
-                    && !tool_policy.denies_tool(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
-                    && crate::repl::sandbox::has_repl_block(&current_text_visible)
-                {
-                    let repl_blocks =
-                        crate::repl::sandbox::extract_repl_blocks(&current_text_visible);
+                    && !tool_policy.denies_tool(super::tool_catalog::CODE_EXECUTION_TOOL_NAME);
+                let mut repl_fence_skip_reason = (repl_fence_present && !repl_fence_offered)
+                    .then(|| "code execution is not available on this turn".to_string());
+                let repl_blocks = if repl_fence_present && repl_fence_offered {
+                    crate::repl::sandbox::extract_repl_blocks(&current_text_visible)
+                } else {
+                    Vec::new()
+                };
+                if !repl_blocks.is_empty() {
+                    let approval_id = format!("{}-repl-{}", turn.id, turn.step);
+                    repl_fence_skip_reason = self
+                        .repl_fence_blocked_reason(
+                            &repl_blocks,
+                            &approval_id,
+                            client.as_ref(),
+                            turn,
+                            &tool_policy,
+                            &tool_catalog,
+                            tool_registry,
+                            &mut active_tool_names,
+                            &mut tool_call_budget,
+                            mode,
+                            fleet_denial_guard.as_ref(),
+                        )
+                        .await;
+                    // Admission may have applied a pending posture change.
+                    mode = self.current_mode;
+                }
+                if let Some(reason) = repl_fence_skip_reason.as_deref() {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!("REPL block not run: {reason}")))
+                        .await;
+                }
+                if !repl_blocks.is_empty() && repl_fence_skip_reason.is_none() {
                     if self.repl_kernel.is_none() {
                         self.repl_kernel = match crate::repl::runtime::PythonRuntime::new().await {
                             Ok(runtime) => Some(runtime),
@@ -2361,13 +2594,19 @@ impl Engine {
                     // same kernel contract, rather than quietly dropping
                     // programmatic recursion outside the legacy DeepSeek
                     // client path.
+                    //
+                    // Depth 0: the approval above covers the code in the
+                    // fence, not code a child model writes later. A nested
+                    // `rlm(...)` from a fence degrades to a one-shot child
+                    // completion (text back to Python) instead of starting a
+                    // sub-RLM whose code rounds would run unapproved.
                     let bridge = self.model_client.as_ref().map(|client| {
                         crate::rlm::RlmBridge::new(
                             std::sync::Arc::new(crate::rlm::ModelClientRlmAdapter::new(
                                 std::sync::Arc::clone(client),
                             )),
                             self.session.model.clone(),
-                            1,
+                            0,
                         )
                         // A nested `rlm_query` reports on this turn's stream,
                         // so its model calls are part of the record (#6511).
@@ -3978,6 +4217,9 @@ impl Engine {
                     let mcp_pool = mcp_pool.clone();
                     let tx_event = self.tx_event.clone();
                     let session_id = self.session.id.clone();
+                    let provider = self.api_provider;
+                    let model = self.session.model.clone();
+                    let route_limits = self.active_route_limits;
                     let started_at = Instant::now();
                     let shell_permits = shell_permits.clone();
                     let workspace = self.session.workspace.clone();
@@ -3992,7 +4234,7 @@ impl Engine {
                             } else {
                                 None
                             };
-                        let mut result = Engine::execute_tool_with_lock(
+                        let result = Engine::execute_tool_with_lock(
                             lock,
                             plan.supports_parallel || plan.detached_start,
                             plan.interactive,
@@ -4020,26 +4262,16 @@ impl Engine {
                                 )
                             });
 
-                        // #500: spill outsized output before fanout (mirror
-                        // of the sequential path below). Emit a
-                        // `tool.spillover` audit event so operators can
-                        // correlate large-output episodes with disk usage.
-                        if let Ok(tool_result) = result.as_mut()
-                            && let Some(path) =
-                                crate::tools::truncate::apply_spillover_with_artifact(
-                                    &mut tool_result.result,
-                                    &plan.id,
-                                    &plan.name,
-                                    &session_id,
-                                )
-                        {
-                            emit_tool_audit(json!({
-                                "event": "tool.spillover",
-                                "tool_id": plan.id.clone(),
-                                "tool_name": plan.name.clone(),
-                                "path": path.display().to_string(),
-                            }));
-                        }
+                        let result = preserve_tool_output_before_fanout(
+                            result,
+                            provider,
+                            &model,
+                            route_limits,
+                            &session_id,
+                            &plan.id,
+                            &plan.name,
+                        )
+                        .await;
 
                         let result = match result {
                             Ok(rich) => Ok(super::tool_media::project(
@@ -4390,6 +4622,10 @@ impl Engine {
                                 }
                             }
                             Ok(ApprovalResult::Denied) => {
+                                // A refused call never executes: hand its
+                                // admission slot back (#5170 covers gates
+                                // at planning time; approval is the last).
+                                nested_gate_env.tool_call_budget.refund();
                                 emit_tool_audit(json!({
                                     "event": "tool.approval_decision",
                                     "tool_id": tool_id.clone(),
@@ -4414,6 +4650,17 @@ impl Engine {
                                     None,
                                 )
                             }
+                            Ok(ApprovalResult::TimedOut) => {
+                                nested_gate_env.tool_call_budget.refund();
+                                emit_tool_audit(json!({
+                                    "event": "tool.approval_decision",
+                                    "tool_id": tool_id.clone(),
+                                    "tool_name": tool_name.clone(),
+                                    "decision": "timeout",
+                                    "caller": caller_type_for_tool_use(tool_caller.as_ref()),
+                                }));
+                                (Some(Err(approval_timed_out_error(&tool_name))), None, None)
+                            }
                             Ok(ApprovalResult::RetryWithPolicy(policy)) => {
                                 emit_tool_audit(json!({
                                     "event": "tool.approval_decision",
@@ -4432,7 +4679,11 @@ impl Engine {
                                     Some(ToolApprovalStamp::ApprovedWithPolicy),
                                 )
                             }
-                            Err(err) => (Some(Err(err)), None, None),
+                            Err(err) => {
+                                // Cancelled or unavailable: the call never ran.
+                                nested_gate_env.tool_call_budget.refund();
+                                (Some(Err(err)), None, None)
+                            }
                         }
                     } else {
                         (None, None, None)
@@ -4470,20 +4721,31 @@ impl Engine {
                     // state before file-modifying tools execute so `/undo` can
                     // revert the most recent write_file/edit_file/apply_patch.
                     // See `should_pre_tool_snapshot` for the gating rationale (#3292).
-                    if should_pre_tool_snapshot(
-                        self.config.snapshots_enabled,
-                        result_override.is_some(),
-                        tool_name.as_str(),
-                        &tool_input,
-                    ) {
-                        let ws = self.session.workspace.clone();
-                        let tid = tool_id.clone();
-                        let cap = self.config.snapshots_max_workspace_bytes;
-                        let sid = self.session.id.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            crate::core::turn::pre_tool_snapshot(&ws, &tid, cap, Some(&sid))
-                        })
-                        .await;
+                    // A host that records restore points also bounds every call
+                    // that may write (a shell command, a program, a write-capable
+                    // MCP tool) so the span it ran in is known; its post-tool
+                    // snapshot is taken once it returns.
+                    let bounded_tool = self.config.record_restore_points
+                        && self.config.snapshots_enabled
+                        && result_override.is_none()
+                        && !plan.read_only;
+                    let mut tool_restore_point = false;
+                    if bounded_tool
+                        || should_pre_tool_snapshot(
+                            self.config.snapshots_enabled,
+                            result_override.is_some(),
+                            tool_name.as_str(),
+                            &tool_input,
+                        )
+                    {
+                        tool_restore_point = self
+                            .take_restore_point(
+                                crate::snapshot::WorkspaceSnapshotKind::Tool,
+                                format!("tool:{tool_id}"),
+                                Some(tool_id.as_str()),
+                                super::file_write_tool_target_paths(&tool_name, &tool_input),
+                            )
+                            .await;
                         self.emit_pending_snapshot_notices().await;
                     }
 
@@ -4565,6 +4827,18 @@ impl Engine {
                         ));
                     }
 
+                    // Close the span the call ran in (recording hosts only).
+                    if tool_restore_point && self.config.record_restore_points {
+                        self.take_restore_point(
+                            crate::snapshot::WorkspaceSnapshotKind::PostTool,
+                            format!("post-tool:{tool_id}"),
+                            Some(tool_id.as_str()),
+                            None,
+                        )
+                        .await;
+                        self.emit_pending_snapshot_notices().await;
+                    }
+
                     if let Some(approval_stamp) = approval_stamp
                         && let Ok(tool_result) = result.as_mut()
                     {
@@ -4583,28 +4857,16 @@ impl Engine {
                             )
                         });
 
-                    // #500: spill outsized tool outputs to disk before the
-                    // result fans out to the model context and the UI cell.
-                    // Both consumers see the same artifact reference block +
-                    // metadata pointing at the session-owned full file.
-                    // Emit a discrete `tool.spillover` audit event so
-                    // operators can correlate large-output episodes with
-                    // disk-usage growth in `~/.deepseek/tool_outputs/`.
-                    if let Ok(tool_result) = result.as_mut()
-                        && let Some(path) = crate::tools::truncate::apply_spillover_with_artifact(
-                            &mut tool_result.result,
-                            &tool_id,
-                            &tool_name,
-                            &self.session.id,
-                        )
-                    {
-                        emit_tool_audit(json!({
-                            "event": "tool.spillover",
-                            "tool_id": tool_id.clone(),
-                            "tool_name": tool_name.clone(),
-                            "path": path.display().to_string(),
-                        }));
-                    }
+                    let result = preserve_tool_output_before_fanout(
+                        result,
+                        self.api_provider,
+                        &self.session.model,
+                        self.active_route_limits,
+                        &self.session.id,
+                        &tool_id,
+                        &tool_name,
+                    )
+                    .await;
 
                     let result = match result {
                         Ok(rich) => Ok(super::tool_media::project(
@@ -4874,6 +5136,12 @@ impl Engine {
                         plan.name
                     ))),
                 ),
+                // An expired approval card is not a denial: the user never
+                // answered, and the model is told so.
+                Ok(ApprovalResult::TimedOut) => (
+                    NestedDecision::TimedOut,
+                    Some(approval_timed_out_error(&plan.name)),
+                ),
                 Err(error) => (NestedDecision::Refused, Some(error)),
             };
             emit_tool_audit(json!({
@@ -4885,6 +5153,9 @@ impl Engine {
                 "parent_tool_id": parent_id,
             }));
             if let Some(error) = refusal {
+                // Admitted by planning but never executed: hand the slot
+                // back, as a direct call's refused approval does.
+                nested_gate_env.tool_call_budget.refund();
                 return NestedCallVerdict::Refused { error, decision };
             }
             decision
@@ -4937,13 +5208,12 @@ impl Engine {
             plan.name.as_str(),
             &plan.input,
         ) {
-            let ws = self.session.workspace.clone();
-            let tid = nested_id.clone();
-            let cap = self.config.snapshots_max_workspace_bytes;
-            let sid = self.session.id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::core::turn::pre_tool_snapshot(&ws, &tid, cap, Some(&sid))
-            })
+            self.take_restore_point(
+                crate::snapshot::WorkspaceSnapshotKind::Tool,
+                format!("tool:{nested_id}"),
+                Some(nested_id.as_str()),
+                super::file_write_tool_target_paths(&plan.name, &plan.input),
+            )
             .await;
             self.emit_pending_snapshot_notices().await;
         }
@@ -7048,6 +7318,17 @@ pub(super) fn resolve_auto_effort(
         Some(other) => Some(other.to_string()),
         None => None,
     }
+}
+
+/// The error a call gets when its approval card expired unanswered. It must
+/// not read as a refusal: the user never saw or never answered the card, so
+/// the model is told to ask again rather than to treat the idea as rejected.
+fn approval_timed_out_error(tool_name: &str) -> ToolError {
+    ToolError::execution_failed(format!(
+        "Tool '{tool_name}' did not run: its approval request timed out with no answer. \
+         The user did not deny it. Do not retry it blindly; say what you intended and \
+         wait for the user to approve or give new instructions."
+    ))
 }
 
 #[cfg(test)]

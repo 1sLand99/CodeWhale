@@ -318,7 +318,6 @@ Supported keys in the project overlay (top-level fields only):
 | `reasoning_effort` | force `"high"` / `"max"` for a complex repo |
 | `approval_policy` | only values that tighten the user's current permission posture |
 | `sandbox_mode` | only values that tighten the user's current sandbox posture |
-| `notes_path` | keep notes in-repo |
 | `max_subagents` | clamp sub-agent concurrency for a constrained repo (clamped to 1..=128) |
 | `allow_shell` | `false` can disable shell access; `true` is ignored |
 
@@ -327,7 +326,7 @@ maintainer is most likely to want to standardize across contributors.
 Credential, endpoint, provider-selection, MCP config, hooks, skills,
 retry, hotbar bindings, and `instructions = [...]` settings stay user-global.
 If a repo-local config declares `api_key`, `base_url`, `providers`, `provider`,
-`mcp_config_path`, `hotbar`, `allow_shell = true`, or `instructions`,
+`mcp_config_path`, `notes_path`, `hotbar`, `allow_shell = true`, or `instructions`,
 Codewhale ignores that key and keeps the user's global setting.
 
 The consolidated `codewhale` runtime uses one config file for DeepSeek auth
@@ -2513,6 +2512,10 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `notifications.sound_file`: custom local WAV path for `sound = "file"` or legacy
   `completion_sound = "file"`.
 - `notifications.subagent_completion`: `always`, `final-only` (default), `off`.
+  Covers all background work that finishes: sub-agents, background shells and
+  durable tasks. `final-only` sends one notice naming everything that finished
+  once no agent, workflow or durable task is still running; a running shell
+  (a dev server, a watcher) never holds it back. `always` sends one per item.
 - `notifications.quiet`: boolean, default `false`.
 - `notifications.events`: six boolean categories, all enabled by default; see below.
 - `notifications.completion_sound`: legacy completion cue, default `off`, with the
@@ -3391,3 +3394,31 @@ The config value itself is forgiving: `true`/`false`, `"on"`/`"off"`, and
 A confirmed opt-out still sends your configured API keys to the provider you
 are already talking to. Only use it when the model must read and edit files
 that contain real credentials.
+
+### Stored sessions
+
+The masking runs once, when tool output enters the transcript, so saved
+session files (`~/.codewhale/sessions/*.json` and their checkpoints) and
+Runtime API thread items (their text and tool metadata) do not store a
+credential-shaped value from tool output. With the confirmed opt-out above,
+tool output is stored as the model saw it.
+
+Not yet masked: large outputs spilled to `~/.codewhale/tool_outputs`, shell
+completion evidence artifacts, and tool-call *inputs* (for example a
+`curl -H "Authorization: Bearer …"` command line). `doctor` and
+`scrub-secrets` do not check those either.
+
+Sessions saved by builds before this change may still hold credentials in
+their tool output; nothing rewrites them automatically. `codewhale doctor`
+reports them under **Stored Sessions** (it checks the newest 50 files), and
+this command finds and masks them across every saved session:
+
+```sh
+codewhale sessions scrub-secrets          # report only
+codewhale sessions scrub-secrets --apply  # rewrite the affected files
+```
+
+`--apply` rewrites each file under the same per-session lock a save takes,
+so it never loses a concurrent save. A session that is still open can write
+its in-memory copy back on its next save, so close open sessions first, and
+rotate any credential that was exposed — masking a stored copy cannot un-leak it.

@@ -584,6 +584,8 @@ pub(crate) async fn run_exec_agent(
             .snapshots_config()
             .max_workspace_gb
             .saturating_mul(1024 * 1024 * 1024),
+        // No host here records snapshot receipts.
+        record_restore_points: false,
         lsp_config,
         runtime_services,
         subagent_model_overrides: execution_config.subagent_model_overrides(),
@@ -1024,12 +1026,18 @@ pub(crate) async fn run_exec_agent(
             {
                 emit_exec_stream_event(&ExecStreamEvent::WorkflowEvent { run_id, event })?;
             }
+            // Headless runs have no person at the prompt: the run's flags
+            // (the posture) answer every request.
             Event::ApprovalRequired { id, .. } => {
                 if auto_approve {
-                    let _ = engine_handle.approve_tool_call(id).await;
+                    let _ = engine_handle
+                        .approve_tool_call_by(id, crate::approval_log::ApprovalDecider::Posture)
+                        .await;
                 } else {
                     approval_required = true;
-                    let _ = engine_handle.deny_tool_call(id).await;
+                    let _ = engine_handle
+                        .deny_tool_call_by(id, crate::approval_log::ApprovalDecider::Posture)
+                        .await;
                 }
             }
             Event::ElevationRequired {
@@ -1040,7 +1048,13 @@ pub(crate) async fn run_exec_agent(
             } => {
                 if can_elevate_sandbox {
                     let policy = crate::sandbox::SandboxPolicy::DangerFullAccess;
-                    let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
+                    let _ = engine_handle
+                        .retry_tool_with_policy_by(
+                            tool_id,
+                            policy,
+                            crate::approval_log::ApprovalDecider::Posture,
+                        )
+                        .await;
                 } else {
                     sandbox_denied = true;
                     approval_required = true;
@@ -1064,7 +1078,9 @@ pub(crate) async fn run_exec_agent(
                             outcome: "approval_required".to_string(),
                         })?;
                     }
-                    let _ = engine_handle.deny_tool_call(tool_id).await;
+                    let _ = engine_handle
+                        .deny_tool_call_by(tool_id, crate::approval_log::ApprovalDecider::Posture)
+                        .await;
                 }
             }
             Event::Error {

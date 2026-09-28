@@ -3032,8 +3032,8 @@ pub fn theme(app: &mut App, arg: Option<&str>) -> CommandResult {
 ///
 /// Subcommands:
 /// - `/trust`            – show current state and trusted external paths
-/// - `/trust on`         – legacy: trust the entire workspace (turn off all path checks)
-/// - `/trust off`        – disable workspace-level trust mode
+/// - `/trust on|off`     – change file-tool trust for this session only
+/// - `/trust on|off --save` – also persist workspace trust for project sources
 /// - `/trust add <path>` – add a directory to the allowlist (#29)
 /// - `/trust remove <path>` (alias `rm`) – remove a path from the allowlist
 /// - `/trust list`       – list trusted external paths for this workspace
@@ -3046,23 +3046,46 @@ pub fn trust(app: &mut App, arg: Option<&str>) -> CommandResult {
 
     match sub.as_str() {
         "" | "status" | "list" => trust_status(&workspace, app, sub == "list"),
-        "on" | "enable" | "yes" | "y" => {
-            app.trust_mode = true;
-            CommandResult::message(
-                "Workspace trust mode enabled — agent file tools can now read/write any path. \
-                 Use `/trust off` to revert; prefer `/trust add <path>` for a narrower opt-in.",
-            )
-        }
-        "off" | "disable" | "no" | "n" => {
-            app.trust_mode = false;
-            CommandResult::message("Workspace trust mode disabled.")
+        "on" | "enable" | "yes" | "y" | "off" | "disable" | "no" | "n" => {
+            if !matches!(rest, "" | "--save") {
+                return CommandResult::error(format!(
+                    "{} /trust on|off [--save]",
+                    tr(app.ui_locale, MessageId::HelpUsageLabel)
+                ));
+            }
+            CommandResult::action(AppAction::SetWorkspaceTrust {
+                trusted: matches!(sub.as_str(), "on" | "enable" | "yes" | "y"),
+                save: rest == "--save",
+            })
         }
         "add" => trust_add(&workspace, rest),
         "remove" | "rm" | "del" | "delete" => trust_remove(&workspace, rest),
         other => CommandResult::error(format!(
-            "Unknown /trust action `{other}`. Use `/trust`, `/trust on|off`, `/trust add <path>`, or `/trust remove <path>`."
+            "Unknown /trust action `{other}`. Use `/trust`, `/trust on|off [--save]`, `/trust add <path>`, or `/trust remove <path>`."
         )),
     }
+}
+
+pub(crate) async fn set_workspace_trust(app: &mut App, trusted: bool, save: bool) -> Result<()> {
+    if !save {
+        app.trust_mode = trusted;
+        return Ok(());
+    }
+    // Revocation restricts live file access even if the saved decision cannot be updated.
+    if !trusted {
+        app.trust_mode = false;
+    }
+    let workspace = app.workspace.clone();
+    #[cfg(test)]
+    let ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(ticket);
+        crate::config::set_workspace_trust(&workspace, trusted)
+    })
+    .await??;
+    app.trust_mode = trusted;
+    Ok(())
 }
 
 fn trust_status(workspace: &Path, app: &App, force_paths: bool) -> CommandResult {
@@ -6222,15 +6245,86 @@ context_window = 262144
         assert!(app.needs_redraw);
     }
 
-    #[test]
-    fn test_trust_on_enables_flag() {
+    #[tokio::test]
+    async fn trust_only_persists_with_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(tmp.path());
+        let config_path = tmp.path().join("config.toml");
+        let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+        let workspace = tmp.path().join("workspace");
+        let commands = workspace.join(".claude/commands");
+        let skills = workspace.join(".claude/skills/review-example");
+        fs::create_dir_all(&commands).unwrap();
+        fs::create_dir_all(&skills).unwrap();
+        fs::write(commands.join("review-example.md"), "Review the example").unwrap();
+        fs::write(
+            skills.join("SKILL.md"),
+            "---\nname: review-example\ndescription: Review the example\n---\nRead the example.",
+        )
+        .unwrap();
         let mut app = create_test_app();
-        // Normalize trust state regardless of user settings on the host machine.
+        app.workspace = workspace.clone();
         app.trust_mode = false;
-        let result = trust(&mut app, Some("on"));
-        let msg = result.message.expect("message");
-        assert!(msg.contains("Workspace trust mode enabled"));
-        assert!(app.trust_mode);
+        for trusted in [false, true, false] {
+            if trusted || app.trust_mode {
+                let result = trust(
+                    &mut app,
+                    Some(if trusted { "on --save" } else { "off --save" }),
+                );
+                assert_eq!(
+                    result.action,
+                    Some(AppAction::SetWorkspaceTrust {
+                        trusted,
+                        save: true
+                    })
+                );
+                set_workspace_trust(&mut app, trusted, true).await.unwrap();
+            }
+            let saved = fs::read(&config_path).ok();
+            for session_trusted in [true, false] {
+                let result = trust(&mut app, Some(if session_trusted { "on" } else { "off" }));
+                assert_eq!(
+                    result.action,
+                    Some(AppAction::SetWorkspaceTrust {
+                        trusted: session_trusted,
+                        save: false
+                    })
+                );
+                set_workspace_trust(&mut app, session_trusted, false)
+                    .await
+                    .unwrap();
+                assert_eq!(app.trust_mode, session_trusted);
+                assert_eq!(
+                    fs::read(&config_path).ok(),
+                    saved,
+                    "session toggle must not write config"
+                );
+                assert_eq!(crate::config::is_workspace_trusted(&workspace), trusted);
+            }
+            app.trust_mode = trusted;
+            assert!(trust(&mut app, Some("on --typo")).is_error);
+            assert_eq!(crate::config::is_workspace_trusted(&workspace), trusted);
+            crate::commands::user_registry::with_registry_for_workspace(
+                Some(&workspace),
+                |registry| {
+                    assert_eq!(registry.get("review-example").is_some(), trusted);
+                },
+            );
+            assert_eq!(
+                crate::skills::discover_in_workspace(&workspace)
+                    .get("review-example")
+                    .is_some(),
+                trusted
+            );
+        }
+        // A failed write must not grant trust in memory.
+        fs::create_dir_all(tmp.path().join("bad-config")).unwrap();
+        let _bad_config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", tmp.path().join("bad-config"));
+        assert!(set_workspace_trust(&mut app, true, true).await.is_err());
+        assert!(!app.trust_mode);
+        app.trust_mode = true;
+        assert!(set_workspace_trust(&mut app, false, true).await.is_err());
+        assert!(!app.trust_mode);
     }
 
     #[test]

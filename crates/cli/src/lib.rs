@@ -209,6 +209,10 @@ enum Commands {
     Speech(TuiPassthroughArgs),
     /// List saved sessions.
     Sessions(TuiPassthroughArgs),
+    /// Show what a session did: files, commands, web and MCP calls, agents,
+    /// approvals, and failures. `codewhale receipts [ID|--last] [--format md|json]`.
+    #[command(visible_alias = "receipt")]
+    Receipts(TuiPassthroughArgs),
     /// Resume a saved session.
     Resume(TuiPassthroughArgs),
     /// Launch an interactive session and hand it to the Codewhale web app.
@@ -338,8 +342,9 @@ New integrations should prefer `codewhale app-server`.")]
     Web(WebArgs),
     /// Sign in to your Codewhale account (browser device flow).
     Login(LoginArgs),
-    /// Remove saved authentication state.
-    Logout,
+    /// Remove saved authentication state (every provider key, OAuth login,
+    /// the account session and the Daytona token). Asks before deleting.
+    Logout(LogoutArgs),
     /// Manage authentication credentials and provider mode.
     Auth(AuthArgs),
     /// Sign in to your Codewhale account and manage account-scoped provider keys.
@@ -1520,6 +1525,13 @@ fn remote_setup_tui_args(args: RemoteSetupArgs) -> Vec<String> {
 }
 
 #[derive(Debug, Args)]
+struct LogoutArgs {
+    /// Delete without the confirmation prompt (required when stdin is not a terminal).
+    #[arg(long, short = 'y', default_value_t = false)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
 struct LoginArgs {
     /// Print the verification URL without trying to open a browser.
     #[arg(long, default_value_t = false)]
@@ -2126,6 +2138,12 @@ fn run() -> Result<()> {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_tui_in_process(&cli, &resolved_runtime, tui_args("sessions", args))
         }
+        Some(Commands::Receipts(args)) => {
+            // Read-only: resolve the runtime without first-run setup side effects.
+            let resolved_runtime =
+                resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("receipts", args))
+        }
         Some(Commands::Resume(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_resume_command(&cli, &resolved_runtime, args)
@@ -2247,7 +2265,10 @@ fn run() -> Result<()> {
                 &store,
             )
         }
-        Some(Commands::Logout) => run_logout_command(&mut store, cli.profile.as_deref()),
+        Some(Commands::Logout(args)) => {
+            confirm_logout(args.yes)?;
+            run_logout_command(&mut store, cli.profile.as_deref())
+        }
         Some(Commands::Auth(args)) => match args.command {
             AuthCommand::XaiDevice => {
                 let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -2616,6 +2637,37 @@ fn reject_legacy_login_provider_args(args: &LoginArgs) -> Result<()> {
     )
 }
 
+const LOGOUT_CONFIRM_PROMPT: &str = "This deletes every saved provider API key and OAuth login, \
+the Codewhale account session and the Daytona token. Type 'yes' to log out: ";
+
+/// `codewhale logout` wipes every provider credential at once, so it must not
+/// run on a stray keystroke. Non-interactive callers opt in with `--yes`.
+fn confirm_logout(yes: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() {
+        bail!(
+            "logout would delete every saved provider key; nothing was deleted. \
+             Re-run with --yes to confirm non-interactively."
+        );
+    }
+    confirm_logout_answer(&mut io::stdin().lock(), &mut io::stderr().lock())
+}
+
+fn confirm_logout_answer(reader: &mut impl io::BufRead, writer: &mut impl io::Write) -> Result<()> {
+    write!(writer, "{LOGOUT_CONFIRM_PROMPT}")?;
+    writer.flush()?;
+    let mut answer = String::new();
+    reader
+        .read_line(&mut answer)
+        .context("reading logout confirmation")?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "yes" | "y") {
+        bail!("logout cancelled; no credentials were deleted");
+    }
+    Ok(())
+}
+
 fn run_logout_command(store: &mut ConfigStore, profile: Option<&str>) -> Result<()> {
     run_logout_command_with_secrets(store, &Secrets::auto_detect(), profile)
 }
@@ -2625,16 +2677,24 @@ fn run_logout_command_with_secrets(
     secrets: &Secrets,
     profile: Option<&str>,
 ) -> Result<()> {
-    codewhale_config::with_xai_oauth_revocation_transaction(|| {
+    let failures = codewhale_config::with_xai_oauth_revocation_transaction(|| {
         run_logout_command_with_secrets_unlocked(store, secrets, profile)
-    })
+    })?;
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "logout incomplete: failed to delete stored credentials for: {}",
+            failures.join(", ")
+        );
+    }
+    println!("logged out");
+    Ok(())
 }
 
 fn run_logout_command_with_secrets_unlocked(
     store: &mut ConfigStore,
     secrets: &Secrets,
     profile: Option<&str>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let original_config = store.config.clone();
     for provider in ProviderKind::ALL {
         clear_provider_api_key_from_config(store, provider);
@@ -2681,16 +2741,9 @@ fn run_logout_command_with_secrets_unlocked(
     if let Err(error) = clear_account_session(profile) {
         keyring_failures.push(format!("account session: {error}"));
     }
-    if keyring_failures.is_empty() {
-        println!("logged out");
-    } else {
-        eprintln!(
-            "failed to delete stored credentials for: {}",
-            keyring_failures.join(", ")
-        );
-        println!("logged out (some stored credentials could not be deleted)");
-    }
-    Ok(())
+    // The config save committed the authority change. Partial deletions must
+    // not roll back xAI revocation; report them after its transaction commits.
+    Ok(keyring_failures)
 }
 
 fn clear_daytona_slot(secrets: &Secrets) -> Result<(), codewhale_secrets::SecretsError> {
@@ -5802,6 +5855,7 @@ mod tests {
     struct RecordingKeyringStore {
         gets: Mutex<Vec<String>>,
         values: Mutex<std::collections::BTreeMap<String, String>>,
+        fail_delete_slot: Option<&'static str>,
     }
 
     impl RecordingKeyringStore {
@@ -5844,6 +5898,11 @@ mod tests {
         }
 
         fn delete(&self, key: &str) -> std::result::Result<(), codewhale_secrets::SecretsError> {
+            if self.fail_delete_slot == Some(key) {
+                return Err(codewhale_secrets::SecretsError::Keyring(
+                    "test delete failure".into(),
+                ));
+            }
             self.values
                 .lock()
                 .expect("recording values lock")
@@ -10201,6 +10260,38 @@ verbosity = "project-imported"
     }
 
     #[test]
+    fn logout_confirmation_accepts_only_an_explicit_yes() {
+        let mut out = Vec::new();
+        confirm_logout_answer(&mut std::io::Cursor::new("yes\n"), &mut out).expect("yes confirms");
+        assert!(String::from_utf8_lossy(&out).contains("Type 'yes' to log out"));
+        confirm_logout_answer(&mut std::io::Cursor::new("Y\n"), &mut Vec::new())
+            .expect("y confirms");
+        for answer in ["\n", "no\n", "", "yess\n"] {
+            let err = confirm_logout_answer(&mut std::io::Cursor::new(answer), &mut Vec::new())
+                .expect_err("anything else cancels");
+            assert!(
+                err.to_string().contains("no credentials were deleted"),
+                "{err}"
+            );
+        }
+        assert!(confirm_logout(true).is_ok(), "--yes skips the prompt");
+    }
+
+    #[test]
+    fn logout_parses_yes_flag() {
+        let cli = parse_ok(&["codewhale", "logout", "--yes"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Logout(LogoutArgs { yes: true }))
+        ));
+        let cli = parse_ok(&["codewhale", "logout"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Logout(LogoutArgs { yes: false }))
+        ));
+    }
+
+    #[test]
     fn logout_removes_plaintext_provider_keys() {
         let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -10250,6 +10341,99 @@ verbosity = "project-imported"
         assert!(credentials.join("other-provider.json").exists());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn logout_finishes_revocation_and_other_deletions_before_reporting_failures() {
+        use codewhale_secrets::account::{
+            ACCOUNT_API_BASE_ENV, AccountAuthBundle, AccountSessionStore, DEFAULT_ACCOUNT_API_BASE,
+            secure_account_session_secrets,
+        };
+
+        let _lock = env_lock();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("codewhale-home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
+        let _api_base = ScopedEnvVar::remove(ACCOUNT_API_BASE_ENV);
+        let mut store = ConfigStore::load(Some(home.join("config.toml"))).expect("load config");
+        let generation = "xai-auth-0123456789abcdef0123456789abcdef.json";
+        store.config.providers.xai.auth_mode = Some("oauth".into());
+        store.config.providers.xai.oauth_credential_generation = Some(generation.into());
+        store.save().expect("save xAI authority");
+        let owned_files = [
+            generation,
+            codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME,
+            codewhale_config::LEGACY_CHATGPT_OAUTH_FILE_NAME,
+        ];
+        codewhale_config::with_xai_oauth_lifecycle_lock(|owned| {
+            for name in owned_files {
+                owned.write(name, b"test-oauth-credential", false)?;
+            }
+            Ok(())
+        })
+        .expect("seed OAuth credentials");
+        let account = AccountSessionStore::new(
+            secure_account_session_secrets().expect("account store"),
+            None,
+            DEFAULT_ACCOUNT_API_BASE,
+        );
+        account
+            .save(AccountAuthBundle {
+                token_type: "Bearer".into(),
+                access_token: "test-access".into(),
+                refresh_token: "test-refresh".into(),
+                session: None,
+                user: None,
+            })
+            .expect("seed account session");
+        let failing_slot = provider_slot(ProviderKind::Deepseek);
+        let keyring = RecordingKeyringStore {
+            fail_delete_slot: Some(failing_slot),
+            ..RecordingKeyringStore::default()
+        };
+        for provider in [ProviderKind::Deepseek, ProviderKind::Fireworks] {
+            keyring.set_value(provider_slot(provider), "test-credential");
+        }
+        keyring.set_value(codewhale_secrets::DAYTONA_TOKEN_SLOT, "test-daytona");
+        let secrets = Secrets::new(std::sync::Arc::new(keyring));
+        let error = run_logout_command_with_secrets(&mut store, &secrets, None)
+            .expect_err("partial logout must fail");
+        assert!(error.to_string().contains("logout incomplete"));
+        for name in owned_files {
+            assert!(
+                !home.join("credentials").join(name).exists(),
+                "{name} survived"
+            );
+        }
+        assert!(error.to_string().contains(failing_slot));
+        assert!(secrets.get(failing_slot).unwrap().is_some());
+        assert!(
+            secrets
+                .get(provider_slot(ProviderKind::Fireworks))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            secrets
+                .get(codewhale_secrets::DAYTONA_TOKEN_SLOT)
+                .unwrap()
+                .is_none()
+        );
+        assert!(account.load().expect("load cleared account").is_none());
+        let saved = ConfigStore::load(Some(home.join("config.toml"))).expect("reload config");
+        assert!(saved.config.providers.xai.auth_mode.is_none());
+        assert!(
+            saved
+                .config
+                .providers
+                .xai
+                .oauth_credential_generation
+                .is_none()
+        );
     }
 
     #[test]

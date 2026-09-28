@@ -10,6 +10,84 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn requirements_check_implicit_approval_and_sandbox_defaults() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("requirements.toml");
+    let mut config = Config {
+        requirements_path: Some(path.display().to_string()),
+        ..Config::default()
+    };
+
+    fs::write(&path, "allowed_approval_policies = ['never']\n").unwrap();
+    let error = apply_requirements(&mut config).expect_err("default approval must be checked");
+    assert!(error.to_string().contains("approval_policy 'on-request'"));
+    config.approval_policy = Some("never".into());
+    apply_requirements(&mut config).expect("explicit allowed policy");
+
+    fs::write(&path, "allowed_sandbox_modes = ['read-only']\n").unwrap();
+    let error = apply_requirements(&mut config).expect_err("default sandbox must be checked");
+    assert!(error.to_string().contains("sandbox_mode 'workspace-write'"));
+    config.sandbox_mode = Some("read-only".into());
+    apply_requirements(&mut config).expect("explicit allowed sandbox");
+
+    config.approval_policy = None;
+    config.sandbox_mode = None;
+    fs::write(
+        &path,
+        "allowed_approval_policies = ['ON-REQUEST']\nallowed_sandbox_modes = ['WORKSPACE-WRITE']\n",
+    )
+    .unwrap();
+    apply_requirements(&mut config).expect("allowed implicit defaults");
+    config.yolo = Some(true);
+    apply_requirements(&mut config).expect("managed approvals prevent the YOLO override");
+    fs::write(&path, "allowed_sandbox_modes = ['workspace-write']\n").unwrap();
+    apply_requirements(&mut config).expect("managed sandbox prevents the YOLO override");
+    config.approval_policy = Some("full-access".into());
+    let error =
+        apply_requirements(&mut config).expect_err("full access changes the sandbox default");
+    assert!(
+        error
+            .to_string()
+            .contains("sandbox_mode 'danger-full-access'")
+    );
+}
+
+#[test]
+fn requirements_accept_equivalent_approval_aliases() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("requirements.toml");
+    let mut config = Config {
+        requirements_path: Some(path.display().to_string()),
+        ..Config::default()
+    };
+    for alias in ["untrusted", "ask", "suggest", "ON-REQUEST"] {
+        fs::write(&path, format!("allowed_approval_policies = ['{alias}']\n")).unwrap();
+        for policy in [None, Some("on-request"), Some("ask")] {
+            config.approval_policy = policy.map(str::to_string);
+            apply_requirements(&mut config).expect("equivalent approval mode is allowed");
+        }
+        config.approval_policy = Some("full-access".into());
+        assert!(
+            apply_requirements(&mut config).is_err(),
+            "{alias} must not allow bypass"
+        );
+    }
+    fs::write(&path, "allowed_approval_policies = ['unknown']\n").unwrap();
+    config.approval_policy = None;
+    assert!(
+        apply_requirements(&mut config).is_err(),
+        "unknown is not the default"
+    );
+    config.approval_policy = Some("other-unknown".into());
+    assert!(
+        apply_requirements(&mut config).is_err(),
+        "unknown modes must not compare equal"
+    );
+    config.approval_policy = Some("UNKNOWN".into());
+    apply_requirements(&mut config).expect("unparsed policies retain literal comparison");
+}
+
+#[test]
 fn remembered_deepseek_cn_and_layered_root_models_keep_their_precedence() {
     let _lock = lock_test_env();
     let home = tempfile::tempdir().unwrap();

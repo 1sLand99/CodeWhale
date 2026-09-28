@@ -32,6 +32,9 @@
 //! - [`NotificationKind::SubagentTerminal`] — localized status headline,
 //!   the sub-agent's display name as detail, and a preview of the child's summary
 //!   line.
+//! - [`NotificationKind::BackgroundTerminal`] — shell/task or mixed batch
+//!   headline and labels only. Commands, task prompts and errors stay in the UI;
+//!   this kind never carries a preview, even if an agent is in the batch.
 //! - [`NotificationKind::ApprovalNeeded`] — headline plus the *tool name*.
 //!   Never the tool description or arguments: an approval prompt fires
 //!   precisely when those arguments are untrusted, and the previous code
@@ -75,6 +78,8 @@ pub enum NotificationKind {
     TurnComplete,
     /// A sub-agent reached a terminal status (complete/failed/cancelled/…).
     SubagentTerminal,
+    /// Shell/task completion, possibly batched with agents; no raw previews.
+    BackgroundTerminal,
     /// A tool call is blocked waiting for the user to approve it.
     ApprovalNeeded,
     /// The agent asked the user a question and is blocked on the answer.
@@ -143,6 +148,13 @@ impl NotificationPayload {
             headline,
             Some(agent_name),
         )
+    }
+
+    /// Finished background work. Callers supply only display labels, never
+    /// commands or task prompts; output and errors remain in the terminal.
+    #[must_use]
+    pub fn background_terminal(headline: &str, labels: &str) -> Self {
+        Self::new(NotificationKind::BackgroundTerminal, headline, Some(labels))
     }
 
     /// A tool call needs approval. Only the tool *name* is disclosed —
@@ -285,7 +297,7 @@ pub fn sanitize_field(text: &str) -> String {
     // drops the ESC byte but leaves the parameter tail behind — good
     // enough for a terminal that will never re-interpret it, wrong for a
     // notification banner that would render a literal `[31m`.
-    codewhale_secrets::sanitize::sanitize_stream_chunk(&strip_escape_sequences(text))
+    codewhale_secrets::sanitize::sanitize_text(&strip_escape_sequences(text))
         .lines()
         .map(|line| {
             let redacted = redact_structured(line.trim());
@@ -454,6 +466,7 @@ mod tests {
         vec![
             NotificationPayload::turn_complete(text).with_preview(Some(text)),
             NotificationPayload::subagent_terminal(text, text).with_preview(Some(text)),
+            NotificationPayload::background_terminal(text, text).with_preview(Some(text)),
             NotificationPayload::approval_needed(text, text),
             NotificationPayload::input_needed(text),
             NotificationPayload::elevation_needed(text, text, text),
@@ -532,6 +545,7 @@ mod tests {
 
         // Prompt kinds refuse a preview no matter what the caller does.
         for payload in [
+            NotificationPayload::background_terminal("Shell failed", "shell"),
             NotificationPayload::approval_needed("Approval needed", "bash"),
             NotificationPayload::input_needed("Input needed"),
             NotificationPayload::elevation_needed("Elevation needed", "bash", "network blocked"),

@@ -1566,6 +1566,43 @@ async fn apply_command_result_inner(
                     persist_full_reset_snapshot(app);
                 }
             }
+            AppAction::SetWorkspaceTrust { trusted, save } => {
+                let result = crate::commands::set_workspace_trust(app, trusted, save).await;
+                sync_mode_update(app, engine_handle).await;
+                match result {
+                    Ok(()) => {
+                        app.push_status_toast(
+                            format!(
+                                "/trust: {} ({})",
+                                tr(
+                                    app.ui_locale,
+                                    if trusted {
+                                        MessageId::ConfigValueOn
+                                    } else {
+                                        MessageId::ConfigValueOff
+                                    }
+                                ),
+                                tr(
+                                    app.ui_locale,
+                                    if save {
+                                        MessageId::ConfigScopeSaved
+                                    } else {
+                                        MessageId::ConfigScopeSession
+                                    }
+                                ),
+                            ),
+                            StatusToastLevel::Info,
+                            None,
+                        );
+                    }
+                    Err(error) => app.push_status_toast(
+                        tr(app.ui_locale, MessageId::AutomationEditorSaveFailed)
+                            .replace("{error}", &format!("/trust: {error:#}")),
+                        StatusToastLevel::Error,
+                        None,
+                    ),
+                }
+            }
             AppAction::ModeChanged(_mode) => {
                 sync_mode_update(app, engine_handle).await;
             }
@@ -3754,10 +3791,23 @@ pub(crate) fn apply_loaded_session_with_goal(
         // is contended, the current conversation stays intact and a retry can
         // use this durably repaired binding to the same host.
         let mut recovered = session.clone();
-        recovered.metadata.runtime_store = Some(binding.clone());
-        SessionManager::default_location()
-            .and_then(|manager| manager.save_session(&recovered))
+        let abandoned = recovered.metadata.runtime_store.replace(binding.clone());
+        let manager = SessionManager::default_location()
             .map_err(|error| format!("Session recovery could not be saved: {error}"))?;
+        manager
+            .save_session(&recovered)
+            .map_err(|error| format!("Session recovery could not be saved: {error}"))?;
+        // The conversation now lives in this host's store. The empty store it
+        // left is set aside here, where it is abandoned, unless another
+        // document still binds it (#6144 P1a) — otherwise it stayed on disk
+        // with nothing pointing at it.
+        if let Some(abandoned) = abandoned {
+            crate::session_reconcile::retire_unbound_store_in_background(
+                manager,
+                abandoned.data_dir,
+                "conversation rebound to another host's store",
+            );
+        }
     }
     app.restore_work_state(
         &session.metadata.id,

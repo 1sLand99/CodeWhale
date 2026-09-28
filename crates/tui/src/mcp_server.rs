@@ -21,6 +21,10 @@ struct McpServerConfigFile {
 #[derive(Debug, Default, Deserialize)]
 struct McpServerSection {
     expose_tools: Option<Vec<String>>,
+    /// Withhold tools that write files or run commands. This stdio server has
+    /// no channel for an out-of-band approval prompt, so "approval required"
+    /// means those tools are refused. Defaults to `true`; only the operator's
+    /// own config file can turn it off.
     require_approval: Option<bool>,
 }
 
@@ -36,24 +40,25 @@ impl McpServerSettings {
         if let Some(path) = path.filter(|p| p.exists()) {
             let contents = std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read MCP server config: {}", path.display()))?;
-            let config: McpServerConfigFile = toml::from_str(&contents).with_context(|| {
-                format!("Failed to parse MCP server config: {}", path.display())
-            })?;
-            let expose_tools = config
-                .server
-                .expose_tools
-                .unwrap_or_else(default_expose_tools);
-            let require_approval = config.server.require_approval.unwrap_or(false);
-            Ok(Self {
-                expose_tools,
-                require_approval,
-            })
+            Self::from_toml(&contents)
+                .with_context(|| format!("Failed to parse MCP server config: {}", path.display()))
         } else {
             Ok(Self {
                 expose_tools: default_expose_tools(),
-                require_approval: false,
+                require_approval: true,
             })
         }
+    }
+
+    fn from_toml(contents: &str) -> Result<Self> {
+        let config: McpServerConfigFile = toml::from_str(contents)?;
+        Ok(Self {
+            expose_tools: config
+                .server
+                .expose_tools
+                .unwrap_or_else(default_expose_tools),
+            require_approval: config.server.require_approval.unwrap_or(true),
+        })
     }
 }
 
@@ -70,6 +75,15 @@ pub async fn run_mcp_server(workspace: PathBuf) -> Result<()> {
         .await
         .context("MCP server settings task failed")??;
     let mut server = McpServer::new(workspace, settings)?;
+    // stdout carries the protocol; the notice goes to stderr so an operator
+    // whose config lists write tools sees why they are missing.
+    for name in server.withheld_tools() {
+        eprintln!(
+            "codewhale mcp server: not exposing '{name}': it writes files or runs \
+             commands and require_approval is on. Set require_approval = false under \
+             [server] in the MCP server config to allow it."
+        );
+    }
     server.run().await
 }
 
@@ -174,6 +188,10 @@ impl McpServer {
                 continue;
             }
             if let Some(tool) = self.registry.get(&entry.internal) {
+                // A tool this server would refuse is not advertised.
+                if self.require_approval && !tool.is_read_only() {
+                    continue;
+                }
                 tools.push(json!({
                     "name": entry.public,
                     "description": tool.description(),
@@ -185,6 +203,24 @@ impl McpServer {
         // are no more results. Emitting `null` violates the spec and breaks
         // strict clients (e.g. Claude Code) that validate the response shape.
         json!({ "tools": tools })
+    }
+
+    /// Configured tools that `require_approval` keeps out of `tools/list`.
+    fn withheld_tools(&self) -> Vec<String> {
+        if !self.require_approval {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        self.exposed_tools
+            .iter()
+            .filter(|entry| seen.insert(entry.public.clone()))
+            .filter(|entry| {
+                self.registry
+                    .get(&entry.internal)
+                    .is_some_and(|tool| !tool.is_read_only())
+            })
+            .map(|entry| entry.public.clone())
+            .collect()
     }
 
     async fn list_resources_response(&self) -> Value {
@@ -232,18 +268,6 @@ impl McpServer {
                 message: "Missing tool name".to_string(),
             })?;
 
-        if self.require_approval
-            && !params
-                .get("approved")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            return Err(RpcError {
-                code: -32001,
-                message: "Approval required. Resend with approved=true.".to_string(),
-            });
-        }
-
         let internal = self
             .exposed_tools
             .iter()
@@ -258,6 +282,23 @@ impl McpServer {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        // Approval comes from the operator's config, never from the caller:
+        // a request cannot vouch for itself.
+        if self.require_approval
+            && self
+                .registry
+                .get(&internal)
+                .is_some_and(|tool| !(tool.is_read_only() && tool.is_read_only_for(&arguments)))
+        {
+            return Err(RpcError {
+                code: -32001,
+                message: format!(
+                    "Tool '{name}' writes files or runs commands and needs approval, which \
+                     this server cannot request. Set require_approval = false in the MCP \
+                     server config to allow it."
+                ),
+            });
+        }
         let result = self.registry.execute_full(&internal, arguments).await;
         Ok(tool_result_to_mcp(result))
     }
@@ -267,14 +308,10 @@ fn default_config_path() -> Option<PathBuf> {
     crate::config::effective_home_dir().map(|home| home.join(".deepseek").join("mcp_server.toml"))
 }
 
+/// Read-only by default: writing or executing tools must be named in the
+/// operator's config and allowed with `require_approval = false`.
 fn default_expose_tools() -> Vec<String> {
-    vec![
-        "file_read".to_string(),
-        "file_write".to_string(),
-        "search".to_string(),
-        "apply_patch".to_string(),
-        "shell".to_string(),
-    ]
+    vec!["file_read".to_string(), "search".to_string()]
 }
 
 fn build_exposed_tools(names: &[String]) -> Vec<ExposedTool> {
@@ -454,6 +491,116 @@ mod tests {
         // backs it, so the call answers with an isError result.
         let response = response.expect("tools/call responds");
         assert_eq!(response["result"]["isError"], json!(true), "{response}");
+    }
+
+    #[test]
+    fn default_settings_expose_only_read_only_tools() {
+        assert_eq!(default_expose_tools(), vec!["file_read", "search"]);
+        let settings = McpServerSettings {
+            expose_tools: default_expose_tools(),
+            require_approval: true,
+        };
+        let server = McpServer::new(PathBuf::from("."), settings).expect("build server");
+        let tools = server.list_tools_response();
+        let names: Vec<&str> = tools["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["file_read", "search"], "{tools}");
+    }
+
+    #[test]
+    fn existing_config_without_require_approval_withholds_and_names_write_tools() {
+        let settings = McpServerSettings::from_toml(
+            "[server]\nexpose_tools = [\"file_read\", \"file_write\", \"apply_patch\"]\n",
+        )
+        .expect("parse config");
+        assert!(settings.require_approval);
+        let server = McpServer::new(PathBuf::from("."), settings).expect("build server");
+        assert_eq!(server.withheld_tools(), vec!["file_write", "apply_patch"]);
+
+        let allowed = McpServerSettings::from_toml(
+            "[server]\nexpose_tools = [\"file_write\"]\nrequire_approval = false\n",
+        )
+        .expect("parse config");
+        let server = McpServer::new(PathBuf::from("."), allowed).expect("build server");
+        assert!(server.withheld_tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn caller_cannot_self_approve_write_tools() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let canary = workspace.path().join("canary.txt");
+        let settings = McpServerSettings {
+            expose_tools: vec![
+                "file_read".to_string(),
+                "file_write".to_string(),
+                "apply_patch".to_string(),
+            ],
+            require_approval: true,
+        };
+        let mut server =
+            McpServer::new(workspace.path().to_path_buf(), settings).expect("build server");
+
+        let tools = server.list_tools_response();
+        let names: Vec<&str> = tools["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["file_read"], "{tools}");
+
+        for (name, arguments) in [
+            ("file_write", json!({"path": "canary.txt", "content": "x"})),
+            (
+                "apply_patch",
+                json!({"patch": "--- /dev/null\n+++ b/canary.txt\n@@ -0,0 +1 @@\n+x\n"}),
+            ),
+        ] {
+            let response = server
+                .handle_message(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": name, "approved": true, "arguments": arguments}
+                }))
+                .await
+                .expect("tools/call responds");
+            assert_eq!(
+                response["error"]["code"],
+                json!(-32001),
+                "{name}: {response}"
+            );
+            assert!(!canary.exists(), "{name} must not run");
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_config_can_allow_write_tools() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let settings = McpServerSettings {
+            expose_tools: vec!["file_write".to_string()],
+            require_approval: false,
+        };
+        let mut server =
+            McpServer::new(workspace.path().to_path_buf(), settings).expect("build server");
+        let response = server
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "file_write",
+                    "arguments": {"path": "allowed.txt", "content": "x"}
+                }
+            }))
+            .await
+            .expect("tools/call responds");
+        assert!(response.get("error").is_none(), "{response}");
+        assert!(workspace.path().join("allowed.txt").exists(), "{response}");
     }
 
     #[test]

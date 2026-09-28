@@ -29,16 +29,13 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 import { ExecError, currentSignal } from "./exec.mjs";
 import { stateDir } from "./registry.mjs";
+import { recordingsDir as defaultRecordingsDir } from "./recordings.mjs";
 
 const APPLICATIONS = ["Google Chrome", "Chromium", "Brave Browser", "Microsoft Edge"];
 const LINUX_BINARIES = ["google-chrome", "chromium", "chromium-browser", "brave-browser", "microsoft-edge"];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const badArgs = (message) => Object.assign(new ExecError(message), { code: "bad_args" });
-
-function defaultRecordingsDir() {
-  return process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(stateDir(), "recordings");
-}
 
 /** Only http(s) and about:blank can be navigated to; everything else is refused. */
 export function checkBrowserUrl(url) {
