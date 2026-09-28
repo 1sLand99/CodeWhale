@@ -49,6 +49,7 @@ const OPTIONAL_FILES = [
   "digest.ts",
   "faq.ts",
   "roadmap.ts",
+  "contribute.ts",
   "computer-use.ts",
 ];
 
