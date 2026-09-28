@@ -11262,10 +11262,17 @@ fn first_run_ollama_choice_survives_restart_from_canonical_config() {
         app.status_message,
     );
 
-    // The canonical provider slot owns the selection; preserve the unrelated
-    // compatibility root for callers that still explicitly read it.
+    // The root default was DeepSeek's own model (the outgoing route had no
+    // leaf and was resolving it). Since #6693 the route writer moves such an
+    // alias onto the outgoing route's leaf instead of leaving it at the root,
+    // so switching back to DeepSeek keeps the choice and Ollama never
+    // inherits it.
+    assert!(
+        saved.get("default_text_model").is_none(),
+        "the root alias moves with the route that owned it: {saved:?}",
+    );
     assert_eq!(
-        saved["default_text_model"].as_str(),
+        saved["providers"]["deepseek"]["model"].as_str(),
         Some("deepseek-v4-pro"),
     );
 

@@ -4059,10 +4059,13 @@ struct ModelsListResponse {
 }
 
 /// The list envelope is validated as a whole; each row is decoded on its own
-/// so one malformed row cannot fail the entire roster (#6690).
+/// so one malformed row cannot fail the entire roster (#6690). Rows stay raw
+/// text rather than `serde_json::Value`: a `Value` map keeps the last of a
+/// duplicated key, which would silently accept an ambiguous row (two `id`s,
+/// two `pricing.prompt`s) instead of skipping it as malformed.
 #[derive(Debug, Deserialize)]
 struct OpenRouterModelsResponse {
-    data: Vec<serde_json::Value>,
+    data: Vec<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4475,7 +4478,7 @@ fn parse_openrouter_models_response(
         // catalog cannot hold is skipped and counted: one such row used to
         // fail the whole roster closed, so no OpenRouter route could ever be
         // priced from the lake (#6690).
-        let Ok(item) = serde_json::from_value::<OpenRouterModelItem>(row) else {
+        let Ok(item) = serde_json::from_str::<OpenRouterModelItem>(row.get()) else {
             malformed += 1;
             continue;
         };
