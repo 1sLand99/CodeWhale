@@ -1829,15 +1829,14 @@ impl Engine {
                     billing.provider_live_pricing = u64::try_from(dispatched_at.timestamp())
                         .ok()
                         .and_then(|dispatched_at_unix| {
-                            billing.endpoint_fingerprint.as_deref().and_then(|fingerprint| {
-                                crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
-                                    route.provider,
-                                    &route.provider_identity,
-                                    &route.model,
-                                    fingerprint,
-                                    dispatched_at_unix,
-                                )
-                            })
+                            crate::client::main_turn_pricing_quote_at(
+                                self.codewhale_client.as_ref(),
+                                route.provider,
+                                &route.provider_identity,
+                                &route.model,
+                                billing.endpoint_fingerprint.as_deref()?,
+                                dispatched_at_unix,
+                            )
                         });
                 }
                 let _ = self

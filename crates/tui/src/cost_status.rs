@@ -201,8 +201,8 @@ impl EffectiveRouteEnvelope {
             u64::try_from(dispatched_at.timestamp())
                 .ok()
                 .and_then(|at| {
-                    config
-                        .and_then(|config| {
+                    crate::provider_catalog_live::declared_or_catalog_quote(
+                        config.and_then(|config| {
                             crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
                                 config.custom_models.as_deref().unwrap_or_default(),
                                 provider,
@@ -211,8 +211,8 @@ impl EffectiveRouteEnvelope {
                                 base_url,
                                 at,
                             )
-                        })
-                        .or_else(|| {
+                        }),
+                        || {
                             crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
                                 provider,
                                 &provider_identity,
@@ -220,7 +220,8 @@ impl EffectiveRouteEnvelope {
                                 base_url,
                                 at,
                             )
-                        })
+                        },
+                    )
                 })
         });
         Self {
@@ -251,7 +252,7 @@ impl EffectiveRouteEnvelope {
             self.provider,
             self.endpoint_fingerprint.as_deref(),
         );
-        let declared_estimate = self.provider_live_pricing.as_ref().is_some_and(|quote| {
+        let declared_quote = self.provider_live_pricing.as_ref().filter(|quote| {
             quote.provenance == codewhale_config::pricing::PricingProvenance::UserOverride
                 && self
                     .endpoint_fingerprint
@@ -269,6 +270,7 @@ impl EffectiveRouteEnvelope {
                             .is_some()
                     })
         });
+        let declared_estimate = declared_quote.is_some();
         match self.billing_mode {
             RouteBillingMode::Subscription | RouteBillingMode::Local => {
                 return TurnCostAudit::unpriced(crate::pricing::UnpricedReason::NotMoneyMetered);
@@ -282,7 +284,12 @@ impl EffectiveRouteEnvelope {
         }
         // The OpenRouter model catalog does not identify a pinned upstream's
         // price. An endpoint match alone must not promote that aggregate rate.
-        if self.provider == ApiProvider::Openrouter && self.openrouter_vendor.is_some() {
+        // An operator's own declared rate for this exact route is not the
+        // aggregate catalog, so it still prices the pinned turn.
+        if self.provider == ApiProvider::Openrouter
+            && self.openrouter_vendor.is_some()
+            && !declared_quote.is_some_and(|quote| quote.carries_rates())
+        {
             return TurnCostAudit::unpriced(crate::pricing::UnpricedReason::RoutingDependentPrice);
         }
         crate::pricing::audit_turn_cost_for_route_on_endpoint_for_identity_at(
@@ -2259,6 +2266,151 @@ mod tests {
                 .effective_route_envelope("other-model", Utc::now())
                 .provider_live_pricing,
             None
+        );
+    }
+
+    const DECLARED_OPENROUTER_MODEL: &str = "synthetic/declared-model";
+
+    /// An OpenRouter config on the official endpoint with one
+    /// `[[custom_models]]` row; `extra` adds fields such as `cost`.
+    fn openrouter_declared_config(extra: &str, vendor: Option<&str>) -> crate::config::Config {
+        let vendor = vendor.map_or_else(String::new, |vendor| format!("vendor = \"{vendor}\"\n"));
+        toml::from_str(&format!(
+            "provider = \"openrouter\"\ntelemetry = false\n\n\
+             [[custom_models]]\nprovider = \"openrouter\"\n\
+             base_url = \"{base}\"\nid = \"{DECLARED_OPENROUTER_MODEL}\"\n{extra}\n\n\
+             [providers.openrouter]\nbase_url = \"{base}\"\n\
+             api_key = \"fixture-not-a-provider-credential\"\n{vendor}",
+            base = crate::config::DEFAULT_OPENROUTER_BASE_URL,
+        ))
+        .expect("declared OpenRouter config")
+    }
+
+    fn declared_openrouter_client(
+        config: &crate::config::Config,
+    ) -> crate::client::CodewhaleClient {
+        let route = crate::route_runtime::resolve_runtime_route(
+            config,
+            ApiProvider::Openrouter,
+            Some(DECLARED_OPENROUTER_MODEL),
+        )
+        .expect("declared OpenRouter route");
+        crate::client::CodewhaleClient::from_candidate(config, &route.candidate)
+            .expect("declared OpenRouter client")
+    }
+
+    /// #6690: a `[[custom_models]]` row declared only to add a model (no
+    /// rates) used to freeze a rate-less quote on the main turn and hide the
+    /// endpoint's own catalog price. A declared rate still wins, and with no
+    /// catalog row the rate-less declaration stays frozen so no same-named
+    /// bundled price can fill it.
+    #[test]
+    fn main_turn_rateless_declaration_yields_to_the_endpoint_catalog_price() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().expect("isolated catalog home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _reset = ProviderCatalogTestReset;
+        crate::provider_catalog_live::reset_cache_for_test();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        crate::provider_lake::clear_live_snapshot();
+
+        let fingerprint = endpoint_fingerprint(crate::config::DEFAULT_OPENROUTER_BASE_URL)
+            .expect("official endpoint");
+        let now = u64::try_from(Utc::now().timestamp()).expect("timestamp");
+        let rateless = declared_openrouter_client(&openrouter_declared_config("", None));
+        let declared = declared_openrouter_client(&openrouter_declared_config(
+            "cost = { input = 0.4, output = 1.6 }",
+            None,
+        ));
+        let quote_for = |client: &crate::client::CodewhaleClient| {
+            crate::client::main_turn_pricing_quote_at(
+                Some(client),
+                ApiProvider::Openrouter,
+                "openrouter",
+                DECLARED_OPENROUTER_MODEL,
+                &fingerprint,
+                now,
+            )
+            .expect("a frozen main-turn quote")
+        };
+
+        // No catalog row yet: the rate-less declaration is frozen as-is.
+        let frozen = quote_for(&rateless);
+        assert_eq!(
+            frozen.provenance,
+            codewhale_config::pricing::PricingProvenance::UserOverride
+        );
+        assert!(!frozen.carries_rates());
+
+        crate::provider_catalog_live::record_success(priced_provider_delta(
+            "openrouter",
+            DECLARED_OPENROUTER_MODEL,
+            &fingerprint,
+            now,
+        ));
+        let catalog = quote_for(&rateless);
+        assert_eq!(
+            catalog.provenance,
+            codewhale_config::pricing::PricingProvenance::ProviderLive
+        );
+        assert_eq!(catalog.input_per_million.as_deref(), Some("1.25"));
+        assert_eq!(catalog.output_per_million.as_deref(), Some("5"));
+        assert_eq!(catalog.cache_read_per_million.as_deref(), Some("0.25"));
+
+        let explicit = quote_for(&declared);
+        assert_eq!(
+            explicit.provenance,
+            codewhale_config::pricing::PricingProvenance::UserOverride
+        );
+        assert_eq!(explicit.input_per_million.as_deref(), Some("0.4"));
+        assert_eq!(explicit.output_per_million.as_deref(), Some("1.6"));
+    }
+
+    /// #6690 review: a pinned OpenRouter vendor blocks the aggregate catalog
+    /// price, but an operator's own declared rate for the exact route is not
+    /// that aggregate and must still price the turn.
+    #[test]
+    fn openrouter_vendor_pin_is_priced_by_an_explicit_declared_rate() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().expect("isolated catalog home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _reset = ProviderCatalogTestReset;
+        crate::provider_catalog_live::reset_cache_for_test();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        crate::provider_lake::clear_live_snapshot();
+
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..Usage::default()
+        };
+        let capture = |extra: &str| {
+            EffectiveRouteEnvelope::capture(
+                Some(&openrouter_declared_config(extra, Some("cerebras"))),
+                ApiProvider::Openrouter,
+                "openrouter",
+                DECLARED_OPENROUTER_MODEL,
+                Some(crate::config::DEFAULT_OPENROUTER_BASE_URL),
+                Utc::now(),
+            )
+        };
+
+        let declared = capture("cost = { input = 0.4, output = 1.6 }");
+        assert_eq!(declared.openrouter_vendor.as_deref(), Some("cerebras"));
+        let audit = declared.audit(&usage);
+        assert_eq!(audit.unpriced_reason, None, "{audit:?}");
+        assert_eq!(
+            audit.provenance,
+            Some(codewhale_config::pricing::PricingProvenance::UserOverride)
+        );
+        let usd = audit.estimate.expect("declared estimate").usd;
+        assert!((usd - 2.0).abs() < 1e-12, "{usd}");
+
+        // A rate-less declaration is no explicit rate: the pin still wins.
+        let rateless = capture("");
+        assert_eq!(
+            rateless.audit(&usage).unpriced_reason,
+            Some(crate::pricing::UnpricedReason::RoutingDependentPrice)
         );
     }
 

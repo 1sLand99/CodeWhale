@@ -127,6 +127,15 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- OpenRouter turns are priced again instead of always showing "rate
+  unavailable". The model-list refresh no longer fails as a whole on one bad
+  row: `~` "latest" aliases are dropped, routers that publish a `-1`
+  variable price are listed without a rate, and other malformed rows are
+  skipped and counted. Main interactive turns now honor a `[[custom_models]]`
+  rate the same way background work does, a declaration without rates no
+  longer hides the catalog price, and an explicit declared rate prices a
+  vendor-pinned OpenRouter route
+  ([#6690](https://github.com/Hmbown/Codewhale/issues/6690)).
 - Keep reasoning effort labels, including `xhigh` and `ultra`, visible beside
   short model names in the 80-column terminal footer.
 - First-run TUI startup keeps explicitly configured providers, models and
