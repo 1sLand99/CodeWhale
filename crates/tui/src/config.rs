@@ -6712,6 +6712,16 @@ impl Config {
                 && env_base_url_override().is_some())
     }
 
+    /// The active route names its own endpoint: its `[providers.<name>]`
+    /// `base_url` (where a legacy top-level `base_url` lands too) or an
+    /// environment endpoint override. An endpoint is a configured route even
+    /// without a model or a working key.
+    pub(crate) fn active_route_endpoint_configured(&self) -> bool {
+        let provider = self.api_provider();
+        self.configured_base_url_for_provider(provider).is_some()
+            || self.active_base_url_is_environment_owned(provider)
+    }
+
     /// The endpoint `provider` owns through a file or in-memory layer, before
     /// the environment layer is consulted: its own `[providers.<name>]` table
     /// (DeepSeek-CN also reading `[providers.deepseek]`). There is no

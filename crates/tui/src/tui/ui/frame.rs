@@ -2175,8 +2175,12 @@ pub(crate) fn context_usage_snapshot(app: &App) -> Option<(i64, u32, f64)> {
 pub(crate) fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(i64, u32, f64)> {
     // Before a conversation starts, the assembled startup prompt alone is not
     // conversation usage, and compacting an empty session cannot reclaim it.
-    // Once messages or provider usage exist, retain the real pressure reading.
-    if app.api_messages.is_empty()
+    // A submitted first turn has started the conversation even before the
+    // engine mirrors its messages back, and so has any provider usage; those
+    // keep the real pressure reading.
+    let conversation_started =
+        !app.api_messages.is_empty() || app.is_loading || count_user_history_cells(app) > 0;
+    if !conversation_started
         && app.session.last_prompt_tokens.unwrap_or(0) == 0
         && app.last_billed_input_tokens.unwrap_or(0) == 0
     {
@@ -2208,6 +2212,12 @@ pub(crate) fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(
     // fallback when no estimate is available (e.g., immediately after a
     // session restore before the api_messages are populated).
     let used = match (estimated, reported) {
+        // No messages yet (a restore before the projection lands): the
+        // estimate is only the system prompt, so the reported prompt is the
+        // better reading and must not be dropped to ~0%.
+        (Some(estimated), Some(reported)) if app.api_messages.is_empty() => {
+            estimated.max(reported).min(max_i64)
+        }
         (Some(estimated), _) => estimated.min(max_i64),
         (None, Some(reported)) => reported.min(max_i64),
         (None, None) => return None,

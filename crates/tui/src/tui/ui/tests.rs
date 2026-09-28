@@ -10486,6 +10486,167 @@ fn first_run_route_context_is_empty_until_conversation_starts() {
     assert_eq!(context_usage_snapshot(&app), Some((8192, 8192, 100.0)));
 }
 
+/// A submitted first turn, or usage the provider already reported, is real
+/// pressure even while `api_messages` is still empty (the engine mirrors the
+/// transcript back later, and a restore installs usage before messages).
+#[test]
+fn first_run_route_context_keeps_reported_usage_without_messages() {
+    let mut app = create_test_app();
+    app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+        context_tokens: Some(8192),
+        ..Default::default()
+    });
+    app.system_prompt = None;
+    assert!(app.api_messages.is_empty());
+    app.session.last_prompt_tokens = Some(4096);
+    let (used, max, percent) = context_usage_snapshot(&app).expect("reading");
+    assert_eq!((used, max), (4096, 8192));
+    assert!((percent - 50.0).abs() < f64::EPSILON, "{percent}");
+    assert_eq!(crate::tui::phase_strip::context_percent_from_app(&app), 50);
+
+    // A first turn in flight before the projection lands counts too.
+    app.session.last_prompt_tokens = None;
+    app.system_prompt = Some(SystemPrompt::Text("startup instructions ".repeat(8192)));
+    app.is_loading = true;
+    assert_eq!(context_usage_snapshot(&app).map(|(_, _, p)| p), Some(100.0));
+}
+
+fn first_run_route_env_guards() -> Vec<crate::test_support::EnvVarGuard> {
+    [
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "CODEWHALE_BASE_URL",
+        "DEEPSEEK_BASE_URL",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "DEEPSEEK_API_KEY",
+    ]
+    .into_iter()
+    .map(crate::test_support::EnvVarGuard::remove)
+    .collect()
+}
+
+fn first_run_route_catalog() -> crate::local_ollama::LiveLocalOllamaCatalog {
+    crate::local_ollama::LiveLocalOllamaCatalog {
+        endpoint_v1: "http://127.0.0.1:11434/v1".into(),
+        tags: vec!["qwen3:4b".into()],
+        chat_tag: Some("qwen3:4b".into()),
+    }
+}
+
+/// The first launch writes `default_text_model = DEFAULT_TEXT_MODEL` into a
+/// generated config. That template line is not a choice: a person who first
+/// launched without Ollama and starts it later still gets local discovery.
+#[tokio::test]
+async fn first_run_route_generated_config_restart_keeps_local_discovery() {
+    let _home = SettingsHomeGuard::new();
+    let _env = first_run_route_env_guards();
+    let created = crate::config::ensure_config_file_exists(None)
+        .unwrap()
+        .expect("first launch writes the template");
+    assert!(
+        std::fs::read_to_string(&created)
+            .unwrap()
+            .contains(&format!("default_text_model = \"{DEFAULT_TEXT_MODEL}\""))
+    );
+    // Launch 0: no daemon answers. Launch 1 (restart): Ollama is up.
+    for launch in 0..2 {
+        let mut config = Config::load(None, None).expect("load generated config");
+        let mut options = create_test_options();
+        options.model = config.default_model();
+        let mut app = App::new(options, &config);
+        app.onboarding_needs_api_key = true;
+        sync_config_provider_from_app(&mut config, &app);
+        assert!(!app.startup_route_configured, "launch {launch}");
+        assert!(
+            crate::local_ollama::should_adopt_live_local_ollama(&mut app),
+            "launch {launch}"
+        );
+        if launch == 1 {
+            let mut engine = mock_engine_handle();
+            super::event_loop::adopt_live_local_ollama_catalog(
+                &mut app,
+                &mut engine.handle,
+                &mut config,
+                first_run_route_catalog(),
+            )
+            .await;
+            assert_eq!(app.api_provider, ApiProvider::Ollama);
+            assert_eq!(app.model, "qwen3:4b");
+        }
+    }
+}
+
+/// An endpoint is a configured route even with no provider, no model and no
+/// working key: a live Ollama must not replace it.
+#[tokio::test]
+async fn first_run_route_endpoint_only_keeps_route_when_credentials_are_missing() {
+    use crate::test_support::EnvVarGuard;
+
+    for (document, env_url) in [
+        // Legacy top-level endpoint (#6394 lands it in [providers.deepseek]).
+        ("base_url = 'http://127.0.0.1:9/v1'\n", None),
+        (
+            "[providers.deepseek]\nbase_url = 'http://127.0.0.1:9/v1'\n",
+            None,
+        ),
+        ("", Some("http://127.0.0.1:9/v1")),
+    ] {
+        let _home = SettingsHomeGuard::new();
+        let _env = first_run_route_env_guards();
+        let _url = env_url.map(|url| EnvVarGuard::set("DEEPSEEK_BASE_URL", url));
+        let path = crate::config::home_config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, document).unwrap();
+        let mut config = Config::load(None, None).expect("load endpoint-only config");
+        assert!(config.active_route_endpoint_configured(), "{document:?}");
+        let provider = config.api_provider();
+        let mut options = create_test_options();
+        options.model = config.default_model();
+        let mut app = App::new(options, &config);
+        app.onboarding_needs_api_key = true;
+        app.onboarding_missing_key_recovery = true;
+        assert!(app.startup_route_configured, "{document:?}");
+        assert!(!crate::local_ollama::should_adopt_live_local_ollama(
+            &mut app
+        ));
+        let mut engine = mock_engine_handle();
+        super::event_loop::adopt_live_local_ollama_catalog(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            first_run_route_catalog(),
+        )
+        .await;
+        assert_eq!(app.api_provider, provider, "{document:?}");
+        assert_eq!(config.api_provider(), provider, "{document:?}");
+    }
+}
+
+/// A key supplied only through the environment is a working hosted route:
+/// no onboarding, no local takeover.
+#[test]
+fn first_run_route_env_key_only_is_not_replaced() {
+    use crate::test_support::EnvVarGuard;
+
+    let _home = SettingsHomeGuard::new();
+    let _env = first_run_route_env_guards();
+    let _key = EnvVarGuard::set("DEEPSEEK_API_KEY", "fixture-key");
+    crate::config::ensure_config_file_exists(None)
+        .unwrap()
+        .expect("first launch writes the template");
+    let config = Config::load(None, None).expect("load generated config");
+    let mut options = create_test_options();
+    options.model = config.default_model();
+    let mut app = App::new(options, &config);
+    assert!(!app.onboarding_needs_api_key);
+    assert!(!app.onboarding_missing_key_recovery);
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert!(!crate::local_ollama::should_adopt_live_local_ollama(
+        &mut app
+    ));
+}
+
 #[tokio::test]
 async fn provider_switch_to_deepseek_canonicalizes_openrouter_default_model() {
     let _home = SettingsHomeGuard::new();

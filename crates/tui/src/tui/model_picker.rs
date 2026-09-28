@@ -5469,14 +5469,17 @@ mod tests {
                 }
                 let mut picker = ModelPickerView::new(&app, &config);
                 let visible = picker.visible_model_rows();
-                // The current route leads (#6533); the pins follow it.
+                // The current route leads (#6533); the pins follow it. The
+                // configured `default_text_model` is the startup route, so the
+                // lower pin is also the current row.
+                assert_eq!(app.model, lower);
                 assert_eq!(visible[0].id, app.model);
-                assert_eq!(
-                    visible[1].id, lower,
+                let lower_index = visible.iter().position(|row| row.id == lower).unwrap();
+                let upper_index = visible.iter().position(|row| row.id == upper).unwrap();
+                assert!(
+                    lower_index < upper_index,
                     "saved pin order precedes lexical order"
                 );
-                assert_eq!(visible[2].id, upper);
-                let upper_index = visible.iter().position(|row| row.id == upper).unwrap();
                 drop(visible);
                 picker.selected_model_idx = upper_index;
                 picker.re_resolve_from_app(&app, &config);
