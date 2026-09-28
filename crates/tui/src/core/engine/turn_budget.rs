@@ -235,6 +235,18 @@ mod tests {
         assert!(!clock.exhausted(), "the default never stops a turn");
     }
 
+    /// Code mode and headless exec sleep toward what is left of the default
+    /// budget; a near-`Duration::MAX` sleep must park, not panic.
+    #[tokio::test]
+    async fn an_unbounded_remaining_budget_is_a_safe_sleep() {
+        let remaining = DEFAULT_TURN_WALL_CLOCK.saturating_sub(Duration::from_secs(1));
+        let woke =
+            tokio::time::timeout(Duration::from_millis(20), tokio::time::sleep(remaining)).await;
+        assert!(woke.is_err(), "the sleep parks until cancelled");
+        let started = std::time::Instant::now();
+        assert!(started.checked_add(remaining).is_none());
+    }
+
     #[test]
     fn turn_wall_clock_is_overridable_and_clamped() {
         assert_eq!(resolve_turn_wall_clock(Some(120)), Duration::from_secs(120));
