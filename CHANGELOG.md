@@ -134,7 +134,10 @@ quieter, and Fleet runs can be checked before they spend anything.
   `base_url`), even with a missing key, instead of adopting a detected local
   Ollama model. The `default_text_model` line written into the generated
   first-launch config is not treated as a choice, so starting Ollama after the
-  first launch is still detected. Empty sessions no longer show a full context
+  first launch is still detected. Usable configured routes skip the provider
+  picker and record the provider step as configured, without claiming a
+  successful check; missing-key recovery focuses the configured provider even
+  on a fresh home. Empty sessions no longer show a full context
   window from the startup prompt; a submitted first turn or reported usage
   still shows real pressure.
 - `/trust on|off` changes file-tool trust for this session. Add `--save` to

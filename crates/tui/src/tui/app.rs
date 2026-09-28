@@ -319,8 +319,8 @@ fn launch_onboarding_decision(
         )
     };
     // Both a new user and a returning one reach the picker directly, and Esc
-    // returns to the composer; `was_onboarded` only decides whether the
-    // picker focuses the saved route (see `onboarding_had_provider_step`).
+    // returns to the composer. An explicitly configured route is focused even
+    // on first run (see `onboarding_recovers_configured_route`).
     let missing_key_recovery = !skip_onboarding && needs_api_key && !xai_oauth_needs_reauth;
     (onboarding, missing_key_recovery)
 }
@@ -3027,11 +3027,11 @@ impl App {
     }
 
     /// Whether the onboarding provider picker should focus the saved route.
-    /// Only a returning user recovering a missing key has one; a new user's
-    /// "route" is the built-in default, and focusing it would open the picker
-    /// on that provider's missing key instead of the provider list (#6566).
+    /// A fresh home can already name a route in config. Only an unconfigured
+    /// new user has the built-in default rather than a route to recover.
     pub(crate) fn onboarding_recovers_configured_route(&self) -> bool {
-        self.onboarding_missing_key_recovery && !self.onboarding_had_provider_step
+        self.onboarding_missing_key_recovery
+            && (self.startup_route_configured || !self.onboarding_had_provider_step)
     }
 
     pub fn finish_onboarding_without_feature_intro(&mut self) {

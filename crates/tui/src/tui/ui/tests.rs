@@ -11354,7 +11354,7 @@ async fn provider_switch_model_override_updates_target_provider_model_slot() {
         .expect("setup state");
     assert_eq!(
         state.status(codewhale_config::SetupStep::ProviderModel),
-        codewhale_config::StepStatus::Verified
+        codewhale_config::StepStatus::Configured
     );
     let provider_model_result = state
         .steps
@@ -22954,7 +22954,7 @@ async fn model_picker_apply_is_session_local_until_startup_default_is_requested(
         .expect("setup state");
     assert_eq!(
         state.status(codewhale_config::SetupStep::ProviderModel),
-        codewhale_config::StepStatus::Verified,
+        codewhale_config::StepStatus::Configured,
         "the local setup receipt records a live selection, not a startup-default write"
     );
     let provider_model_result = state
@@ -25733,7 +25733,7 @@ async fn provider_switch_auth_error_restores_previous_provider_and_model() {
         .expect("setup state");
     assert_eq!(
         state.status(codewhale_config::SetupStep::ProviderModel),
-        codewhale_config::StepStatus::Verified
+        codewhale_config::StepStatus::Configured
     );
     let provider_model_result = state
         .steps
