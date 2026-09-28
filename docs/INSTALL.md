@@ -23,7 +23,7 @@ there.
 
 Install commands that use `latest` resolve to the latest **published** GitHub
 Release or package. Between releases, `main` may already describe the next
-version (for example the v0.10.0 source candidate before 2026-09-22). A
+version (for example the v0.10.1 source candidate before 2026-09-22). A
 candidate isn't installable until its tag, checksums and release assets
 exist.
 
