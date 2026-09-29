@@ -2391,52 +2391,6 @@ fn test_manager(data_dir: PathBuf) -> Result<RuntimeThreadManager> {
     )
 }
 
-/// Serializes tests that set or read the process-wide approval-timeout
-/// override, so a parallel test never sees another test's value.
-static APPROVAL_TIMEOUT_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn lock_approval_timeout_override() -> std::sync::MutexGuard<'static, ()> {
-    APPROVAL_TIMEOUT_OVERRIDE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-struct ApprovalTimeoutGuard {
-    previous_ms: u64,
-    // Dropped after `drop` restores the previous value.
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for ApprovalTimeoutGuard {
-    fn drop(&mut self) {
-        set_test_approval_decision_timeout_ms(self.previous_ms);
-    }
-}
-
-fn test_approval_timeout_ms(ms: u64) -> ApprovalTimeoutGuard {
-    let lock = lock_approval_timeout_override();
-    ApprovalTimeoutGuard {
-        previous_ms: set_test_approval_decision_timeout_ms(ms),
-        _lock: lock,
-    }
-}
-
-struct DynamicToolTimeoutGuard {
-    previous_ms: u64,
-}
-
-impl Drop for DynamicToolTimeoutGuard {
-    fn drop(&mut self) {
-        set_test_dynamic_tool_result_timeout_ms(self.previous_ms);
-    }
-}
-
-fn test_dynamic_tool_timeout_ms(ms: u64) -> DynamicToolTimeoutGuard {
-    DynamicToolTimeoutGuard {
-        previous_ms: set_test_dynamic_tool_result_timeout_ms(ms),
-    }
-}
-
 struct EventAppendFaultGuard {
     restore: Option<EventAppendTestFaultRestore>,
 }
@@ -12099,6 +12053,12 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
     Ok(())
 }
 
+/// Readiness ceiling for an approval to be persisted, registered, or resolved.
+/// Every wait under it ends as soon as its condition holds, so it only bounds
+/// how long a stuck case takes to fail; a loaded shared-process `cargo test`
+/// run overran the earlier 2s ceiling (#6698).
+const APPROVAL_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Reads the approval identity exactly as an external client does: off the
 /// `approval.required` event for `raw_call_id`, returning the opaque ID that
 /// client must echo back. Also pins the two properties every caller below
@@ -12109,7 +12069,7 @@ async fn await_approval_identity(
     thread_id: &str,
     raw_call_id: &str,
 ) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     loop {
         let found = manager
             .events_since(thread_id, None)?
@@ -12202,7 +12162,7 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
         sleep(Duration::from_millis(20)).await;
     }
@@ -14455,8 +14415,8 @@ fn pending_dynamic_tool_registry_rejects_duplicates_and_is_bounded() -> Result<(
 async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
     use crate::tools::spec::{DynamicToolExecutor, ToolError};
 
-    let _timeout_guard = test_dynamic_tool_timeout_ms(25);
     let manager = test_manager(test_runtime_dir())?;
+    manager.set_test_dynamic_tool_result_timeout_ms(25);
     let thread = manager
         .create_thread(CreateThreadRequest::default())
         .await?;
@@ -14637,9 +14597,6 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
 /// reads as a live claim that the (already answered) call is still waiting.
 #[tokio::test]
 async fn approval_wait_heartbeat_is_never_sequenced_after_the_decision() -> Result<()> {
-    // The timeout test changes a process-wide override to 25 ms. This case
-    // checks heartbeat ordering while a decision is still pending.
-    let _timeout_guard = test_approval_timeout_ms(0);
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
         .create_thread(CreateThreadRequest::default())
@@ -14795,7 +14752,7 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
         sleep(Duration::from_millis(20)).await;
     }
@@ -15226,8 +15183,8 @@ async fn approval_interrupt_revokes_waiter_and_rejects_late_actions() -> Result<
 
 #[tokio::test]
 async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<()> {
-    let _timeout_guard = test_approval_timeout_ms(25);
     let manager = test_manager(test_runtime_dir())?;
+    manager.set_test_approval_decision_timeout_ms(25);
     let thread = manager
         .create_thread(CreateThreadRequest {
             model: None,
@@ -15278,7 +15235,7 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
         })
         .await?;
 
-    let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+    let decision = tokio::time::timeout(APPROVAL_READINESS_TIMEOUT, harness.recv_approval_event())
         .await
         .context("approval timeout should resolve the engine's wait")?;
     // The engine hears a timeout, not the user's denial, so the model and the
@@ -20305,7 +20262,6 @@ async fn runtime_receipts_mask_configured_secrets() -> Result<()> {
 /// `[tools] user_input_timeout_seconds` no longer bounds approvals.
 #[test]
 fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Result<()> {
-    let _override = lock_approval_timeout_override();
     let manager = test_manager(test_runtime_dir())?;
     assert_eq!(manager.approval_decision_timeout(), None);
 
