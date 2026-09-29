@@ -635,6 +635,10 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             while let Ok((mut socket, _)) = listener.accept().await {
                 let _ = socket.write_all(b"HTTP/1.1 400 Not TLS\r\n\r\n").await;
+                // Keep reading until the client closes. Dropping a socket with
+                // unread ClientHello bytes can send a TCP reset on Windows,
+                // hiding the TLS protocol error this fixture is meant to test.
+                let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
             }
         });
         crate::tls::ensure_rustls_crypto_provider();
