@@ -21069,6 +21069,52 @@ fn try_autocomplete_file_mention_extends_to_common_prefix() {
 }
 
 #[test]
+fn try_autocomplete_file_mention_common_prefix_stops_at_whitespace() {
+    let tmpdir = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(tmpdir.path().join("My Docs")).unwrap();
+    std::fs::create_dir_all(tmpdir.path().join("My Dogs")).unwrap();
+    std::fs::write(tmpdir.path().join("My Docs/a.md"), "a").unwrap();
+    std::fs::write(tmpdir.path().join("My Dogs/b.md"), "b").unwrap();
+
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    app.input = "@My".to_string();
+    app.cursor_position = app.input.chars().count();
+
+    let _ = await_visible_mention_entries(&mut app, 64);
+    assert!(try_autocomplete_file_mention(&mut app));
+    // `@My Do` would split into a missing `@My` mention and leave the next
+    // Tab with no partial to complete.
+    assert_eq!(app.input, "@My");
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Matches:")),
+        "{:?}",
+        app.status_message
+    );
+}
+
+#[test]
+fn launch_submit_holds_oversized_draft_before_creating_a_session() {
+    let tmpdir = TempDir::new().expect("tempdir");
+    // `.codewhale` is a file, so `.codewhale/pastes` cannot be created.
+    std::fs::write(tmpdir.path().join(".codewhale"), "not a dir").unwrap();
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    let draft = "z".repeat(crate::tui::app::MAX_SUBMITTED_INPUT_CHARS + 1);
+    app.input = draft.clone();
+    app.cursor_position = app.input.chars().count();
+
+    assert!(super::event_loop::launch_submit_held(&mut app));
+    assert_eq!(app.input, draft, "the full text stays in the composer");
+
+    app.input = "hello".to_string();
+    app.cursor_position = app.input.chars().count();
+    assert!(!super::event_loop::launch_submit_held(&mut app));
+}
+
+#[test]
 fn try_autocomplete_file_mention_no_match_reports_status() {
     let tmpdir = TempDir::new().expect("tempdir");
     std::fs::write(tmpdir.path().join("README.md"), "x").unwrap();

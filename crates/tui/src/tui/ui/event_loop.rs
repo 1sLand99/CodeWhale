@@ -1283,6 +1283,20 @@ pub async fn run_tui(
 /// the draft is still sitting in the composer for the user to resubmit —
 /// the failure can never erase it.
 #[allow(clippy::too_many_arguments)]
+/// Whether a composer guard owns this launch-screen Enter. Every guard is
+/// applied here, before a session exists, so a held submit never leaves the
+/// user in a new empty session.
+pub(super) fn launch_submit_held(app: &mut App) -> bool {
+    if app.startup_input_unproven || !app.composer_enter_would_submit() {
+        // A paste burst, empty composer or startup integrity hold.
+        app.handle_composer_enter();
+        return true;
+    }
+    // An oversized draft is backed up to a paste file now; if that fails the
+    // submit is held with the full text in the composer.
+    !app.consolidate_large_input_if_oversized()
+}
+
 async fn dispatch_launch_composer_submit(
     terminal: &mut AppTerminal,
     app: &mut App,
@@ -1304,10 +1318,7 @@ async fn dispatch_launch_composer_submit(
         .await;
     }
     let action = app.decide_composer_submit(chord);
-    if app.startup_input_unproven || !app.composer_enter_would_submit() {
-        // A paste burst, empty composer or startup integrity hold owns this
-        // Enter. Apply that guard without creating an empty session.
-        app.handle_composer_enter();
+    if launch_submit_held(app) {
         return Ok(false);
     }
     let result = begin_launch_session(app, None);

@@ -88,7 +88,8 @@ fn load_history_from(path: &Path) -> Vec<String> {
 }
 
 /// One file line for `entry`. Plain single-line entries stay plain, so files
-/// written before this encoding (and by older builds) read the same.
+/// written before this encoding (and by older builds) read the same; see
+/// [`decode_history_line`] for why a legacy quoted line is not decoded.
 fn encode_history_line(entry: &str) -> String {
     if entry.contains(['\n', '\r']) || entry.starts_with('"') {
         serde_json::to_string(entry).unwrap_or_else(|_| entry.replace(['\n', '\r'], " "))
@@ -97,9 +98,13 @@ fn encode_history_line(entry: &str) -> String {
     }
 }
 
+/// Inverse of [`encode_history_line`]. A line is decoded only when it is
+/// exactly what the encoder writes for the decoded entry, so a plain line an
+/// older build stored (such as `"yes"`, quotes included) keeps its quotes.
 fn decode_history_line(line: String) -> String {
     if line.starts_with('"')
         && let Ok(entry) = serde_json::from_str::<String>(&line)
+        && encode_history_line(&entry) == line
     {
         return entry;
     }
@@ -420,6 +425,20 @@ mod tests {
         append_history_to(&path, "a\nb");
         append_history_to(&path, "a\nb");
         assert_eq!(load_history_from(&path).len(), 5);
+    }
+
+    #[test]
+    fn legacy_plain_quoted_lines_keep_their_quotes() {
+        let (_tmp, path) = temp_history_path();
+        // Written by an older build, which stored every entry raw.
+        std::fs::write(&path, "\"yes\"\n\"a\" and \"b\"\n").expect("seed legacy file");
+        assert_eq!(load_history_from(&path), vec!["\"yes\"", "\"a\" and \"b\""]);
+        // Rewriting the file on the next append must not strip them either.
+        append_history_to(&path, "next");
+        assert_eq!(
+            load_history_from(&path),
+            vec!["\"yes\"", "\"a\" and \"b\"", "next"]
+        );
     }
 
     #[test]

@@ -3305,8 +3305,8 @@ fn submit_input_holds_oversized_input_when_paste_file_cannot_be_written() {
     assert!(
         app.status_toasts
             .iter()
-            .any(|toast| toast.text.starts_with("Not sent")),
-        "expected a not-sent toast"
+            .any(|toast| toast.text.starts_with("Not sent") && toast.text.contains("shorten it")),
+        "expected an actionable not-sent toast"
     );
 }
 

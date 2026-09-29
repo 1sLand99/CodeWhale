@@ -1915,7 +1915,7 @@ impl App {
     ///
     /// Returns `false` when the input is oversized and could not be backed
     /// up to a paste file; the composer then still holds the full text.
-    fn consolidate_large_input_if_oversized(&mut self) -> bool {
+    pub(crate) fn consolidate_large_input_if_oversized(&mut self) -> bool {
         if char_count(&self.input) > MAX_SUBMITTED_INPUT_CHARS {
             return self.consolidate_large_input();
         }
@@ -1949,7 +1949,8 @@ impl App {
             let reason = format!(
                 "Not sent: this message is over {MAX_SUBMITTED_INPUT_CHARS} characters and \
                  could not be saved as a paste file ({error}). The full text is still in \
-                 the composer."
+                 the composer: shorten it, or make .codewhale/pastes writable, then press \
+                 Enter again."
             );
             self.status_message = Some(reason.clone());
             self.push_status_toast(reason, StatusToastLevel::Error, Some(8_000));

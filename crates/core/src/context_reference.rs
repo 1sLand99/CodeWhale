@@ -87,10 +87,12 @@ pub fn media_attachment_references(input: &str) -> Vec<MediaAttachmentReference>
 }
 
 /// The path in `<description> at <path>` or a bare `<path>`. Attachment
-/// paths are absolute, and a description never starts with one, so the
-/// separator is the first ` at ` followed by an absolute path. Splitting at
-/// the last ` at ` broke paths that contain one, such as macOS screenshot
-/// names (`Screenshot 2026-09-28 at 9.18.11 AM.png`).
+/// producers write absolute paths, and a description never starts with one,
+/// so the separator is the first ` at ` followed by an absolute path.
+/// Splitting at the last ` at ` broke paths that contain one, such as macOS
+/// screenshot names (`Screenshot 2026-09-28 at 9.18.11 AM.png`). Text with no
+/// absolute candidate (hand-written or older sessions) keeps the last-` at `
+/// split it always had.
 fn attachment_path(rest: &str) -> &str {
     if looks_absolute(rest) {
         return rest;
@@ -98,6 +100,7 @@ fn attachment_path(rest: &str) -> &str {
     rest.match_indices(" at ")
         .map(|(idx, sep)| &rest[idx + sep.len()..])
         .find(|candidate| looks_absolute(candidate))
+        .or_else(|| rest.rsplit_once(" at ").map(|(_, path)| path))
         .unwrap_or(rest)
 }
 
@@ -152,5 +155,7 @@ mod tests {
             media_attachment_references(windows)[0].path,
             r"C:\Users\x\Shot at noon.png"
         );
+        let relative = "[Attached image: 8x4 PNG at shots/a.png]";
+        assert_eq!(media_attachment_references(relative)[0].path, "shots/a.png");
     }
 }

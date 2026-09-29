@@ -367,7 +367,14 @@ pub fn try_autocomplete_file_mention(app: &mut App) -> bool {
         return true;
     }
     let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    // Extend only up to the first whitespace: the partial token ends there,
+    // so `@My Do` would leave a missing `@My` mention and a dead next Tab.
+    // Paths with spaces are completed whole (and quoted) by the unique-match
+    // branch or the mention menu.
     let shared = longest_common_prefix(&candidate_refs);
+    let shared = shared
+        .find(char::is_whitespace)
+        .map_or(shared, |idx| &shared[..idx]);
     if shared.len() > partial.len() {
         replace_file_mention(app, byte_start, &partial, shared);
         app.status_message = Some(format!("@{shared}…"));
@@ -774,8 +781,8 @@ fn is_screencapture_temp_path(path: &Path) -> bool {
             .any(|c| c.contains(SCREENCAPTURE_TEMP_DIR_MARKERS[1]))
 }
 
-/// The `[Attached …]` parser splits at " at ", so a stable copy must not
-/// reintroduce that separator in its name.
+/// Keep " at " out of a stable copy's name: `[Attached …: <desc> at <path>]`
+/// uses it as the separator, and older parsers split at its last occurrence.
 fn stable_attachment_name(file_name: &std::ffi::OsStr) -> String {
     file_name.to_string_lossy().replace(" at ", "-")
 }
@@ -1483,9 +1490,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// #101 regression — workspace-vs-cwd divergence: `@bar.txt` typed from
-    /// the cwd `<root>/sub` MUST resolve to `<root>/sub/bar.txt`, never to
-    /// `<root>/bar.txt` (which doesn't exist).
     #[test]
     fn inserted_mention_bodies_parse_back_to_the_whole_path() {
         for path in [
@@ -1505,6 +1509,9 @@ mod tests {
         assert_eq!(file_mention_body("src/main.rs"), "src/main.rs");
     }
 
+    /// #101 regression — workspace-vs-cwd divergence: `@bar.txt` typed from
+    /// the cwd `<root>/sub` MUST resolve to `<root>/sub/bar.txt`, never to
+    /// `<root>/bar.txt` (which doesn't exist).
     #[test]
     fn cwd_pass_resolves_when_workspace_pass_misses() {
         let tmp = TempDir::new().expect("tempdir");
