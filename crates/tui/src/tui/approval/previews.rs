@@ -425,7 +425,9 @@ fn parse_printf_write_file_command(command: &str) -> Option<PrintfWriteFilePrevi
     // it into `printf > target` would hide everything after the operator
     // from the approval card. Scan the whole command (not the halves around
     // the redirect) so quote state is never read from a mid-string split.
-    if has_unquoted_shell_control(command) {
+    // shlex and the scanners below only understand POSIX quoting. Bash's
+    // ANSI-C and locale quotes need their original command shown in full.
+    if command.contains("$'") || command.contains("$\"") || has_unquoted_shell_control(command) {
         return None;
     }
     let (before_redirect, after_redirect) = split_unquoted_redirect(command)?;
@@ -533,7 +535,7 @@ fn split_unquoted_redirect(command: &str) -> Option<(&str, &str)> {
             escaped = false;
             continue;
         }
-        if ch == '\\' {
+        if ch == '\\' && quote != Some('\'') {
             escaped = true;
             continue;
         }

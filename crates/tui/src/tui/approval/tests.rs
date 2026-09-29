@@ -663,6 +663,29 @@ fn test_shell_formatter_printf_preview_refuses_chained_commands() {
     assert_eq!(lines[0], "printf > notes.txt");
 }
 
+#[test]
+fn test_shell_formatter_preserves_unsupported_shell_quotes_in_full() {
+    for command in [
+        r#"printf $'\'' ; echo PWN ; echo \' > out.log"#,
+        r#"printf $"translated" > out.log"#,
+    ] {
+        let lines = format_shell_command_for_approval(command);
+        assert!(
+            !lines[0].starts_with("printf >"),
+            "unsupported quoting collapsed into a file-write preview: {lines:?}"
+        );
+        assert_eq!(
+            lines.join(" "),
+            command,
+            "approval must retain every clause"
+        );
+    }
+    // A backslash is literal inside POSIX single quotes, including immediately
+    // before the closing quote. Both preview scanners must agree on that.
+    let lines = format_shell_command_for_approval(r#"printf 'literal\' > out.log"#);
+    assert_eq!(lines, vec!["printf > out.log", "  literal\\"]);
+}
+
 // ========================================================================
 // ApprovalView Tests — Benign Variant (single-key approve)
 // ========================================================================
