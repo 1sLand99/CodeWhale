@@ -10,6 +10,7 @@ import { getChrome, getHome } from "@/lib/i18n/dictionaries";
 import { serializeJsonLd } from "@/lib/json-ld";
 import { buildPageMetadata } from "@/lib/page-meta";
 import { buildSiteJsonLd } from "@/lib/site-schema";
+import { metadata as notFoundMetadata } from "./not-found";
 import "../globals.css";
 
 // Shannon Sans is the one face, as in the GPUI app (`set_theme`). The pinned
@@ -58,6 +59,10 @@ export function generateStaticParams() {
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }): Promise<Metadata> {
   const { locale } = await params;
+  // The layout answers not-found for this; without the guard the home page's
+  // title, canonical, and hreflang stream into that 404 (`/wp-login.php`).
+  // Throwing here instead leaves the page with no title at all.
+  if (!isValidLocale(locale)) return notFoundMetadata;
   const home = getHome(locale);
   return buildPageMetadata({
     path: "/",
