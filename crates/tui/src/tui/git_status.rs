@@ -13,7 +13,9 @@
 //! `remote get-url origin` by way of
 //! [`crate::remote_control::observed_git_repo`]. Git older than 2.11 has no
 //! porcelain v2; the probe then falls back to the old three calls. There is
-//! no `gix` dependency and no per-invocation timeout. All of these run with
+//! no `gix` dependency; each probe command is bounded by
+//! `GIT_PROBE_TIMEOUT`, and overlapping refreshes coalesce onto the probe
+//! already in flight. All of these run with
 //! `GIT_OPTIONAL_LOCKS=0` so a read never contends for `.git/index.lock` in
 //! the user's repository.
 //!
@@ -409,23 +411,57 @@ fn snapshot_is_stale(snap: &GitStatusSnapshot, workspace: &Path) -> bool {
         || snap.probed_workspace.as_deref() != Some(workspace)
 }
 
-/// Returns the snapshot for `workspace`: the cached one while fresh, else a
-/// new probe (which also becomes the cache).
-pub fn refresh_if_stale(workspace: &Path) -> GitStatusSnapshot {
-    let cached = cache()
+/// Held for the whole of a probe. Background ticks, the worktree manager and
+/// explicit refreshes all funnel through [`refresh_if_stale`] /
+/// [`force_refresh`]; without this a slow `git status` let the next tick
+/// start a second full probe on top of the first.
+static PROBE_IN_FLIGHT: Mutex<()> = Mutex::new(());
+
+fn fresh_cached(workspace: &Path) -> Option<GitStatusSnapshot> {
+    cache()
         .lock()
         .ok()
         .filter(|g| !snapshot_is_stale(g, workspace))
-        .map(|g| g.clone());
-    if let Some(snap) = cached {
-        return snap;
-    }
-    force_refresh(workspace)
+        .map(|g| g.clone())
 }
 
-/// Force a refresh (e.g. after checkout / worktree create).
+/// Returns the snapshot for `workspace`: the cached one while fresh, else a
+/// new probe (which also becomes the cache). While another probe is running
+/// this coalesces onto it: it returns the last known snapshot instead of
+/// stacking a second probe.
+pub fn refresh_if_stale(workspace: &Path) -> GitStatusSnapshot {
+    if let Some(snap) = fresh_cached(workspace) {
+        return snap;
+    }
+    let _probe = match PROBE_IN_FLIGHT.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return cached_status(),
+    };
+    // The probe that just finished may already have answered this call.
+    if let Some(snap) = fresh_cached(workspace) {
+        return snap;
+    }
+    probe_and_store(workspace)
+}
+
+/// Force a refresh (e.g. after checkout / worktree create). Waits out a probe
+/// already in flight rather than reusing it: that probe may have started
+/// before the change this refresh exists to observe.
 pub fn force_refresh(workspace: &Path) -> GitStatusSnapshot {
-    let snap = probe_status(workspace);
+    let _probe = PROBE_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    probe_and_store(workspace)
+}
+
+/// Probe and publish. The caller holds [`PROBE_IN_FLIGHT`].
+fn probe_and_store(workspace: &Path) -> GitStatusSnapshot {
+    let mut snap = probe_status(workspace);
+    // The TTL runs from when the answer arrived, not from when the probe
+    // began: a probe slower than `CACHE_TTL` otherwise lands already stale
+    // and the next tick re-probes immediately.
+    snap.fetched_at = Some(Instant::now());
     if let Ok(mut guard) = cache().lock() {
         *guard = snap.clone();
     }
@@ -536,8 +572,25 @@ fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
     entries
 }
 
+/// Ceiling on one read-only probe command. A hung `git` (network
+/// filesystem, credential prompt, stuck fsmonitor) would otherwise hold
+/// [`PROBE_IN_FLIGHT`] forever and freeze the chrome's git state.
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Read-only probe command, bounded by [`GIT_PROBE_TIMEOUT`].
 fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    git_output_with_timeout(cwd, args, Some(GIT_PROBE_TIMEOUT))
+}
+
+fn git_output_with_timeout(
+    cwd: &Path,
+    args: &[&str],
+    timeout: Option<Duration>,
+) -> Result<String, String> {
+    use std::io::Read;
+    use wait_timeout::ChildExt as _;
+
+    let mut child = Command::new("git")
         .args(args)
         // This probe runs against the user's own repository every two
         // seconds. `git status` opportunistically refreshes the index, and
@@ -546,12 +599,57 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
         // are exactly what we do not want here: we only ever read.
         .env("GIT_OPTIONAL_LOCKS", "0")
         .current_dir(cwd)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    // Drain both pipes concurrently so a large `status` cannot fill a pipe
+    // buffer and deadlock against the wait below.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let status = match timeout {
+        Some(limit) => match child.wait_timeout(limit).map_err(|e| e.to_string())? {
+            Some(status) => status,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // The drain threads finish once the pipes close; they are not
+                // joined so a grandchild holding a pipe cannot stall us.
+                return Err(format!(
+                    "git {} timed out after {}s",
+                    args.first().copied().unwrap_or_default(),
+                    limit.as_secs()
+                ));
+            }
+        },
+        None => child.wait().map_err(|e| e.to_string())?,
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr).into_owned());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 /// The repository's name (from the common git directory, so a linked
@@ -653,7 +751,10 @@ pub fn create_worktree(
         args.push(path.to_str().ok_or("invalid path")?);
         args.push(branch);
     }
-    git_output(repo, &args).map(|_| ())?;
+    // Not a probe: a checkout into a new worktree may legitimately take
+    // longer than the probe ceiling, and killing it would leave a partial
+    // worktree behind.
+    git_output_with_timeout(repo, &args, None).map(|_| ())?;
     force_refresh(repo);
     Ok(())
 }
@@ -661,6 +762,41 @@ pub fn create_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refresh that finds a probe already running coalesces onto it: it
+    /// returns the last known snapshot instead of stacking a second probe.
+    #[test]
+    fn refresh_while_a_probe_is_in_flight_does_not_start_another() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _in_flight = PROBE_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snap = refresh_if_stale(dir.path());
+        assert_ne!(
+            snap.probed_workspace.as_deref(),
+            Some(dir.path()),
+            "a second probe ran while the first was still in flight"
+        );
+    }
+
+    /// A hung git must not hold the probe forever.
+    #[test]
+    fn git_probe_command_is_killed_at_its_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = Instant::now();
+        let err = git_output_with_timeout(
+            dir.path(),
+            &["-c", "alias.hang=!sleep 5", "hang"],
+            Some(Duration::from_millis(200)),
+        )
+        .expect_err("a hung git must time out");
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     fn probed(workspace: &Path, root: &Path) -> GitStatusSnapshot {
         GitStatusSnapshot {
