@@ -150,11 +150,11 @@ struct Cli {
     /// Workspace directory for Codewhale file tools.
     #[arg(short = 'C', long = "workspace", alias = "cd", value_name = "DIR")]
     workspace: Option<PathBuf>,
-    /// Enable TUI mouse capture for internal scrolling, transcript
+    /// Enable terminal mouse capture for internal scrolling, transcript
     /// selection, and scrollbar dragging (default off on Windows).
     #[arg(long = "mouse-capture", conflicts_with = "no_mouse_capture")]
     mouse_capture: bool,
-    /// Disable TUI mouse capture so terminal-native text selection works.
+    /// Disable terminal mouse capture so terminal-native text selection works.
     #[arg(long = "no-mouse-capture", conflicts_with = "mouse_capture")]
     no_mouse_capture: bool,
     /// Skip onboarding screens.
@@ -11396,7 +11396,7 @@ verbosity = "project-imported"
             "danger-full-access disables",
             "Provider API key for this run",
             "Provider base URL for this run",
-            "Enable TUI mouse capture",
+            "Enable terminal mouse capture",
             "Initial prompt for the interactive session",
         ] {
             assert!(
