@@ -44,7 +44,7 @@ const MAX_EMPTY_SESSION_STUBS: usize = 10;
 /// Maximum session title length, in `char`s. Matches the bound the session
 /// picker's rename prompt has always enforced.
 pub const MAX_SESSION_TITLE_CHARS: usize = 100;
-const WORK_GRAPH_IMPORT_ARCHIVE_DIR: &str = ".work-graph-import-archive";
+pub(crate) const WORK_GRAPH_IMPORT_ARCHIVE_DIR: &str = ".work-graph-import-archive";
 const SESSION_GOALS_DIR: &str = ".goals";
 const CURRENT_SESSION_GOAL_SCHEMA_VERSION: u32 = 2;
 const MAX_SESSION_GOAL_OBJECTIVE_CHARS: usize = 8_192;
@@ -2380,7 +2380,12 @@ impl SessionManager {
             let CheckpointSource::Session(id) = checkpoint.source else {
                 continue;
             };
-            if Some(id.as_str()) == exclude || !self.session_from_prior_instance(&id) {
+            // A checkpoint another running session is still refreshing is
+            // that session's in-flight work, not a prior crash.
+            if Some(id.as_str()) == exclude
+                || !self.session_from_prior_instance(&id)
+                || self.is_session_live_anywhere(&id)
+            {
                 continue;
             }
             // One malformed id or unreadable record must not hide a later
@@ -2940,6 +2945,19 @@ impl SessionManager {
                 Err(error) => return Err(error),
             }
         }
+        // The pre-import copy kept by the first graph-bearing write is the
+        // same transcript; a deleted session must not survive in it.
+        if let Some(name) = path.file_name() {
+            match fs::remove_file(
+                self.sessions_dir
+                    .join(WORK_GRAPH_IMPORT_ARCHIVE_DIR)
+                    .join(name),
+            ) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
         self.clear_session_boot_owner(id);
         let session_dir = self.sessions_dir.join(id.trim());
         if session_dir.exists() {
@@ -3187,11 +3205,33 @@ impl SessionManager {
         &self,
         workspace: &Path,
     ) -> std::io::Result<Option<SessionMetadata>> {
+        self.latest_session_for_workspace_where(workspace, |_| true)
+    }
+
+    /// [`Self::get_latest_session_for_workspace`], skipping sessions open in
+    /// an interactive session in this process or another. `--continue` that
+    /// attached to one would give the document two autosaving writers, and
+    /// whichever saved last would silently drop the other's turns.
+    pub fn latest_resumable_session_for_workspace(
+        &self,
+        workspace: &Path,
+    ) -> std::io::Result<Option<SessionMetadata>> {
+        self.latest_session_for_workspace_where(workspace, |session| {
+            !self.is_session_live_anywhere(&session.id)
+        })
+    }
+
+    fn latest_session_for_workspace_where(
+        &self,
+        workspace: &Path,
+        accept: impl Fn(&SessionMetadata) -> bool,
+    ) -> std::io::Result<Option<SessionMetadata>> {
         let sessions = self.list_sessions()?;
         Ok(sessions.into_iter().find(|session| {
             !session.archived
                 && workspace_scope_matches(&session.workspace, workspace)
                 && !is_empty_auto_created_session(session)
+                && accept(session)
         }))
     }
 
@@ -3751,6 +3791,18 @@ fn json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+/// The longest valid UTF-8 prefix of `buf`. A fixed-size read prefix can end
+/// inside a multi-byte character (routine for CJK or emoji transcripts, which
+/// serde writes unescaped); rejecting the whole buffer then forced a full-file
+/// read of every such session on each listing.
+fn utf8_prefix(buf: &[u8]) -> &str {
+    match std::str::from_utf8(buf) {
+        Ok(s) => s,
+        // `valid_up_to` marks a char boundary, so this slice is valid.
+        Err(error) => std::str::from_utf8(&buf[..error.valid_up_to()]).unwrap_or_default(),
+    }
+}
+
 /// String-scan a JSON byte buffer for the top-level `"metadata":{...}`
 /// block and return it parsed. Returns `None` if no balanced metadata
 /// object is present in the buffer.
@@ -3760,7 +3812,7 @@ fn json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// `}` appearing inside a string literal doesn't perturb the depth
 /// count.
 fn extract_top_level_metadata(buf: &[u8]) -> Option<SessionMetadata> {
-    let s = std::str::from_utf8(buf).ok()?;
+    let s = utf8_prefix(buf);
     let bytes = s.as_bytes();
     const KEY: &[u8] = b"\"metadata\"";
     let start = json_value_start(bytes, find_json_key(bytes, KEY)?, KEY.len(), b'{')?;
@@ -3772,9 +3824,7 @@ fn extract_top_level_metadata(buf: &[u8]) -> Option<SessionMetadata> {
 /// whether the array was seen to end. A message the prefix cut in half is
 /// simply absent; nothing is reconstructed.
 fn extract_leading_messages(buf: &[u8], max: usize) -> (Vec<Message>, bool) {
-    let Ok(s) = std::str::from_utf8(buf) else {
-        return (Vec::new(), false);
-    };
+    let s = utf8_prefix(buf);
     let bytes = s.as_bytes();
     const KEY: &[u8] = b"\"messages\"";
     let Some(key_offset) = find_json_key(bytes, KEY) else {
@@ -6412,6 +6462,36 @@ mod tests {
     }
 
     #[test]
+    fn delete_session_removes_its_work_graph_import_archive() {
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("new");
+        let session = create_saved_session(
+            &[make_test_message("user", "archived transcript")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        let session_id = session.metadata.id.clone();
+        let path = manager.save_session(&session).expect("save");
+        let archive_dir = sessions_dir.join(WORK_GRAPH_IMPORT_ARCHIVE_DIR);
+        fs::create_dir_all(&archive_dir).expect("archive dir");
+        let archive = archive_dir.join(path.file_name().expect("file name"));
+        fs::copy(&path, &archive).expect("archive copy");
+        let other = archive_dir.join("other-session.json");
+        fs::write(&other, "{}").expect("other archive");
+
+        manager.delete_session(&session_id).expect("delete");
+
+        assert!(
+            !archive.exists(),
+            "the deleted transcript's copy is removed"
+        );
+        assert!(other.exists(), "other sessions' copies are untouched");
+    }
+
+    #[test]
     fn test_session_id_rejects_invalid_characters() {
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
@@ -7190,6 +7270,72 @@ mod tests {
         );
     }
 
+    /// Hold `id`'s live lease the way another running Codewhale process does:
+    /// an OS lock on its own open file description.
+    fn hold_live_lease(manager: &SessionManager, id: &str) -> fs::File {
+        let path = manager.live_lease_path(id, true).expect("lease path");
+        let lease = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("open lease");
+        assert!(crate::runtime_threads::try_lock_file_exclusive(&lease).expect("lock lease"));
+        lease
+    }
+
+    #[test]
+    fn interrupted_workspace_session_skips_a_session_live_elsewhere() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+        write_prior_interrupted_session(&manager, "sess-crashed", &workspace);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_prior_interrupted_session(&manager, "sess-running", &workspace);
+
+        let lease = hold_live_lease(&manager, "sess-running");
+        assert_eq!(
+            manager
+                .interrupted_workspace_session(&workspace, None)
+                .map(|meta| meta.id),
+            Some("sess-crashed".to_string()),
+            "a checkpoint another terminal is refreshing is not a crash"
+        );
+        drop(lease);
+        assert_eq!(
+            manager
+                .interrupted_workspace_session(&workspace, None)
+                .map(|meta| meta.id),
+            Some("sess-running".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_resumable_session_skips_a_session_live_elsewhere() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+        write_prior_interrupted_session(&manager, "sess-older", &workspace);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_prior_interrupted_session(&manager, "sess-open", &workspace);
+
+        let _lease = hold_live_lease(&manager, "sess-open");
+        let latest = |resumable: bool| {
+            if resumable {
+                manager.latest_resumable_session_for_workspace(&workspace)
+            } else {
+                manager.get_latest_session_for_workspace(&workspace)
+            }
+            .expect("latest")
+            .map(|meta| meta.id)
+        };
+        assert_eq!(latest(false), Some("sess-open".to_string()));
+        assert_eq!(latest(true), Some("sess-older".to_string()));
+    }
+
     #[test]
     fn interrupted_workspace_session_ignores_settled_sessions() {
         let tmp = tempdir().expect("tempdir");
@@ -7608,6 +7754,29 @@ mod tests {
         assert_eq!(extracted.title, "Real Session");
         assert_eq!(extracted.message_count, 12);
         assert_eq!(extracted.total_tokens, 4096);
+    }
+
+    /// A 64 KB read prefix routinely ends inside a multi-byte character in a
+    /// CJK or emoji transcript. The metadata ahead of the cut is intact and
+    /// must still be read from the prefix, not force a full-file read.
+    #[test]
+    fn extract_top_level_metadata_survives_a_prefix_cut_inside_a_character() {
+        let json = format!(
+            r#"{{"schema_version":1,"metadata":{{"id":"cjk-1","title":"会话","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","message_count":3,"total_tokens":10,"model":"m","workspace":"/tmp"}},"messages":[{{"role":"user","content":"{}"}}]}}"#,
+            "中文".repeat(100)
+        );
+        let bytes = json.as_bytes();
+        let body_start = json.find("中文").expect("body");
+        // One byte into a three-byte character.
+        let cut = &bytes[..body_start + 1];
+        assert!(
+            std::str::from_utf8(cut).is_err(),
+            "the cut splits a character"
+        );
+
+        let extracted = extract_top_level_metadata(cut).expect("metadata from the cut prefix");
+        assert_eq!(extracted.id, "cjk-1");
+        assert_eq!(extracted.title, "会话");
     }
 
     #[test]

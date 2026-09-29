@@ -577,12 +577,68 @@ pub(crate) fn coalesce_scroll_burst(
                 latest = *next;
             }
             _ => {
-                pending.push_back(next_observed);
+                // Back to the head, not the tail: `pending` may already hold
+                // later input (typed text, Enter), and this event came first.
+                pending.push_front(next_observed);
                 break;
             }
         }
     }
     Ok(latest)
+}
+
+/// Fold every queued `Resize` behind the one in hand into the final size, so
+/// one clear and redraw serves the whole drag (#65).
+///
+/// The first non-resize event ends the fold and goes back to the head of the
+/// queue, ahead of any later input already drained into `pending`.
+pub(crate) fn coalesce_resize_burst(
+    width: u16,
+    height: u16,
+    input: &TerminalInputPump,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
+) -> std::io::Result<(u16, u16)> {
+    let (mut final_w, mut final_h) = (width, height);
+    while let Some(next_observed) = try_next_terminal_event(input, pending)? {
+        if let Event::Resize(w, h) = next_observed.event {
+            final_w = w;
+            final_h = h;
+        } else {
+            pending.push_front(next_observed);
+            break;
+        }
+    }
+    Ok((final_w, final_h))
+}
+
+/// Warn once per new batch of failed session writes. Saves run on the
+/// persistence actor, so a full disk or an unwritable sessions directory
+/// used to reach only the log while the user kept working unsaved.
+pub(crate) fn surface_persistence_failures(app: &mut App, seen: &mut u64) {
+    let Some((total, what, kind)) = crate::tui::persistence_actor::write_failures_since(*seen)
+    else {
+        return;
+    };
+    *seen = total;
+    app.push_status_toast(
+        format!("Session save failed ({what}: {kind}). Recent work may not be saved."),
+        StatusToastLevel::Error,
+        Some(App::STICKY_ERROR_TTL_MS),
+    );
+    app.needs_redraw = true;
+}
+
+/// The exit line for a session whose writes failed during this run.
+pub(crate) fn shutdown_persistence_notice(
+    failures: &[(String, std::io::ErrorKind)],
+) -> Option<String> {
+    failures.last().map(|(what, kind)| {
+        format!(
+            "codewhale: {} session write(s) failed (latest: {what}: {kind}); \
+             recent work may not have been saved.",
+            failures.len()
+        )
+    })
 }
 
 /// Run the interactive TUI event loop.
@@ -1158,6 +1214,7 @@ pub async fn run_tui(
     // applied), the checkpoint is the only durable record of that work:
     // clearing it here unconditionally could erase in-flight progress that
     // never reached a snapshot, so it survives for startup recovery review.
+    let mut shutdown_persistence_failures = Vec::new();
     if let Some((handle, task)) = persistence_runtime {
         // A quit key can leave the frame before its usual queue comparison.
         // Capture the final edited draft before the shutdown durability barrier.
@@ -1185,6 +1242,7 @@ pub async fn run_tui(
                 failures = ?report.failures,
                 "session persistence reported write failures during shutdown",
             );
+            shutdown_persistence_failures = report.failures;
         }
         handle.try_send(PersistRequest::Shutdown);
         let _ = task.await;
@@ -1245,7 +1303,21 @@ pub async fn run_tui(
         }
     }
 
+    if let Some(notice) = shutdown_persistence_notice(&shutdown_persistence_failures) {
+        // Primary screen, like the settings failures above.
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("{notice}");
+        }
+    }
+
+    // `codewhale resume <id>` for a document that never reached disk (every
+    // save failed, or nothing was ever saved) only fails with NotFound.
+    let session_document_exists = app.current_session_id.as_deref().is_some_and(|id| {
+        SessionManager::default_location().is_ok_and(|manager| manager.session_document_exists(id))
+    });
     if result.is_ok()
+        && session_document_exists
         && let Some(hint) = resume_hint_text(
             app.ui_locale,
             app.current_session_id.as_deref(),
@@ -1651,6 +1723,7 @@ pub(crate) async fn run_event_loop(
     }
 
     let mut pending_subagent_list_refresh = false;
+    let mut persistence_failures_seen = 0u64;
 
     loop {
         // #6169: first statement of every iteration. The job-control handler can
@@ -1997,6 +2070,8 @@ pub(crate) async fn run_event_loop(
         {
             deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
         }
+
+        surface_persistence_failures(app, &mut persistence_failures_seen);
 
         // Discovery and callback delivery never park terminal input.
         poll_mcp_login(app);
@@ -4705,25 +4780,12 @@ pub(crate) async fn run_event_loop(
                 // common "stale art on the right edge" symptom (#65) caused by
                 // the diff renderer skipping cells that match a stale back
                 // buffer between intermediate sizes.
-                let mut final_w = width;
-                let mut final_h = height;
-                while let Some(next_observed) =
-                    try_next_terminal_event(&terminal_input, &mut pending_terminal_events)?
-                {
-                    match next_observed.event {
-                        Event::Resize(w, h) => {
-                            final_w = w;
-                            final_h = h;
-                        }
-                        other => {
-                            pending_terminal_events.push_back(ObservedTerminalEvent::new(
-                                other,
-                                next_observed.observed_at,
-                            ));
-                            break;
-                        }
-                    }
-                }
+                let (final_w, final_h) = coalesce_resize_burst(
+                    width,
+                    height,
+                    &terminal_input,
+                    &mut pending_terminal_events,
+                )?;
 
                 if final_w == 0 || final_h == 0 {
                     tracing::debug!(

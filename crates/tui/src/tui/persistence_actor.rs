@@ -393,6 +393,7 @@ pub fn spawn_persistence_actor(
             ) {
                 let cycle = flush_inner(manager, pending);
                 log_flush_failures(&cycle);
+                note_write_failures(&cycle);
                 unreported.merge(cycle);
             }
 
@@ -618,6 +619,30 @@ fn flush_inner(manager: &SessionManager, pending: &mut PendingState) -> FlushRep
         }
     }
     report
+}
+
+/// Every write failure this process has seen, with the latest one. The log
+/// alone left a failing sessions directory invisible: the user kept working
+/// while nothing was saved. The event loop polls this to warn in the UI.
+static WRITE_FAILURES: std::sync::Mutex<(u64, Option<(String, std::io::ErrorKind)>)> =
+    std::sync::Mutex::new((0, None));
+
+pub(crate) fn note_write_failures(report: &FlushReport) {
+    let Some(last) = report.failures.last() else {
+        return;
+    };
+    if let Ok(mut failures) = WRITE_FAILURES.lock() {
+        failures.0 += report.failures.len() as u64;
+        failures.1 = Some(last.clone());
+    }
+}
+
+/// The failure total and the latest failure, when the total moved past
+/// `seen` (the total the caller last surfaced).
+pub(crate) fn write_failures_since(seen: u64) -> Option<(u64, String, std::io::ErrorKind)> {
+    let failures = WRITE_FAILURES.lock().ok()?;
+    let (what, kind) = failures.1.clone()?;
+    (failures.0 > seen).then_some((failures.0, what, kind))
 }
 
 /// Surface flush failures in the log for write cycles that have no caller

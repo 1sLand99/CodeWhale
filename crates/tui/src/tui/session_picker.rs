@@ -510,6 +510,20 @@ impl SessionPickerView {
     fn delete_selected(&mut self) -> Option<ViewEvent> {
         let session = self.selected_session().cloned()?;
         let manager = SessionManager::default_location().ok()?;
+        // A deleted document the live session still owns refuses every later
+        // save, so the conversation on screen would silently stop persisting.
+        let refusal = if self.current_session_id.as_deref() == Some(session.id.as_str()) {
+            Some("it is the session open here; switch to another session first".to_string())
+        } else if manager.is_session_live_anywhere(&session.id) {
+            Some(crate::session_manager::live_session_conflict(&session.id).to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            self.status =
+                Some(tr(self.locale, MessageId::SessionsDeleteFailed).replace("{error}", &reason));
+            return None;
+        }
         if let Err(err) = manager.delete_session(&session.id) {
             self.status = Some(
                 tr(self.locale, MessageId::SessionsDeleteFailed)
@@ -1631,6 +1645,36 @@ mod tests {
         };
         view.apply_sort_and_filter();
         view
+    }
+
+    /// Deleting the session open in this window would leave it unable to
+    /// save anything afterwards, with nothing on screen saying so.
+    #[test]
+    fn delete_refuses_the_session_open_here() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let manager = SessionManager::default_location().expect("session manager");
+        let mut saved = saved_session_with_messages(vec![text_message("user", "hello")]);
+        saved.metadata.id = "session-open-here".to_string();
+        manager.save_session(&saved).expect("save session");
+        let mut view = picker_with(vec![saved.metadata.clone()], None);
+        view.current_session_id = Some("session-open-here".to_string());
+
+        assert!(view.delete_selected().is_none(), "no deletion event");
+
+        assert!(
+            view.status
+                .as_deref()
+                .is_some_and(|status| status.contains("open here")),
+            "{:?}",
+            view.status
+        );
+        assert_eq!(view.sessions.len(), 1, "the row stays listed");
+        assert!(
+            manager.load_session("session-open-here").is_ok(),
+            "the document is not deleted"
+        );
     }
 
     #[test]

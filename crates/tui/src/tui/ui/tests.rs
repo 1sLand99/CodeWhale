@@ -30911,6 +30911,125 @@ fn a_scroll_burst_is_folded_into_one_frame() {
     ));
 }
 
+fn observed_key(c: char) -> ObservedTerminalEvent {
+    ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+        Instant::now(),
+    )
+}
+
+fn idle_input_pump() -> TerminalInputPump {
+    let (_tx, rx) = std::sync::mpsc::channel();
+    TerminalInputPump {
+        rx,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused_ack: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        handle: None,
+        last_alive_at: std::cell::Cell::new(Instant::now()),
+    }
+}
+
+fn pending_key_chars(pending: &VecDeque<ObservedTerminalEvent>) -> String {
+    pending
+        .iter()
+        .filter_map(|observed| match &observed.event {
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(c),
+                ..
+            }) => Some(*c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Typing while the wheel scrolls: the loop has already drained the burst and
+/// the keys into `pending`. The key that ends the burst goes back to the head,
+/// so the composer receives "abc", not "bca".
+#[test]
+fn a_scroll_burst_keeps_following_input_in_order() {
+    let mut app = create_test_app();
+    app.launch.visible = false;
+    app.viewport.last_transcript_area = Some(Rect::new(0, 0, 80, 20));
+    let scroll = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    let input = idle_input_pump();
+    let mut pending: VecDeque<ObservedTerminalEvent> = VecDeque::new();
+    pending.push_back(ObservedTerminalEvent::new(
+        Event::Mouse(scroll),
+        Instant::now(),
+    ));
+    for c in ['a', 'b', 'c'] {
+        pending.push_back(observed_key(c));
+    }
+
+    super::event_loop::coalesce_scroll_burst(&mut app, scroll, &input, &mut pending)
+        .expect("coalesce");
+
+    assert_eq!(pending_key_chars(&pending), "abc");
+}
+
+#[test]
+fn a_resize_burst_keeps_following_input_in_order() {
+    let input = idle_input_pump();
+    let mut pending: VecDeque<ObservedTerminalEvent> = VecDeque::new();
+    pending.push_back(ObservedTerminalEvent::new(
+        Event::Resize(120, 40),
+        Instant::now(),
+    ));
+    pending.push_back(observed_key('a'));
+    pending.push_back(observed_key('b'));
+
+    let size =
+        super::event_loop::coalesce_resize_burst(100, 30, &input, &mut pending).expect("coalesce");
+
+    assert_eq!(size, (120, 40), "the final queued size wins");
+    assert_eq!(pending_key_chars(&pending), "ab");
+}
+
+/// A failed background save reaches the user, not only the log.
+#[test]
+fn a_failed_session_write_is_surfaced_as_an_error_toast() {
+    let mut app = create_test_app();
+    crate::tui::persistence_actor::note_write_failures(&persistence_actor::FlushReport {
+        completed: 0,
+        failures: vec![(
+            "session:toast-probe".to_string(),
+            std::io::ErrorKind::PermissionDenied,
+        )],
+    });
+    let mut seen = 0;
+
+    super::event_loop::surface_persistence_failures(&mut app, &mut seen);
+
+    assert!(seen > 0, "the surfaced total is remembered");
+    assert!(
+        app.status_toasts.iter().any(|toast| {
+            toast.level == StatusToastLevel::Error && toast.text.contains("Session save failed")
+        }),
+        "a failed save must produce a visible error"
+    );
+}
+
+#[test]
+fn shutdown_reports_failed_session_writes() {
+    assert_eq!(super::event_loop::shutdown_persistence_notice(&[]), None);
+    let notice = super::event_loop::shutdown_persistence_notice(&[
+        ("checkpoint:a".to_string(), std::io::ErrorKind::StorageFull),
+        (
+            "session:a".to_string(),
+            std::io::ErrorKind::PermissionDenied,
+        ),
+    ])
+    .expect("failures produce an exit notice");
+    assert!(notice.contains("2 session write(s) failed"), "{notice}");
+    assert!(notice.contains("session:a"), "{notice}");
+}
+
 // ---------------------------------------------------------------------------
 // Startup type-ahead integrity (#5925).
 //

@@ -9042,7 +9042,7 @@ fn resolve_session_id(session_id: Option<String>, last: bool, workspace: &Path) 
 fn latest_session_id_for_workspace(workspace: &Path) -> std::io::Result<Option<String>> {
     let manager = SessionManager::default_location()?;
     Ok(manager
-        .get_latest_session_for_workspace(workspace)?
+        .latest_resumable_session_for_workspace(workspace)?
         .map(|session| session.id))
 }
 
@@ -11396,6 +11396,14 @@ fn load_recent_checkpoints(manager: &session_manager::SessionManager) -> Vec<Rec
     let refs = manager.list_checkpoints().unwrap_or_default();
     let mut recent = Vec::new();
     for checkpoint_ref in refs {
+        // A session open in another terminal refreshes its own checkpoint
+        // mid-turn. It is not interrupted: promoting or clearing it would
+        // take that session's only crash-recovery record while it runs.
+        if let session_manager::CheckpointSource::Session(id) = &checkpoint_ref.source
+            && manager.is_session_live_anywhere(id)
+        {
+            continue;
+        }
         let Ok(age) = std::time::SystemTime::now().duration_since(checkpoint_ref.modified) else {
             continue;
         };
@@ -21275,6 +21283,50 @@ mod setup_helper_tests {
                 "--continue should consume the per-session checkpoint"
             );
             assert!(manager.load_session(&session_id).is_ok());
+        });
+    }
+
+    /// `--continue` in a second terminal must not take the session the first
+    /// terminal is still running: no promotion, no checkpoint clear, and no
+    /// attach to the same document.
+    #[test]
+    fn continue_leaves_a_session_live_in_another_terminal_alone() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        with_home(tmp.path(), || {
+            let manager = SessionManager::default_location().expect("manager");
+            let messages = vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "still running".to_string(),
+                    cache_control: None,
+                }],
+            }];
+            let session = create_saved_session(&messages, "test-model", &workspace, 0, None);
+            let session_id = session.metadata.id.clone();
+            manager.save_session(&session).expect("save session");
+            manager.save_checkpoint(&session).expect("save checkpoint");
+
+            manager.claim_live_session(&session_id);
+            let resolved = resolve_continue_session_id(&workspace, true);
+            crate::session_manager::set_live_session(None);
+
+            assert_eq!(resolved, None, "a live session is not continued");
+            assert!(
+                manager
+                    .load_session_checkpoint(&session_id)
+                    .expect("load checkpoint")
+                    .is_some(),
+                "the live session keeps its crash-recovery checkpoint"
+            );
+            // Once that session has exited, --continue recovers it as before.
+            assert_eq!(
+                resolve_continue_session_id(&workspace, true).as_deref(),
+                Some(session_id.as_str())
+            );
         });
     }
 

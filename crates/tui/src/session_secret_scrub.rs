@@ -56,6 +56,13 @@ pub(crate) fn session_files(
         if let Some(checkpoints) = canonical_store_root(&root.join("checkpoints"), unreadable) {
             dirs.push(checkpoints);
         }
+        // Pre-import transcript copies hold the same tool output.
+        if let Some(archive) = canonical_store_root(
+            &root.join(crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR),
+            unreadable,
+        ) {
+            dirs.push(archive);
+        }
         for session in directory_entries(&root, unreadable) {
             if !entry_has_type(&session, true, unreadable) {
                 continue;
@@ -181,6 +188,12 @@ pub(crate) fn configured_secrets(
     ))
 }
 
+fn is_import_archive(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR)
+}
+
 fn runtime_root(path: &Path) -> Option<&Path> {
     let parent = path.parent()?;
     matches!(parent.file_name()?.to_str()?, "items" | "events")
@@ -230,6 +243,9 @@ pub(crate) fn scrub_files(
                         .with_session_file_lock(id, || scrub_file(path, true, secrets).map(|_| ()))
                 }) {
                     Some(Ok(Some(()))) => FileScan::Dirty(redacted),
+                    // A pre-import copy left behind by a session deleted before
+                    // deletion removed it: rewriting it resurrects nothing.
+                    Some(Ok(None)) if is_import_archive(path) => scrub_file(path, true, secrets)?,
                     // A deleted session is not resurrected by a rewrite.
                     Some(Ok(None)) => FileScan::Clean,
                     // No lockable session id: leave the file untouched.
@@ -435,6 +451,41 @@ mod tests {
             Vec::<PathBuf>::new(),
             "a scrubbed store scans clean"
         );
+    }
+
+    /// The pre-import copy of a transcript holds the same tool output. It is
+    /// scrubbed with the sessions, including a copy an earlier build left
+    /// behind for a session that has since been deleted.
+    #[test]
+    fn work_graph_import_archive_copies_are_scrubbed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = format!("{{\"access_token\": \"{TOKEN}\"}}");
+        let manager =
+            crate::session_manager::SessionManager::new(dir.path().to_path_buf()).expect("manager");
+        std::fs::write(
+            dir.path().join("gone.json"),
+            session_with_tool_output("nothing").to_string(),
+        )
+        .unwrap();
+        manager.delete_session("gone").expect("delete");
+        let archive_dir = dir
+            .path()
+            .join(crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR);
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        let kept = archive_dir.join("kept.json");
+        let orphan = archive_dir.join("gone.json");
+        for path in [&kept, &orphan] {
+            std::fs::write(path, session_with_tool_output(&output).to_string()).unwrap();
+        }
+
+        let files = session_files(dir.path(), &dir.path().join("standalone"), &mut Vec::new());
+        let report = scrub_files(&files, Some(&manager), &[]).expect("scrub");
+
+        assert_eq!(report.flagged_files.len(), 2, "{report:?}");
+        for path in [&kept, &orphan] {
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(!text.contains(TOKEN), "{}: {text}", path.display());
+        }
     }
 
     #[test]
