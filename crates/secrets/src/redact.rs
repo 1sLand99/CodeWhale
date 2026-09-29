@@ -116,8 +116,11 @@ fn redact_json_secrets_at(
 ///    everything from the value to the end of the line is dropped, exactly as
 ///    the whole-line form already does. Token *counts* in diagnostics
 ///    (`max tokens = 8192`) are not credentials and stay visible.
-/// 2. **Bare tokens.** Whitespace-delimited words beginning with a known
-///    `SECRET_TOKEN_PREFIXES` are replaced wholesale.
+/// 2. **Bare tokens.** Whitespace-delimited words that are a credential on
+///    their own — a known `SECRET_TOKEN_PREFIXES` word, a provider-prefixed
+///    opaque key (`CREDENTIAL_VALUE_PREFIXES`, `xai-`, `nvapi-`, `gsk_`,
+///    `hf_`, `pplx-`), an AWS access key id, or a JWT — are replaced
+///    wholesale.
 ///
 /// The goal is defense in depth: setup state and reports are built from safe
 /// summaries that never include secrets in the first place, and this is the
@@ -687,10 +690,45 @@ fn redact_keyed_assignment(body: &str, policy: RedactionPolicy) -> Option<String
     ))
 }
 
+/// Provider key prefixes masked as bare words only when the rest of the word
+/// is an opaque run ([`is_opaque_token_body`]): real keys under them are
+/// random, while identifiers sharing the prefix (`hf_hub_download`,
+/// `npm_config_cache`) are not. [`CREDENTIAL_VALUE_PREFIXES`] joins them.
+const BARE_OPAQUE_TOKEN_PREFIXES: &[&str] = &["xai-", "nvapi-", "gsk_", "hf_", "pplx-"];
+
+/// Whether a whitespace-delimited word is a credential on its own: a
+/// [`SECRET_TOKEN_PREFIXES`] word, a provider-prefixed opaque key, an AWS
+/// access key id, or a JWT.
 fn looks_like_secret_token(word: &str) -> bool {
     SECRET_TOKEN_PREFIXES
         .iter()
         .any(|p| word.len() > p.len() + 6 && word.starts_with(p))
+        || CREDENTIAL_VALUE_PREFIXES
+            .iter()
+            .chain(BARE_OPAQUE_TOKEN_PREFIXES)
+            .filter(|p| !matches!(**p, "AKIA" | "ASIA"))
+            .any(|p| word.strip_prefix(p).is_some_and(is_opaque_token_body))
+        || is_aws_access_key_id(word)
+        || is_jwt_shaped(word)
+}
+
+/// At least 16 key characters with both a letter and a digit.
+fn is_opaque_token_body(body: &str) -> bool {
+    body.len() >= 16
+        && body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && body.chars().any(|c| c.is_ascii_alphabetic())
+        && body.chars().any(|c| c.is_ascii_digit())
+}
+
+/// `AKIA`/`ASIA` followed by exactly 16 upper-case letters or digits.
+fn is_aws_access_key_id(word: &str) -> bool {
+    word.len() == 20
+        && (word.starts_with("AKIA") || word.starts_with("ASIA"))
+        && word[4..]
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -729,5 +767,44 @@ mod model_bound_json_tests {
         // The key-based pass would have hidden the second half of the command.
         let key_based = redact_json_secrets(&input);
         assert!(!key_based["command"].as_str().unwrap().contains("evil.test"));
+    }
+}
+
+#[cfg(test)]
+mod bare_token_tests {
+    use super::*;
+
+    #[test]
+    fn every_known_prefix_is_masked_as_a_bare_word() {
+        let body = "Z7qX4mNb2Vc9Lk3PwR8t";
+        let mut tokens: Vec<String> = SECRET_TOKEN_PREFIXES
+            .iter()
+            .chain(CREDENTIAL_VALUE_PREFIXES)
+            .chain(BARE_OPAQUE_TOKEN_PREFIXES)
+            .filter(|prefix| !matches!(**prefix, "AKIA" | "ASIA"))
+            .map(|prefix| format!("{prefix}{body}"))
+            .collect();
+        tokens.push(["AKIA", "Z7QX4MNB2VC9LK3P"].concat());
+        tokens.push(["ASIA", "Z7QX4MNB2VC9LK3P"].concat());
+        tokens.push(["eyJhbGciOiJIUzI1NiJ9", ".eyJzdWIiOiIxIn0", ".c2lnbmF0dXJl"].concat());
+        for token in tokens {
+            let out = redact_secrets(&format!("request failed: {token} rejected"));
+            assert_eq!(out, "request failed: [redacted] rejected", "{token}");
+        }
+    }
+
+    #[test]
+    fn identifiers_sharing_a_prefix_stay_visible() {
+        for word in [
+            "hf_hub_download",
+            "npm_config_cache",
+            "xai-grok-sdk",
+            "AKIAshort",
+            "gsk_",
+            "eyJ.eyJ",
+        ] {
+            let line = format!("call {word} now");
+            assert_eq!(redact_secrets(&line), line, "{word}");
+        }
     }
 }
