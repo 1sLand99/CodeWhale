@@ -322,15 +322,28 @@ impl ApprovalReceiptStore {
     }
 
     pub(crate) fn load(&self, session_id: &str) -> io::Result<Vec<ApprovalReceipt>> {
+        Ok(self.load_if_present(session_id)?.unwrap_or_default())
+    }
+
+    /// Preserve the distinction between a missing legacy log and an existing
+    /// authoritative log with no complete receipts, including a torn first write.
+    pub(crate) fn load_if_present(
+        &self,
+        session_id: &str,
+    ) -> io::Result<Option<Vec<ApprovalReceipt>>> {
         let Some(lock_file) = self.open_existing_lock_file(session_id)? else {
             // Imported or legacy snapshots can contain a receipt log without
             // its ephemeral lock file. Preserve read-only session loading;
             // live writers always publish the lock before creating the log.
-            return Ok(self.load_unlocked(session_id)?.unwrap_or_default().receipts);
+            return Ok(self
+                .load_unlocked(session_id)?
+                .map(|loaded| loaded.receipts));
         };
         let lock = fd_lock::RwLock::new(lock_file);
         let _guard = lock.read()?;
-        Ok(self.load_unlocked(session_id)?.unwrap_or_default().receipts)
+        Ok(self
+            .load_unlocked(session_id)?
+            .map(|loaded| loaded.receipts))
     }
 
     pub(crate) fn replay(&self, session_id: &str) -> io::Result<ApprovalReplay> {
@@ -546,6 +559,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = ApprovalReceiptStore::new(tmp.path().join("sessions"));
         assert!(store.load_unlocked("session-missing").unwrap().is_none());
+        assert!(store.load_if_present("session-missing").unwrap().is_none());
         for (id, bytes) in [
             ("session-empty", b"".as_slice()),
             ("session-torn", b"{\"phase\":\"asked\"".as_slice()),
@@ -555,6 +569,7 @@ mod tests {
             fs::write(&path, bytes).unwrap();
             let loaded = store.load_unlocked(id).unwrap().expect("existing log");
             assert!(loaded.receipts.is_empty());
+            assert_eq!(store.load_if_present(id).unwrap(), Some(Vec::new()));
             assert_eq!(loaded.valid_bytes, 0);
             assert_eq!(loaded.torn_tail.is_some(), !bytes.is_empty());
             assert_eq!(fs::read(path).unwrap(), bytes);

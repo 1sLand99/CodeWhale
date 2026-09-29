@@ -1327,8 +1327,12 @@ impl SessionManager {
     }
 
     fn hydrate_approval_receipts(&self, session: &mut SavedSession) -> io::Result<()> {
-        let durable = self.approval_receipt_store().load(&session.metadata.id)?;
-        if !durable.is_empty() {
+        if let Some(durable) = self
+            .approval_receipt_store()
+            .load_if_present(&session.metadata.id)?
+        {
+            // Only a missing log permits legacy embedded evidence to stand.
+            // An empty or torn-first log must not resurrect an old approval.
             session.approval_receipts = durable;
         }
         ApprovalReplay::from_receipts(&session.approval_receipts)
@@ -5610,6 +5614,168 @@ mod tests {
                 .expect("replay canonical sidecar"),
             replay
         );
+    }
+
+    #[test]
+    fn approval_hydration_distinguishes_missing_and_present_logs_on_disk() {
+        let ask = ApprovalReceipt::asked("receipt-hydration", "exec_shell");
+        let decision = ApprovalReceipt::decided("receipt-hydration", ApprovalOutcome::ApprovedOnce);
+        let embedded = vec![ask.clone(), decision];
+        let mut prefix_with_torn_decision = serde_json::to_vec(&ask).unwrap();
+        prefix_with_torn_decision.extend_from_slice(b"\n{\"phase\":\"decided\"");
+        let cases = [
+            ("missing", None, embedded.clone()),
+            ("empty", Some(Vec::new()), Vec::new()),
+            (
+                "torn-first",
+                Some(b"{\"phase\":\"asked\"".to_vec()),
+                Vec::new(),
+            ),
+            (
+                "asked-prefix",
+                Some(prefix_with_torn_decision),
+                vec![ask.clone()],
+            ),
+        ];
+        for with_lock in [false, true] {
+            for (name, log_bytes, expected) in &cases {
+                let tmp = tempdir().unwrap();
+                let sessions_dir = tmp.path().join("sessions");
+                let manager = SessionManager::new(sessions_dir.clone()).unwrap();
+                let mut session = create_saved_session(
+                    &[make_test_message("user", "receipt recovery")],
+                    "test-model",
+                    tmp.path(),
+                    0,
+                    None,
+                );
+                session.approval_receipts = embedded.clone();
+                let id = &session.metadata.id;
+                // Persist legacy embedded evidence while no sidecar exists.
+                let saved_path = manager.save_session(&session).unwrap();
+                let checkpoint_path = manager.save_checkpoint(&session).unwrap();
+                let saved_before = fs::read(&saved_path).unwrap();
+                let checkpoint_before = fs::read(&checkpoint_path).unwrap();
+                let store = ApprovalReceiptStore::new(sessions_dir.clone());
+                let log_path = sessions_dir.join(id).join("approval_receipts.jsonl");
+                if with_lock {
+                    // Exercise the live-writer lock path as well as an imported
+                    // log without a lock, then simulate its final on-disk bytes.
+                    store.append(id, &ask).unwrap();
+                }
+                if let Some(bytes) = log_bytes {
+                    fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+                    fs::write(&log_path, bytes).unwrap();
+                } else if with_lock {
+                    fs::remove_file(&log_path).unwrap();
+                }
+                let resumed = manager.load_session_snapshot(id).unwrap();
+                let checkpoint = manager.load_session_checkpoint(id).unwrap().unwrap();
+                for loaded in [&resumed, &checkpoint] {
+                    assert_eq!(
+                        &loaded.approval_receipts, expected,
+                        "{name}, lock={with_lock}"
+                    );
+                    assert_eq!(loaded.messages, session.messages);
+                    let replay = ApprovalReplay::from_receipts(&loaded.approval_receipts).unwrap();
+                    assert_eq!(
+                        replay.completed.len(),
+                        usize::from(*name == "missing"),
+                        "{name}"
+                    );
+                    assert_eq!(
+                        replay.unmatched_asks.len(),
+                        usize::from(*name == "asked-prefix"),
+                        "{name}"
+                    );
+                }
+                assert_eq!(
+                    fs::read(&saved_path).unwrap(),
+                    saved_before,
+                    "read-only snapshot"
+                );
+                assert_eq!(
+                    fs::read(&checkpoint_path).unwrap(),
+                    checkpoint_before,
+                    "read-only checkpoint"
+                );
+                // Saving the old in-memory snapshot must hydrate too, so stale
+                // approvals cannot be reintroduced into either persisted file.
+                manager.save_session(&session).unwrap();
+                manager.save_checkpoint(&session).unwrap();
+                for path in [&saved_path, &checkpoint_path] {
+                    let saved: SavedSession =
+                        serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                    assert_eq!(
+                        &saved.approval_receipts, expected,
+                        "persisted {name}, lock={with_lock}"
+                    );
+                }
+                match log_bytes {
+                    Some(bytes) => assert_eq!(fs::read(&log_path).unwrap(), *bytes, "{name}"),
+                    None => assert!(!log_path.exists(), "missing log must not be created"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn approval_hydration_rejects_complete_corruption_without_replacing_saved_evidence() {
+        let ask = ApprovalReceipt::asked("receipt-invalid", "exec_shell");
+        let decision = ApprovalReceipt::decided("receipt-invalid", ApprovalOutcome::ApprovedOnce);
+        let embedded = vec![ask.clone(), decision.clone()];
+        let mut interior = b"not-json\n".to_vec();
+        interior.extend_from_slice(&serde_json::to_vec(&ask).unwrap());
+        interior.push(b'\n');
+        let mut orphan_decision = serde_json::to_vec(&decision).unwrap();
+        orphan_decision.push(b'\n');
+        for bytes in [
+            b"not-json\n".to_vec(),
+            interior,
+            b"{\"phase\":\"unknown\"}".to_vec(),
+            orphan_decision,
+        ] {
+            let tmp = tempdir().unwrap();
+            let sessions_dir = tmp.path().join("sessions");
+            let manager = SessionManager::new(sessions_dir.clone()).unwrap();
+            let mut session = create_saved_session(
+                &[make_test_message("user", "invalid receipt recovery")],
+                "test-model",
+                tmp.path(),
+                0,
+                None,
+            );
+            session.approval_receipts = embedded.clone();
+            let id = &session.metadata.id;
+            let saved_path = manager.save_session(&session).unwrap();
+            let checkpoint_path = manager.save_checkpoint(&session).unwrap();
+            let saved_before = fs::read(&saved_path).unwrap();
+            let checkpoint_before = fs::read(&checkpoint_path).unwrap();
+            ApprovalReceiptStore::new(sessions_dir.clone())
+                .append(id, &ask)
+                .unwrap();
+            let log_path = sessions_dir.join(id).join("approval_receipts.jsonl");
+            fs::write(&log_path, &bytes).unwrap();
+            assert_eq!(
+                manager.load_session_snapshot(id).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                manager.load_session_checkpoint(id).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                manager.save_session(&session).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                manager.save_checkpoint(&session).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(fs::read(&saved_path).unwrap(), saved_before);
+            assert_eq!(fs::read(&checkpoint_path).unwrap(), checkpoint_before);
+            assert_eq!(fs::read(&log_path).unwrap(), bytes);
+        }
     }
 
     #[test]
