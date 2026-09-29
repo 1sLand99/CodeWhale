@@ -382,64 +382,88 @@ export async function markDraftResolved(
 }
 
 /**
- * An exclusive hold on one draft identity while a maintainer action (post or
- * discard) runs. Each request writes its own claim key, so no request can
- * overwrite another's claim, and proceeds only if its key is the only one
- * under the draft's claim prefix.
+ * A hold on one draft identity while a maintainer action (post or discard)
+ * runs. It is a single KV key holding the claiming request's random token.
  */
 export interface DraftClaim {
   key: string;
-}
-
-const CLAIM_PREFIX = "draft-claim:";
-
-function claimPrefix(type: AgentDraftType, id: string): string {
-  return `${CLAIM_PREFIX}${draftKey(type, id).slice("draft:".length)}:`;
+  token: string;
 }
 
 /**
- * Claim a draft before acting on it. Returns null when another request holds
- * a claim, or when a decision (posted, discarded, a post in flight) was
- * recorded before this claim.
+ * Why a claim was not taken:
+ * - `held`: another request's claim is visible (a post in flight, or one whose
+ *   outcome is unknown, which holds the draft until the claim expires).
+ * - `resolved`: a decision (posted, discarded, a post in flight) exists.
+ * - `unconfirmed`: this request could not read its own claim back; nothing
+ *   was done and a retry is safe.
+ */
+export type DraftClaimResult =
+  | { ok: true; claim: DraftClaim }
+  | { ok: false; reason: "held" | "unconfirmed" }
+  | { ok: false; reason: "resolved"; resolution: DraftResolution };
+
+const CLAIM_PREFIX = "draft-claim:";
+
+function claimKey(type: AgentDraftType, id: string): string {
+  return CLAIM_PREFIX + draftKey(type, id).slice("draft:".length);
+}
+
+/**
+ * Claim a draft before acting on it.
  *
- * Why this is exclusive: two overlapping claimants each write their key before
- * they list. Whichever lists second sees both keys, so at most one sees only
- * its own. If they overlap exactly, both see two keys and both refuse (the
- * maintainer retries); two can never both proceed. A claimant that arrives
- * after the winner still sees the winner's key, which is kept until it
- * expires unless the winner's action definitely did not happen.
+ * This is best effort, not a lock. Workers KV has no compare-and-set: a
+ * write is usually visible at once to reads in the location that made it,
+ * but can take 60 seconds or more to reach other locations, and list results
+ * can lag even locally. So the claim uses only get and put on one key:
+ * refuse if a claim is already visible, write our token, and proceed only if
+ * reading the key back returns our token and no decision has been recorded.
+ * That stops the double-post cases this admin page actually produces (a
+ * second tab, a retry, a discard during a post), since each re-reads a key
+ * that a finished request wrote. Two requests whose writes land within the
+ * same moment, or that run in different locations, can still both proceed;
+ * a Durable Object would be needed to rule that out.
  *
- * This holds when a list reflects every put that finished before it. Workers
- * KV guarantees that within one location, not across locations (its writes
- * can take up to 60 seconds to reach other locations), so two maintainers
- * posting the same draft from different regions in the same instant are not
- * serialized. A real compare-and-set authority (a Durable Object) would be
- * needed for that; this admin surface has one maintainer.
+ * A released claim can also stay visible to a retry from another location
+ * for up to about a minute, which surfaces as `held`.
  */
 export async function claimDraft(
   kv: KVNamespace | undefined,
   type: AgentDraftType,
   id: string
-): Promise<DraftClaim | null> {
-  if (!kv) return { key: "" };
-  const prefix = claimPrefix(type, id);
-  const key = prefix + crypto.randomUUID();
-  await kv.put(key, new Date().toISOString(), { expirationTtl: POSTING_CLAIM_TTL_SEC });
-  let won = false;
-  try {
-    const { keys } = await kv.list({ prefix });
-    won = keys.length === 1 && keys[0].name === key;
-    // A decision recorded after the caller's own check still wins.
-    if (won && (await getDraftResolution(kv, type, id))) won = false;
-  } finally {
-    if (!won) await kv.delete(key).catch(() => undefined);
+): Promise<DraftClaimResult> {
+  const token = crypto.randomUUID();
+  if (!kv) return { ok: true, claim: { key: "", token } };
+  const key = claimKey(type, id);
+  if (await kv.get(key)) return { ok: false, reason: "held" };
+  await kv.put(key, token, { expirationTtl: POSTING_CLAIM_TTL_SEC });
+  const seen = await kv.get(key);
+  if (seen !== token) {
+    // Someone else's token is theirs to keep. Our own write not being visible
+    // is not a lost race: drop it so it cannot block the retry.
+    if (seen === null) {
+      await kv.delete(key).catch(() => undefined);
+      return { ok: false, reason: "unconfirmed" };
+    }
+    return { ok: false, reason: "held" };
   }
-  return won ? { key } : null;
+  // A decision recorded after the caller's own check still wins.
+  const resolution = await getDraftResolution(kv, type, id).catch(async (e) => {
+    await kv.delete(key).catch(() => undefined);
+    throw e;
+  });
+  if (resolution) {
+    await kv.delete(key).catch(() => undefined);
+    return { ok: false, reason: "resolved", resolution };
+  }
+  return { ok: true, claim: { key, token } };
 }
 
-/** Give up a claim, for an action that definitely did not happen. */
+/** Give up a claim, for an action that definitely did not happen or is recorded. */
 export async function releaseDraftClaim(kv: KVNamespace | undefined, claim: DraftClaim): Promise<void> {
   if (!kv || !claim.key) return;
+  // Leave a claim another request has since written in place.
+  if ((await kv.get(claim.key)) !== claim.token) return;
   await kv.delete(claim.key);
 }
 

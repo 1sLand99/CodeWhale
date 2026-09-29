@@ -537,7 +537,8 @@ describe("admin post action is idempotent and bounded", () => {
       act(kv, { action: "post", draftKey: "draft:triage:42" }),
     ]);
     const statuses = results.map((r) => r.status);
-    // Overlapping claims may both refuse (fail closed), never both proceed.
+    // This fake KV makes every write visible at once, so the claim is exact
+    // here; on Workers KV it is best effort (see claimDraft).
     expect(statuses.filter((s) => s === 200)).toHaveLength(posts.length);
     expect(posts.length).toBeLessThanOrEqual(1);
     expect(statuses.every((s) => s === 200 || s === 409)).toBe(true);
@@ -570,8 +571,6 @@ describe("admin post action is idempotent and bounded", () => {
     };
     let claimPuts = 0;
     kv.beforePut = async (key, value) => {
-      // A claim write: its own key, or (the earlier design) a token written
-      // over the shared marker.
       const isClaim = key.startsWith("draft-claim:") || (key.startsWith("draft-resolved:") && value.includes('"claim"'));
       if (!isClaim) return;
       claimPuts += 1;
@@ -621,6 +620,92 @@ describe("admin post action is idempotent and bounded", () => {
     expect(posts).toHaveLength(1);
     expect(JSON.parse(kv.values.get("draft-resolved:triage:42")!)).toMatchObject({ state: "posted" });
     expect(JSON.parse(kv.values.get("draft:triage:42")!)).toMatchObject({ posted: true });
+  });
+
+  it("claims without KV list, whose results can lag writes by up to a minute", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+    // A stale listing that never shows claim keys must not affect the claim.
+    const realList = kv.list.bind(kv);
+    kv.list = async (options) => {
+      if (options?.prefix?.startsWith("draft-claim:")) throw new Error("claim must not list");
+      return realList(options);
+    };
+
+    const res = await act(kv, { action: "post", draftKey: "draft:triage:42" });
+    expect(res.status).toBe(200);
+    expect(posts).toHaveLength(1);
+    expect([...kv.values.keys()].filter((k) => k.startsWith("draft-claim:"))).toEqual([]);
+  });
+
+  it("answers a claim it cannot read back as retryable, not as a lost race, and the retry posts", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+    // The first read-back of the request's own claim misses the write.
+    const realGet = kv.get.bind(kv);
+    let claimReads = 0;
+    kv.get = async (key: string) => {
+      if (key.startsWith("draft-claim:") && ++claimReads === 2) return null;
+      return realGet(key);
+    };
+
+    const first = await act(kv, { action: "post", draftKey: "draft:triage:42" });
+    expect(first.status).toBe(503);
+    expect(posts).toEqual([]);
+    expect([...kv.values.keys()].filter((k) => k.startsWith("draft-claim:") || k.startsWith("draft-resolved:"))).toEqual([]);
+
+    const retry = await act(kv, { action: "post", draftKey: "draft:triage:42" });
+    expect(retry.status).toBe(200);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("refuses a post while another request's claim is visible, and leaves that claim alone", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+    kv.values.set("draft-claim:triage:42", "other-request");
+
+    for (const action of ["post", "discard"]) {
+      const res = await act(kv, { action, draftKey: "draft:triage:42" });
+      expect(res.status).toBe(409);
+    }
+    expect(posts).toEqual([]);
+    expect(kv.values.get("draft-claim:triage:42")).toBe("other-request");
+  });
+
+  it("treats a repeated discard as a no-op, including one that sees the marker only at claim time", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    stubGitHub();
+
+    const first = await act(kv, { action: "discard", draftKey: "draft:triage:42" });
+    expect(first.status).toBe(200);
+    // A double click whose request still reads the draft (its delete not yet
+    // visible), first past the marker, then with the marker missed by the
+    // route's own check and seen only by the claim.
+    const staleDraft = JSON.stringify(draft());
+    kv.values.set("draft:triage:42", staleDraft);
+    const again = await act(kv, { action: "discard", draftKey: "draft:triage:42" });
+    expect(again.status).toBe(200);
+    await expect(again.json()).resolves.toEqual({ ok: true, action: "discarded" });
+
+    kv.values.set("draft:triage:42", staleDraft);
+    const realGet = kv.get.bind(kv);
+    let markerReads = 0;
+    kv.get = async (key: string) => {
+      if (key.startsWith("draft-resolved:") && ++markerReads === 1) return null;
+      return realGet(key);
+    };
+    const racing = await act(kv, { action: "discard", draftKey: "draft:triage:42" });
+    expect(racing.status).toBe(200);
+    expect(JSON.parse(kv.values.get("draft-resolved:triage:42")!)).toMatchObject({ state: "discarded" });
+    expect([...kv.values.keys()].filter((k) => k.startsWith("draft-claim:"))).toEqual([]);
   });
 
   it("refuses an action on a draft regenerated after the page loaded, before calling GitHub", async () => {

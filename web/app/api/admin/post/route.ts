@@ -16,7 +16,7 @@ import {
   reviewedBodyHash,
   validateSession,
   type CommunityAgentEnv,
-  type DraftClaim,
+  type DraftClaimResult,
 } from "@/lib/community-agent";
 
 export const dynamic = "force-dynamic";
@@ -64,6 +64,22 @@ function revalidateDigestPage() {
 function githubDefinitelyRejected(status: number): boolean {
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
+
+/** The answer for a claim that was not taken. */
+function claimRefused(result: Exclude<DraftClaimResult, { ok: true }>) {
+  if (result.reason === "unconfirmed") {
+    return NextResponse.json({ error: "could not confirm the draft claim; nothing was done, retry" }, { status: 503 });
+  }
+  if (result.reason === "resolved") {
+    return NextResponse.json({ error: `draft already ${result.resolution.state}` }, { status: 409 });
+  }
+  return NextResponse.json(
+    { error: "another request is acting on this draft; check GitHub, then retry in a minute" },
+    { status: 409 }
+  );
+}
+
+const discarded = () => NextResponse.json({ ok: true, action: "discarded" });
 
 export async function POST(req: Request) {
   const env = await getAgentEnv();
@@ -149,17 +165,21 @@ export async function POST(req: Request) {
     if (draft.posted || resolution?.state === "posted" || resolution?.state === "posting") {
       return NextResponse.json({ error: "draft already posted" }, { status: 409 });
     }
+    // A repeated discard (double click) is a no-op, not an error.
+    if (resolution?.state === "discarded") return discarded();
     // Hold the same claim a post takes, so a discard and a post of one draft
-    // cannot both run.
-    let claim: DraftClaim | null = null;
+    // do not both run.
+    let result: DraftClaimResult;
     try {
-      claim = await claimDraft(env.CURATED_KV, parsedKey.type, parsedKey.id);
+      result = await claimDraft(env.CURATED_KV, parsedKey.type, parsedKey.id);
     } catch (e) {
       return NextResponse.json({ error: `could not claim draft: ${String(e)}` }, { status: 500 });
     }
-    if (!claim) {
-      return NextResponse.json({ error: "draft is being posted or was already resolved" }, { status: 409 });
+    if (!result.ok) {
+      if (result.reason === "resolved" && result.resolution.state === "discarded") return discarded();
+      return claimRefused(result);
     }
+    const claim = result.claim;
     try {
       // The marker stops the next cron run from regenerating this draft.
       await markDraftResolved(env.CURATED_KV, parsedKey.type, parsedKey.id, "discarded");
@@ -174,7 +194,7 @@ export async function POST(req: Request) {
       await releaseDraftClaim(env.CURATED_KV, claim).catch(() => undefined);
     }
     if (draft.type === "digest") revalidateDigestPage();
-    return NextResponse.json({ ok: true, action: "discarded" });
+    return discarded();
   }
 
   if (action === "post") {
@@ -195,19 +215,21 @@ export async function POST(req: Request) {
     if (resolution) {
       return NextResponse.json({ error: `draft already ${resolution.state}` }, { status: 409 });
     }
-    let claim: DraftClaim | null = null;
+    let result: DraftClaimResult;
     try {
-      claim = await claimDraft(env.CURATED_KV, parsedKey.type, parsedKey.id);
-      if (!claim) {
-        return NextResponse.json({ error: "draft already posting or resolved" }, { status: 409 });
-      }
+      result = await claimDraft(env.CURATED_KV, parsedKey.type, parsedKey.id);
+    } catch (e) {
+      return NextResponse.json({ error: `could not claim draft: ${String(e)}` }, { status: 500 });
+    }
+    if (!result.ok) return claimRefused(result);
+    const heldClaim = result.claim;
+    try {
       // Keeps the cron from regenerating the draft while the post is in flight.
       await markDraftResolved(env.CURATED_KV, parsedKey.type, parsedKey.id, "posting");
     } catch (e) {
-      if (claim) await releaseDraftClaim(env.CURATED_KV, claim).catch(() => undefined);
+      await releaseDraftClaim(env.CURATED_KV, heldClaim).catch(() => undefined);
       return NextResponse.json({ error: `could not claim draft: ${String(e)}` }, { status: 500 });
     }
-    const heldClaim = claim;
 
     const commentBody = editedBody ?? originalBody;
 
