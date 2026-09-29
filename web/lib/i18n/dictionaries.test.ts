@@ -20,6 +20,7 @@ import {
   EN_DOCS_SHELL,
   EN_DOCS_TROUBLESHOOTING,
   EN_DIGEST,
+  EN_FEED,
   EN_FAQ,
   EN_HOME,
   EN_LEGAL_PRIVACY,
@@ -47,6 +48,7 @@ import {
   getDocsModes,
   getDocsReview,
   getDigest,
+  getFeed,
   getFaq,
   getHome,
   getLegalPrivacy,
@@ -268,6 +270,7 @@ describe("website dictionaries", () => {
       ["legal-terms", getLegalTerms, EN_LEGAL_TERMS],
       ["legal-privacy", getLegalPrivacy, EN_LEGAL_PRIVACY],
       ["digest", getDigest, EN_DIGEST],
+      ["feed", getFeed, EN_FEED],
       ["faq", getFaq, EN_FAQ],
       ["roadmap", getRoadmap, EN_ROADMAP],
     ] as const) {

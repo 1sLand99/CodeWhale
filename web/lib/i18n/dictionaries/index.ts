@@ -35,6 +35,7 @@ import type {
   DocsWorkDict,
   HomeDict,
   DigestDict,
+  FeedDict,
   FaqDict,
   LegalPrivacyDict,
   LegalTermsDict,
@@ -105,6 +106,8 @@ import { legalPrivacy as enLegalPrivacy } from "./en/legal-privacy";
 import { legalPrivacy as zhLegalPrivacy } from "./zh/legal-privacy";
 import { digest as enDigest } from "./en/digest";
 import { digest as zhDigest } from "./zh/digest";
+import { feed as enFeed } from "./en/feed";
+import { feed as zhFeed } from "./zh/feed";
 import { faq as enFaq } from "./en/faq";
 import { faq as zhFaq } from "./zh/faq";
 import { roadmap as enRoadmap } from "./en/roadmap";
@@ -300,9 +303,9 @@ const DOCS_REVIEW: Record<string, DocsReviewDict> = {
 
 /**
  * Shared surface states, the changelog page, the two legal pages, the digest
- * page, the FAQ and the roadmap follow the same optional per-locale rule as
- * the docs page dictionaries: English is the reference, every other locale
- * falls back to it at lookup time.
+ * and feed pages, the FAQ and the roadmap follow the same optional per-locale
+ * rule as the docs page dictionaries: English is the reference, every other
+ * locale falls back to it at lookup time.
  */
 const STATES: Record<string, StatesDict> = {
   zh: zhStates,
@@ -322,6 +325,10 @@ const LEGAL_PRIVACY: Record<string, LegalPrivacyDict> = {
 
 const DIGEST: Record<string, DigestDict> = {
   zh: zhDigest,
+};
+
+const FEED: Record<string, FeedDict> = {
+  zh: zhFeed,
 };
 
 const FAQ: Record<string, FaqDict> = {
@@ -432,6 +439,10 @@ export function getDigest(locale: string): DigestDict {
   return DIGEST[locale] ?? enDigest;
 }
 
+export function getFeed(locale: string): FeedDict {
+  return FEED[locale] ?? enFeed;
+}
+
 export function getFaq(locale: string): FaqDict {
   return FAQ[locale] ?? enFaq;
 }
@@ -482,6 +493,7 @@ export const EN_CHANGELOG = enChangelog;
 export const EN_LEGAL_TERMS = enLegalTerms;
 export const EN_LEGAL_PRIVACY = enLegalPrivacy;
 export const EN_DIGEST = enDigest;
+export const EN_FEED = enFeed;
 export const EN_FAQ = enFaq;
 export const EN_ROADMAP = enRoadmap;
 
