@@ -198,15 +198,19 @@ impl ToolSpec for GrepFilesTool {
             let mut results: Vec<GrepMatch> = Vec::new();
             let mut files_searched = 0;
             let mut total_matches = 0;
+            // Set once a match exists beyond `max_results`. The walk keeps
+            // going past a full budget only until it sees one, so a capped
+            // result set is reported as capped rather than complete.
+            let mut truncated = false;
 
-            visit_files(
+            let skipped_dirs = visit_files(
                 &search_path,
                 &include_patterns,
                 &exclude_patterns,
                 cancel_token,
                 follow_symlinks,
                 &mut |file_path| {
-                    if results.len() >= max_results {
+                    if truncated {
                         return Ok(WalkControl::Stop);
                     }
                     check_cancelled(cancel_token)?;
@@ -225,8 +229,8 @@ impl ToolSpec for GrepFilesTool {
                         .to_string_lossy()
                         .to_string();
 
-                    let budget = max_results - results.len();
-                    let Some(file_matches) = search_file_streaming(
+                    let budget = max_results.saturating_sub(results.len());
+                    let Some((file_matches, overflowed)) = search_file_streaming(
                         file_path,
                         &relative_path,
                         &regex,
@@ -241,6 +245,10 @@ impl ToolSpec for GrepFilesTool {
                     files_searched += 1;
                     total_matches += file_matches.len();
                     results.extend(file_matches);
+                    if overflowed {
+                        truncated = true;
+                        return Ok(WalkControl::Stop);
+                    }
                     Ok(WalkControl::Continue)
                 },
             )?;
@@ -253,12 +261,19 @@ impl ToolSpec for GrepFilesTool {
             // Build result. When context_lines == 1, return the single context
             // line as a string instead of a one-item array. That keeps the common
             // "show just the adjacent line" case easy for model callers to read.
-            Ok(json!({
+            let mut output = json!({
                 "matches": matches_json,
                 "total_matches": total_matches,
                 "files_searched": files_searched,
-                "truncated": total_matches > max_results,
-            }))
+                "truncated": truncated,
+            });
+            if truncated {
+                output["max_results"] = json!(max_results);
+            }
+            if skipped_dirs > 0 {
+                output["unreadable_dirs_skipped"] = json!(skipped_dirs);
+            }
+            Ok(output)
         })
         .await?;
 
@@ -333,7 +348,8 @@ fn grep_match_to_json(item: &GrepMatch, context_lines: usize) -> Value {
 /// previous `read_to_string` implementation, which required the whole file to
 /// be valid before contributing any match. At most `budget` matches are
 /// recorded; the scan still runs to EOF so late invalid bytes disqualify the
-/// file and pending after-context is completed.
+/// file and pending after-context is completed. The returned flag is true
+/// when the file held at least one match beyond `budget`.
 fn search_file_streaming(
     path: &Path,
     relative_path: &str,
@@ -341,7 +357,7 @@ fn search_file_streaming(
     context_lines: usize,
     budget: usize,
     cancel_token: Option<&CancellationToken>,
-) -> Result<Option<Vec<GrepMatch>>, ToolError> {
+) -> Result<Option<(Vec<GrepMatch>, bool)>, ToolError> {
     let Ok(file) = fs::File::open(path) else {
         return Ok(None);
     };
@@ -353,6 +369,7 @@ fn search_file_streaming(
     // lines still needed). Entries complete in FIFO order.
     let mut pending: VecDeque<(usize, usize)> = VecDeque::new();
     let mut line_idx = 0usize;
+    let mut overflowed = false;
 
     loop {
         raw.clear();
@@ -389,7 +406,9 @@ fn search_file_streaming(
             pending.pop_front();
         }
 
-        if matches.len() < budget && regex.is_match(line) {
+        if matches.len() >= budget {
+            overflowed = overflowed || regex.is_match(line);
+        } else if regex.is_match(line) {
             matches.push(GrepMatch {
                 file: relative_path.to_string(),
                 line_number: line_idx + 1,
@@ -411,7 +430,7 @@ fn search_file_streaming(
         line_idx += 1;
     }
 
-    Ok(Some(matches))
+    Ok(Some((matches, overflowed)))
 }
 
 /// Flow control for the streaming file walk.
@@ -422,7 +441,8 @@ enum WalkControl {
 
 /// Walk files matching the include/exclude patterns, invoking `visit` for
 /// each one in traversal order. The walk stops early when `visit` returns
-/// [`WalkControl::Stop`].
+/// [`WalkControl::Stop`]. Returns how many subdirectories (or entries) could
+/// not be read and were skipped; only an unreadable `root` fails the walk.
 fn visit_files(
     root: &Path,
     include_patterns: &[String],
@@ -430,13 +450,14 @@ fn visit_files(
     cancel_token: Option<&CancellationToken>,
     follow_symlinks: bool,
     visit: &mut dyn FnMut(&Path) -> Result<WalkControl, ToolError>,
-) -> Result<(), ToolError> {
+) -> Result<usize, ToolError> {
     let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
+    let mut skipped = 0usize;
     check_cancelled(cancel_token)?;
 
     if root.is_file() {
         visit(root)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if follow_symlinks && let Ok(canonical_root) = root.canonicalize() {
@@ -451,9 +472,10 @@ fn visit_files(
         cancel_token,
         &mut visited_dirs,
         follow_symlinks,
+        &mut skipped,
         visit,
     )?;
-    Ok(())
+    Ok(skipped)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -465,30 +487,42 @@ fn visit_files_recursive(
     cancel_token: Option<&CancellationToken>,
     visited_dirs: &mut HashSet<PathBuf>,
     follow_symlinks: bool,
+    skipped: &mut usize,
     visit: &mut dyn FnMut(&Path) -> Result<WalkControl, ToolError>,
 ) -> Result<WalkControl, ToolError> {
     check_cancelled(cancel_token)?;
 
-    let entries = fs::read_dir(current).map_err(|e| {
-        ToolError::execution_failed(format!(
-            "Failed to read directory {}: {}",
-            current.display(),
-            e
-        ))
-    })?;
+    // An unreadable subdirectory (permissions, or removed mid-walk) is
+    // skipped and counted rather than discarding every match found so far.
+    // The search root itself still fails loudly.
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(e) if current != root => {
+            tracing::debug!(dir = %current.display(), error = %e, "grep_files skipped an unreadable directory");
+            *skipped += 1;
+            return Ok(WalkControl::Continue);
+        }
+        Err(e) => {
+            return Err(ToolError::execution_failed(format!(
+                "Failed to read directory {}: {}",
+                current.display(),
+                e
+            )));
+        }
+    };
 
     for entry in entries {
         check_cancelled(cancel_token)?;
 
-        let entry = entry.map_err(|e| ToolError::execution_failed(e.to_string()))?;
+        let Ok(entry) = entry else {
+            *skipped += 1;
+            continue;
+        };
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|e| {
-            ToolError::execution_failed(format!(
-                "Failed to inspect file type for {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let Ok(file_type) = entry.file_type() else {
+            *skipped += 1;
+            continue;
+        };
         if file_type.is_symlink() && !follow_symlinks {
             continue;
         }
@@ -532,6 +566,7 @@ fn visit_files_recursive(
                 cancel_token,
                 visited_dirs,
                 follow_symlinks,
+                skipped,
                 visit,
             )? {
                 return Ok(WalkControl::Stop);
@@ -600,7 +635,13 @@ pub(crate) fn matches_glob(path: &str, pattern: &str) -> bool {
             let prefix = parts[0].trim_end_matches('/');
             let suffix = parts[1].trim_start_matches('/');
 
-            if !prefix.is_empty() && !path.starts_with(prefix) {
+            // The prefix names a directory: `build/**` covers `build` and
+            // `build/...`, never `build.rs` or `builders/`.
+            let under_prefix = path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('/'));
+            if !prefix.is_empty() && !under_prefix {
                 return false;
             }
             if !suffix.is_empty() {
@@ -609,7 +650,7 @@ pub(crate) fn matches_glob(path: &str, pattern: &str) -> bool {
                         .split('/')
                         .any(|part| matches_simple_glob(part, suffix));
             }
-            return path.starts_with(prefix) || prefix.is_empty();
+            return true;
         }
     }
 

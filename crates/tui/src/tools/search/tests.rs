@@ -450,3 +450,81 @@ fn test_parallel_support_flags() {
     let tool = GrepFilesTool;
     assert!(tool.supports_parallel());
 }
+
+#[test]
+fn double_star_exclude_prefix_stops_at_a_path_component() {
+    // Directory excludes still cover the directory and everything under it.
+    assert!(matches_glob("build", "build/**"));
+    assert!(matches_glob("build/out.o", "build/**"));
+    assert!(matches_glob(".git/config", ".git/**"));
+    // A same-prefix sibling file or directory is a different path.
+    assert!(!matches_glob("build.rs", "build/**"));
+    assert!(!matches_glob("build.gradle", "build/**"));
+    assert!(!matches_glob("builders/x.rs", "build/**"));
+    assert!(!matches_glob(".github/workflows/ci.yml", ".git/**"));
+    assert!(!matches_glob(".gitignore", ".git/**"));
+    assert!(!matches_glob("targets/a.rs", "target/**"));
+}
+
+#[tokio::test]
+async fn grep_files_reports_truncation_when_matches_exceed_the_cap() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    // Three files, two matches each: six matches against a cap of 3.
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(tmp.path().join(name), "needle\nneedle\n").expect("write");
+    }
+
+    let capped = GrepFilesTool
+        .execute(json!({"pattern": "needle", "max_results": 3}), &ctx)
+        .await
+        .expect("execute");
+    let capped: Value = serde_json::from_str(&capped.content).unwrap();
+    assert_eq!(capped["matches"].as_array().unwrap().len(), 3);
+    assert_eq!(capped["truncated"], json!(true), "{capped}");
+
+    // Exactly at the cap with nothing more is complete, not truncated.
+    let exact = GrepFilesTool
+        .execute(json!({"pattern": "needle", "max_results": 6}), &ctx)
+        .await
+        .expect("execute");
+    let exact: Value = serde_json::from_str(&exact.content).unwrap();
+    assert_eq!(exact["matches"].as_array().unwrap().len(), 6);
+    assert_eq!(exact["truncated"], json!(false), "{exact}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn grep_files_skips_an_unreadable_subdirectory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    fs::write(tmp.path().join("found.txt"), "needle\n").expect("write");
+    let locked = tmp.path().join("locked");
+    fs::create_dir(&locked).expect("mkdir");
+    fs::write(locked.join("hidden.txt"), "needle\n").expect("write");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    if fs::read_dir(&locked).is_ok() {
+        // Running with privileges that ignore directory modes; nothing to prove.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod");
+        return;
+    }
+
+    let result = GrepFilesTool
+        .execute(json!({"pattern": "needle"}), &ctx)
+        .await;
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let result = result.expect("an unreadable subdirectory must not fail the search");
+    let parsed: Value = serde_json::from_str(&result.content).unwrap();
+    let matches = parsed["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1, "{parsed}");
+    assert!(
+        matches[0]["file"]
+            .as_str()
+            .is_some_and(|file| file.ends_with("found.txt")),
+        "{parsed}"
+    );
+    assert_eq!(parsed["unreadable_dirs_skipped"], json!(1), "{parsed}");
+}
