@@ -58,7 +58,7 @@ fn model_identity(config: &Config, key: &str) -> Result<ProviderIdentity> {
                 })
                 .map_or(id, |provider| provider.as_str())
         };
-        config.resolve_provider_pin_identity(selector)
+        config.resolve_provider_selection_identity(selector)
     } else {
         config.active_provider_identity(config.api_provider())
     }
@@ -369,7 +369,7 @@ pub fn set_document(
     let config = parse_config(&doc.to_string())?;
     if key == "provider" {
         let identity = config
-            .resolve_provider_pin_identity(value)
+            .resolve_provider_selection_identity(value)
             .map_err(anyhow::Error::msg)?;
         persistence::set_document_value(
             doc,

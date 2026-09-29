@@ -41,9 +41,9 @@ local supervisor / SDK / automation harness
 The engine runs as a local-only process. All APIs bind to `localhost` by
 default. No hosted relay, no provider-token custody, no secret leakage.
 
-For a proposed read-only audit export over completed turns, see
-[`docs/RECEIPTS.md`](RECEIPTS.md). That document is a protocol note; the receipt
-CLI/API surfaces are not implemented yet.
+For the read-only record of what a thread or turn did, see
+[`docs/RECEIPTS.md`](RECEIPTS.md): `codewhale receipts` on the CLI and the
+`/receipt` routes under **Threads** below.
 
 ## Runtime API entrypoints
 
@@ -761,7 +761,10 @@ a TLS or verified transport boundary.
 - `GET /v1/sessions?limit=50&search=<fuzzy>&include_archived=false&archived_only=false&workspace=<path>&sort=recent|name|size`
 - `GET /v1/sessions/summary?…` (same query params; projected row shape)
 - `GET /v1/sessions/{id}` (add `?peek=true&entries=12` for a bounded, redacted
-  read-only peek instead of the full transcript)
+  read-only peek instead of the full transcript). The full response carries
+  `turn_outcomes` when a turn ended `Failed`: `{ status, error, ended_at,
+  after_message_count }` per failure, oldest first, bounded to 64, with the
+  error text the transcript showed and secrets redacted
 - `PATCH /v1/sessions/{id}` (`{ "title"?: string, "archived"?: bool }`)
 - `DELETE /v1/sessions/{id}`
 - `POST /v1/sessions/{id}/resume-thread` returns the open thread that already
@@ -1421,9 +1424,6 @@ Responses:
 Capability probe: `GET` on the route returns `405` where the endpoint exists
 and `404` on an older engine; clients treat any non-`404` as available and
 degrade with an explanation otherwise.
-
-**Receipts** (future read-only audit export)
-- Proposed only: `GET /v1/threads/{thread_id}/turns/{turn_id}/receipt`
 
 **Compatibility stream** (one-shot, backwards-compatible)
 - `POST /v1/stream`

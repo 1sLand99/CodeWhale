@@ -21,11 +21,6 @@ use crate::config::{
     moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
-// The bounded response-header wait (`stream_open_timeout`) and its env
-// override live in the shared stream-entry seam; every streaming adapter
-// (Chat Completions / Anthropic Messages / Responses) uses the same policy.
-use super::stream_entry::stream_open_timeout;
-
 use crate::config::ApiProvider;
 use crate::llm_client::StreamEventBox;
 use crate::llm_client::sanitize_http_error_body;
@@ -1336,7 +1331,7 @@ impl CodewhaleClient {
         body: &Value,
     ) -> Result<(reqwest::Response, Duration)> {
         let open_req = super::stream_entry::StreamOpenRequest::new(
-            stream_open_timeout(),
+            self.stream_open_timeout,
             self.stream_idle_timeout,
         );
         let idle_timeout = open_req.idle_timeout;
@@ -2104,6 +2099,7 @@ pub(crate) enum PromptLayerStability {
     Dynamic,
 }
 
+#[cfg(test)]
 impl PromptLayerStability {
     pub(crate) fn label(self) -> &'static str {
         match self {

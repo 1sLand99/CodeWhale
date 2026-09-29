@@ -16,7 +16,7 @@ use super::protocol::{
     parse_host_message,
 };
 use super::registry::{OwnerRegistry, OwnerState};
-use super::{ExtensionHostManager, ExtensionHostOptions, HostStatus};
+use super::{ExtensionHostManager, ExtensionHostOptions, HostAttachment, HostStatus};
 use crate::plugins::PluginRegistry;
 use crate::plugins::activation::TestPolicyGuard;
 use crate::plugins::discovery::{DiscoveryConfig, discover_with_config};
@@ -132,7 +132,7 @@ fn register(registry: &mut OwnerRegistry, owner: &OwnerRef, name: &str) -> Resul
 #[test]
 fn registry_refuses_shadowing_and_foreign_names_and_undoes_exactly_one_entry() {
     let mut registry = OwnerRegistry::new();
-    registry.set_native_names(["grep_files"]);
+    registry.add_native_names(["grep_files"]);
     let a = registry.begin_owner("a", "a", fake_authority("a"), "hash-a");
     let b = registry.begin_owner("b", "b", fake_authority("b"), "hash-b");
 
@@ -393,10 +393,14 @@ impl FixturePlugins {
     }
 }
 
-fn host_tool(manager: &ExtensionHostManager, workspace: &Path, name: &str) -> Arc<dyn ToolSpec> {
+pub(crate) fn host_tool(
+    engine: &HostAttachment,
+    workspace: &Path,
+    name: &str,
+) -> Arc<dyn ToolSpec> {
     let mut registry =
         crate::tools::registry::ToolRegistryBuilder::new().build(ToolContext::new(workspace));
-    let installed = manager.install_tools(&mut registry);
+    let installed = engine.install_tools(&mut registry);
     assert!(
         installed.contains(&name.to_string()),
         "{name} not installed: {installed:?}"
@@ -427,7 +431,8 @@ async fn dsh_plugin_runs_end_to_end_behind_the_approval_gate() {
     );
 
     let started = Instant::now();
-    manager.sync(fixture.registry()).await.unwrap();
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
     let elapsed = started.elapsed();
     let pid = manager.host_pid().expect("host running");
     eprintln!(
@@ -451,7 +456,7 @@ async fn dsh_plugin_runs_end_to_end_behind_the_approval_gate() {
         Some(OwnerState::Active)
     );
 
-    let tool = host_tool(&manager, fixture.workspace(), "load_workspace_dependencies");
+    let tool = host_tool(&engine, fixture.workspace(), "load_workspace_dependencies");
     assert_eq!(tool.registration_origin(), "extension:dsh-workspace-deps");
     // The plugin declares `presentCall: kind 'read'`; approval stays Required.
     assert_eq!(
@@ -486,10 +491,11 @@ async fn execute_tools_refuses_extension_tools_before_any_host_call() {
     let _policy = TestPolicyGuard::extension_host(true);
     let fixture = FixturePlugins::new(&["slow-tool"]).await;
     let manager = fixture.manager(node);
-    manager.sync(fixture.registry()).await.unwrap();
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
     let mut registry = crate::tools::registry::ToolRegistryBuilder::new()
         .build(ToolContext::new(fixture.workspace()));
-    manager.install_tools(&mut registry);
+    engine.install_tools(&mut registry);
     let context = ToolContext::new(fixture.workspace());
     let started = Instant::now();
     let result = crate::tools::codemode::execute_tools_tool(
@@ -518,8 +524,9 @@ async fn disabling_mid_call_revokes_at_once_and_teardown_waits_for_async_dispose
     let _policy = TestPolicyGuard::extension_host(true);
     let fixture = FixturePlugins::new(&["slow-tool"]).await;
     let manager = fixture.manager(node);
-    manager.sync(fixture.registry()).await.unwrap();
-    let tool = host_tool(&manager, fixture.workspace(), "slow_wait");
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    let tool = host_tool(&engine, fixture.workspace(), "slow_wait");
     let context = ToolContext::new(fixture.workspace());
     let call = tokio::spawn(async move { tool.execute(json!({}), &context).await });
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -545,9 +552,10 @@ async fn disabling_mid_call_revokes_at_once_and_teardown_waits_for_async_dispose
         })
     };
     let sync_started = Instant::now();
+    engine.set_plugins(disabled);
     let sync = {
         let manager = Arc::clone(&manager);
-        tokio::spawn(async move { manager.sync(disabled).await })
+        tokio::spawn(async move { manager.reconcile().await })
     };
     let outcome = tokio::time::timeout(Duration::from_secs(2), call)
         .await
@@ -590,10 +598,11 @@ async fn killed_host_fails_calls_with_a_typed_error_and_does_not_respawn() {
     let _policy = TestPolicyGuard::extension_host(true);
     let fixture = FixturePlugins::new(&["slow-tool"]).await;
     let manager = fixture.manager(node);
-    manager.sync(fixture.registry()).await.unwrap();
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
     assert_eq!(manager.spawn_attempts(), 1);
     let pid = manager.host_pid().unwrap();
-    let tool = host_tool(&manager, fixture.workspace(), "slow_wait");
+    let tool = host_tool(&engine, fixture.workspace(), "slow_wait");
     let context = ToolContext::new(fixture.workspace());
     let call = tokio::spawn(async move { tool.execute(json!({}), &context).await });
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -628,7 +637,7 @@ async fn killed_host_fails_calls_with_a_typed_error_and_does_not_respawn() {
     assert!(manager.live_tool_names().is_empty());
     let report = super::render_status(&manager);
     assert!(report.contains("failed"), "{report}");
-    manager.sync(fixture.registry()).await.ok();
+    engine.sync().await.ok();
     assert_eq!(manager.spawn_attempts(), 1, "no respawn within the session");
     assert!(matches!(manager.status(), HostStatus::Failed { .. }));
 }
@@ -641,7 +650,8 @@ async fn approval_providing_plugin_fails_activation_and_leaves_nothing_registere
     let _policy = TestPolicyGuard::extension_host(true);
     let fixture = FixturePlugins::new(&["refuses-approval", "clash-native"]).await;
     let manager = fixture.manager(node);
-    manager.sync(fixture.registry()).await.unwrap();
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
     let registry = fixture.registry();
     for (name, needle) in [
         ("refuses-approval", "approval"),
@@ -658,7 +668,7 @@ async fn approval_providing_plugin_fails_activation_and_leaves_nothing_registere
     assert!(manager.live_tool_names().is_empty());
     // A failed activation of the same bytes is not retried every turn.
     let attempts = manager.spawn_attempts();
-    manager.sync(fixture.registry()).await.unwrap();
+    engine.sync().await.unwrap();
     assert_eq!(manager.spawn_attempts(), attempts);
     manager.shutdown().await;
 }
@@ -700,12 +710,13 @@ async fn an_extension_named_like_a_script_tool_is_skipped_at_turn_build() {
     let _policy = TestPolicyGuard::extension_host(true);
     let fixture = FixturePlugins::new(&["clash-script"]).await;
     let manager = fixture.manager(node);
-    manager.sync(fixture.registry()).await.unwrap();
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
     assert_eq!(manager.live_tool_names(), vec!["fixture_script_tool"]);
     let mut registry = crate::tools::registry::ToolRegistryBuilder::new()
         .build(ToolContext::new(fixture.workspace()));
     registry.register(Arc::new(FakeScriptTool));
-    let installed = manager.install_tools(&mut registry);
+    let installed = engine.install_tools(&mut registry);
     assert!(installed.is_empty());
     assert_eq!(
         registry
@@ -731,11 +742,12 @@ async fn with_no_native_plugin_the_host_is_never_spawned() {
     let _policy = TestPolicyGuard::extension_host(true);
     let temp = tempfile::tempdir().unwrap();
     let registry = Arc::new(PluginRegistry::empty(temp.path()));
-    let manager = ExtensionHostManager::new(ExtensionHostOptions {
+    let manager = Arc::new(ExtensionHostManager::new(ExtensionHostOptions {
         node_override: None,
         root: Some(temp.path().join("home")),
-    });
-    manager.sync(registry).await.unwrap();
+    }));
+    let engine = manager.attach(registry);
+    engine.sync().await.unwrap();
     assert_eq!(manager.spawn_attempts(), 0);
     assert_eq!(manager.status(), HostStatus::Idle);
     assert!(!temp.path().join("home").exists(), "nothing materialized");
@@ -774,7 +786,8 @@ async fn sandboxed_host_cannot_read_codewhale_secrets_or_write_outside_its_data_
     std::fs::write(&readable, "plain").unwrap();
 
     let manager = fixture.manager(node);
-    manager.sync(fixture.registry()).await.unwrap();
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
     let HostStatus::Ready { sandbox, .. } = manager.status() else {
         panic!("host not ready: {:?}", manager.status());
     };
@@ -790,8 +803,8 @@ async fn sandboxed_host_cannot_read_codewhale_secrets_or_write_outside_its_data_
     assert!(super::render_status(&manager).contains(&format!("{sandbox} sandbox")));
 
     let context = ToolContext::new(fixture.workspace());
-    let read = host_tool(&manager, fixture.workspace(), "probe_read");
-    let write = host_tool(&manager, fixture.workspace(), "probe_write");
+    let read = host_tool(&engine, fixture.workspace(), "probe_read");
+    let write = host_tool(&engine, fixture.workspace(), "probe_write");
 
     let plain = probe(&read, &readable, &context).await;
     assert_eq!(
@@ -843,5 +856,316 @@ async fn sandboxed_host_cannot_read_codewhale_secrets_or_write_outside_its_data_
         assert_eq!(escaped["ok"], false, "{escaped}");
         assert!(!leaked);
     }
+    manager.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Receipt-bound approval keys (design §4.3)
+// ---------------------------------------------------------------------------
+
+fn keys_for(
+    manager: &ExtensionHostManager,
+    registration: super::registry::ToolRegistration,
+    input: &Value,
+) -> (String, String) {
+    let name = registration.name.clone();
+    let mut registry = crate::tools::ToolRegistry::new(ToolContext::new(Path::new("/w")));
+    registry.register(Arc::new(super::tool::HostToolSpec::new(
+        registration,
+        Arc::clone(&manager.shared),
+    )));
+    let (exact, grouping) =
+        crate::tools::approval_cache::approval_keys_for_call(Some(&registry), &name, input);
+    (exact.0, grouping.0)
+}
+
+/// A session grant for an extension tool covers one reviewed plugin build:
+/// an update of the plugin, or another plugin that later registers the same
+/// tool name, gets a different key and is asked again.
+#[test]
+fn extension_approval_keys_are_bound_to_the_plugin_receipt() {
+    let manager = ExtensionHostManager::new(ExtensionHostOptions::default());
+    let input = json!({"path": "x"});
+    let mut owners = OwnerRegistry::new();
+    let live = |owners: &mut OwnerRegistry, owner: &OwnerRef| {
+        register(owners, owner, "shared_tool").unwrap();
+        owners.mark_active(owner);
+        owners.live_tools().pop().unwrap()
+    };
+
+    let first = owners.begin_owner("a", "a", fake_authority("a"), "hash-a1");
+    let first = keys_for(&manager, live(&mut owners, &first), &input);
+    assert!(
+        first.0.starts_with("ext:a@hash-a1:shared_tool:"),
+        "{first:?}"
+    );
+    assert_eq!(first.0, first.1, "a grant covers the exact call only");
+    let generic = crate::tools::approval_cache::build_approval_grouping_key("shared_tool", &input);
+    assert_ne!(first.1, generic.0, "never the name-derived family key");
+
+    // Same plugin, same input, updated bytes: a different grant.
+    let updated = owners.begin_owner("a", "a", fake_authority("a"), "hash-a2");
+    let updated = keys_for(&manager, live(&mut owners, &updated), &input);
+    assert_ne!(first.1, updated.1);
+
+    // Another plugin takes the name once the first is gone.
+    owners.revoke_owner("a");
+    let other = owners.begin_owner("b", "b", fake_authority("b"), "hash-a1");
+    let other = keys_for(&manager, live(&mut owners, &other), &input);
+    assert_ne!(first.1, other.1);
+    assert_ne!(updated.1, other.1);
+
+    // Tools without a scope keep their existing keys.
+    let shell = json!({"command": "cargo build --release"});
+    let (exact, grouping) =
+        crate::tools::approval_cache::approval_keys_for_call(None, "exec_shell", &shell);
+    assert_eq!(
+        exact,
+        crate::tools::approval_cache::build_approval_key("exec_shell", &shell)
+    );
+    assert_eq!(
+        grouping,
+        crate::tools::approval_cache::build_approval_grouping_key("exec_shell", &shell)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The native-entry rule at validate / review time
+// ---------------------------------------------------------------------------
+
+fn native_bundle(user: &Path, name: &str, native_path: &str, files: &[&str]) {
+    let root = user.join(name);
+    for file in files {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "export const name = 'x'\nexport function apply() {}\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("plugin.json"),
+        serde_json::to_vec_pretty(&json!({
+            "$schema": "https://agent-plugins.org/schemas/plugin.json",
+            "name": name,
+            "version": "0.1.0",
+            "description": "native entry rule fixture",
+            "license": "MIT",
+            "extensions": {"net.codewhale": {"native": {"path": native_path}}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// `/plugin validate` and the review screen read plugin diagnostics, so an
+/// entry that activation would refuse must fail there too, with the flag on;
+/// with it off `native` is inventory-only and any path stays valid.
+#[test]
+fn native_entry_rule_fails_validation_when_the_host_is_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let user = temp.path().join("user");
+    native_bundle(&user, "dir-entry", "lib", &["lib/index.mjs"]);
+    native_bundle(&user, "ts-entry", "index.ts", &["index.ts"]);
+    native_bundle(&user, "good-entry", "index.mjs", &["index.mjs"]);
+    let config = DiscoveryConfig {
+        workspace: temp.path().join("project"),
+        user_plugins_dir: user,
+        workspace_plugins_dir: temp.path().join("project/.codewhale/plugins"),
+        builtin_plugin_dirs: Vec::new(),
+        state_path: temp.path().join("state/plugin-state.json"),
+    };
+    let native_errors = |registry: &PluginRegistry, name: &str| -> Vec<String> {
+        registry
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} not discovered: {:?}", registry.diagnostics()))
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "native-entry-invalid")
+            .map(|diagnostic| {
+                assert_eq!(
+                    diagnostic.level,
+                    crate::plugins::types::PluginDiagnosticLevel::Error
+                );
+                diagnostic.message.clone()
+            })
+            .collect()
+    };
+
+    {
+        let _policy = TestPolicyGuard::extension_host(true);
+        let registry = discover_with_config(&config);
+        for name in ["dir-entry", "ts-entry"] {
+            let errors = native_errors(&registry, name);
+            assert_eq!(errors.len(), 1, "{name}: {errors:?}");
+            assert!(errors[0].contains(".mjs or .js"), "{name}: {errors:?}");
+        }
+        assert!(native_errors(&registry, "good-entry").is_empty());
+        assert!(!registry.validation_is_clean());
+    }
+    let _policy = TestPolicyGuard::extension_host(false);
+    let registry = discover_with_config(&config);
+    for name in ["dir-entry", "ts-entry", "good-entry"] {
+        assert!(native_errors(&registry, name).is_empty(), "{name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engines sharing one process-wide host
+// ---------------------------------------------------------------------------
+
+#[test]
+fn attachment_changes_discard_the_complete_scan_before_owner_side_effects() {
+    let manager = Arc::new(ExtensionHostManager::new(ExtensionHostOptions::default()));
+    let old = Arc::new(PluginRegistry::empty(Path::new("/old")));
+    let current = Arc::new(PluginRegistry::empty(Path::new("/current")));
+    let attachment = manager.attach(Arc::clone(&old));
+    let scan = |plugins: &Arc<PluginRegistry>| super::DesiredScan {
+        attachments: vec![(
+            attachment.id,
+            Arc::clone(plugins),
+            [("plugin".into(), "hash-plugin".into())].into(),
+        )],
+        owners: [(
+            "plugin".into(),
+            super::DesiredOwner {
+                plugin_name: "plugin".into(),
+                authority: fake_authority("plugin"),
+                entries: Vec::new(),
+            },
+        )]
+        .into(),
+        errors: Vec::new(),
+    };
+
+    // An old scan finishes after the engine has already changed workspace.
+    attachment.set_plugins(Arc::clone(&current));
+    let mut attachments = manager.shared.attachments.lock().unwrap();
+    assert!(scan(&old).publish(&mut attachments).is_none());
+    assert!(attachments[&attachment.id].desired.is_empty());
+    // A current scan publishes both the engine view and owner union.
+    let (owners, _) = scan(&current).publish(&mut attachments).unwrap();
+    assert!(owners.contains_key("plugin"));
+    assert_eq!(attachments[&attachment.id].desired["plugin"], "hash-plugin");
+    drop(attachments);
+
+    // A newly attached engine also invalidates the complete scan, even when
+    // it uses the same snapshot: otherwise its owners could be revoked.
+    let other = manager.attach(Arc::clone(&current));
+    assert!(
+        scan(&current)
+            .publish(&mut manager.shared.attachments.lock().unwrap())
+            .is_none()
+    );
+    drop(other);
+    let stale = scan(&current);
+    drop(attachment);
+    assert!(
+        stale
+            .publish(&mut manager.shared.attachments.lock().unwrap())
+            .is_none()
+    );
+}
+
+fn installed(engine: &HostAttachment, workspace: &Path) -> Vec<String> {
+    let mut registry =
+        crate::tools::registry::ToolRegistryBuilder::new().build(ToolContext::new(workspace));
+    engine.install_tools(&mut registry)
+}
+
+fn plugin_id(fixture: &FixturePlugins, name: &str) -> String {
+    fixture
+        .registry()
+        .get(name)
+        .unwrap()
+        .id
+        .as_str()
+        .to_string()
+}
+
+/// Two engines for different workspaces in one process: syncing either
+/// keeps the other's plugin active and its in-flight call running, neither
+/// receives the other's tools, and detaching one revokes only its plugin.
+#[tokio::test]
+async fn engines_in_one_process_never_revoke_each_others_plugins() {
+    let Some(node) = node_for_tests("engines_in_one_process") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let slow = FixturePlugins::new(&["slow-tool"]).await;
+    let deps = FixturePlugins::new(&["dsh-workspace-deps"]).await;
+    let (slow_id, deps_id) = (
+        plugin_id(&slow, "slow-tool"),
+        plugin_id(&deps, "dsh-workspace-deps"),
+    );
+    let manager = slow.manager(node);
+    let first = manager.attach(slow.registry());
+    first.sync().await.unwrap();
+    let tool = host_tool(&first, slow.workspace(), "slow_wait");
+    let context = ToolContext::new(slow.workspace());
+    let call = tokio::spawn(async move { tool.execute(json!({"ms": 600}), &context).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A second workspace's engine attaches and syncs mid-call.
+    let second = manager.attach(deps.registry());
+    second.sync().await.unwrap();
+    assert_eq!(manager.owner_state(&slow_id), Some(OwnerState::Active));
+    assert_eq!(manager.owner_state(&deps_id), Some(OwnerState::Active));
+    let result = tokio::time::timeout(Duration::from_secs(5), call)
+        .await
+        .expect("call resolves")
+        .unwrap()
+        .expect("the first engine's in-flight call completes");
+    assert!(result.success, "{}", result.content);
+    assert!(result.content.contains("600"), "{}", result.content);
+
+    assert_eq!(installed(&first, slow.workspace()), vec!["slow_wait"]);
+    assert_eq!(
+        installed(&second, deps.workspace()),
+        vec!["load_workspace_dependencies"]
+    );
+    first.sync().await.unwrap();
+    assert_eq!(manager.owner_state(&deps_id), Some(OwnerState::Active));
+    assert!(
+        !manager.diagnostics().iter().any(|d| d.contains("revoked")),
+        "{:?}",
+        manager.diagnostics()
+    );
+
+    // Detaching does not revoke by itself; the next reconcile revokes only
+    // what no remaining engine desires.
+    drop(second);
+    assert_eq!(manager.owner_state(&deps_id), Some(OwnerState::Active));
+    first.sync().await.unwrap();
+    assert_eq!(manager.owner_state(&deps_id), None);
+    assert_eq!(manager.owner_state(&slow_id), Some(OwnerState::Active));
+    assert_eq!(manager.spawn_attempts(), 1);
+    manager.shutdown().await;
+}
+
+/// Each snapshot is re-verified against persisted plugin state, so a disable
+/// made through one engine's registry revokes the plugin for an engine still
+/// holding the older snapshot.
+#[tokio::test]
+async fn a_disable_through_either_registry_revokes_for_every_engine() {
+    let Some(node) = node_for_tests("a_disable_through_either_registry") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["slow-tool"]).await;
+    let id = plugin_id(&fixture, "slow-tool");
+    let manager = fixture.manager(node);
+    let first = manager.attach(fixture.registry());
+    let second = manager.attach(fixture.registry());
+    first.sync().await.unwrap();
+    assert_eq!(installed(&first, fixture.workspace()), vec!["slow_wait"]);
+    assert_eq!(installed(&second, fixture.workspace()), vec!["slow_wait"]);
+
+    second.set_plugins(fixture.disable("slow-tool"));
+    second.sync().await.unwrap();
+    assert_eq!(manager.owner_state(&id), None, "revoked and forgotten");
+    assert!(installed(&first, fixture.workspace()).is_empty());
+    assert!(installed(&second, fixture.workspace()).is_empty());
     manager.shutdown().await;
 }

@@ -181,7 +181,7 @@ impl CodewhaleClient {
         let request_body =
             serde_json::to_vec(&body).context("Failed to serialize Responses API request body")?;
         let open_req = super::stream_entry::StreamOpenRequest::new(
-            super::stream_entry::stream_open_timeout(),
+            self.stream_open_timeout,
             self.stream_idle_timeout,
         );
         let response = super::stream_entry::open_sse_response(&open_req, |policy| {

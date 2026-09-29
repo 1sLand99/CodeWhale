@@ -517,6 +517,12 @@ impl HostProcess {
         }
     }
 
+    /// How many requests the core has sent this host (handshake included).
+    #[cfg(test)]
+    pub(crate) fn requests_started(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed) - 1
+    }
+
     #[must_use]
     pub fn has_exited(&self) -> bool {
         *self.exited.borrow()
