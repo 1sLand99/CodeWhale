@@ -11099,6 +11099,39 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
 }
 
 #[test]
+fn path_alias_spellings_meet_the_same_typed_file_rules() {
+    let config = EngineConfig {
+        exec_policy_engine: file_ask_rule_engine("write_file", "src/lib.rs"),
+        ..EngineConfig::default()
+    };
+    let expected = Some(ToolAskRuleDecision::Prompt(
+        "Typed ask rule 'tool=write_file path=src/lib.rs' requires approval.".to_string(),
+    ));
+    for (tool, input) in [
+        (
+            "write_file",
+            json!({"filePath": "src/lib.rs", "content": "new\n"}),
+        ),
+        (
+            "write_file",
+            json!({"file_path": "src/lib.rs", "content": "new\n"}),
+        ),
+        (
+            "File",
+            json!({"action": "write", "filePath": "src/lib.rs", "content": "new\n"}),
+        ),
+    ] {
+        let decision =
+            file_tool_ask_rule_decision(&config, tool, &input, Path::new("/repo"), ApprovalMode::Auto);
+        assert_eq!(decision, expected, "{tool} {input}");
+    }
+    assert_eq!(
+        file_write_tool_target_paths("write_file", &json!({"filePath": "src/lib.rs"})),
+        Some(vec!["src/lib.rs".to_string()])
+    );
+}
+
+#[test]
 fn apply_patch_allow_requires_every_touched_path_to_match() {
     let rules = ["src/a.rs", "src/b.rs"]
         .into_iter()

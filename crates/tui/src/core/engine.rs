@@ -7924,15 +7924,32 @@ fn tool_ask_rule_decision_for_context(
     }
 }
 
+/// Every path the file tool will act on. The tools fold `file_path` /
+/// `filePath` onto `path` before executing, so each alias spelling is read
+/// here too; a rule keyed on `path` would otherwise never see that target.
 fn file_tool_permission_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
+    let path_arguments = || {
+        let mut paths: Vec<String> = crate::tools::file::path_argument_keys()
+            .filter_map(|key| string_field(input, key))
+            .collect();
+        paths.dedup();
+        paths
+    };
     match tool_name {
         "read_file" | "write_file" | "edit_file" | "file_search" | "grep_files" => {
-            Some(string_field(input, "path").into_iter().collect())
+            Some(path_arguments())
         }
-        "list_dir" => Some(vec![
-            string_field(input, "path").unwrap_or_else(|| ".".to_string()),
-        ]),
-        "apply_patch" => Some(apply_patch_permission_paths(input)),
+        "list_dir" => {
+            let paths = path_arguments();
+            Some(if paths.is_empty() {
+                vec![".".to_string()]
+            } else {
+                paths
+            })
+        }
+        "apply_patch" => Some(apply_patch_permission_paths(
+            &crate::tools::file::with_canonical_path_argument(input),
+        )),
         _ => None,
     }
 }
