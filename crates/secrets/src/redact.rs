@@ -662,6 +662,21 @@ fn redact_keyed_assignment(body: &str, policy: RedactionPolicy) -> Option<String
         ));
     }
 
+    // `[auth] Authorization failed: You have run out of credits…` is an error
+    // sentence, not a header: the key is several words and does not end in
+    // the credential word. Dropping the rest of the line there hid the
+    // provider's human message (and made the next line read as part of a
+    // broken markdown link). Keep the prose and mask only what still looks
+    // like a secret in it: keyed values, known prefixes, JWTs, opaque runs.
+    // A short value (`password for db: hunter2`, `Authorization header:
+    // Bearer x`) is still treated as the credential it probably is.
+    if is_prose_key(key_norm) && raw_value.split_whitespace().count() >= 3 {
+        return Some(format!(
+            "{raw_key}{sep}{}",
+            mask_credential_shaped_words(&redact_line(raw_value, policy))
+        ));
+    }
+
     // Keep leading whitespace of the key and the original separator spacing so
     // the redacted line reads naturally.
     let key_lead_ws: String = raw_key.chars().take_while(|c| c.is_whitespace()).collect();
@@ -685,6 +700,36 @@ fn redact_keyed_assignment(body: &str, policy: RedactionPolicy) -> Option<String
         "{key_lead_ws}{}{sep}{value_lead_ws}{replacement}",
         raw_key.trim()
     ))
+}
+
+/// Whether a sensitive-looking key is really prose: several words whose last
+/// word is not the credential name (`Authorization failed`, as opposed to
+/// `API Key`, `client secret` or `export API_KEY`).
+fn is_prose_key(key: &str) -> bool {
+    if !key.trim().contains(char::is_whitespace) {
+        return false;
+    }
+    let key_norm = normalize_sensitive_key(key);
+    !SENSITIVE_KEY_HINTS.iter().any(|hint| {
+        let hint = hint.replace('-', "_");
+        key_norm == hint || key_norm.ends_with(&format!("_{hint}"))
+    })
+}
+
+/// Mask every whitespace-delimited word that looks like credential material,
+/// leaving the rest of the text byte-exact.
+fn mask_credential_shaped_words(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            let trimmed = trim_word_punctuation(word);
+            if value_looks_like_credential(trimmed) {
+                word.replace(trimmed, REDACTED)
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn looks_like_secret_token(word: &str) -> bool {
@@ -729,5 +774,44 @@ mod model_bound_json_tests {
         // The key-based pass would have hidden the second half of the command.
         let key_based = redact_json_secrets(&input);
         assert!(!key_based["command"].as_str().unwrap().contains("evil.test"));
+    }
+}
+
+#[cfg(test)]
+mod prose_key_tests {
+    use super::*;
+
+    #[test]
+    fn provider_error_prose_after_authorization_stays_readable() {
+        // Founder run: the TUI showed `Authorization failed: [redacted](provider
+        // …` — the key-based pass read the error sentence as an
+        // `Authorization:` header and dropped the provider's message.
+        let error = "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok.\n(provider `xAI` · requested model `grok-4.6` · route: saved agent profile \"reviewer\" pins xai/grok-4.6)";
+        assert_eq!(redact_secrets(error), error);
+    }
+
+    #[test]
+    fn credentials_inside_prose_and_real_headers_are_still_masked() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        let out = redact_secrets(&format!(
+            "Authorization failed: the server rejected Bearer {jwt} for this route"
+        ));
+        assert!(!out.contains(jwt), "{out}");
+        assert!(out.contains("the server rejected"), "{out}");
+        let out = redact_secrets("Authorization failed: key sk-live-abcdef0123456789 was revoked");
+        assert!(!out.contains("sk-live-abcdef0123456789"), "{out}");
+        // Short values and single-word credential keys keep the old policy.
+        assert_eq!(
+            redact_secrets("password for db: hunter2"),
+            "password for db: [redacted]"
+        );
+        assert_eq!(
+            redact_secrets("Authorization: Bearer abc.def"),
+            "Authorization: [redacted]"
+        );
+        assert_eq!(
+            redact_secrets("API Key: some value here"),
+            "API Key: [redacted]"
+        );
     }
 }

@@ -273,3 +273,202 @@ replacements = ["fixture-backup-model"]
         0
     );
 }
+
+/// The founder's shape: a saved agent profile (not a config pin) routes the
+/// reviewer role to a provider whose account refuses authorization, while
+/// the parent route works.
+fn write_refusing_reviewer_profile(root: &std::path::Path) {
+    let dir = root.join(".codewhale/agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("reviewer.toml"),
+        "id = \"reviewer\"\ndisplay_name = \"reviewer\"\nprovider = \"PinRoute\"\nmodel = \"fixture-pin-model\"\nrole_hint = \"reviewer\"\n",
+    )
+    .unwrap();
+}
+
+struct ProjectProfiles(bool);
+impl ProjectProfiles {
+    fn enabled() -> Self {
+        let previous = crate::fleet::roster::project_agent_profiles_enabled();
+        crate::fleet::roster::set_project_agent_profiles_enabled(true);
+        Self(previous)
+    }
+}
+impl Drop for ProjectProfiles {
+    fn drop(&mut self) {
+        crate::fleet::roster::set_project_agent_profiles_enabled(self.0);
+    }
+}
+
+async fn settle(manager: &SharedSubAgentManager, id: &str) -> SubAgentResult {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let result = manager.read().await.get_result(id).expect("registered");
+            if result.status != SubAgentStatus::Running {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child settles")
+}
+
+#[tokio::test]
+async fn refused_saved_profile_pin_runs_on_the_parent_route_visibly_and_once() {
+    let _env = crate::test_support::lock_test_env();
+    let _profiles = ProjectProfiles::enabled();
+    let root = tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+    let _provider = crate::test_support::EnvVarGuard::set("CODEWHALE_PROVIDER", "deepseek");
+    let _model = crate::test_support::EnvVarGuard::set("CODEWHALE_MODEL", "deepseek-v4-flash");
+    write_refusing_reviewer_profile(root.path());
+    let (tool, context, manager, pin_calls, backup_calls) = reviewer_tool(root.path(), "").await;
+
+    // First worker: the pin is asked once, refuses, and the same request runs
+    // on the parent route with the reason on the receipt.
+    let started = tool
+        .execute(
+            json!({"type": "reviewer", "prompt": "Review the change."}),
+            &context,
+        )
+        .await
+        .unwrap();
+    let meta = started.metadata.clone().unwrap();
+    assert_eq!(meta["child_route"]["route_source"], "agent_profile.model");
+    assert_eq!(meta["child_route"]["provider_id"], "PinRoute");
+    let first = settle(&manager, meta["agent_id"].as_str().unwrap()).await;
+    assert_eq!(
+        first.status,
+        SubAgentStatus::Completed,
+        "{:?}",
+        first.status
+    );
+    assert_eq!(first.result.as_deref(), Some("review done"));
+    assert_eq!(pin_calls.load(Ordering::SeqCst), 1, "the pin is asked once");
+    assert!(
+        backup_calls.load(Ordering::SeqCst) >= 1,
+        "the parent route ran it"
+    );
+    let route = first.child_route.expect("route receipt");
+    assert_eq!(route.route_source, "session.fallback");
+    assert_eq!(route.provider_id, "deepseek");
+    assert_eq!(route.model_id, "deepseek-v4-flash");
+    let note = route.fallback_note.expect("fallback note");
+    for fact in [
+        "saved agent profile \"reviewer\" pins PinRoute/fixture-pin-model",
+        "failed authorization",
+        "run out of credits",
+        "ran on deepseek/deepseek-v4-flash instead",
+    ] {
+        assert!(note.contains(fact), "{fact} missing from {note}");
+    }
+    assert!(!note.contains("fixture-pin-key") && !note.contains("fixture-backup-key"));
+
+    // Second worker in the same session goes straight to the parent route:
+    // the known-bad pin is not asked again.
+    let started = tool
+        .execute(
+            json!({"type": "reviewer", "prompt": "Review the other change."}),
+            &context,
+        )
+        .await
+        .unwrap();
+    let meta = started.metadata.clone().unwrap();
+    assert_eq!(meta["child_route"]["route_source"], "session.fallback");
+    assert_eq!(meta["child_route"]["provider_id"], "deepseek");
+    let note = meta["child_route"]["fallback_note"].as_str().unwrap();
+    assert!(note.contains("earlier this session"), "{note}");
+    assert!(note.contains("PinRoute/fixture-pin-model"), "{note}");
+    let second = settle(&manager, meta["agent_id"].as_str().unwrap()).await;
+    assert_eq!(
+        second.status,
+        SubAgentStatus::Completed,
+        "{:?}",
+        second.status
+    );
+    assert_eq!(pin_calls.load(Ordering::SeqCst), 1, "no second refusal");
+}
+
+#[tokio::test]
+async fn strict_saved_profile_pin_stays_exact_and_names_its_source() {
+    let _env = crate::test_support::lock_test_env();
+    let _profiles = ProjectProfiles::enabled();
+    let root = tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
+    write_refusing_reviewer_profile(root.path());
+    let (tool, _context, _manager, _pin, _backup) = reviewer_tool(root.path(), "").await;
+    let runtime = tool.runtime.clone();
+    let bind = |allow_fallback: bool| {
+        let runtime = runtime.clone();
+        async move {
+            let roster = spawn_roster(&runtime);
+            let mut request =
+                parse_spawn_request(&json!({"type": "reviewer", "prompt": "Review."})).unwrap();
+            let member = resolve_spawn_route_profile(&runtime, &mut request, &roster).unwrap();
+            let mut child = runtime.child_runtime();
+            bind_spawn_model_route(&mut child, &request, member.as_ref(), true, allow_fallback)
+                .await
+                .unwrap();
+            child
+        }
+    };
+
+    let fallback = bind(true).await;
+    let origin = fallback.route_origin.as_deref().expect("origin");
+    assert_eq!(
+        origin.parent.as_ref().map(|parent| parent.label.as_str()),
+        Some("deepseek/deepseek-v4-flash")
+    );
+
+    // An exact Fleet binding forbids the substitution: no parent route is
+    // armed, and the failure names the saved profile and how to change it.
+    let strict = bind(false).await;
+    let origin = strict.route_origin.as_deref().expect("origin");
+    assert!(origin.parent.is_none());
+    let refusal = anyhow::Error::new(LlmError::from_http_response(403, REFUSAL));
+    let message = annotate_child_model_error_with_origin(
+        &subagent_failure_message(&refusal),
+        &strict.model,
+        strict.client.api_provider(),
+        &ModelRoute::Fixed(strict.model.clone()),
+        Some(origin),
+    );
+    for fact in [
+        "run out of credits",
+        "saved agent profile \"reviewer\" pins PinRoute/fixture-pin-model",
+        "/fleet members",
+        "reviewer.toml",
+        "forbids falling back to the parent route",
+    ] {
+        assert!(message.contains(fact), "{fact} missing from {message}");
+    }
+    assert!(
+        !message.contains("explicit child model override"),
+        "no override was given: {message}"
+    );
+}
+
+#[test]
+fn only_typed_auth_and_credit_refusals_move_a_saved_pin() {
+    let refusal = |status| anyhow::Error::new(LlmError::from_http_response(status, REFUSAL));
+    assert!(pin_refusal_reason(&refusal(403)).is_some());
+    assert!(pin_refusal_reason(&refusal(401)).is_some());
+    // Transient failures keep the ordinary retry path; no route change.
+    for transient in [
+        LlmError::RateLimited {
+            message: "slow down".into(),
+            retry_after: None,
+        },
+        LlmError::NetworkError("connection reset".into()),
+        LlmError::ServerError {
+            status: 503,
+            message: "unavailable".into(),
+        },
+        LlmError::ModelError("no such model".into()),
+    ] {
+        assert_eq!(pin_refusal_reason(&anyhow::Error::new(transient)), None);
+    }
+    assert_eq!(pin_refusal_reason(&anyhow!(REFUSAL)), None);
+}

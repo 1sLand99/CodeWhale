@@ -2546,3 +2546,38 @@ async fn tools_call_cap_rejects_runaway_loops() {
         "unexpected: {message}"
     );
 }
+
+/// An absolute `cwd` inside the run's workspace normalizes to the
+/// repo-relative form; outside it, through `..`, or with no known workspace
+/// it is still refused (the trust boundary is unchanged).
+#[test]
+fn absolute_cwd_inside_the_workspace_normalizes_and_outside_is_refused() {
+    use codewhale_workflow_js::{normalize_task_cwd, normalize_task_cwd_in};
+    use std::path::Path;
+    let workspace = Path::new("/Volumes/VIXinSSD/CW");
+    assert_eq!(
+        normalize_task_cwd_in("/Volumes/VIXinSSD/CW/codewhale", Some(workspace)).unwrap(),
+        "codewhale"
+    );
+    assert_eq!(
+        normalize_task_cwd_in("/Volumes/VIXinSSD/CW/", Some(workspace)).unwrap(),
+        "."
+    );
+    assert_eq!(
+        normalize_task_cwd_in("crates/tui", Some(workspace)).unwrap(),
+        normalize_task_cwd("crates/tui").unwrap()
+    );
+    for outside in [
+        "/Volumes/VIXinSSD/CW-other/codewhale",
+        "/etc",
+        "/Volumes/VIXinSSD/CW/../secrets",
+    ] {
+        let error = normalize_task_cwd_in(outside, Some(workspace)).unwrap_err();
+        assert!(
+            error.contains("outside the workspace") || error.contains("parent traversal"),
+            "{outside}: {error}"
+        );
+    }
+    let error = normalize_task_cwd_in("/Volumes/VIXinSSD/CW/codewhale", None).unwrap_err();
+    assert!(error.contains("bounded repo-relative paths"), "{error}");
+}

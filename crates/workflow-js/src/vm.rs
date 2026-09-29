@@ -946,7 +946,8 @@ async fn task_host_inner(
     spawned: Rc<Cell<u64>>,
 ) -> Result<serde_json::Value, TaskError> {
     let admission = |message: String| TaskError::new(TaskErrorKind::Admission, message);
-    let request = parse_task_options(&opts_json)
+    let workspace = driver.workspace_root();
+    let request = parse_task_options(&opts_json, workspace.as_deref())
         .map_err(|message| admission(reject_task(&driver, &opts_json, message)))?;
     // Compile the schema before spawning so a malformed one fails fast
     // instead of burning a subagent.
@@ -1180,7 +1181,10 @@ struct TaskOptions {
     phase: Option<String>,
 }
 
-fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
+fn parse_task_options(
+    opts_json: &str,
+    workspace: Option<&std::path::Path>,
+) -> Result<TaskRequest, String> {
     let mut options: TaskOptions =
         serde_json::from_str(opts_json).map_err(|err| format!("task(): invalid options: {err}"))?;
     if let Some(policy) = options.workspace_policy.take() {
@@ -1220,7 +1224,11 @@ fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
         .map_err(|err| format!("task(): {err}"))?;
     options.write_roots = normalize_task_paths("writeRoots", options.write_roots, 32)?;
     options.exact_files = normalize_task_paths("exactFiles", options.exact_files, 32)?;
-    let cwd = options.cwd.as_deref().map(normalize_task_cwd).transpose()?;
+    let cwd = options
+        .cwd
+        .as_deref()
+        .map(|cwd| normalize_task_cwd_in(cwd, workspace))
+        .transpose()?;
     options.coordination_contracts =
         normalize_task_string_list("coordinationContracts", options.coordination_contracts, 16)?;
     options.dependencies = normalize_task_string_list("dependencies", options.dependencies, 8)?;
@@ -1323,6 +1331,37 @@ fn normalize_task_string_list(
 /// The same bounded repo-relative policy applies to both entry points.
 pub fn normalize_task_cwd(value: &str) -> Result<String, String> {
     normalize_task_paths("cwd", vec![value.to_owned()], 1).map(|mut paths| paths.remove(0))
+}
+
+/// [`normalize_task_cwd`] for a run that knows its workspace root. An
+/// absolute path that lies inside `workspace` is rewritten to the same
+/// bounded repo-relative form; an absolute path outside it, or one that
+/// escapes through `..`, is still rejected. Without a workspace every
+/// absolute path is rejected, exactly as before.
+pub fn normalize_task_cwd_in(
+    value: &str,
+    workspace: Option<&std::path::Path>,
+) -> Result<String, String> {
+    let raw = value.trim();
+    let path = std::path::Path::new(raw);
+    let Some(workspace) = workspace.filter(|_| path.is_absolute()) else {
+        return normalize_task_cwd(value);
+    };
+    // `strip_prefix` compares whole components, so `/ws-other` is not inside
+    // `/ws`; any `..` left in the remainder is rejected below.
+    let relative = path.strip_prefix(workspace).map_err(|_| {
+        format!(
+            "task(): cwd {raw:?} is outside the workspace {}; cwd entries must be bounded repo-relative paths or absolute paths inside the workspace",
+            workspace.display()
+        )
+    })?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| "task(): cwd entries must be bounded repo-relative paths".to_string())?;
+    if relative.is_empty() {
+        return Ok(".".to_string());
+    }
+    normalize_task_cwd(relative)
 }
 
 fn normalize_task_paths(
