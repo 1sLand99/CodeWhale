@@ -6,7 +6,7 @@
  *                      writes a draft per broken link (4xx/5xx). Stores a
  *                      `linkcheck:last` summary so /admin can show last status.
  *
- *   runSemanticDrift — reads recent CHANGELOG / commits, asks deepseek-v4-flash
+ *   runSemanticDrift — reads recent CHANGELOG / commits, asks deepseek-flash
  *                      whether any specific claims on the site look out of
  *                      date, writes review-required drafts.
  *
