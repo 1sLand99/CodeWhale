@@ -1117,6 +1117,7 @@ impl App {
             fleet_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             constitution_draft_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             mcp_login: None,
+            mcp_retries: Vec::new(),
             prompt_suggestion_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             balance_initiated: false,
             last_balance_fetch: None,
