@@ -12,6 +12,7 @@ import {
   hasFreshDraft,
   getDraftResolution,
   digestRecordKey,
+  renderDigestBody,
   logUsage,
   type WeeklyDigestRecord,
   type AgentDraft,
@@ -430,8 +431,8 @@ export async function runDigest(env: AgentEnv): Promise<Record<string, unknown>>
     const draft: AgentDraft = {
       id: weekId,
       type: "digest",
-      bodyEn: `# ${parsed.titleEn}\n\n${parsed.summaryEn}\n\n${parsed.sections.map((s) => `## ${s.heading}\n${s.items.map((i) => `- ${i}`).join("\n")}`).join("\n\n")}`,
-      bodyZh: `# ${parsed.titleZh}\n\n${parsed.summaryZh}\n\n${parsed.sections.map((s) => `## ${s.heading}\n${s.items.map((i) => `- ${i}`).join("\n")}`).join("\n\n")}`,
+      bodyEn: renderDigestBody(parsed, "en"),
+      bodyZh: renderDigestBody(parsed, "zh"),
       generatedAt: new Date().toISOString(),
       posted: false,
     };

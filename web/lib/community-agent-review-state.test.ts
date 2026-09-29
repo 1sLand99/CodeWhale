@@ -27,6 +27,7 @@ import {
   isPublishedDigest,
   listDrafts,
   MAX_LISTED_DRAFTS,
+  reviewedBodyHash,
   saveDraft,
   type AgentDraft,
 } from "./community-agent";
@@ -40,6 +41,8 @@ class FakeKv {
   yieldEachOp = false;
   pageSize = 1000;
   failListAtCursor: string | null = null;
+  /** Awaited before a put lands, to hold a request at an exact step. */
+  beforePut: ((key: string, value: string) => Promise<void>) | null = null;
 
   private async tick() {
     if (this.yieldEachOp) await new Promise((resolve) => setTimeout(resolve, 0));
@@ -52,6 +55,7 @@ class FakeKv {
 
   async put(key: string, value: string): Promise<void> {
     await this.tick();
+    if (this.beforePut) await this.beforePut(key, value);
     if (this.failPutsMatching?.test(key)) throw new Error("kv put failed");
     this.values.set(key, value);
   }
@@ -116,6 +120,22 @@ function adminRequest(body: BodyInit, headers: Record<string, string> = {}): Req
 
 function postBody(value: Record<string, unknown>): string {
   return JSON.stringify(value);
+}
+
+/**
+ * An admin action as the admin page sends it: bound to the stored draft text
+ * in the selected language, as shown to the maintainer.
+ */
+async function act(kv: FakeKv, fields: Record<string, unknown>): Promise<Response> {
+  let reviewedSha256 = fields.reviewedSha256;
+  if (reviewedSha256 === undefined) {
+    const raw = kv.values.get(String(fields.draftKey));
+    const stored = raw ? (JSON.parse(raw) as AgentDraft) : null;
+    reviewedSha256 = await reviewedBodyHash(
+      stored ? (fields.lang === "zh" ? stored.bodyZh : stored.bodyEn) : ""
+    );
+  }
+  return adminPost(adminRequest(postBody({ ...fields, reviewedSha256 })));
 }
 
 function useAdminEnv(kv: FakeKv) {
@@ -196,7 +216,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     useAdminEnv(kv);
     const posts = stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
-    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en" })));
+    const res = await act(kv, { action: "post", draftKey, lang: "en" });
     await expect(res.json()).resolves.toMatchObject({ ok: true, published: true, number: 900 });
     expect(posts).toHaveLength(1);
     const published = JSON.parse(kv.values.get(recordKey)!);
@@ -214,7 +234,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     useAdminEnv(kv);
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
-    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "zh" })));
+    const res = await act(kv, { action: "post", draftKey, lang: "zh" });
     await expect(res.json()).resolves.toMatchObject({ ok: true, published: true });
     expect(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!)).toMatchObject({ approvedLang: "zh" });
   });
@@ -228,9 +248,9 @@ describe("weekly digest publication requires maintainer approval", () => {
     useAdminEnv(kv);
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
-    expect((await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en" })))).status).toBe(200);
+    expect((await act(kv, { action: "post", draftKey, lang: "en" })).status).toBe(200);
 
-    const discard = await adminPost(adminRequest(postBody({ action: "discard", draftKey })));
+    const discard = await act(kv, { action: "discard", draftKey });
     expect(discard.status).toBe(409);
     expect(isPublishedDigest(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!))).toBe(true);
   });
@@ -244,7 +264,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     useAdminEnv(kv);
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
-    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en", editedBody: "# Edited" })));
+    const res = await act(kv, { action: "post", draftKey, lang: "en", editedBody: "# Edited" });
     // The maintainer is told why the digest is not on /digest.
     await expect(res.json()).resolves.toMatchObject({
       ok: true,
@@ -262,7 +282,7 @@ describe("weekly digest publication requires maintainer approval", () => {
 
     useAdminEnv(kv);
     const draftKey = onlyKey(kv, "draft:digest:");
-    const res = await adminPost(adminRequest(postBody({ action: "discard", draftKey })));
+    const res = await act(kv, { action: "discard", draftKey });
     await expect(res.json()).resolves.toMatchObject({ ok: true, action: "discarded" });
     expect([...kv.values.keys()].filter((k) => k.startsWith("digest:weekly-"))).toEqual([]);
 
@@ -281,12 +301,70 @@ describe("weekly digest publication requires maintainer approval", () => {
     useAdminEnv(kv);
     stubGitHub(422);
     const draftKey = onlyKey(kv, "draft:digest:");
-    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en" })));
+    const res = await act(kv, { action: "post", draftKey, lang: "en" });
     expect(res.status).toBe(502);
     const payload = await res.json();
     expect(payload.ok).toBeUndefined();
     expect(payload.error).toMatch(/^GitHub 422/);
     expect(isPublishedDigest(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!))).toBe(false);
+  });
+
+  it("never publishes an older record when a later run saved its draft but not its record", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
+    await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+    const recordKey = onlyKey(kv, "digest:weekly-");
+    const recordA = kv.values.get(recordKey)!;
+
+    // Run B saves its draft, then its record write fails: draft B + record A.
+    mocks.agentChat.mockResolvedValue({
+      content: JSON.stringify({ ...DIGEST_MODEL_OUTPUT, titleEn: "Digest B", summaryEn: "Run B." }),
+      usage: { input: 1, output: 1 },
+    });
+    kv.failPutsMatching = /^digest:weekly-/;
+    await expect(runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" })).resolves.toMatchObject({ ok: false });
+    kv.failPutsMatching = null;
+    const draftKey = onlyKey(kv, "draft:digest:");
+    expect(JSON.parse(kv.values.get(draftKey)!).bodyEn).toContain("Digest B");
+    expect(kv.values.get(recordKey)).toBe(recordA);
+
+    useAdminEnv(kv);
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return jsonResponse({ number: 900, html_url: "https://github.com/Hmbown/CodeWhale/issues/900" }, 201);
+    }));
+    const res = await act(kv, { action: "post", draftKey, lang: "en" });
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      published: false,
+      warning: expect.stringContaining("does not match the reviewed text"),
+    });
+    // GitHub got the reviewed B; /digest shows nothing rather than A.
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0]).title).toBe("Digest B");
+    expect(isPublishedDigest(JSON.parse(kv.values.get(recordKey)!))).toBe(false);
+  });
+
+  it("publishes only the fields of a record that matches the reviewed text", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
+    await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+    const recordKey = onlyKey(kv, "digest:weekly-");
+    kv.values.set(recordKey, JSON.stringify({ ...JSON.parse(kv.values.get(recordKey)!), extra: "<script>" }));
+
+    useAdminEnv(kv);
+    stubGitHub();
+    const draftKey = onlyKey(kv, "draft:digest:");
+    await expect((await act(kv, { action: "post", draftKey, lang: "zh" })).json()).resolves.toMatchObject({
+      published: true,
+    });
+    const published = JSON.parse(kv.values.get(recordKey)!);
+    expect(isPublishedDigest(published)).toBe(true);
+    expect(published).not.toHaveProperty("extra");
+    expect(published).toMatchObject({ approvedLang: "zh", titleZh: DIGEST_MODEL_OUTPUT.titleZh });
   });
 
   it("hides legacy records that were never approved", () => {
@@ -327,7 +405,7 @@ describe("resolved drafts are not resurrected by the cron", () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
     useAdminEnv(kv);
-    const res = await adminPost(adminRequest(postBody({ action: "discard", draftKey: "draft:triage:42" })));
+    const res = await act(kv, { action: "discard", draftKey: "draft:triage:42" });
     expect(res.status).toBe(200);
 
     stubIssues("2020-01-01T00:00:00.000Z");
@@ -341,7 +419,7 @@ describe("resolved drafts are not resurrected by the cron", () => {
     await saveDraft(kv, draft());
     useAdminEnv(kv);
     stubGitHub();
-    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42", lang: "en" })));
+    const res = await act(kv, { action: "post", draftKey: "draft:triage:42", lang: "en" });
     expect(res.status).toBe(200);
 
     // Our own comment bumps updated_at past the draft's generatedAt.
@@ -356,7 +434,7 @@ describe("resolved drafts are not resurrected by the cron", () => {
     await saveDraft(kv, draft());
     useAdminEnv(kv);
     stubGitHub();
-    expect((await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })))).status).toBe(200);
+    expect((await act(kv, { action: "post", draftKey: "draft:triage:42" })).status).toBe(200);
 
     // New commits or a reply a day later.
     stubIssues(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
@@ -365,7 +443,7 @@ describe("resolved drafts are not resurrected by the cron", () => {
 
     // The fresh draft can be posted.
     const posts = stubGitHub();
-    expect((await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })))).status).toBe(200);
+    expect((await act(kv, { action: "post", draftKey: "draft:triage:42" })).status).toBe(200);
     expect(posts).toHaveLength(1);
   });
 
@@ -392,7 +470,7 @@ describe("admin post action is idempotent and bounded", () => {
     useAdminEnv(kv);
     const posts = stubGitHub();
 
-    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    const res = await act(kv, { action: "post", draftKey: "draft:triage:42" });
     expect(res.status).toBe(409);
     expect(posts).toEqual([]);
   });
@@ -404,11 +482,11 @@ describe("admin post action is idempotent and bounded", () => {
     const posts = stubGitHub();
     kv.failPutsMatching = /^draft:triage:42$/;
 
-    const first = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    const first = await act(kv, { action: "post", draftKey: "draft:triage:42" });
     expect(first.status).toBe(200);
     await expect(first.json()).resolves.toMatchObject({ ok: true, action: "posted", warning: expect.any(String) });
 
-    const retry = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    const retry = await act(kv, { action: "post", draftKey: "draft:triage:42" });
     expect(retry.status).toBe(409);
     expect(posts).toHaveLength(1);
   });
@@ -419,11 +497,11 @@ describe("admin post action is idempotent and bounded", () => {
     useAdminEnv(kv);
     stubGitHub(422);
 
-    const failed = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    const failed = await act(kv, { action: "post", draftKey: "draft:triage:42" });
     expect(failed.status).toBe(502);
 
     const posts = stubGitHub();
-    const retry = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    const retry = await act(kv, { action: "post", draftKey: "draft:triage:42" });
     expect(retry.status).toBe(200);
     expect(posts).toHaveLength(1);
   });
@@ -436,18 +514,18 @@ describe("admin post action is idempotent and bounded", () => {
       useAdminEnv(kv);
       const posts = stubGitHub(status);
 
-      const failed = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+      const failed = await act(kv, { action: "post", draftKey: "draft:triage:42" });
       expect(failed.status).toBe(502);
       await expect(failed.json()).resolves.toMatchObject({ error: expect.stringContaining("check GitHub before retrying") });
 
       stubGitHub();
-      const retry = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+      const retry = await act(kv, { action: "post", draftKey: "draft:triage:42" });
       expect(retry.status).toBe(409);
       expect(posts).toHaveLength(1);
     }
   );
 
-  it("posts once when two requests for the same draft race", async () => {
+  it("never posts twice when two requests for the same draft race", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
     kv.yieldEachOp = true;
@@ -455,12 +533,124 @@ describe("admin post action is idempotent and bounded", () => {
     const posts = stubGitHub();
 
     const results = await Promise.all([
-      adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" }))),
-      adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" }))),
+      act(kv, { action: "post", draftKey: "draft:triage:42" }),
+      act(kv, { action: "post", draftKey: "draft:triage:42" }),
+    ]);
+    const statuses = results.map((r) => r.status);
+    // Overlapping claims may both refuse (fail closed), never both proceed.
+    expect(statuses.filter((s) => s === 200)).toHaveLength(posts.length);
+    expect(posts.length).toBeLessThanOrEqual(1);
+    expect(statuses.every((s) => s === 200 || s === 409)).toBe(true);
+
+    // Refused claims are released, so the maintainer's retry posts exactly once.
+    if (posts.length === 0) {
+      expect((await act(kv, { action: "post", draftKey: "draft:triage:42" })).status).toBe(200);
+    }
+    expect(posts).toHaveLength(1);
+    expect((await act(kv, { action: "post", draftKey: "draft:triage:42" })).status).toBe(409);
+    expect(posts).toHaveLength(1);
+  });
+
+  /**
+   * Hold two admin actions at the reviewer's interleaving: both pass the
+   * "no decision yet" check, the first takes its claim and reaches GitHub,
+   * and only then does the second's claim write land.
+   */
+  function raceAfterAbsenceChecks(kv: FakeKv) {
+    let prechecks = 0;
+    let bothChecked!: () => void;
+    const bothCheckedP = new Promise<void>((resolve) => (bothChecked = resolve));
+    let firstAtGitHub!: () => void;
+    const firstAtGitHubP = new Promise<void>((resolve) => (firstAtGitHub = resolve));
+    const realGet = kv.get.bind(kv);
+    kv.get = async (key: string) => {
+      const value = await realGet(key);
+      if (key.startsWith("draft-resolved:") && ++prechecks === 2) bothChecked();
+      return value;
+    };
+    let claimPuts = 0;
+    kv.beforePut = async (key, value) => {
+      // A claim write: its own key, or (the earlier design) a token written
+      // over the shared marker.
+      const isClaim = key.startsWith("draft-claim:") || (key.startsWith("draft-resolved:") && value.includes('"claim"'));
+      if (!isClaim) return;
+      claimPuts += 1;
+      await (claimPuts === 1 ? bothCheckedP : firstAtGitHubP);
+    };
+    const posts: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      posts.push(inputUrl(input));
+      firstAtGitHub();
+      // Let the second request finish its claim while this post is in flight.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return jsonResponse({ id: 1 }, 201);
+    }));
+    return posts;
+  }
+
+  it("refuses a second post whose claim lands while the first is at GitHub", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    kv.yieldEachOp = true;
+    useAdminEnv(kv);
+    const posts = raceAfterAbsenceChecks(kv);
+
+    const results = await Promise.all([
+      act(kv, { action: "post", draftKey: "draft:triage:42" }),
+      act(kv, { action: "post", draftKey: "draft:triage:42" }),
     ]);
 
     expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
     expect(posts).toHaveLength(1);
+  });
+
+  it("refuses a discard that overlaps an in-flight post of the same draft", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    kv.yieldEachOp = true;
+    useAdminEnv(kv);
+    const posts = raceAfterAbsenceChecks(kv);
+
+    const [post, discard] = await Promise.all([
+      act(kv, { action: "post", draftKey: "draft:triage:42" }),
+      act(kv, { action: "discard", draftKey: "draft:triage:42" }),
+    ]);
+
+    expect(post.status).toBe(200);
+    expect(discard.status).toBe(409);
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(kv.values.get("draft-resolved:triage:42")!)).toMatchObject({ state: "posted" });
+    expect(JSON.parse(kv.values.get("draft:triage:42")!)).toMatchObject({ posted: true });
+  });
+
+  it("refuses an action on a draft regenerated after the page loaded, before calling GitHub", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft({ bodyEn: "reviewed A" }));
+    useAdminEnv(kv);
+    const shownA = await reviewedBodyHash("reviewed A");
+    // The cron regenerates the pending draft while the admin page shows A.
+    await saveDraft(kv, draft({ bodyEn: "unseen B", generatedAt: "2026-01-02T00:00:00.000Z" }));
+    const posts = stubGitHub();
+
+    for (const action of ["post", "discard"]) {
+      const res = await act(kv, { action, draftKey: "draft:triage:42", lang: "en", reviewedSha256: shownA });
+      expect(res.status).toBe(409);
+      await expect(res.json()).resolves.toMatchObject({ error: expect.stringContaining("changed") });
+    }
+    expect(posts).toEqual([]);
+    expect(JSON.parse(kv.values.get("draft:triage:42")!)).toMatchObject({ bodyEn: "unseen B", posted: false });
+    expect([...kv.values.keys()].filter((k) => k.startsWith("draft-resolved:") || k.startsWith("draft-claim:"))).toEqual([]);
+  });
+
+  it("requires the reviewed-text hash", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+
+    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    expect(res.status).toBe(400);
+    expect(posts).toEqual([]);
   });
 
   it("answers malformed JSON with a JSON 400", async () => {

@@ -317,8 +317,6 @@ export type DraftResolutionState = "posting" | "posted" | "discarded";
 export interface DraftResolution {
   state: DraftResolutionState;
   at: string;
-  /** Random token of the request holding a "posting" claim. */
-  claim?: string;
 }
 
 const RESOLUTION_PREFIX = "draft-resolved:";
@@ -362,11 +360,7 @@ export async function getDraftResolution(
   try {
     const parsed = JSON.parse(raw) as Partial<DraftResolution>;
     if (parsed.state === "posting" || parsed.state === "posted" || parsed.state === "discarded") {
-      return {
-        state: parsed.state,
-        at: typeof parsed.at === "string" ? parsed.at : "",
-        ...(typeof parsed.claim === "string" ? { claim: parsed.claim } : {}),
-      };
+      return { state: parsed.state, at: typeof parsed.at === "string" ? parsed.at : "" };
     }
   } catch {
     /* fall through: treat an unreadable marker as present */
@@ -388,26 +382,76 @@ export async function markDraftResolved(
 }
 
 /**
- * Claim a draft before posting it to GitHub. Returns false when another
- * request holds or wins the claim.
- *
- * KV has no compare-and-set, so this is best effort, not a lock: it writes a
- * random token and reads it back, which stops concurrent posts that meet in
- * one location (two tabs, a double submit) but cannot fully order writers in
- * different edge locations, because KV is eventually consistent across them.
+ * An exclusive hold on one draft identity while a maintainer action (post or
+ * discard) runs. Each request writes its own claim key, so no request can
+ * overwrite another's claim, and proceeds only if its key is the only one
+ * under the draft's claim prefix.
  */
-export async function claimDraftForPosting(
+export interface DraftClaim {
+  key: string;
+}
+
+const CLAIM_PREFIX = "draft-claim:";
+
+function claimPrefix(type: AgentDraftType, id: string): string {
+  return `${CLAIM_PREFIX}${draftKey(type, id).slice("draft:".length)}:`;
+}
+
+/**
+ * Claim a draft before acting on it. Returns null when another request holds
+ * a claim, or when a decision (posted, discarded, a post in flight) was
+ * recorded before this claim.
+ *
+ * Why this is exclusive: two overlapping claimants each write their key before
+ * they list. Whichever lists second sees both keys, so at most one sees only
+ * its own. If they overlap exactly, both see two keys and both refuse (the
+ * maintainer retries); two can never both proceed. A claimant that arrives
+ * after the winner still sees the winner's key, which is kept until it
+ * expires unless the winner's action definitely did not happen.
+ *
+ * This holds when a list reflects every put that finished before it. Workers
+ * KV guarantees that within one location, not across locations (its writes
+ * can take up to 60 seconds to reach other locations), so two maintainers
+ * posting the same draft from different regions in the same instant are not
+ * serialized. A real compare-and-set authority (a Durable Object) would be
+ * needed for that; this admin surface has one maintainer.
+ */
+export async function claimDraft(
   kv: KVNamespace | undefined,
   type: AgentDraftType,
   id: string
-): Promise<boolean> {
-  if (!kv) return true;
-  const key = resolutionKey(type, id);
-  const claim = crypto.randomUUID();
-  const value: DraftResolution = { state: "posting", at: new Date().toISOString(), claim };
-  await kv.put(key, JSON.stringify(value), { expirationTtl: POSTING_CLAIM_TTL_SEC });
-  const current = await getDraftResolution(kv, type, id);
-  return current?.state === "posting" && current.claim === claim;
+): Promise<DraftClaim | null> {
+  if (!kv) return { key: "" };
+  const prefix = claimPrefix(type, id);
+  const key = prefix + crypto.randomUUID();
+  await kv.put(key, new Date().toISOString(), { expirationTtl: POSTING_CLAIM_TTL_SEC });
+  let won = false;
+  try {
+    const { keys } = await kv.list({ prefix });
+    won = keys.length === 1 && keys[0].name === key;
+    // A decision recorded after the caller's own check still wins.
+    if (won && (await getDraftResolution(kv, type, id))) won = false;
+  } finally {
+    if (!won) await kv.delete(key).catch(() => undefined);
+  }
+  return won ? { key } : null;
+}
+
+/** Give up a claim, for an action that definitely did not happen. */
+export async function releaseDraftClaim(kv: KVNamespace | undefined, claim: DraftClaim): Promise<void> {
+  if (!kv || !claim.key) return;
+  await kv.delete(claim.key);
+}
+
+/**
+ * SHA-256 (hex) of the draft text a maintainer was shown. The admin page
+ * sends it with every action, and the route acts only if the stored draft
+ * still has exactly that text, so a draft regenerated after the page loaded
+ * is never posted, published or discarded unseen.
+ */
+export async function reviewedBodyHash(body: string): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export async function clearDraftResolution(
@@ -471,29 +515,81 @@ export function isPublishedDigest(value: unknown): value is WeeklyDigestRecord {
   );
 }
 
+/** The structured fields of a digest that its markdown body is rendered from. */
+export type DigestContent = Pick<
+  WeeklyDigestRecord,
+  "titleEn" | "titleZh" | "summaryEn" | "summaryZh" | "sections"
+>;
+
 /**
- * Mark the stored digest for `weekId` approved in the language the maintainer
- * reviewed. Returns false if it is gone.
+ * The one renderer from structured digest to the markdown a maintainer
+ * reviews and GitHub receives. Approval re-renders the stored record with it
+ * and publishes only on an exact match with the reviewed draft.
+ */
+export function renderDigestBody(digest: DigestContent, lang: "en" | "zh"): string {
+  const title = lang === "zh" ? digest.titleZh : digest.titleEn;
+  const summary = lang === "zh" ? digest.summaryZh : digest.summaryEn;
+  const sections = digest.sections
+    .map((s) => `## ${s.heading}\n${s.items.map((i) => `- ${i}`).join("\n")}`)
+    .join("\n\n");
+  return `# ${title}\n\n${summary}\n\n${sections}`;
+}
+
+export type DigestApproval = "published" | "missing" | "mismatch";
+
+/**
+ * Publish the stored digest for `draft` in the language the maintainer
+ * reviewed. The record is published only if it is the same generation as the
+ * reviewed draft and renders to exactly the reviewed text; a missing,
+ * malformed or different record (for example, a later cron run whose record
+ * write failed after its draft write) stays unpublished. The publication is a
+ * single put of the approved record.
  */
 export async function approveDigestRecord(
   kv: KVNamespace | undefined,
-  weekId: string,
+  draft: AgentDraft,
   lang: "en" | "zh"
-): Promise<boolean> {
-  if (!kv) return false;
-  const key = digestRecordKey(weekId);
+): Promise<DigestApproval> {
+  if (!kv || draft.type !== "digest") return "missing";
+  const key = digestRecordKey(draft.id);
   const raw = await kv.get(key);
-  if (!raw) return false;
-  const record = JSON.parse(raw) as WeeklyDigestRecord;
-  const approved: WeeklyDigestRecord = {
-    ...record,
+  if (!raw) return "missing";
+  let record: unknown;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    return "mismatch";
+  }
+  const approved = {
+    ...(record && typeof record === "object" ? (record as Record<string, unknown>) : {}),
     approved: true,
     approvedAt: new Date().toISOString(),
     approvedLang: lang,
   };
-  if (!isPublishedDigest(approved)) return false;
-  await kv.put(key, JSON.stringify(approved), { expirationTtl: DIGEST_RECORD_TTL_SEC });
-  return true;
+  if (!isPublishedDigest(approved)) return "mismatch";
+  const reviewed = lang === "zh" ? draft.bodyZh : draft.bodyEn;
+  if (
+    approved.weekId !== draft.id ||
+    approved.generatedAt !== draft.generatedAt ||
+    renderDigestBody(approved, lang) !== reviewed
+  ) {
+    return "mismatch";
+  }
+  // Copy the fields explicitly so nothing else stored under the key is published.
+  const published: WeeklyDigestRecord = {
+    weekId: approved.weekId,
+    titleEn: approved.titleEn,
+    titleZh: approved.titleZh,
+    summaryEn: approved.summaryEn,
+    summaryZh: approved.summaryZh,
+    sections: approved.sections,
+    generatedAt: approved.generatedAt,
+    approved: true,
+    approvedAt: approved.approvedAt,
+    approvedLang: lang,
+  };
+  await kv.put(key, JSON.stringify(published), { expirationTtl: DIGEST_RECORD_TTL_SEC });
+  return "published";
 }
 
 export async function deleteDigestRecord(kv: KVNamespace | undefined, weekId: string): Promise<void> {
