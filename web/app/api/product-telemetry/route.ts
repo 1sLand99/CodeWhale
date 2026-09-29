@@ -19,7 +19,10 @@ import { MAX_ENVELOPE_BYTES, validateEnvelope } from "@/lib/telemetry/product-us
  * holds it.
  */
 
-export const runtime = "edge";
+// No `runtime = "edge"`: @opennextjs/cloudflare does not support the edge
+// runtime, and the deployed worker answered every method with a 500 while it
+// was declared. The default runtime already has fetch, Request, and
+// TextDecoder.
 
 export const CANONICAL_INGEST_URL = "https://telemetry.codewhale.net/v1/telemetry";
 const FORWARD_TIMEOUT_MS = 1500;
