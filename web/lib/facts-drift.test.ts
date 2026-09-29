@@ -15,6 +15,7 @@ const VALID_GENERATED_FACTS =
 function installGitHubFixture(
   toolCountSource: string | null,
   releaseHtmlUrl = "https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.0",
+  sourceOverrides: Record<string, string> = {},
 ): void {
   vi.stubGlobal(
     "fetch",
@@ -51,6 +52,7 @@ function installGitHubFixture(
         `,
         "npm/codewhale/package.json": JSON.stringify({ engines: { node: ">=18" } }),
         LICENSE: "MIT License\n",
+        ...sourceOverrides,
       };
       if (rawPath === "web/lib/facts.generated.ts") {
         return toolCountSource === null ? response("not found", 404) : response(toolCountSource);
@@ -147,6 +149,32 @@ describe("runFactsDrift", () => {
 
     expect(result.ok).toBe(true);
     expect(isRepoFacts(JSON.parse(store.get("facts:current") ?? "null"))).toBe(true);
+  });
+
+  // The scheduled handler discards the result, so the log line is the only
+  // signal that the cron stopped refreshing KV.
+  it("warns and writes nothing when the derived facts fail validation", async () => {
+    installGitHubFixture(VALID_GENERATED_FACTS, undefined, {
+      // A non-string engines.node survives derivation but fails isRepoFacts.
+      "npm/codewhale/package.json": JSON.stringify({ engines: { node: 18 } }),
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = new Map<string, string>();
+    const kv = {
+      get: async (key: string) => store.get(key) ?? null,
+      put: async (key: string, value: string) => {
+        store.set(key, value);
+      },
+    };
+
+    const result = await runFactsDrift({ CURATED_KV: kv });
+
+    expect(result).toEqual({ ok: false, reason: "remote facts failed validation" });
+    expect(store.size).toBe(0);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("[facts-drift] remote facts failed validation"),
+    );
+    warn.mockRestore();
   });
 });
 

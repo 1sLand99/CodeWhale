@@ -391,7 +391,18 @@ export async function runFactsDrift(env: { CURATED_KV?: KVNamespace; GITHUB_TOKE
   const remote = await deriveFactsFromRemote(env.GITHUB_TOKEN);
   if (!remote) return { ok: false, reason: "remote derivation failed" };
   // getFacts() discards a snapshot isRepoFacts rejects, so never store one.
-  if (!isRepoFacts(remote)) return { ok: false, reason: "remote facts failed validation" };
+  // The scheduled handler drops this result, so say it here: otherwise the
+  // cron stops refreshing KV with no signal at all.
+  const { sourceRevision, sourceCommittedAt, version } = remote;
+  if (!isRepoFacts(remote)) {
+    const reason = "remote facts failed validation";
+    console.warn(
+      `[facts-drift] ${reason}; KV snapshot not refreshed ` +
+        `(sourceRevision=${String(sourceRevision)}, ` +
+        `sourceCommittedAt=${String(sourceCommittedAt)}, version=${String(version)})`,
+    );
+    return { ok: false, reason };
+  }
 
   const cachedRaw = await env.CURATED_KV.get(KV_KEY);
   let cached: RepoFacts = BUILD_FACTS;
