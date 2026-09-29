@@ -2880,8 +2880,86 @@ async fn mcp_mutations_while_turn_running_defer_the_live_pool_refresh() {
     )));
 }
 
+fn mcp_retry_snapshot_row(
+    name: &str,
+    connected: bool,
+    error: Option<&str>,
+    auth_required: bool,
+    tools: usize,
+) -> crate::mcp::McpServerSnapshot {
+    crate::mcp::McpServerSnapshot {
+        name: name.into(),
+        enabled: true,
+        required: false,
+        transport: "stdio".into(),
+        command_or_url: "fixture-mcp".into(),
+        connect_timeout: 5,
+        execute_timeout: 5,
+        read_timeout: 5,
+        connected,
+        error: error.map(str::to_string),
+        auth_required,
+        capability_metadata: if connected {
+            crate::mcp::McpServerCapabilityMetadata::LegacyFallback
+        } else {
+            crate::mcp::McpServerCapabilityMetadata::NotObserved
+        },
+        tools: (0..tools)
+            .map(|index| crate::mcp::McpDiscoveredItem {
+                name: format!("tool{index}"),
+                model_name: format!("mcp_{name}_tool{index}"),
+                description: None,
+            })
+            .collect(),
+        resources: Vec::new(),
+        prompts: Vec::new(),
+    }
+}
+
+/// Answer the next `/mcp retry` op the background task sends, then poll the
+/// UI until the outcome is delivered.
+async fn answer_mcp_retry(
+    app: &mut App,
+    mock: &mut crate::core::engine::MockEngineHandle,
+    expected: &str,
+    row: crate::mcp::McpServerSnapshot,
+) {
+    let op = tokio::time::timeout(Duration::from_secs(2), mock.rx_op.recv())
+        .await
+        .expect("the retry op reaches the engine mailbox")
+        .expect("engine mailbox open");
+    let Op::RetryMcpServer { name, tx } = op else {
+        panic!("expected RetryMcpServer");
+    };
+    assert_eq!(name, expected);
+    let sender = tx.lock().unwrap().take().expect("retry reply sender");
+    sender
+        .send(Ok(crate::core::ops::McpManagerUpdate {
+            snapshot: crate::mcp::McpManagerSnapshot {
+                config_path: PathBuf::from("mcp.json"),
+                config_exists: true,
+                reload_required: false,
+                servers: vec![row],
+            },
+            generation: app.mcp_snapshot_generation + 1,
+        }))
+        .unwrap();
+    for _ in 0..200 {
+        poll_mcp_retries(app);
+        if app.mcp_retries.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the retry outcome was never delivered");
+}
+
+/// Founder run: Enter on `reconnect` while a turn ran printed "run /mcp
+/// retry linear again after the turn finishes" and did nothing else. The
+/// retry is now queued behind the turn (the engine mailbox is the queue), the
+/// panel says so, and the outcome is reported when it lands.
 #[tokio::test]
-async fn mcp_retry_while_turn_running_names_the_deferral_and_never_awaits() {
+async fn mcp_retry_while_turn_running_is_queued_then_reports_its_outcome() {
     use crate::tui::app::McpUiAction;
 
     let mut app = create_test_app();
@@ -2900,11 +2978,123 @@ async fn mcp_retry_while_turn_running_names_the_deferral_and_never_awaits() {
     )
     .await
     .expect("retry must not park the UI loop behind the running turn (#6159)");
-    assert!(mock.rx_op.try_recv().is_err());
-    assert!(app.history.iter().any(|cell| matches!(
-        cell,
-        HistoryCell::System { content } if content.contains("/mcp retry flaky")
-    )));
+    assert_eq!(app.mcp_retries.len(), 1);
+    assert!(app.mcp_retries[0].queued);
+    let notice = app.status_toasts.back().unwrap().text.clone();
+    assert!(
+        notice.contains("flaky will reconnect as soon as it finishes"),
+        "{notice}"
+    );
+    assert!(
+        !notice.contains("again"),
+        "the person asked once; they are not told to ask again: {notice}"
+    );
+
+    // A second press while it is pending does not stack a second op.
+    handle_mcp_ui_action(
+        &mut app,
+        &mock.handle,
+        &Config::default(),
+        McpUiAction::Retry {
+            name: "flaky".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(app.mcp_retries.len(), 1);
+
+    answer_mcp_retry(
+        &mut app,
+        &mut mock,
+        "flaky",
+        mcp_retry_snapshot_row(
+            "flaky",
+            false,
+            Some("MCP server 'flaky' rejected initialize (command `uvx`): -32602"),
+            false,
+            0,
+        ),
+    )
+    .await;
+    assert!(
+        mock.rx_op.try_recv().is_err(),
+        "exactly one retry op for one pending row"
+    );
+    let receipt = app.status_toasts.back().unwrap();
+    assert_eq!(receipt.level, StatusToastLevel::Error);
+    assert!(
+        receipt
+            .text
+            .contains("flaky did not connect: MCP server 'flaky' rejected initialize"),
+        "{}",
+        receipt.text
+    );
+    let observed = &app.mcp_snapshot.as_ref().unwrap().servers[0];
+    assert!(observed.error.is_some(), "the panel reads the same outcome");
+}
+
+#[tokio::test]
+async fn mcp_retry_reports_connected_and_needs_login_outcomes() {
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    let mut mock = mock_engine_handle();
+    handle_mcp_ui_action(
+        &mut app,
+        &mock.handle,
+        &Config::default(),
+        McpUiAction::Retry {
+            name: "github".to_string(),
+        },
+    )
+    .await;
+    assert!(!app.mcp_retries[0].queued, "an idle engine connects now");
+    assert!(
+        app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .contains("Connecting github")
+    );
+    answer_mcp_retry(
+        &mut app,
+        &mut mock,
+        "github",
+        mcp_retry_snapshot_row("github", true, None, false, 3),
+    )
+    .await;
+    let receipt = app.status_toasts.back().unwrap();
+    assert_eq!(receipt.level, StatusToastLevel::Success);
+    assert!(
+        receipt.text.contains("github connected: 3 tool(s)"),
+        "{}",
+        receipt.text
+    );
+
+    handle_mcp_ui_action(
+        &mut app,
+        &mock.handle,
+        &Config::default(),
+        McpUiAction::Retry {
+            name: "stripe".to_string(),
+        },
+    )
+    .await;
+    answer_mcp_retry(
+        &mut app,
+        &mut mock,
+        "stripe",
+        mcp_retry_snapshot_row("stripe", false, Some("HTTP 401 Unauthorized"), true, 0),
+    )
+    .await;
+    let receipt = app.status_toasts.back().unwrap();
+    assert_eq!(receipt.level, StatusToastLevel::Warning);
+    assert!(
+        receipt
+            .text
+            .contains("stripe needs a login: run /mcp login stripe"),
+        "{}",
+        receipt.text
+    );
 }
 
 #[tokio::test]
