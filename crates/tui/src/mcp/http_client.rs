@@ -82,10 +82,35 @@ impl McpHttpClient {
         self.execute(request.build()?, true).await
     }
 
+    /// Send the long-lived GET that carries a legacy SSE event stream.
+    ///
+    /// Response headers are still bounded by `read_timeout`, but the body is
+    /// not: reqwest's client-wide timeout also covers body streaming, so it
+    /// would cut a healthy, quiet stream at `read_timeout` and silently drop
+    /// every later server message. Dead peers are still detected by TCP
+    /// keepalive and by the stream ending.
+    pub(super) async fn send_event_stream(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Response> {
+        self.execute_with(request.build()?, true, BodyDeadline::None)
+            .await
+    }
+
     pub(super) async fn execute(
+        &self,
+        request: Request,
+        follow_redirects: bool,
+    ) -> Result<Response> {
+        self.execute_with(request, follow_redirects, BodyDeadline::ReadTimeout)
+            .await
+    }
+
+    async fn execute_with(
         &self,
         mut request: Request,
         follow_redirects: bool,
+        body_deadline: BodyDeadline,
     ) -> Result<Response> {
         if request.url().origin().ascii_serialization() == self.origin {
             for (name, value) in &self.default_headers {
@@ -95,19 +120,23 @@ impl McpHttpClient {
             }
         }
         let timeout = request.timeout().copied().unwrap_or(self.read_timeout);
-        tokio::time::timeout(timeout, self.execute_inner(request, follow_redirects))
-            .await
-            .context("MCP HTTP request timed out")?
+        tokio::time::timeout(
+            timeout,
+            self.execute_inner(request, follow_redirects, body_deadline),
+        )
+        .await
+        .context("MCP HTTP request timed out")?
     }
 
     async fn execute_inner(
         &self,
         mut request: Request,
         follow_redirects: bool,
+        body_deadline: BodyDeadline,
     ) -> Result<Response> {
         for redirect_count in 0..=5 {
             let url = request.url().clone();
-            let client = self.client_for_target(&url).await?;
+            let client = self.client_for_target(&url, body_deadline).await?;
             // MCP and OAuth requests have buffered bodies. Keep the exact request
             // to replay only after the Location has passed the same guard.
             let next_request = request
@@ -159,7 +188,11 @@ impl McpHttpClient {
         unreachable!("redirect loop is bounded")
     }
 
-    async fn client_for_target(&self, url: &Url) -> Result<reqwest::Client> {
+    async fn client_for_target(
+        &self,
+        url: &Url,
+        body_deadline: BodyDeadline,
+    ) -> Result<reqwest::Client> {
         validate_url(url)?;
         let same_origin = url.origin().ascii_serialization() == self.origin;
         if self.reviewed_plugin && !super::reviewed_redirect_matches_origin(url, &self.origin) {
@@ -184,7 +217,10 @@ impl McpHttpClient {
         // Validate DNS before reusing a client too: a new private answer revokes
         // this request. Each cached client itself remains pinned to its old public
         // address, including reconnects after a keep-alive socket expires.
-        let key = format!("{}:{pin:?}", url.origin().ascii_serialization());
+        let key = format!(
+            "{}:{pin:?}:{body_deadline:?}",
+            url.origin().ascii_serialization()
+        );
         if proxy.is_none()
             && let Some(client) = self
                 .clients
@@ -196,8 +232,10 @@ impl McpHttpClient {
         }
         let mut builder = guarded_reqwest_client_builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(self.connect_timeout)
-            .timeout(self.read_timeout);
+            .connect_timeout(self.connect_timeout);
+        if body_deadline == BodyDeadline::ReadTimeout {
+            builder = builder.timeout(self.read_timeout);
+        }
         let proxied = proxy.is_some();
         if let Some(proxy) = proxy {
             builder = builder.proxy(proxy);
@@ -216,6 +254,15 @@ impl McpHttpClient {
         }
         Ok(client)
     }
+}
+
+/// Whether a response body must finish within `read_timeout`. Every MCP and
+/// OAuth request does, except the legacy SSE event stream, whose body is
+/// meant to stay open for the life of the connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyDeadline {
+    ReadTimeout,
+    None,
 }
 
 fn validate_network_policy(url: &Url, network_policy: Option<&NetworkPolicyDecider>) -> Result<()> {
@@ -504,7 +551,10 @@ mod tests {
         .unwrap();
         assert!(
             client
-                .client_for_target(&Url::parse(config.url.as_deref().unwrap()).unwrap())
+                .client_for_target(
+                    &Url::parse(config.url.as_deref().unwrap()).unwrap(),
+                    BodyDeadline::ReadTimeout,
+                )
                 .await
                 .is_err()
         );
@@ -589,9 +639,15 @@ mod tests {
             vec!["8.8.8.8:443".parse().unwrap()],
             vec!["127.0.0.1:443".parse().unwrap()],
         ]));
-        configured.client_for_target(&url).await.unwrap();
+        configured
+            .client_for_target(&url, BodyDeadline::ReadTimeout)
+            .await
+            .unwrap();
         assert_eq!(configured.clients.lock().unwrap().len(), 1);
-        let error = configured.client_for_target(&url).await.unwrap_err();
+        let error = configured
+            .client_for_target(&url, BodyDeadline::ReadTimeout)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("restricted"), "{error:#}");
         assert!(
             configured
@@ -613,7 +669,12 @@ mod tests {
         *configured.dns_answers.lock().unwrap() = Some(std::collections::VecDeque::from([vec![
             "10.0.0.3:443".parse().unwrap(),
         ]]));
-        assert!(configured.client_for_target(&url).await.is_err());
+        assert!(
+            configured
+                .client_for_target(&url, BodyDeadline::ReadTimeout)
+                .await
+                .is_err()
+        );
         let approved = McpHttpClient::new(
             url.as_str(),
             false,
@@ -624,6 +685,9 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
-        approved.client_for_target(&url).await.unwrap();
+        approved
+            .client_for_target(&url, BodyDeadline::ReadTimeout)
+            .await
+            .unwrap();
     }
 }
