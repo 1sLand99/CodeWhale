@@ -82,6 +82,12 @@ def run_shared_process_fixture(mode: str = "pass", expected_sha: str | None = No
             repo / "scripts/with-hermetic-test-home.sh",
         )
         trace = fixture / "cargo-calls.jsonl"
+        outside = fixture / "outside"
+        outside.mkdir()
+        outside_payload = outside / "payload.txt"
+        outside_payload.write_text("outside fixture must remain unchanged", encoding="utf-8")
+        outside_payload.chmod(0o400)
+        outside.chmod(0o500)
         fake_cargo = f"""#!{sys.executable}
 import json, os, sys
 from pathlib import Path
@@ -104,10 +110,35 @@ for identity in identities:
 print('fixture complete: integration targets and doctests reached')
 if os.environ['FIXTURE_MODE'] == 'source_changed':
     Path('scripts/with-hermetic-test-home.sh').write_text('# changed fixture source\\n')
-raise SystemExit(101 if os.environ['FIXTURE_MODE'] == 'first_failure' and not calls else 0)
+if os.environ['FIXTURE_MODE'] in ('readonly_cleanup', 'cleanup_failure'):
+    root = Path(os.environ['TMPDIR']) / 'readonly-runtime'
+    nested = root / 'nested'
+    nested.mkdir(parents=True)
+    (nested / 'payload.txt').write_text('read-only plugin fixture')
+    (nested / 'payload.txt').chmod(0o400)
+    outside = Path(os.environ['FIXTURE_OUTSIDE'])
+    (root / 'external-directory').symlink_to(outside, target_is_directory=True)
+    (root / 'external-file').symlink_to(outside / 'payload.txt')
+    os.link(outside / 'payload.txt', root / 'external-hardlink')
+    nested.chmod(0o500)
+    root.chmod(0o500)
+raise SystemExit(101 if os.environ['FIXTURE_MODE'] in ('first_failure', 'cleanup_failure') and not calls else 0)
+"""
+        fake_rm = f"""#!{sys.executable}
+import os, sys
+from pathlib import Path
+target = Path(sys.argv[-1])
+trace = Path(os.environ['FIXTURE_TRACE'])
+if (os.environ['FIXTURE_MODE'] == 'cleanup_failure'
+        and target.parent == Path('/tmp') and target.name.startswith('cw69.')
+        and len(trace.read_text().splitlines()) == 1):
+    print('fixture: qualification cleanup refused', file=sys.stderr)
+    raise SystemExit(73)
+os.execv({shutil.which('rm')!r}, ['rm', *sys.argv[1:]])
 """
         for name, content in {
             "cargo": fake_cargo,
+            "rm": fake_rm,
             "rustc": "#!/bin/sh\nprintf '%s\\n' 'rustc fixture (no compiler invoked)'\n",
             "rustup": '#!/bin/sh\nprintf "%s\\n" "$FIXTURE_BIN/rustc"\n',
         }.items():
@@ -125,7 +156,7 @@ raise SystemExit(101 if os.environ['FIXTURE_MODE'] == 'first_failure' and not ca
             "RUST_MIN_STACK": "16777216", "RUST_TEST_THREADS": "1",
             "OPENAI_API_KEY": "synthetic-untrusted-fixture-key",
             "FIXTURE_BIN": str(binary), "FIXTURE_TRACE": str(trace),
-            "FIXTURE_MODE": mode,
+            "FIXTURE_MODE": mode, "FIXTURE_OUTSIDE": str(outside),
         }
         for args in (
             ["init", "-q"], ["add", "scripts/with-hermetic-test-home.sh"],
@@ -139,11 +170,25 @@ raise SystemExit(101 if os.environ['FIXTURE_MODE'] == 'first_failure' and not ca
             ["bash", "-c", script], cwd=repo, env=env, text=True, capture_output=True, timeout=30,
         )
         evidence = fixture / "evidence/shared-process-workspace"
-        return {
+        calls = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+        proof = {
             "result": result,
-            "calls": [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else [],
+            "calls": calls,
             "evidence": {path.name: path.read_text() for path in evidence.iterdir()},
+            "qualification_removed": [not Path(call["tmpdir"]).exists() for call in calls],
+            "outside": {
+                "directory_mode": outside.stat().st_mode & 0o777,
+                "file_mode": outside_payload.stat().st_mode & 0o777,
+                "contents": outside_payload.read_text(encoding="utf-8"),
+            },
         }
+        # Only the injected rm failure leaves a root; the workflow has already
+        # made its directories writable. Do not leave the deliberate fixture.
+        for call in calls:
+            if Path(call["tmpdir"]).exists():
+                shutil.rmtree(call["tmpdir"])
+        outside.chmod(0o700)
+        return proof
 
 
 class CiWiringTests(unittest.TestCase):
@@ -319,6 +364,31 @@ class CiWiringTests(unittest.TestCase):
         self.assertEqual(len(proof["calls"]), 2)
         self.assertIn("run=1 cargo_exit=101 log_exit=0", proof["evidence"]["results.txt"])
         self.assertIn("run=2 cargo_exit=0 log_exit=0", proof["evidence"]["results.txt"])
+        self.assertIn("run-1.log", proof["evidence"])
+        self.assertIn("run-2.log", proof["evidence"])
+
+    def test_shared_process_cleans_readonly_directories_without_following_links(self) -> None:
+        proof = run_shared_process_fixture("readonly_cleanup")
+        self.assertEqual(proof["result"].returncode, 0, proof["result"].stderr)
+        self.assertEqual(len(proof["calls"]), 2)
+        self.assertEqual(proof["qualification_removed"], [True, True])
+        self.assertEqual(proof["outside"], {
+            "directory_mode": 0o500, "file_mode": 0o400,
+            "contents": "outside fixture must remain unchanged",
+        })
+        for run in (1, 2):
+            self.assertIn(f"run={run} permission_exit=0 cleanup_exit=0", proof["evidence"]["results.txt"])
+
+    def test_shared_process_cleanup_failure_retains_cargo_failure_and_runs_second(self) -> None:
+        proof = run_shared_process_fixture("cleanup_failure")
+        self.assertNotEqual(proof["result"].returncode, 0)
+        self.assertEqual(len(proof["calls"]), 2)
+        self.assertEqual(proof["qualification_removed"], [False, True])
+        results = proof["evidence"]["results.txt"]
+        self.assertIn("run=1 cargo_exit=101 log_exit=0", results)
+        self.assertIn("run=1 permission_exit=0 cleanup_exit=73", results)
+        self.assertIn("run=2 cargo_exit=0 log_exit=0", results)
+        self.assertIn("run=2 permission_exit=0 cleanup_exit=0", results)
         self.assertIn("run-1.log", proof["evidence"])
         self.assertIn("run-2.log", proof["evidence"])
 

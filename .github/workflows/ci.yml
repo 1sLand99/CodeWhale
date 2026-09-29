@@ -987,7 +987,17 @@ jobs:
               printf 'run=%s source_changed=true\n' "$run" >> "$evidence/results.txt"
               failed=1
             fi
-            rm -rf -- "$qualification_tmp"
+            # Plugin fixtures can leave read-only directories outside HOME.
+            # Change only owned directories; never follow links or chmod files.
+            permission_exit=0
+            find -P "$qualification_tmp" -type d -exec chmod u+w {} + || permission_exit=$?
+            cleanup_exit=0
+            rm -rf -- "$qualification_tmp" || cleanup_exit=$?
+            printf 'run=%s permission_exit=%s cleanup_exit=%s\n' \
+              "$run" "$permission_exit" "$cleanup_exit" >> "$evidence/results.txt"
+            if [[ "$permission_exit" != 0 || "$cleanup_exit" != 0 ]]; then
+              failed=1
+            fi
           done
           cat "$evidence/results.txt"
           exit "$failed"
