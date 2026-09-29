@@ -147,9 +147,22 @@ test("termination signals reach the native child and its status is kept", async 
     process: proc,
   });
   await new Promise((resolve) => setImmediate(resolve));
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  // Terminal signals are outlived, never forwarded: the terminal already
+  // delivered them to the child through the process group.
+  for (const signal of ["SIGINT", "SIGHUP"]) {
     assert.equal(proc.listenerCount(signal), 1, signal);
+    proc.emit(signal);
   }
+  assert.deepEqual(killed, []);
+  const forwarded = _internal.FORWARDED_SIGNALS;
+  assert.deepEqual(forwarded, process.platform === "win32" ? [] : ["SIGTERM"]);
+  if (forwarded.length === 0) {
+    child.emit("exit", 0, null);
+    await running;
+    assert.deepEqual(exits, [0]);
+    return;
+  }
+  assert.equal(proc.listenerCount("SIGTERM"), 1);
   proc.emit("SIGTERM");
   await running;
 
@@ -221,6 +234,60 @@ test(
     } finally {
       if (childPid && alive(childPid)) process.kill(childPid, "SIGKILL");
       if (wrapper.exitCode === null && wrapper.signalCode === null) wrapper.kill("SIGKILL");
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Ctrl-C to the terminal's process group reaches the native child once",
+  { skip: process.platform === "win32" && "POSIX process groups only", timeout: 20000 },
+  async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "codewhale-run-sigint-"));
+    const pidFile = path.join(dir, "child.pid");
+    const logFile = path.join(dir, "signals.log");
+    // Count every SIGINT, then exit the way a Ctrl-C'd CLI does.
+    const childScript =
+      `const fs = require("fs");` +
+      `process.on("SIGINT", () => { fs.appendFileSync(${JSON.stringify(logFile)}, "INT\\n");` +
+      ` setTimeout(() => process.exit(130), 300); });` +
+      `fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+      "setInterval(() => {}, 1000);";
+    const wrapperScript =
+      `require(${JSON.stringify(path.join(__dirname, "..", "scripts", "run.js"))})` +
+      `.run("codewhale", { getBinaryPath: async () => process.execPath, ` +
+      `args: ["-e", ${JSON.stringify(childScript)}] });`;
+    // `detached` makes the wrapper a process-group leader, standing in for the
+    // terminal's foreground job; the native child joins that group.
+    const wrapper = spawn(process.execPath, ["-e", wrapperScript], {
+      stdio: "ignore",
+      detached: true,
+    });
+    let childPid = null;
+    try {
+      const deadline = Date.now() + 10000;
+      while (childPid === null && Date.now() < deadline) {
+        try {
+          childPid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10) || null;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      assert.ok(childPid, "native child should have started");
+      const wrapperExit = new Promise((resolve) =>
+        wrapper.once("exit", (code, signal) => resolve({ code, signal })),
+      );
+      process.kill(-wrapper.pid, "SIGINT");
+      const ended = await wrapperExit;
+      const received = fs.readFileSync(logFile, "utf8").trim().split("\n");
+      assert.deepEqual(received, ["INT"], "the child must see one SIGINT, not a forwarded copy");
+      assert.deepEqual(ended, { code: 130, signal: null });
+    } finally {
+      try {
+        process.kill(-wrapper.pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
       await fs.promises.rm(dir, { recursive: true, force: true });
     }
   },

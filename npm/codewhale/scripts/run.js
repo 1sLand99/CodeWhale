@@ -43,14 +43,24 @@ function printVersionFallback(binaryName, error) {
 }
 
 // Signals that end the wrapper must end the native binary too. With a
-// blocking spawn the wrapper died on SIGTERM/SIGHUP and left the child running
-// (still executing tools, still holding its port); as PID 1 in a container it
-// ignored SIGTERM entirely. The native binary treats the first of these as
-// "terminate", so a duplicate from the terminal's process group is harmless.
-const FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+// blocking spawn the wrapper died on SIGTERM and left the child running (still
+// executing tools, still holding its port); as PID 1 in a container it ignored
+// SIGTERM entirely. So SIGTERM, which a terminal never sends, is forwarded.
+//
+// SIGINT (Ctrl-C) and SIGHUP (terminal hangup) come from the terminal, which
+// delivers them to the whole foreground process group, native child included.
+// Forwarding them would deliver each one twice, and the native binary treats a
+// second signal as "skip the graceful drain". On Windows `child.kill()` is a
+// hard TerminateProcess, which would race the child's own Ctrl-C cleanup. The
+// wrapper only has to outlive them, then mirror how the child ended.
+const FORWARDED_SIGNALS = process.platform === "win32" ? [] : ["SIGTERM"];
+const OUTLIVED_SIGNALS = ["SIGINT", "SIGHUP"];
+
+function ignoreSignal() {}
 
 // Run the native binary and settle with how it ended. While it runs, the
-// forwarded signals go to the child instead of killing the wrapper.
+// forwarded signals go to the child and the outlived ones do not kill the
+// wrapper.
 function runChild(spawn, binaryPath, args, proc) {
   return new Promise((resolve) => {
     let child;
@@ -60,23 +70,28 @@ function runChild(spawn, binaryPath, args, proc) {
       resolve({ error });
       return;
     }
-    const forwarders = FORWARDED_SIGNALS.map((signal) => {
-      const forward = () => {
-        try {
-          child.kill(signal);
-        } catch {
-          // The child already exited; its exit event settles the run.
-        }
-      };
-      proc.on(signal, forward);
-      return [signal, forward];
-    });
+    const listeners = [
+      ...FORWARDED_SIGNALS.map((signal) => [
+        signal,
+        () => {
+          try {
+            child.kill(signal);
+          } catch {
+            // The child already exited; its exit event settles the run.
+          }
+        },
+      ]),
+      ...OUTLIVED_SIGNALS.map((signal) => [signal, ignoreSignal]),
+    ];
+    for (const [signal, listener] of listeners) {
+      proc.on(signal, listener);
+    }
     let settled = false;
     const settle = (result) => {
       if (settled) return;
       settled = true;
-      for (const [signal, forward] of forwarders) {
-        proc.removeListener(signal, forward);
+      for (const [signal, listener] of listeners) {
+        proc.removeListener(signal, listener);
       }
       resolve(result);
     };
@@ -147,7 +162,7 @@ module.exports = {
   runCodeWhale,
   runCodeWhaleTui,
   reportStartFailure,
-  _internal: { isVersionFlag, printVersionFallback },
+  _internal: { isVersionFlag, printVersionFallback, FORWARDED_SIGNALS, OUTLIVED_SIGNALS },
 };
 
 if (require.main === module) {
