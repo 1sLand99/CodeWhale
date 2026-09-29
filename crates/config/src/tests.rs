@@ -10340,3 +10340,57 @@ fn key_and_cookie_names_are_classified_as_sensitive() {
     let shown = listed.get("http_headers").expect("headers listed");
     assert!(!shown.contains("apim-value-0123456789abcdef"), "{shown}");
 }
+
+#[test]
+fn config_backup_strips_every_credential_named_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    let original = r#"chatgpt_access_token = "root-access-token-value"
+model = "deepseek-v4-pro"
+
+[lifecycle_outbox]
+path = "/tmp/outbox.jsonl"
+webhook_token = "webhook-token-value"
+
+[providers.openrouter]
+api_key = "provider-api-key-value"
+auth_mode = "api_key"
+
+[providers.openrouter.http_headers]
+Authorization = "Bearer header-bearer-value"
+X-Title = "kept-title"
+
+[future_section]
+profiles = [{ secret_key = "inline-array-secret-value", label = "kept-label" }]
+"#;
+    fs::write(&path, original).expect("seed config");
+
+    let mut store = ConfigStore::load(Some(path.clone())).expect("load config");
+    store.config.model = Some("deepseek-v4-flash".to_string());
+    store.save().expect("changed save");
+
+    let backup = fs::read_to_string(config_backup_path(&path)).expect("read backup");
+    for secret in [
+        "root-access-token-value",
+        "webhook-token-value",
+        "provider-api-key-value",
+        "header-bearer-value",
+        "inline-array-secret-value",
+    ] {
+        assert!(
+            !backup.contains(secret),
+            "{secret} left in backup:\n{backup}"
+        );
+    }
+    for kept in [
+        "auth_mode = \"api_key\"",
+        "kept-title",
+        "kept-label",
+        "model = \"deepseek-v4-pro\"",
+    ] {
+        assert!(
+            backup.contains(kept),
+            "{kept} missing from backup:\n{backup}"
+        );
+    }
+}

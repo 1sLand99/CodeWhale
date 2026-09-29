@@ -5566,12 +5566,17 @@ fn checked_config_backup_path(path: &Path) -> Result<PathBuf> {
 /// while ensuring that moving a key into the durable secret store does not
 /// leave the same credential behind in an older backup.
 pub fn scrub_plaintext_api_keys_from_config_backup(path: &Path) -> Result<()> {
-    let backup = checked_config_backup_path(path)?;
+    scrub_credentials_from_backup_file(&checked_config_backup_path(path)?)
+}
+
+/// Rewrite an existing backup without credential-named keys; see
+/// [`config_toml_without_plaintext_api_keys`].
+fn scrub_credentials_from_backup_file(backup: &Path) -> Result<()> {
     if !backup.exists() {
         return Ok(());
     }
 
-    let raw = read_checked_toml_file(&backup, "config backup")?;
+    let raw = read_checked_toml_file(backup, "config backup")?;
     let scrubbed = config_toml_without_plaintext_api_keys(&raw).with_context(|| {
         format!(
             "failed to scrub plaintext API keys from config backup {}",
@@ -5579,7 +5584,7 @@ pub fn scrub_plaintext_api_keys_from_config_backup(path: &Path) -> Result<()> {
         )
     })?;
     if scrubbed != raw {
-        persistence::atomic_write(&backup, scrubbed.as_bytes()).with_context(|| {
+        persistence::atomic_write(backup, scrubbed.as_bytes()).with_context(|| {
             format!(
                 "failed to write credential-free config backup {}",
                 backup.display()
@@ -5676,7 +5681,14 @@ pub(crate) fn note_legacy_root_file_migration(path: &Path, original_raw: &str) -
 /// top-level keys first moved. Later migrations never overwrite it.
 pub(crate) fn write_legacy_root_backup(path: &Path, original_raw: &str) -> Result<PathBuf> {
     let backup = checked_config_sibling_path(path, &pre_migrate_backup_file_name(path))?;
-    if !backup.exists() {
+    if backup.exists() {
+        // Written once and kept; still repair one left by a release that
+        // scrubbed only `api_key`. Best effort: an unreadable old backup must
+        // not block the save that is moving keys now.
+        if let Err(err) = scrub_credentials_from_backup_file(&backup) {
+            tracing::warn!("{err:#}");
+        }
+    } else {
         let scrubbed = config_toml_without_plaintext_api_keys(original_raw)?;
         persistence::atomic_write(&backup, scrubbed.as_bytes()).with_context(|| {
             format!(
@@ -5737,16 +5749,45 @@ fn config_toml_without_plaintext_api_keys(raw: &str) -> Result<String> {
     Ok(document.to_string())
 }
 
+/// Drop every credential-named key ([`is_sensitive_config_key`]: `api_key`,
+/// `webhook_token`, `Authorization` under `http_headers`, ...) at any depth,
+/// including tables inside arrays. The backups are kept indefinitely and are
+/// described as credential-free, so a rotated secret must not live on there.
 fn remove_plaintext_api_keys_recursive(table: &mut dyn toml_edit::TableLike) {
-    // Keep a comment written above the key (often the file header).
-    config_document::remove_key_preserving_leading_decor(table, "api_key");
+    let sensitive: Vec<String> = table
+        .iter()
+        .filter(|(key, _)| is_sensitive_config_key(key))
+        .map(|(key, _)| key.to_owned())
+        .collect();
+    for key in sensitive {
+        // Keep a comment written above the key (often the file header).
+        config_document::remove_key_preserving_leading_decor(table, &key);
+    }
     for (_, item) in table.iter_mut() {
-        if let toml_edit::Item::ArrayOfTables(tables) = item {
-            for nested in tables.iter_mut() {
-                remove_plaintext_api_keys_recursive(nested);
+        match item {
+            toml_edit::Item::ArrayOfTables(tables) => {
+                for nested in tables.iter_mut() {
+                    remove_plaintext_api_keys_recursive(nested);
+                }
             }
-        } else if let Some(nested) = item.as_table_like_mut() {
-            remove_plaintext_api_keys_recursive(nested);
+            toml_edit::Item::Value(toml_edit::Value::Array(array)) => {
+                remove_plaintext_api_keys_in_array(array);
+            }
+            _ => {
+                if let Some(nested) = item.as_table_like_mut() {
+                    remove_plaintext_api_keys_recursive(nested);
+                }
+            }
+        }
+    }
+}
+
+fn remove_plaintext_api_keys_in_array(array: &mut toml_edit::Array) {
+    for value in array.iter_mut() {
+        match value {
+            toml_edit::Value::InlineTable(table) => remove_plaintext_api_keys_recursive(table),
+            toml_edit::Value::Array(nested) => remove_plaintext_api_keys_in_array(nested),
+            _ => {}
         }
     }
 }
