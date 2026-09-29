@@ -56,12 +56,14 @@ pub(crate) fn session_files(
         if let Some(checkpoints) = canonical_store_root(&root.join("checkpoints"), unreadable) {
             dirs.push(checkpoints);
         }
-        // Pre-import transcript copies hold the same tool output.
-        if let Some(archive) = canonical_store_root(
-            &root.join(crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR),
-            unreadable,
-        ) {
-            dirs.push(archive);
+        // Pre-import transcript copies hold the same tool output. Session
+        // deletion does not follow a linked archive directory, so neither does
+        // the scrub: it is reported as not covered instead.
+        let archive = root.join(crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR);
+        match std::fs::symlink_metadata(&archive) {
+            Ok(metadata) if metadata.is_dir() => dirs.push(archive),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => unreadable.push(archive),
         }
         for session in directory_entries(&root, unreadable) {
             if !entry_has_type(&session, true, unreadable) {
@@ -188,10 +190,15 @@ pub(crate) fn configured_secrets(
     ))
 }
 
-fn is_import_archive(path: &Path) -> bool {
-    path.parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR)
+/// Whether `path` sits directly in `manager`'s pre-import archive directory
+/// (never a linked one; see [`session_files`]).
+fn is_import_archive(path: &Path, manager: &crate::session_manager::SessionManager) -> bool {
+    let archive = manager
+        .sessions_dir()
+        .join(crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR);
+    std::fs::symlink_metadata(&archive).is_ok_and(|metadata| metadata.is_dir())
+        && std::fs::canonicalize(&archive)
+            .is_ok_and(|archive| path.parent() == Some(archive.as_path()))
 }
 
 fn runtime_root(path: &Path) -> Option<&Path> {
@@ -243,9 +250,18 @@ pub(crate) fn scrub_files(
                         .with_session_file_lock(id, || scrub_file(path, true, secrets).map(|_| ()))
                 }) {
                     Some(Ok(Some(()))) => FileScan::Dirty(redacted),
-                    // A pre-import copy left behind by a session deleted before
-                    // deletion removed it: rewriting it resurrects nothing.
-                    Some(Ok(None)) if is_import_archive(path) => scrub_file(path, true, secrets)?,
+                    // A pre-import copy an earlier build left behind when it
+                    // deleted the session. Finish that deletion: rewriting it
+                    // would keep a deleted transcript, and could put back a
+                    // copy a concurrent delete had just removed.
+                    Some(Ok(None)) if is_import_archive(path, manager) => {
+                        match std::fs::remove_file(path) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(error),
+                        }
+                        FileScan::Dirty(redacted)
+                    }
                     // A deleted session is not resurrected by a rewrite.
                     Some(Ok(None)) => FileScan::Clean,
                     // No lockable session id: leave the file untouched.
@@ -454,8 +470,8 @@ mod tests {
     }
 
     /// The pre-import copy of a transcript holds the same tool output. It is
-    /// scrubbed with the sessions, including a copy an earlier build left
-    /// behind for a session that has since been deleted.
+    /// scrubbed with the sessions. A copy an earlier build left behind for a
+    /// session it deleted is removed, finishing that deletion.
     #[test]
     fn work_graph_import_archive_copies_are_scrubbed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -482,10 +498,39 @@ mod tests {
         let report = scrub_files(&files, Some(&manager), &[]).expect("scrub");
 
         assert_eq!(report.flagged_files.len(), 2, "{report:?}");
-        for path in [&kept, &orphan] {
-            let text = std::fs::read_to_string(path).unwrap();
-            assert!(!text.contains(TOKEN), "{}: {text}", path.display());
-        }
+        let text = std::fs::read_to_string(&kept).unwrap();
+        assert!(!text.contains(TOKEN), "{text}");
+        assert!(!orphan.exists(), "the deleted session's copy is removed");
+    }
+
+    /// A linked archive directory is not followed, matching session deletion.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_import_archive_is_reported_not_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions = dir.path().join("sessions");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let outside = elsewhere.join("gone.json");
+        let output = format!("{{\"access_token\": \"{TOKEN}\"}}");
+        std::fs::write(&outside, session_with_tool_output(&output).to_string()).unwrap();
+        std::os::unix::fs::symlink(
+            &elsewhere,
+            sessions.join(crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR),
+        )
+        .unwrap();
+
+        let mut unreadable = Vec::new();
+        let files = session_files(&sessions, &dir.path().join("standalone"), &mut unreadable);
+
+        assert!(
+            !files.iter().any(|file| file.ends_with("gone.json")),
+            "{files:?}"
+        );
+        assert_eq!(unreadable.len(), 1, "{unreadable:?}");
+        assert!(unreadable[0].ends_with(crate::session_manager::WORK_GRAPH_IMPORT_ARCHIVE_DIR));
+        assert!(std::fs::read_to_string(&outside).unwrap().contains(TOKEN));
     }
 
     #[test]

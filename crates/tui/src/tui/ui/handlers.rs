@@ -1684,7 +1684,9 @@ pub(crate) async fn handle_view_events(
                     }
                 };
 
-                match manager.resume_session(&session_id) {
+                // Another window's open session is refused, not attached
+                // as a second autosaving writer.
+                match manager.attach_session(&session_id) {
                     Ok(recovery) => {
                         let session = recovery.session;
                         let next_config = config.clone();

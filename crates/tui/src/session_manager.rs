@@ -445,6 +445,21 @@ pub fn set_live_session(session_id: Option<&str>) {
 static LIVE_SESSION_LEASE: std::sync::Mutex<Option<(String, Option<fs::File>)>> =
     std::sync::Mutex::new(None);
 
+/// Lock attempts [`SessionManager::claim_live_session_for_attach`] makes
+/// before it treats contention as a running owner.
+const LIVE_LEASE_ATTACH_ATTEMPTS: u32 = 3;
+
+/// The refusal for attaching to a session another process has open.
+pub(crate) fn session_open_elsewhere(session_id: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::ResourceBusy,
+        format!(
+            "session {session_id} is open in another Codewhale window. \
+             Continue it there, or run `codewhale fork {session_id}` to work on a copy"
+        ),
+    )
+}
+
 /// Is this session currently owned by **this process's** interactive surface?
 ///
 /// The registry is process-local. Reclamation must not treat a missing entry
@@ -1499,24 +1514,86 @@ impl SessionManager {
         let Ok(mut lease) = LIVE_SESSION_LEASE.lock() else {
             return;
         };
-        if lease.as_ref().is_some_and(|(held, _)| held == id) {
-            return;
-        }
+        // A lease already held is kept. One that could not be taken is tried
+        // again: another process's liveness probe briefly holds the same lock,
+        // and a claim that lost that race once must not run unleased for the
+        // rest of the session.
+        let retry = match lease.as_ref() {
+            Some((held, Some(_))) if held == id => return,
+            Some((held, None)) => held == id,
+            _ => false,
+        };
         let file = self.live_lease_path(id, true).and_then(|path| {
             let file = open_private_lock_file(&path)?;
             Ok(crate::runtime_threads::try_lock_file_exclusive(&file)?.then_some(file))
         });
         match &file {
             Ok(Some(_)) => {}
-            Ok(None) => tracing::warn!(
+            Ok(None) if !retry => tracing::warn!(
                 session_id = id,
                 "another Codewhale process already holds this session open"
             ),
+            Ok(None) => {}
             Err(error) => {
                 tracing::debug!(session_id = id, %error, "session live lease unavailable");
             }
         }
         *lease = Some((id.to_string(), file.ok().flatten()));
+    }
+
+    /// Claim `session_id` before attaching to it (`resume`, `--continue`,
+    /// `exec --resume`, the session picker). Unlike [`Self::claim_live_session`],
+    /// which records whatever it gets, this refuses with `ResourceBusy` when
+    /// another process holds the session open: attaching anyway gives the
+    /// document two autosaving writers, and the last save silently drops the
+    /// other's turns. Taking the lock is the check, so nothing can claim the
+    /// session between a check and the attach.
+    ///
+    /// A lease file that cannot be opened (an unwritable store) does not block
+    /// the attach; saves will surface that failure on their own.
+    pub fn claim_live_session_for_attach(&self, session_id: &str) -> io::Result<()> {
+        let id = self.validated_session_id(session_id)?;
+        if LIVE_SESSION_LEASE
+            .lock()
+            .is_ok_and(|lease| matches!(lease.as_ref(), Some((held, Some(_))) if held == id))
+        {
+            set_live_session(Some(id));
+            return Ok(());
+        }
+        let file = match self
+            .live_lease_path(id, true)
+            .and_then(|path| open_private_lock_file(&path))
+        {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::debug!(session_id = id, %error, "session live lease unavailable");
+                self.claim_live_session(id);
+                return Ok(());
+            }
+        };
+        // A liveness probe from another process holds this lock for a moment;
+        // a few short retries tell that apart from a running owner.
+        for attempt in 0..LIVE_LEASE_ATTACH_ATTEMPTS {
+            match crate::runtime_threads::try_lock_file_exclusive(&file) {
+                Ok(true) => {
+                    set_live_session(Some(id));
+                    if let Ok(mut lease) = LIVE_SESSION_LEASE.lock() {
+                        *lease = Some((id.to_string(), Some(file)));
+                    }
+                    return Ok(());
+                }
+                Ok(false) if attempt + 1 < LIVE_LEASE_ATTACH_ATTEMPTS => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(session_id = id, %error, "session live lease unavailable");
+                    self.claim_live_session(id);
+                    return Ok(());
+                }
+            }
+        }
+        Err(session_open_elsewhere(id))
     }
 
     /// Is `session_id` open in an interactive session in this process *or any
@@ -1541,6 +1618,16 @@ impl SessionManager {
             crate::runtime_threads::try_lock_file_exclusive(&file),
             Ok(false)
         )
+    }
+
+    /// Hold `session_id`'s live lease the way another running Codewhale
+    /// process does: an OS lock on its own open file description.
+    #[cfg(test)]
+    pub(crate) fn hold_live_lease_elsewhere(&self, session_id: &str) -> fs::File {
+        let path = self.live_lease_path(session_id, true).expect("lease path");
+        let lease = open_private_lock_file(&path).expect("open lease");
+        assert!(crate::runtime_threads::try_lock_file_exclusive(&lease).expect("lock lease"));
+        lease
     }
 
     /// Whether a saved document exists for `session_id`.
@@ -2641,6 +2728,20 @@ impl SessionManager {
         Ok(recovery)
     }
 
+    /// [`Self::resume_session`] for a surface that will own and autosave the
+    /// session: it first takes the session's live lease, and refuses with
+    /// `ResourceBusy` when another process has it open
+    /// ([`Self::claim_live_session_for_attach`]).
+    pub fn attach_session(&self, id: &str) -> std::io::Result<SessionRecovery> {
+        self.claim_live_session_for_attach(id)?;
+        self.resume_session(id)
+    }
+
+    /// [`Self::attach_session`] with a partial-ID prefix.
+    pub fn attach_session_by_prefix(&self, prefix: &str) -> std::io::Result<SessionRecovery> {
+        self.attach_session(&self.resolve_session_id_prefix(prefix)?)
+    }
+
     /// [`Self::resume_session`] with a partial-ID prefix.
     pub fn resume_session_by_prefix(&self, prefix: &str) -> std::io::Result<SessionRecovery> {
         self.resume_session(&self.resolve_session_id_prefix(prefix)?)
@@ -2868,6 +2969,36 @@ impl SessionManager {
         self.remove_session(id, SessionRemoval::Explicit)
     }
 
+    /// Remove the pre-import copy of `session_path` that the first
+    /// graph-bearing write kept (see `archive_before_first_graph_write`): it is
+    /// the same transcript, so a deleted session must not survive in it.
+    ///
+    /// A linked archive directory is not followed, as the late-usage store
+    /// refuses one: deletion must not reach a same-named file elsewhere.
+    fn remove_import_archive_copy(&self, session_path: &Path) -> io::Result<()> {
+        let Some(name) = session_path.file_name() else {
+            return Ok(());
+        };
+        let dir = self.sessions_dir.join(WORK_GRAPH_IMPORT_ARCHIVE_DIR);
+        match fs::symlink_metadata(&dir) {
+            Ok(metadata) if crate::plugins::metadata_is_link_or_reparse(&metadata) => {
+                tracing::warn!(
+                    path = %dir.display(),
+                    "work-graph import archive is a link; its copies were not removed"
+                );
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        match fs::remove_file(dir.join(name)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn remove_session(&self, id: &str, removal: SessionRemoval) -> std::io::Result<()> {
         let path = self.validated_session_path(id)?;
         // Older ordinary snapshots may use a name reserved by the checkpoint
@@ -2902,11 +3033,13 @@ impl SessionManager {
             // Retention owns the ordinary snapshot, not crash recovery. Keep
             // the origin and its accounting/evidence writable for resume.
             // An unreadable legacy origin cannot justify retiring any id.
-            return match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-            };
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            // The pre-import copy is an older ordinary snapshot, not recovery.
+            return self.remove_import_archive_copy(&path);
         }
         // The store this document is bound to is named by its binding, not by
         // its id: a host store usually sits under another conversation's
@@ -2945,19 +3078,7 @@ impl SessionManager {
                 Err(error) => return Err(error),
             }
         }
-        // The pre-import copy kept by the first graph-bearing write is the
-        // same transcript; a deleted session must not survive in it.
-        if let Some(name) = path.file_name() {
-            match fs::remove_file(
-                self.sessions_dir
-                    .join(WORK_GRAPH_IMPORT_ARCHIVE_DIR)
-                    .join(name),
-            ) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
+        self.remove_import_archive_copy(&path)?;
         self.clear_session_boot_owner(id);
         let session_dir = self.sessions_dir.join(id.trim());
         if session_dir.exists() {
@@ -3205,33 +3326,11 @@ impl SessionManager {
         &self,
         workspace: &Path,
     ) -> std::io::Result<Option<SessionMetadata>> {
-        self.latest_session_for_workspace_where(workspace, |_| true)
-    }
-
-    /// [`Self::get_latest_session_for_workspace`], skipping sessions open in
-    /// an interactive session in this process or another. `--continue` that
-    /// attached to one would give the document two autosaving writers, and
-    /// whichever saved last would silently drop the other's turns.
-    pub fn latest_resumable_session_for_workspace(
-        &self,
-        workspace: &Path,
-    ) -> std::io::Result<Option<SessionMetadata>> {
-        self.latest_session_for_workspace_where(workspace, |session| {
-            !self.is_session_live_anywhere(&session.id)
-        })
-    }
-
-    fn latest_session_for_workspace_where(
-        &self,
-        workspace: &Path,
-        accept: impl Fn(&SessionMetadata) -> bool,
-    ) -> std::io::Result<Option<SessionMetadata>> {
         let sessions = self.list_sessions()?;
         Ok(sessions.into_iter().find(|session| {
             !session.archived
                 && workspace_scope_matches(&session.workspace, workspace)
                 && !is_empty_auto_created_session(session)
-                && accept(session)
         }))
     }
 
@@ -3795,11 +3894,18 @@ fn json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// inside a multi-byte character (routine for CJK or emoji transcripts, which
 /// serde writes unescaped); rejecting the whole buffer then forced a full-file
 /// read of every such session on each listing.
+///
+/// Only a character cut at the very end is trimmed. An invalid byte anywhere
+/// else means a damaged file, and an empty prefix sends it down the full read,
+/// which reports it.
 fn utf8_prefix(buf: &[u8]) -> &str {
     match std::str::from_utf8(buf) {
         Ok(s) => s,
         // `valid_up_to` marks a char boundary, so this slice is valid.
-        Err(error) => std::str::from_utf8(&buf[..error.valid_up_to()]).unwrap_or_default(),
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&buf[..error.valid_up_to()]).unwrap_or_default()
+        }
+        Err(_) => "",
     }
 }
 
@@ -6491,6 +6597,73 @@ mod tests {
         assert!(other.exists(), "other sessions' copies are untouched");
     }
 
+    /// Retention keeps a session's crash-recovery checkpoint but retires the
+    /// ordinary snapshot, and the pre-import copy is an ordinary snapshot.
+    #[test]
+    fn retention_removes_the_import_archive_copy_of_a_recoverable_session() {
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("new");
+        let session = create_saved_session(
+            &[make_test_message("user", "archived transcript")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        let session_id = session.metadata.id.clone();
+        let path = manager.save_session(&session).expect("save");
+        manager.save_checkpoint(&session).expect("checkpoint");
+        let archive_dir = sessions_dir.join(WORK_GRAPH_IMPORT_ARCHIVE_DIR);
+        fs::create_dir_all(&archive_dir).expect("archive dir");
+        let archive = archive_dir.join(path.file_name().expect("file name"));
+        fs::copy(&path, &archive).expect("archive copy");
+
+        manager
+            .remove_session(&session_id, SessionRemoval::Retention)
+            .expect("retention");
+
+        assert!(!path.exists(), "the ordinary snapshot is retired");
+        assert!(!archive.exists(), "so is its pre-import copy");
+        assert!(
+            manager
+                .load_session_checkpoint(&session_id)
+                .expect("checkpoint")
+                .is_some(),
+            "crash recovery is kept"
+        );
+    }
+
+    /// Deletion does not follow a linked archive directory to a same-named
+    /// file somewhere else.
+    #[cfg(unix)]
+    #[test]
+    fn delete_does_not_follow_a_linked_import_archive() {
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("new");
+        let session = create_saved_session(
+            &[make_test_message("user", "transcript")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        let session_id = session.metadata.id.clone();
+        let path = manager.save_session(&session).expect("save");
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).expect("elsewhere");
+        let unrelated = elsewhere.join(path.file_name().expect("file name"));
+        fs::write(&unrelated, "{}").expect("unrelated file");
+        std::os::unix::fs::symlink(&elsewhere, sessions_dir.join(WORK_GRAPH_IMPORT_ARCHIVE_DIR))
+            .expect("link");
+
+        manager.delete_session(&session_id).expect("delete");
+
+        assert!(!path.exists());
+        assert!(unrelated.exists(), "a file behind the link is untouched");
+    }
+
     #[test]
     fn test_session_id_rejects_invalid_characters() {
         let tmp = tempdir().expect("tempdir");
@@ -7270,19 +7443,8 @@ mod tests {
         );
     }
 
-    /// Hold `id`'s live lease the way another running Codewhale process does:
-    /// an OS lock on its own open file description.
     fn hold_live_lease(manager: &SessionManager, id: &str) -> fs::File {
-        let path = manager.live_lease_path(id, true).expect("lease path");
-        let lease = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-            .expect("open lease");
-        assert!(crate::runtime_threads::try_lock_file_exclusive(&lease).expect("lock lease"));
-        lease
+        manager.hold_live_lease_elsewhere(id)
     }
 
     #[test]
@@ -7312,28 +7474,66 @@ mod tests {
         );
     }
 
+    /// Attaching to a session another process has open is refused, naming
+    /// it, rather than giving the document a second autosaving writer.
     #[test]
-    fn latest_resumable_session_skips_a_session_live_elsewhere() {
+    fn attach_refuses_a_session_open_in_another_process() {
+        let _env = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
         let workspace = tmp.path().join("ws");
         fs::create_dir_all(&workspace).expect("workspace");
-        write_prior_interrupted_session(&manager, "sess-older", &workspace);
-        std::thread::sleep(std::time::Duration::from_millis(20));
         write_prior_interrupted_session(&manager, "sess-open", &workspace);
 
-        let _lease = hold_live_lease(&manager, "sess-open");
-        let latest = |resumable: bool| {
-            if resumable {
-                manager.latest_resumable_session_for_workspace(&workspace)
-            } else {
-                manager.get_latest_session_for_workspace(&workspace)
-            }
-            .expect("latest")
-            .map(|meta| meta.id)
-        };
-        assert_eq!(latest(false), Some("sess-open".to_string()));
-        assert_eq!(latest(true), Some("sess-older".to_string()));
+        let lease = hold_live_lease(&manager, "sess-open");
+        let error = manager
+            .claim_live_session_for_attach("sess-open")
+            .expect_err("a session open elsewhere is refused");
+        assert_eq!(error.kind(), io::ErrorKind::ResourceBusy);
+        assert!(error.to_string().contains("sess-open"), "{error}");
+        assert!(!is_live_session("sess-open"), "nothing was claimed");
+
+        drop(lease);
+        manager
+            .claim_live_session_for_attach("sess-open")
+            .expect("attach once the other window has closed");
+        assert!(
+            !try_lock_elsewhere(&manager, "sess-open"),
+            "the attach holds the lease from the start"
+        );
+        set_live_session(None);
+    }
+
+    /// A liveness probe from another process briefly holds the lease lock. A
+    /// claim that lost that race once must take the lease on a later save,
+    /// not run unleased for the whole session.
+    #[test]
+    fn a_claim_that_lost_a_probe_race_takes_the_lease_later() {
+        let _env = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+
+        let probe = hold_live_lease(&manager, "sess-a");
+        manager.claim_live_session("sess-a");
+        drop(probe);
+        assert!(
+            try_lock_elsewhere(&manager, "sess-a"),
+            "the first claim lost"
+        );
+
+        manager.claim_live_session("sess-a");
+        assert!(
+            !try_lock_elsewhere(&manager, "sess-a"),
+            "the next claim takes the lease"
+        );
+        set_live_session(None);
+    }
+
+    /// Whether another open file description can lock `id`'s lease now.
+    fn try_lock_elsewhere(manager: &SessionManager, id: &str) -> bool {
+        let lease = open_private_read_file(&manager.live_lease_path(id, false).expect("path"))
+            .expect("lease file");
+        crate::runtime_threads::try_lock_file_exclusive(&lease).expect("lock")
     }
 
     #[test]
@@ -7777,6 +7977,18 @@ mod tests {
         let extracted = extract_top_level_metadata(cut).expect("metadata from the cut prefix");
         assert_eq!(extracted.id, "cjk-1");
         assert_eq!(extracted.title, "会话");
+    }
+
+    /// Only a cut at the end of the prefix is trimmed. An invalid byte ahead
+    /// of it is a damaged file, left to the full read to report.
+    #[test]
+    fn extract_top_level_metadata_rejects_invalid_utf8_inside_the_prefix() {
+        let json = r#"{"schema_version":1,"metadata":{"id":"bad-1","title":"t","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","message_count":3,"total_tokens":10,"model":"m","workspace":"/tmp"},"messages":[{"role":"user","content":"AB"}]}"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let body = json.find("AB").expect("body");
+        bytes[body] = 0xFF;
+
+        assert!(extract_top_level_metadata(&bytes).is_none());
     }
 
     #[test]

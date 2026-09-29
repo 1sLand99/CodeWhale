@@ -147,6 +147,14 @@ impl App {
         self.needs_redraw |= self.status_toasts.len() != before;
     }
 
+    /// Retire the notices pushed with [`StatusToast::for_event`]`(event_id)`.
+    pub(crate) fn retire_event_notices(&mut self, event_id: &str) {
+        let before = self.status_toasts.len();
+        self.status_toasts
+            .retain(|toast| toast.event_id.as_deref() != Some(event_id));
+        self.needs_redraw |= self.status_toasts.len() != before;
+    }
+
     /// Gate transitions retire their own guidance or failed-write receipt,
     /// independently of translated text and unrelated requests/errors.
     pub(crate) fn retire_redaction_gate_notice(&mut self, notice: RedactionGateNotice) {

@@ -611,33 +611,50 @@ pub(crate) fn coalesce_resize_burst(
     Ok((final_w, final_h))
 }
 
-/// Warn once per new batch of failed session writes. Saves run on the
-/// persistence actor, so a full disk or an unwritable sessions directory
-/// used to reach only the log while the user kept working unsaved.
-pub(crate) fn surface_persistence_failures(app: &mut App, seen: &mut u64) {
-    let Some((total, what, kind)) = crate::tui::persistence_actor::write_failures_since(*seen)
-    else {
+/// Toast identity for a failing session save, so recovery can retire it.
+const SESSION_SAVE_FAILURE_TOAST: &str = "session-save-failure";
+
+/// Keep the save-failure notice in step with the persistence actor's session
+/// save health. Saves run off the UI thread, so a full disk or an unwritable
+/// sessions directory used to reach only the log while the user kept working
+/// unsaved. The notice stays while a session's latest save is failing and is
+/// withdrawn once a later save lands.
+pub(crate) fn surface_session_save_health(
+    app: &mut App,
+    reading: Option<crate::tui::persistence_actor::SaveHealthReading>,
+    seen: &mut u64,
+) {
+    let Some(reading) = reading.filter(|reading| reading.generation != *seen) else {
         return;
     };
-    *seen = total;
-    app.push_status_toast(
-        format!("Session save failed ({what}: {kind}). Recent work may not be saved."),
-        StatusToastLevel::Error,
-        Some(App::STICKY_ERROR_TTL_MS),
-    );
-    app.needs_redraw = true;
+    *seen = reading.generation;
+    app.retire_event_notices(SESSION_SAVE_FAILURE_TOAST);
+    if let Some((session_id, kind)) = reading.failing {
+        let text = app
+            .tr(MessageId::SessionSaveFailed)
+            .replace("{id}", crate::session_manager::truncate_id(&session_id))
+            .replace("{error}", &kind.to_string());
+        app.push_status_toast_record(
+            StatusToast::new(
+                text,
+                StatusToastLevel::Error,
+                Some(App::STICKY_ERROR_TTL_MS),
+            )
+            .for_event(SESSION_SAVE_FAILURE_TOAST),
+        );
+    }
 }
 
-/// The exit line for a session whose writes failed during this run.
+/// The exit line when a session's latest save failed and was never replaced
+/// by a successful one.
 pub(crate) fn shutdown_persistence_notice(
-    failures: &[(String, std::io::ErrorKind)],
+    locale: codewhale_localization::Locale,
+    reading: &crate::tui::persistence_actor::SaveHealthReading,
 ) -> Option<String> {
-    failures.last().map(|(what, kind)| {
-        format!(
-            "codewhale: {} session write(s) failed (latest: {what}: {kind}); \
-             recent work may not have been saved.",
-            failures.len()
-        )
+    reading.failing.as_ref().map(|(session_id, kind)| {
+        codewhale_localization::tr(locale, MessageId::SessionSaveFailedAtExit)
+            .replace("{id}", session_id)
+            .replace("{error}", &kind.to_string())
     })
 }
 
@@ -862,18 +879,21 @@ pub async fn run_tui(
     {
         // Try to load by prefix or full ID
         let load_result: std::io::Result<Option<crate::session_manager::SavedSession>> =
+            // `attach_*` takes the session's live lease first, and refuses a
+            // session another window has open instead of becoming its second
+            // autosaving writer.
             if session_id == "latest" {
                 // Special case: resume the most recent session in this workspace.
                 match manager.get_latest_session_for_workspace(&options.workspace) {
                     Ok(Some(meta)) => manager
-                        .resume_session(&meta.id)
+                        .attach_session(&meta.id)
                         .map(|recovery| Some(recovery.session)),
                     Ok(None) => Ok(None),
                     Err(e) => Err(e),
                 }
             } else {
                 manager
-                    .resume_session_by_prefix(session_id)
+                    .attach_session_by_prefix(session_id)
                     .map(|recovery| Some(recovery.session))
             };
 
@@ -1214,7 +1234,7 @@ pub async fn run_tui(
     // applied), the checkpoint is the only durable record of that work:
     // clearing it here unconditionally could erase in-flight progress that
     // never reached a snapshot, so it survives for startup recovery review.
-    let mut shutdown_persistence_failures = Vec::new();
+    let mut shutdown_save_health = None;
     if let Some((handle, task)) = persistence_runtime {
         // A quit key can leave the frame before its usual queue comparison.
         // Capture the final edited draft before the shutdown durability barrier.
@@ -1242,8 +1262,10 @@ pub async fn run_tui(
                 failures = ?report.failures,
                 "session persistence reported write failures during shutdown",
             );
-            shutdown_persistence_failures = report.failures;
         }
+        // Read after the final flush: whether each session's latest save
+        // landed, not every failure this run has ever seen.
+        shutdown_save_health = Some(handle.session_save_health());
         handle.try_send(PersistRequest::Shutdown);
         let _ = task.await;
     }
@@ -1303,7 +1325,10 @@ pub async fn run_tui(
         }
     }
 
-    if let Some(notice) = shutdown_persistence_notice(&shutdown_persistence_failures) {
+    if let Some(notice) = shutdown_save_health
+        .as_ref()
+        .and_then(|reading| shutdown_persistence_notice(app.ui_locale, reading))
+    {
         // Primary screen, like the settings failures above.
         #[allow(clippy::print_stderr)]
         {
@@ -1723,7 +1748,7 @@ pub(crate) async fn run_event_loop(
     }
 
     let mut pending_subagent_list_refresh = false;
-    let mut persistence_failures_seen = 0u64;
+    let mut session_save_health_seen = 0u64;
 
     loop {
         // #6169: first statement of every iteration. The job-control handler can
@@ -2071,7 +2096,11 @@ pub(crate) async fn run_event_loop(
             deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
         }
 
-        surface_persistence_failures(app, &mut persistence_failures_seen);
+        surface_session_save_health(
+            app,
+            crate::tui::persistence_actor::session_save_health(),
+            &mut session_save_health_seen,
+        );
 
         // Discovery and callback delivery never park terminal input.
         poll_mcp_login(app);

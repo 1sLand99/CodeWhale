@@ -30991,43 +30991,70 @@ fn a_resize_burst_keeps_following_input_in_order() {
     assert_eq!(pending_key_chars(&pending), "ab");
 }
 
-/// A failed background save reaches the user, not only the log.
+/// A failing session save reaches the user, not only the log, and the notice
+/// is withdrawn once a later save of that session lands.
 #[test]
-fn a_failed_session_write_is_surfaced_as_an_error_toast() {
+fn a_failing_session_save_shows_an_error_until_a_save_lands() {
+    use crate::tui::persistence_actor::SaveHealthReading;
     let mut app = create_test_app();
-    crate::tui::persistence_actor::note_write_failures(&persistence_actor::FlushReport {
-        completed: 0,
-        failures: vec![(
-            "session:toast-probe".to_string(),
-            std::io::ErrorKind::PermissionDenied,
-        )],
-    });
     let mut seen = 0;
+    let failing = SaveHealthReading {
+        generation: 1,
+        failing: Some((
+            "toast-probe".to_string(),
+            std::io::ErrorKind::PermissionDenied,
+        )),
+    };
+    let save_errors = |app: &App| {
+        app.status_toasts
+            .iter()
+            .filter(|toast| toast.level == StatusToastLevel::Error)
+            .count()
+    };
 
-    super::event_loop::surface_persistence_failures(&mut app, &mut seen);
-
-    assert!(seen > 0, "the surfaced total is remembered");
+    super::event_loop::surface_session_save_health(&mut app, Some(failing.clone()), &mut seen);
+    assert_eq!(seen, 1);
+    assert_eq!(save_errors(&app), 1, "a failing save is visible");
     assert!(
-        app.status_toasts.iter().any(|toast| {
-            toast.level == StatusToastLevel::Error && toast.text.contains("Session save failed")
-        }),
-        "a failed save must produce a visible error"
+        app.status_toasts
+            .iter()
+            .any(|toast| toast.text.contains("toast-pr")),
+        "{:?}",
+        app.status_toasts
     );
+
+    // Polling the same reading again does not repeat it.
+    super::event_loop::surface_session_save_health(&mut app, Some(failing), &mut seen);
+    assert_eq!(save_errors(&app), 1);
+
+    let healed = SaveHealthReading {
+        generation: 2,
+        failing: None,
+    };
+    super::event_loop::surface_session_save_health(&mut app, Some(healed), &mut seen);
+    assert_eq!(save_errors(&app), 0, "a later successful save withdraws it");
 }
 
 #[test]
-fn shutdown_reports_failed_session_writes() {
-    assert_eq!(super::event_loop::shutdown_persistence_notice(&[]), None);
-    let notice = super::event_loop::shutdown_persistence_notice(&[
-        ("checkpoint:a".to_string(), std::io::ErrorKind::StorageFull),
-        (
-            "session:a".to_string(),
-            std::io::ErrorKind::PermissionDenied,
-        ),
-    ])
-    .expect("failures produce an exit notice");
-    assert!(notice.contains("2 session write(s) failed"), "{notice}");
-    assert!(notice.contains("session:a"), "{notice}");
+fn shutdown_reports_only_a_save_that_is_still_failing() {
+    use crate::tui::persistence_actor::SaveHealthReading;
+    let locale = codewhale_localization::Locale::En;
+    let healthy = SaveHealthReading {
+        generation: 4,
+        failing: None,
+    };
+    assert_eq!(
+        super::event_loop::shutdown_persistence_notice(locale, &healthy),
+        None,
+        "failures later replaced by a successful save are not reported"
+    );
+    let failing = SaveHealthReading {
+        generation: 5,
+        failing: Some(("session-a".to_string(), std::io::ErrorKind::StorageFull)),
+    };
+    let notice = super::event_loop::shutdown_persistence_notice(locale, &failing)
+        .expect("a failing save produces an exit notice");
+    assert!(notice.contains("session-a"), "{notice}");
 }
 
 // ---------------------------------------------------------------------------

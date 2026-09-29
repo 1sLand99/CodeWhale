@@ -1101,11 +1101,26 @@ fn resolve_exec_resume_session_id(args: &ExecArgs, workspace: &Path) -> Result<O
 }
 
 fn load_exec_resume_session(session_id: &str) -> Result<session_manager::SavedSession> {
-    SessionManager::default_location()
+    match SessionManager::default_location()
         .context("could not open session manager for resume")?
-        .resume_session_by_prefix(session_id)
-        .map(|recovery| recovery.session)
-        .with_context(|| exec_resume_load_error(session_id))
+        .attach_session_by_prefix(session_id)
+    {
+        Ok(recovery) => Ok(recovery.session),
+        // Resuming a session a TUI has open would give its document two
+        // writers; the TUI's next autosave would drop this run's turns.
+        Err(error) if error.kind() == io::ErrorKind::ResourceBusy => {
+            bail!(exec_resume_busy_error(session_id))
+        }
+        Err(error) => Err(error).with_context(|| exec_resume_load_error(session_id)),
+    }
+}
+
+fn exec_resume_busy_error(session_id: &str) -> String {
+    format!(
+        "session {} is open in another Codewhale window. Continue it there, or run \
+         `codewhale fork <SESSION_ID>` and resume the copy.",
+        exec_stream_session_ref(session_id)
+    )
 }
 
 /// The typed `--resume` value stays redacted in every output mode: exec runs
@@ -9042,7 +9057,7 @@ fn resolve_session_id(session_id: Option<String>, last: bool, workspace: &Path) 
 fn latest_session_id_for_workspace(workspace: &Path) -> std::io::Result<Option<String>> {
     let manager = SessionManager::default_location()?;
     Ok(manager
-        .latest_resumable_session_for_workspace(workspace)?
+        .get_latest_session_for_workspace(workspace)?
         .map(|session| session.id))
 }
 
@@ -21287,8 +21302,8 @@ mod setup_helper_tests {
     }
 
     /// `--continue` in a second terminal must not take the session the first
-    /// terminal is still running: no promotion, no checkpoint clear, and no
-    /// attach to the same document.
+    /// terminal is still running: no promotion or clear of its checkpoint, no
+    /// silent swap to an older session, and the attach is refused by name.
     #[test]
     fn continue_leaves_a_session_live_in_another_terminal_alone() {
         let _guard = crate::test_support::lock_test_env();
@@ -21298,23 +21313,31 @@ mod setup_helper_tests {
 
         with_home(tmp.path(), || {
             let manager = SessionManager::default_location().expect("manager");
-            let messages = vec![Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "still running".to_string(),
-                    cache_control: None,
-                }],
-            }];
-            let session = create_saved_session(&messages, "test-model", &workspace, 0, None);
+            let message = |text: &str| {
+                vec![Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: text.to_string(),
+                        cache_control: None,
+                    }],
+                }]
+            };
+            let older = create_saved_session(&message("older"), "test-model", &workspace, 0, None);
+            manager.save_session(&older).expect("save older");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let session =
+                create_saved_session(&message("still running"), "test-model", &workspace, 0, None);
             let session_id = session.metadata.id.clone();
             manager.save_session(&session).expect("save session");
             manager.save_checkpoint(&session).expect("save checkpoint");
 
-            manager.claim_live_session(&session_id);
+            let lease = manager.hold_live_lease_elsewhere(&session_id);
             let resolved = resolve_continue_session_id(&workspace, true);
-            crate::session_manager::set_live_session(None);
-
-            assert_eq!(resolved, None, "a live session is not continued");
+            assert_eq!(
+                resolved.as_deref(),
+                Some(session_id.as_str()),
+                "the newest session is named, not swapped for an older one"
+            );
             assert!(
                 manager
                     .load_session_checkpoint(&session_id)
@@ -21322,11 +21345,25 @@ mod setup_helper_tests {
                     .is_some(),
                 "the live session keeps its crash-recovery checkpoint"
             );
+            let refusal = manager
+                .attach_session(&session_id)
+                .expect_err("attaching to it is refused");
+            assert_eq!(refusal.kind(), io::ErrorKind::ResourceBusy);
+            assert!(refusal.to_string().contains(&session_id), "{refusal}");
+            assert!(
+                load_exec_resume_session(&session_id)
+                    .expect_err("exec --continue is refused too")
+                    .to_string()
+                    .contains("open in another Codewhale window")
+            );
+            drop(lease);
+
             // Once that session has exited, --continue recovers it as before.
             assert_eq!(
                 resolve_continue_session_id(&workspace, true).as_deref(),
                 Some(session_id.as_str())
             );
+            crate::session_manager::set_live_session(None);
         });
     }
 
