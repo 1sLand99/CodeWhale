@@ -1,7 +1,20 @@
 const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
+const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 
 const { run, reportStartFailure, _internal } = require("../scripts/run");
+
+// A stand-in for a spawned child that exits on the next tick.
+function exitingChild(status, signal = null) {
+  const child = new EventEmitter();
+  child.kill = () => true;
+  process.nextTick(() => child.emit("exit", status, signal));
+  return child;
+}
 
 test("version fallback handles only version flags", () => {
   assert.equal(_internal.isVersionFlag(["--version"]), true);
@@ -17,12 +30,12 @@ test("version flags prefer the installed binary over package metadata", async ()
   await run("codewhale", {
     args: ["--version"],
     getBinaryPath: async () => "/tmp/codewhale-test-binary",
-    spawnSync: (binary, args, options) => {
+    spawn: (binary, args, options) => {
       spawned = true;
       assert.equal(binary, "/tmp/codewhale-test-binary");
       assert.deepEqual(args, ["--version"]);
       assert.deepEqual(options, { stdio: "inherit" });
-      return { status: 0 };
+      return exitingChild(0);
     },
     exit: (status) => {
       exits.push(status);
@@ -43,9 +56,9 @@ test("codew wrapper dispatches the native shortcut binary", async () => {
       resolvedNames.push(name);
       return "/tmp/codew-test-binary";
     },
-    spawnSync: (binary, args) => {
+    spawn: (binary, args) => {
       spawned.push({ binary, args });
-      return { status: 0 };
+      return exitingChild(0);
     },
     exit: () => {},
   });
@@ -72,7 +85,7 @@ test("version flags fall back to package metadata when the binary is unavailable
           code: "ENOTFOUND",
         });
       },
-      spawnSync: () => {
+      spawn: () => {
         throw new Error("spawn should not run without a binary");
       },
       exit: (status) => {
@@ -115,3 +128,100 @@ test("start failures print the install hint for download errors", () => {
   reportStartFailure("codewhale", new Error("permission denied"), log);
   assert.deepEqual(logged, ["Failed to start codewhale: permission denied"]);
 });
+
+test("termination signals reach the native child and its status is kept", async () => {
+  const proc = new EventEmitter();
+  const child = new EventEmitter();
+  const killed = [];
+  child.kill = (signal) => {
+    killed.push(signal);
+    process.nextTick(() => child.emit("exit", 143, null));
+    return true;
+  };
+  const exits = [];
+  const running = run("codewhale", {
+    args: ["exec", "--auto", "task"],
+    getBinaryPath: async () => "/tmp/codewhale-test-binary",
+    spawn: () => child,
+    exit: (status) => exits.push(status),
+    process: proc,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    assert.equal(proc.listenerCount(signal), 1, signal);
+  }
+  proc.emit("SIGTERM");
+  await running;
+
+  assert.deepEqual(killed, ["SIGTERM"]);
+  assert.deepEqual(exits, [143]);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    assert.equal(proc.listenerCount(signal), 0, signal);
+  }
+});
+
+test("a child killed by a signal is reported as that signal", async () => {
+  const proc = new EventEmitter();
+  const raised = [];
+  proc.pid = 4242;
+  proc.kill = (pid, signal) => raised.push({ pid, signal });
+  const exits = [];
+  await run("codewhale", {
+    args: [],
+    getBinaryPath: async () => "/tmp/codewhale-test-binary",
+    spawn: () => exitingChild(null, "SIGTERM"),
+    exit: (status) => exits.push(status),
+    process: proc,
+  });
+  assert.deepEqual(raised, [{ pid: 4242, signal: "SIGTERM" }]);
+  assert.deepEqual(exits, [128 + os.constants.signals.SIGTERM]);
+});
+
+test(
+  "SIGTERM to the wrapper process does not leave the native child running",
+  { skip: process.platform === "win32" && "POSIX signals only", timeout: 20000 },
+  async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "codewhale-run-signal-"));
+    const pidFile = path.join(dir, "child.pid");
+    const childScript =
+      `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+      "setInterval(() => {}, 1000);";
+    const wrapperScript =
+      `require(${JSON.stringify(path.join(__dirname, "..", "scripts", "run.js"))})` +
+      `.run("codewhale", { getBinaryPath: async () => process.execPath, ` +
+      `args: ["-e", ${JSON.stringify(childScript)}] });`;
+    const wrapper = spawn(process.execPath, ["-e", wrapperScript], { stdio: "ignore" });
+    let childPid = null;
+    const alive = (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const deadline = Date.now() + 10000;
+      while (childPid === null && Date.now() < deadline) {
+        try {
+          childPid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10) || null;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      assert.ok(childPid, "native child should have started");
+      const wrapperExit = new Promise((resolve) => wrapper.once("exit", resolve));
+      wrapper.kill("SIGTERM");
+      await wrapperExit;
+      const settle = Date.now() + 5000;
+      while (alive(childPid) && Date.now() < settle) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(alive(childPid), false, "native child outlived the wrapper");
+    } finally {
+      if (childPid && alive(childPid)) process.kill(childPid, "SIGKILL");
+      if (wrapper.exitCode === null && wrapper.signalCode === null) wrapper.kill("SIGKILL");
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  },
+);

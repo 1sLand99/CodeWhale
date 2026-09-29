@@ -566,6 +566,7 @@ function httpRequest(rawUrl, opts = {}) {
     let totalTimer = null;
     let stallTimer = null;
     let settled = false;
+    let handedOff = false;
     let req = null;
     let res = null;
     const signal = opts.signal;
@@ -587,7 +588,20 @@ function httpRequest(rawUrl, opts = {}) {
     };
 
     const fail = (err) => {
-      if (settled) return;
+      if (settled) {
+        // The stall, total, and abort budgets outlive the handoff: once the
+        // caller owns the body, end it with the error so the caller's own
+        // `error` handler rejects instead of waiting on a silent socket.
+        if (handedOff) {
+          cleanup();
+          try {
+            if (res && !res.destroyed) res.destroy(err);
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
       settled = true;
       cleanup();
       try {
@@ -601,6 +615,15 @@ function httpRequest(rawUrl, opts = {}) {
         // ignore
       }
       reject(err);
+    };
+
+    // Hand the live response stream to the caller. The timers stay armed
+    // until the body ends or closes (see `fail`).
+    const handOff = (response) => {
+      settled = true;
+      handedOff = true;
+      response.on("close", () => cleanup());
+      resolve({ redirect: null, response });
     };
 
     if (signal) {
@@ -692,9 +715,7 @@ function httpRequest(rawUrl, opts = {}) {
             return;
           }
           if (settled) return;
-          settled = true;
-          // Hand the live response stream to the caller.
-          resolve({ redirect: null, response });
+          handOff(response);
         });
         req.once("error", (err) => fail(err));
         req.once("socket", (s) => {
@@ -757,8 +778,7 @@ function httpRequest(rawUrl, opts = {}) {
                 return;
               }
               if (settled) return;
-              settled = true;
-              resolve({ redirect: null, response });
+              handOff(response);
             },
           );
           req.once("error", (err) => fail(err));
@@ -821,8 +841,7 @@ function httpRequest(rawUrl, opts = {}) {
                   return;
                 }
                 if (settled) return;
-                settled = true;
-                resolve({ redirect: null, response });
+                handOff(response);
               });
               req.once("error", (err) => fail(err));
               req.end();

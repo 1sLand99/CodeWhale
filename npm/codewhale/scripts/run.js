@@ -1,4 +1,5 @@
-const { spawnSync } = require("child_process");
+const { spawn: spawnChild } = require("child_process");
+const os = require("os");
 const { getBinaryPath, installFailureHint } = require("./install");
 
 const pkg = require("../package.json");
@@ -41,11 +42,70 @@ function printVersionFallback(binaryName, error) {
   }
 }
 
+// Signals that end the wrapper must end the native binary too. With a
+// blocking spawn the wrapper died on SIGTERM/SIGHUP and left the child running
+// (still executing tools, still holding its port); as PID 1 in a container it
+// ignored SIGTERM entirely. The native binary treats the first of these as
+// "terminate", so a duplicate from the terminal's process group is harmless.
+const FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+
+// Run the native binary and settle with how it ended. While it runs, the
+// forwarded signals go to the child instead of killing the wrapper.
+function runChild(spawn, binaryPath, args, proc) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(binaryPath, args, { stdio: "inherit" });
+    } catch (error) {
+      resolve({ error });
+      return;
+    }
+    const forwarders = FORWARDED_SIGNALS.map((signal) => {
+      const forward = () => {
+        try {
+          child.kill(signal);
+        } catch {
+          // The child already exited; its exit event settles the run.
+        }
+      };
+      proc.on(signal, forward);
+      return [signal, forward];
+    });
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      for (const [signal, forward] of forwarders) {
+        proc.removeListener(signal, forward);
+      }
+      resolve(result);
+    };
+    child.once("error", (error) => settle({ error }));
+    child.once("exit", (status, signal) => settle({ status, signal }));
+  });
+}
+
+// Mirror a signal death to the parent shell: re-raise it on the wrapper once
+// our listeners are gone, and fall back to the conventional 128 + n.
+function exitLikeChild(result, exit, proc) {
+  if (result.signal) {
+    try {
+      proc.kill(proc.pid, result.signal);
+    } catch {
+      // fall through to the numeric status
+    }
+    const number = os.constants.signals[result.signal];
+    return exit(number ? 128 + number : 1);
+  }
+  return exit(result.status ?? 1);
+}
+
 async function run(binaryName, options = {}) {
   const args = options.args || process.argv.slice(2);
   const resolveBinaryPath = options.getBinaryPath || getBinaryPath;
-  const spawn = options.spawnSync || spawnSync;
+  const spawn = options.spawn || spawnChild;
   const exit = options.exit || process.exit;
+  const proc = options.process || process;
   const versionFlag = isVersionFlag(args);
 
   let binaryPath;
@@ -59,9 +119,7 @@ async function run(binaryName, options = {}) {
     throw error;
   }
 
-  const result = spawn(binaryPath, args, {
-    stdio: "inherit",
-  });
+  const result = await runChild(spawn, binaryPath, args, proc);
   if (result.error) {
     if (versionFlag) {
       printVersionFallback(binaryName, result.error);
@@ -69,7 +127,7 @@ async function run(binaryName, options = {}) {
     }
     throw result.error;
   }
-  return exit(result.status ?? 1);
+  return exitLikeChild(result, exit, proc);
 }
 
 async function runCodeWhale() {

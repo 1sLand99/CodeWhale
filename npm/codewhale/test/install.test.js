@@ -346,3 +346,68 @@ test("httpRequest handles invalid URL parsing errors", async () => {
     assert.match(err.message, /Invalid URL: not-a-valid-url/);
   }
 });
+
+// A server that sends headers and part of a body, then either
+// goes silent or keeps trickling bytes, and never ends the response.
+async function withStallingServer(t, { trickleMs = 0 } = {}) {
+  const http = require("node:http");
+  const timers = [];
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/octet-stream" });
+    res.write("partial body");
+    if (trickleMs > 0) {
+      timers.push(setInterval(() => res.write("."), trickleMs));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    for (const timer of timers) clearInterval(timer);
+    server.closeAllConnections();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  // Keep a developer's proxy variables from routing the loopback request.
+  const noProxy = process.env.NO_PROXY;
+  process.env.NO_PROXY = "*";
+  t.after(() => {
+    if (noProxy === undefined) delete process.env.NO_PROXY;
+    else process.env.NO_PROXY = noProxy;
+  });
+  return `http://127.0.0.1:${server.address().port}/asset`;
+}
+
+// Consume a handed-off body the way `downloadText` and `streamToFile` do:
+// resolve on `end`, reject on `error`.
+function consumeBody(response) {
+  return new Promise((resolve, reject) => {
+    response.on("data", () => {});
+    response.on("end", resolve);
+    response.on("error", reject);
+    response.resume();
+  });
+}
+
+test("a body that stalls after the headers fails with the stall timeout", { timeout: 5000 }, async (t) => {
+  const url = await withStallingServer(t);
+  const { response } = await _internal.httpRequest(url, {
+    stallMs: 150,
+    totalTimeoutMs: 30000,
+  });
+  await assert.rejects(consumeBody(response), (error) => {
+    assert.equal(error.code, "EDOWNLOADTIMEOUT");
+    assert.match(error.message, /stalled/);
+    return true;
+  });
+});
+
+test("a body that trickles past the total budget fails with the total timeout", { timeout: 5000 }, async (t) => {
+  const url = await withStallingServer(t, { trickleMs: 40 });
+  const { response } = await _internal.httpRequest(url, {
+    stallMs: 1000,
+    totalTimeoutMs: 400,
+  });
+  await assert.rejects(consumeBody(response), (error) => {
+    assert.equal(error.code, "EDOWNLOADTIMEOUT");
+    assert.match(error.message, /total timeout/);
+    return true;
+  });
+});
