@@ -1,7 +1,7 @@
 # 更名：DeepSeek TUI → Codewhale
 
 > 英文原文：[REBRAND.md](../REBRAND.md)。
-> 最后与英文同步日期（last synced with English revision）：2026-09-26。
+> 最后与英文同步日期（last synced with English revision）：2026-09-29。
 
 从 **v0.8.41** 起，本项目改用新名字发布：`codewhale`。
 
@@ -129,7 +129,7 @@ Codewhale 发布资产。只要安装目录可写，这两条命令就会把这�
 
 ### Homebrew
 
-**当前发布状态（v0.9.13，发布于 2026-09-14；工作区源码版本 0.9.13）：**
+**截至 v0.9.13（发布于 2026-09-14）的历史迁移状态：**
 formula 名为 `codewhale`。全新安装：
 
 ```bash

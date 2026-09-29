@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Contributors
+
+- **[@SparkofSpike](https://github.com/SparkofSpike)** — translated seventeen Tier-2 guides into Simplified Chinese and connected the localized documentation ([#6662](https://github.com/Hmbown/Codewhale/pull/6662)).
+
 ## [0.10.1] - 2026-09-28
 
 The website's not-found page now uses the Codwhale poster and typo joke,
