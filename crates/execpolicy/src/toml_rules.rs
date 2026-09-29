@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::command_safety::prefix_allow_matches;
+use crate::command_safety::{prefix_allow_matches, prefix_grant_is_eligible};
 use crate::matcher::pattern_matches;
 
 /// Verdict of evaluating a command against the TOML rule sets.
@@ -69,6 +69,7 @@ impl ExecPolicyConfig {
         // command as written, so a broader expansion can never turn into a
         // broader auto-approval.
         let expansion = crate::shell_expand::expand_command(command);
+        let prefix_eligible = prefix_grant_is_eligible(command, &expansion);
         let deny_targets = expansion.commands;
         // A command word only known at run time cannot be checked against a
         // deny pattern: fail closed while any deny pattern is configured, and
@@ -95,9 +96,9 @@ impl ExecPolicyConfig {
             }
         }
 
-        if expansion.dynamic || expansion.nested {
+        if !prefix_eligible {
             return RuleDecision::AskUser(
-                "execpolicy: command runs code an allow rule cannot vouch for".to_string(),
+                "execpolicy: command syntax or arguments require an exact approval".to_string(),
             );
         }
         for (group, rules) in &self.rules {

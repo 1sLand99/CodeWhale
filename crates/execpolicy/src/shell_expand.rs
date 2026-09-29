@@ -818,6 +818,16 @@ pub struct Expansion {
     /// substitution, `eval`, a shell `-c` payload or stdin script, or a
     /// `find -exec` payload.
     pub nested: bool,
+    /// An argument's value is resolved only at execution time. A prefix grant
+    /// cannot check whether that value introduces a write/execute option.
+    /// Unlike `dynamic`, this does not make the command head unknowable.
+    pub arguments_dynamic: bool,
+    /// Unquoted control operators or grouping. Recorded before command
+    /// deduplication: `echo x; echo x` still contains a command list.
+    pub control: bool,
+    /// Unquoted redirection syntax, including descriptor duplication and
+    /// heredocs. Quoted operator characters and heredoc body data are excluded.
+    pub redirects: bool,
 }
 
 /// Returns every command line the shell would execute for `command`.
@@ -846,6 +856,9 @@ fn expand_for_platform(command: &str, windows: bool) -> Expansion {
         literal_backslashes: windows,
         dynamic: false,
         nested: false,
+        arguments_dynamic: false,
+        control: false,
+        redirects: false,
     };
     // Native Windows shells preserve path separators. Also retain the POSIX
     // interpretation for Bash/WSL commands. Both passes use the same bounded,
@@ -859,6 +872,9 @@ fn expand_for_platform(command: &str, windows: bool) -> Expansion {
         commands: expander.out,
         dynamic: expander.dynamic,
         nested: expander.nested,
+        arguments_dynamic: expander.arguments_dynamic,
+        control: expander.control,
+        redirects: expander.redirects,
     }
 }
 
@@ -868,6 +884,9 @@ struct Expander {
     literal_backslashes: bool,
     dynamic: bool,
     nested: bool,
+    arguments_dynamic: bool,
+    control: bool,
+    redirects: bool,
 }
 
 /// The word being read, with what the parser learned about it.
@@ -1106,6 +1125,7 @@ impl Expander {
                     i = next;
                 }
                 '<' if chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') => {
+                    self.redirects = true;
                     if !word.quoted && is_redirect_descriptor(&word.text) {
                         word.text.clear();
                         word.started = false;
@@ -1157,6 +1177,7 @@ impl Expander {
                 // descriptor and next operand. Parse that operand normally so
                 // nested substitutions are still checked as commands.
                 '<' | '>' | '&' if redirection_len(&chars[i..]) > 0 => {
+                    self.redirects = true;
                     if !word.quoted && is_redirect_descriptor(&word.text) {
                         word.text.clear();
                         word.started = false;
@@ -1173,6 +1194,7 @@ impl Expander {
                 // arms above, so a bare paren here is grouping: the body is a
                 // command list of its own, not part of the surrounding word.
                 '(' | ')' => {
+                    self.control = true;
                     word.flush(&mut line);
                     end_command(&mut commands, &mut line);
                     word.redirect_operand = false;
@@ -1193,6 +1215,7 @@ impl Expander {
                 // Control operators end the current command line. `&&`, `||`,
                 // `;;`, `|&` and runs of newlines collapse into one break.
                 '\n' | '\r' | ';' | '&' | '|' => {
+                    self.control = true;
                     word.flush(&mut line);
                     end_command(&mut commands, &mut line);
                     word.redirect_operand = false;
@@ -1334,6 +1357,7 @@ impl Expander {
             }
             let name = command_name(&tokens[head]);
             let args_dynamic = dynamic[head + 1..].iter().any(|dynamic| *dynamic);
+            self.arguments_dynamic |= args_dynamic;
             match name.as_str() {
                 // `eval …` takes a *command line* as data. Parse it.
                 "eval" => self.code_payload(&tokens[head + 1..].join(" "), args_dynamic, depth),
@@ -2352,6 +2376,69 @@ mod tests {
             "find . \\( -name a \\) -print",
             "find . ( -name a ) -print"
         ));
+    }
+
+    #[test]
+    fn syntax_metadata_is_independent_of_candidates_and_literal_data() {
+        for command in [
+            "printf x; printf x",
+            "git log | git log",
+            "cargo test && cargo test",
+            "(git log)",
+        ] {
+            let expansion = expand_for_platform(command, false);
+            assert!(expansion.control, "{command}: {expansion:?}");
+        }
+        assert_eq!(
+            expand_for_platform("printf x; printf x", false)
+                .commands
+                .len(),
+            1
+        );
+        assert!(expand_for_platform("sudo git log", false).commands.len() > 1);
+        assert!(!expand_for_platform("sudo git log", false).control);
+        for command in [
+            r#"grep -E "a|b" src"#,
+            r#"git commit -m "fix: a & b; c""#,
+            r"echo a\;b\&c\|d\>e",
+            "echo '> < ; | &'",
+            "echo ok # ; | > ignored",
+        ] {
+            let expansion = expand_for_platform(command, false);
+            assert!(
+                !expansion.control && !expansion.redirects,
+                "{command}: {expansion:?}"
+            );
+        }
+        for command in [
+            "cargo test 2>&1",
+            "cargo test &>result.log",
+            "cat a<>out",
+            "cat a>|out",
+            "cat 3<&0",
+            "cat<<<literal",
+        ] {
+            for windows in [false, true] {
+                let expansion = expand_for_platform(command, windows);
+                assert!(
+                    expansion.redirects && !expansion.control,
+                    "{command}: {expansion:?}"
+                );
+            }
+        }
+        for command in ["git log $FLAGS", r#"git log "$FLAGS""#] {
+            let expansion = expand_for_platform(command, false);
+            assert!(
+                expansion.arguments_dynamic && !expansion.dynamic,
+                "{command}: {expansion:?}"
+            );
+        }
+        assert!(!expand_for_platform("git log '$FLAGS'", false).arguments_dynamic);
+        assert!(!expand_for_platform(r"git log \$FLAGS", false).arguments_dynamic);
+        let heredoc = expand_for_platform("cat <<'EOF'\n; | > $(not-code)\nEOF", false);
+        assert!(heredoc.redirects);
+        assert!(!heredoc.nested);
+        assert_eq!(heredoc.commands, vec!["cat"]);
     }
 
     #[test]

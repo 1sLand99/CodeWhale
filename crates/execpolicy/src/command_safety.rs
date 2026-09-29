@@ -1152,6 +1152,68 @@ fn option_rejection(segment: &str, program: &str) -> ReadonlyRejection {
     )
 }
 
+fn is_agent_readonly_sort(tokens: &[String]) -> bool {
+    agent_text_filter_options_match(
+        tokens,
+        &[
+            "-b",
+            "-d",
+            "-f",
+            "-g",
+            "-h",
+            "-i",
+            "-M",
+            "-n",
+            "-r",
+            "-s",
+            "-u",
+            "-V",
+            "--dictionary-order",
+            "--general-numeric-sort",
+            "--human-numeric-sort",
+            "--ignore-case",
+            "--ignore-leading-blanks",
+            "--ignore-nonprinting",
+            "--month-sort",
+            "--numeric-sort",
+            "--reverse",
+            "--stable",
+            "--unique",
+            "--version-sort",
+        ],
+        &["-k", "--key", "-t", "--field-separator"],
+        usize::MAX,
+    )
+}
+
+fn is_agent_readonly_uniq(tokens: &[String]) -> bool {
+    agent_text_filter_options_match(
+        tokens,
+        &[
+            "-c",
+            "-d",
+            "-D",
+            "-i",
+            "-u",
+            "-z",
+            "--count",
+            "--ignore-case",
+            "--repeated",
+            "--unique",
+            "--zero-terminated",
+        ],
+        &[
+            "-f",
+            "--skip-fields",
+            "-s",
+            "--skip-chars",
+            "-w",
+            "--check-chars",
+        ],
+        1,
+    )
+}
+
 fn is_agent_readonly_segment(segment: &str) -> bool {
     let segment = segment.trim();
     if segment.is_empty() {
@@ -1173,62 +1235,8 @@ fn is_agent_readonly_segment(segment: &str) -> bool {
         // a plain `npm view pkg`. argv alone cannot establish its authority.
         "npm" => false,
         "echo" | "printf" => is_agent_readonly_literal_print(&tokens),
-        "sort" => agent_text_filter_options_match(
-            &tokens,
-            &[
-                "-b",
-                "-d",
-                "-f",
-                "-g",
-                "-h",
-                "-i",
-                "-M",
-                "-n",
-                "-r",
-                "-s",
-                "-u",
-                "-V",
-                "--dictionary-order",
-                "--general-numeric-sort",
-                "--human-numeric-sort",
-                "--ignore-case",
-                "--ignore-leading-blanks",
-                "--ignore-nonprinting",
-                "--month-sort",
-                "--numeric-sort",
-                "--reverse",
-                "--stable",
-                "--unique",
-                "--version-sort",
-            ],
-            &["-k", "--key", "-t", "--field-separator"],
-            usize::MAX,
-        ),
-        "uniq" => agent_text_filter_options_match(
-            &tokens,
-            &[
-                "-c",
-                "-d",
-                "-D",
-                "-i",
-                "-u",
-                "-z",
-                "--count",
-                "--ignore-case",
-                "--repeated",
-                "--unique",
-                "--zero-terminated",
-            ],
-            &[
-                "-f",
-                "--skip-fields",
-                "-s",
-                "--skip-chars",
-                "-w",
-                "--check-chars",
-            ],
-            1,
-        ),
+        "sort" => is_agent_readonly_sort(&tokens),
+        "uniq" => is_agent_readonly_uniq(&tokens),
         "cut" => agent_text_filter_options_match(
             &tokens,
             &[
@@ -1804,7 +1812,34 @@ pub fn analyze_command(command: &str) -> SafetyAnalysis {
         return analysis;
     }
 
-    if command.contains("&&") || command.contains("||") || command.contains(';') {
+    // Check for dangerous patterns first. The token-aware pass above handles
+    // spacing and quoting variants; these literal patterns remain as a compact
+    // fallback for legacy shapes.
+    for (pattern, reason) in DANGEROUS_PATTERNS {
+        if command_lower.contains(&pattern.to_lowercase()) {
+            return SafetyAnalysis::dangerous(
+                command,
+                vec![(*reason).to_string()],
+                vec!["Review the command carefully before execution".to_string()],
+            );
+        }
+    }
+
+    // Check for pipe to shell (remote code execution risk)
+    if (command_lower.contains("curl") || command_lower.contains("wget"))
+        && (command_lower.contains("| sh")
+            || command_lower.contains("| bash")
+            || command_lower.contains("| zsh"))
+    {
+        return SafetyAnalysis::dangerous(
+            command,
+            vec!["Piping remote content directly to shell is dangerous".to_string()],
+            vec!["Download the script first and review it before execution".to_string()],
+        );
+    }
+
+    let expansion = crate::shell_expand::expand_command(command);
+    if expansion.control {
         // Chains of known-safe commands (cargo/git/zig/npm/etc.) are
         // routine for build+test workflows. Instead of hard-blocking,
         // escalate to RequiresApproval so the user can still deny in
@@ -1825,7 +1860,7 @@ pub fn analyze_command(command: &str) -> SafetyAnalysis {
         );
     }
 
-    if command.contains("`") || command.contains("$(") {
+    if expansion.nested {
         // Substitution is a common shell pattern (e.g., `cargo test
         // $(cargo test --list | head -1)` or `echo $(date)`). Codex
         // doesn't block it; escalate to approval so the user can
@@ -1834,19 +1869,6 @@ pub fn analyze_command(command: &str) -> SafetyAnalysis {
             command,
             vec!["Command substitution detected".to_string()],
         );
-    }
-
-    // Check for dangerous patterns first. The token-aware pass above handles
-    // spacing and quoting variants; these literal patterns remain as a compact
-    // fallback for legacy shapes.
-    for (pattern, reason) in DANGEROUS_PATTERNS {
-        if command_lower.contains(&pattern.to_lowercase()) {
-            return SafetyAnalysis::dangerous(
-                command,
-                vec![(*reason).to_string()],
-                vec!["Review the command carefully before execution".to_string()],
-            );
-        }
     }
 
     // Check for privileged commands
@@ -1860,19 +1882,6 @@ pub fn analyze_command(command: &str) -> SafetyAnalysis {
                 )],
             );
         }
-    }
-
-    // Check for pipe to shell (remote code execution risk)
-    if (command_lower.contains("curl") || command_lower.contains("wget"))
-        && (command_lower.contains("| sh")
-            || command_lower.contains("| bash")
-            || command_lower.contains("| zsh"))
-    {
-        return SafetyAnalysis::dangerous(
-            command,
-            vec!["Piping remote content directly to shell is dangerous".to_string()],
-            vec!["Download the script first and review it before execution".to_string()],
-        );
     }
 
     // Check if it's a known safe command
@@ -2394,8 +2403,9 @@ fn safe_command_arguments_are_read_only(entry: &str, tokens: &[String], args: &[
         "find" => is_agent_readonly_find(tokens),
         // Script verbs `e`, `w`, `r` and the `-i` option execute or write.
         "sed" => is_agent_readonly_sed(tokens),
+        "sort" => is_agent_readonly_sort(tokens),
         // A second operand is the output file.
-        "uniq" => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1,
+        "uniq" => is_agent_readonly_uniq(tokens),
         // `hostname NAME` sets the host name.
         "hostname" => args.iter().all(|arg| arg.starts_with('-')),
         // `--pre CMD` runs a preprocessor on every file searched.
@@ -2456,15 +2466,58 @@ fn safe_command_arguments_are_read_only(entry: &str, tokens: &[String], args: &[
     }
 }
 
-/// Shell metacharacters that let a second stage hide behind a benign first
-/// word. `&&`, `||`, and `;` are excluded: those are split into segments and
-/// each segment is classified on its own.
+/// A prefix grants one command's ordinary arguments. The scanner owns shell
+/// syntax; the existing argument grammar owns known read-to-write/execute
+/// switches. This is not a general read-only requirement: trusted build/write
+/// programs remain eligible. Unknown program options cannot be inferred here.
+pub(crate) fn prefix_grant_is_eligible(
+    command: &str,
+    expansion: &crate::shell_expand::Expansion,
+) -> bool {
+    if expansion.dynamic
+        || expansion.arguments_dynamic
+        || expansion.nested
+        || expansion.control
+        || expansion.redirects
+    {
+        return false;
+    }
+    let Some(mut tokens) = shlex::split(command) else {
+        return false;
+    };
+    let Some(program) = tokens.first_mut() else {
+        return false;
+    };
+    *program = command_word(program);
+    let arguments_are_safe = |tokens: &[String]| {
+        // Global Git options may precede the read subcommand; --output still
+        // changes its authority. Reuse the existing guard for that flag.
+        (tokens[0] != "git"
+            || safe_command_arguments_are_read_only("git log", tokens, &tokens[1..]))
+            && SAFE_COMMANDS.iter().all(|entry| {
+                leading_words_match(tokens, entry).is_none_or(|words| {
+                    safe_command_arguments_are_read_only(entry, tokens, &tokens[words..])
+                })
+            })
+    };
+    // Check both the written program (notably `env CMD`) and the effective
+    // command behind ordinary wrappers, without using joined deny candidates.
+    if !arguments_are_safe(&tokens) {
+        return false;
+    }
+    let Some(tokens) = unwrap_to_effective_tokens(&tokens) else {
+        return false;
+    };
+    let Some(start) = primary_token_index(&tokens) else {
+        return false;
+    };
+    arguments_are_safe(&tokens[start..])
+}
+
+/// Composition is scanner provenance, not punctuation inside literal data.
 fn contains_shell_composition(command: &str) -> bool {
-    let without_booleans = command.replace("&&", "").replace("||", "");
-    without_booleans
-        .chars()
-        .any(|ch| matches!(ch, '|' | '&' | '>' | '<' | '`'))
-        || command.contains("$(")
+    let expansion = crate::shell_expand::expand_command(command);
+    expansion.control || expansion.redirects || expansion.nested || expansion.dynamic
 }
 
 /// Build/test/source-control commands that are reasonable to chain in a
