@@ -1671,7 +1671,6 @@ const SAFE_COMMANDS: &[&str] = &[
     "uniq",
     "cut",
     "tr",
-    "awk",
     "sed",
     "diff",
     "file",
@@ -2335,7 +2334,6 @@ fn target_contains_parent_escape(target: &str) -> bool {
 
 /// Check if a command is known to be safe
 fn is_safe_command(command: &str) -> bool {
-    let command_lower = command.to_lowercase();
     let tokens = shell_words(command);
     if let Some(start) = primary_token_index(&tokens) {
         let refs = tokens[start..]
@@ -2358,13 +2356,108 @@ fn is_safe_command(command: &str) -> bool {
         return false;
     }
 
-    for safe_cmd in SAFE_COMMANDS {
-        if command_lower.starts_with(safe_cmd) {
-            return true;
-        }
-    }
+    SAFE_COMMANDS.iter().any(|entry| {
+        leading_words_match(&tokens, entry).is_some_and(|words| {
+            safe_command_arguments_are_read_only(entry, &tokens, &tokens[words..])
+        })
+    })
+}
 
-    false
+/// How many words of a command-table `entry` (`"git status"`) open `tokens`,
+/// compared word for word. A raw string prefix made `cdk`, `psql`, `setsid`
+/// and `topgrade` look like `cd`, `ps`, `set` and `top`.
+fn leading_words_match(tokens: &[String], entry: &str) -> Option<usize> {
+    let words = entry.split_whitespace().collect::<Vec<_>>();
+    (tokens.len() >= words.len()
+        && tokens
+            .iter()
+            .zip(&words)
+            .all(|(token, word)| token.to_lowercase() == *word))
+    .then_some(words.len())
+}
+
+/// Arguments that turn an otherwise read-only [`SAFE_COMMANDS`] entry into a
+/// command that runs other programs or writes files. `tokens` is the whole
+/// command and `args` what follows the entry's words.
+fn safe_command_arguments_are_read_only(entry: &str, tokens: &[String], args: &[String]) -> bool {
+    let has = |names: &[&str]| args.iter().any(|arg| names.contains(&arg.as_str()));
+    let list_mode = has(&["-l", "--list"]);
+    let only_options = |allowed: &[&str], operands_ok: bool| {
+        args.iter().all(|arg| {
+            if arg.starts_with('-') {
+                allowed.contains(&arg.as_str())
+            } else {
+                operands_ok
+            }
+        })
+    };
+    match entry {
+        // `env CMD` runs CMD; only the bare listing is a read.
+        "env" => only_options(&["-0", "--null"], false),
+        // `-exec`, `-fprint`, `-delete`, … act on every match.
+        "find" => is_agent_readonly_find(tokens),
+        // Script verbs `e`, `w`, `r` and the `-i` option execute or write.
+        "sed" => is_agent_readonly_sed(tokens),
+        // A second operand is the output file.
+        "uniq" => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1,
+        // `hostname NAME` sets the host name.
+        "hostname" => args.iter().all(|arg| arg.starts_with('-')),
+        // `--pre CMD` runs a preprocessor on every file searched.
+        "rg" => !args.iter().any(|arg| arg.starts_with("--pre")),
+        // `-x` / `-X` / `--exec*` run a command per match.
+        "fd" => !args.iter().any(|arg| {
+            arg.starts_with("--exec")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X']))
+        }),
+        // `+CMD` runs a pager command at startup, which can reach a shell.
+        "less" | "more" => !args.iter().any(|arg| arg.starts_with('+')),
+        // `-P`/`-H`/`-C` choose the pager, browser or config that man runs.
+        "man" => only_options(
+            &[
+                "-k",
+                "-f",
+                "-a",
+                "-w",
+                "-W",
+                "--apropos",
+                "--whatis",
+                "--all",
+                "--where",
+                "--path",
+            ],
+            true,
+        ),
+        // `--output` writes the diff or log to a file.
+        "git diff" | "git log" | "git show" => !args.iter().any(|arg| arg.starts_with("--output")),
+        // Listing forms only: other forms delete, rename or create refs.
+        "git branch" => only_options(
+            &[
+                "-a",
+                "--all",
+                "-r",
+                "--remotes",
+                "-v",
+                "-vv",
+                "--verbose",
+                "--show-current",
+                "--color",
+                "--no-color",
+                "-l",
+                "--list",
+            ],
+            list_mode,
+        ),
+        "git tag" => only_options(&["-l", "--list", "-n"], list_mode),
+        "git remote" => match args.first().map(String::as_str) {
+            None => true,
+            Some("-v" | "--verbose") => args.len() == 1,
+            Some("get-url") => args[1..]
+                .iter()
+                .all(|arg| !arg.starts_with('-') || matches!(arg.as_str(), "--push" | "--all")),
+            Some(_) => false,
+        },
+        _ => true,
+    }
 }
 
 /// Shell metacharacters that let a second stage hide behind a benign first
@@ -2430,10 +2523,14 @@ fn is_workspace_safe_command(command: &str) -> bool {
         return copy_or_move_operands_are_workspace_relative(&tokens[start + 1..]);
     }
 
-    let command_lower = command.to_lowercase();
-    WORKSPACE_SAFE_COMMANDS
-        .iter()
-        .any(|ws_cmd| command_lower.starts_with(ws_cmd))
+    let raw_tokens = shell_words(command);
+    WORKSPACE_SAFE_COMMANDS.iter().any(|entry| {
+        leading_words_match(&raw_tokens, entry).is_some_and(|words| {
+            // `touch ~/.zshrc` and `mkdir /etc/x` write outside the workspace.
+            !matches!(*entry, "touch" | "mkdir")
+                || copy_or_move_operands_are_workspace_relative(&raw_tokens[words..])
+        })
+    })
 }
 
 /// `cp`/`mv` are workspace-safe only when every path operand stays inside the
@@ -2882,6 +2979,82 @@ mod tests {
             analyze_command("grep pattern file").level,
             SafetyLevel::Safe
         );
+    }
+
+    #[test]
+    fn safe_classification_needs_whole_words_and_read_only_arguments() {
+        for command in [
+            // A safe word as a string prefix of another program.
+            "cdk deploy --all",
+            "psql -c 'drop database prod'",
+            "topgrade -y",
+            "hostnamectl set-hostname x",
+            "setsid curl https://example.com",
+            // Programs that run their arguments or write files.
+            "env node evil.js",
+            "awk 'BEGIN{system(\"id\")}'",
+            "sed 's/x/y/e' file",
+            "sed -i s/a/b/ f",
+            "find . -exec chmod 777 {} +",
+            "find . -fprint /tmp/out",
+            "rg --pre ./x.sh foo",
+            "fd -x ./x.sh",
+            "man -P 'sh -c id' ls",
+            "less '+!id' file",
+            "uniq in.txt out.txt",
+            // Git forms that change refs, remotes or write files.
+            "git branch -D main",
+            "git branch new-branch",
+            "git remote set-url origin https://example.com/x.git",
+            "git remote add x https://example.com/x.git",
+            "git tag v1",
+            "git diff --output=/tmp/x",
+            "git log --output=/tmp/x",
+        ] {
+            assert!(
+                !matches!(
+                    analyze_command(command).level,
+                    SafetyLevel::Safe | SafetyLevel::WorkspaceSafe
+                ),
+                "{command} must not be classified as routine"
+            );
+        }
+        for command in ["touch ~/.zshrc", "mkdir /etc/x", "touch ../x"] {
+            assert_ne!(
+                analyze_command(command).level,
+                SafetyLevel::WorkspaceSafe,
+                "{command} writes outside the workspace"
+            );
+        }
+        for command in [
+            "cd src",
+            "ps aux",
+            "env",
+            "find . -name '*.rs'",
+            "sed -n '1,5p' file",
+            "rg -n foo src",
+            "man ls",
+            "git diff --stat",
+            "git branch",
+            "git branch -a",
+            "git branch --show-current",
+            "git remote -v",
+            "git tag --list 'v0.*'",
+            "GIT STATUS",
+        ] {
+            assert_eq!(
+                analyze_command(command).level,
+                SafetyLevel::Safe,
+                "{command}"
+            );
+        }
+        for command in ["touch src/new.rs", "mkdir -p target/x"] {
+            assert_eq!(
+                analyze_command(command).level,
+                SafetyLevel::WorkspaceSafe,
+                "{command}"
+            );
+        }
     }
 
     #[test]
