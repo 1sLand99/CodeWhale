@@ -966,6 +966,7 @@ fn native_entry_rule_fails_validation_when_the_host_is_enabled() {
     native_bundle(&user, "dir-entry", "lib", &["lib/index.mjs"]);
     native_bundle(&user, "ts-entry", "index.ts", &["index.ts"]);
     native_bundle(&user, "good-entry", "index.mjs", &["index.mjs"]);
+    native_bundle(&user, "typed-entry", "index.mts", &["index.mts"]);
     let config = DiscoveryConfig {
         workspace: temp.path().join("project"),
         user_plugins_dir: user,
@@ -996,16 +997,156 @@ fn native_entry_rule_fails_validation_when_the_host_is_enabled() {
         for name in ["dir-entry", "ts-entry"] {
             let errors = native_errors(&registry, name);
             assert_eq!(errors.len(), 1, "{name}: {errors:?}");
-            assert!(errors[0].contains(".mjs or .js"), "{name}: {errors:?}");
+            assert!(
+                errors[0].contains(".mjs, .js or .mts"),
+                "{name}: {errors:?}"
+            );
         }
         assert!(native_errors(&registry, "good-entry").is_empty());
+        assert!(native_errors(&registry, "typed-entry").is_empty());
         assert!(!registry.validation_is_clean());
     }
     let _policy = TestPolicyGuard::extension_host(false);
     let registry = discover_with_config(&config);
-    for name in ["dir-entry", "ts-entry", "good-entry"] {
+    for name in ["dir-entry", "ts-entry", "good-entry", "typed-entry"] {
         assert!(native_errors(&registry, name).is_empty(), "{name}");
     }
+}
+
+#[test]
+fn owner_reports_keep_bounded_attributed_logs_and_ignore_stale_hosts() {
+    use super::supervisor::HostEvents;
+
+    let manager = ExtensionHostManager::new(ExtensionHostOptions::default());
+    manager
+        .shared
+        .host_generation
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut registry = manager.shared.registry.lock().unwrap();
+        for id in ["alpha", "beta"] {
+            let owner = registry.begin_owner(id, id, fake_authority(id), "hash");
+            registry.mark_active(&owner);
+            register(&mut registry, &owner, &format!("{id}_probe")).unwrap();
+        }
+    }
+    let current = super::Events {
+        shared: Arc::downgrade(&manager.shared),
+        generation: 2,
+    };
+    let stale = super::Events {
+        shared: Arc::downgrade(&manager.shared),
+        generation: 1,
+    };
+    for index in 0..25 {
+        current.log(&protocol::LogParams {
+            level: "warn".into(),
+            msg: format!("alpha message {index}"),
+            plugin_id: Some("alpha".into()),
+        });
+    }
+    let mut log = protocol::LogParams {
+        level: "error".into(),
+        msg: "beta only".into(),
+        plugin_id: Some("beta".into()),
+    };
+    current.log(&log);
+    log.msg = "stale message".into();
+    stale.log(&log);
+    log.plugin_id = Some("unknown".into());
+    current.log(&log);
+    log.plugin_id = Some("alpha".into());
+    log.level = "debug".into();
+    current.log(&log);
+    let alpha = manager.owner_report("alpha").unwrap();
+    assert!(matches!(alpha.state, Some(OwnerState::Active)));
+    assert_eq!(alpha.tools, ["alpha_probe"]);
+    assert_eq!(alpha.diagnostics.len(), 20);
+    assert_eq!(alpha.diagnostics[0], "warn: alpha message 5");
+    assert_eq!(
+        manager.owner_report("beta").unwrap().diagnostics,
+        ["error: beta only"]
+    );
+    assert!(manager.owner_report("unknown").is_none());
+    manager
+        .shared
+        .plugin_diagnostic(&"x".repeat(10_000), "oversized id".into());
+    assert!(
+        manager
+            .shared
+            .diagnostics
+            .lock()
+            .unwrap()
+            .back()
+            .unwrap()
+            .plugin_id
+            .is_none()
+    );
+    for _ in 0..80 {
+        manager.shared.plugin_diagnostic("alpha", "🦀".repeat(3000));
+    }
+    assert_eq!(manager.diagnostics().len(), 64);
+    assert!(
+        manager
+            .diagnostics()
+            .iter()
+            .all(|line| line.len() <= super::MAX_DIAGNOSTIC_BYTES + '…'.len_utf8())
+    );
+    assert!(
+        manager
+            .owner_report("alpha")
+            .unwrap()
+            .diagnostics
+            .iter()
+            .all(|line| line.ends_with('…'))
+    );
+}
+
+#[tokio::test]
+async fn typed_author_example_is_reviewed_before_its_tool_can_execute() {
+    use crate::plugins::install::{DEFAULT_MAX_SIZE_BYTES, PluginInstallSource, install};
+
+    let Some(node) = node_for_tests("typed author example") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&[]).await;
+    let example =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/plugins/hello-extension");
+    install(
+        PluginInstallSource::LocalPath(example),
+        &fixture.config.user_plugins_dir,
+        DEFAULT_MAX_SIZE_BYTES,
+        &crate::network_policy::NetworkPolicy::default(),
+        false,
+        &|_| None,
+    )
+    .await
+    .unwrap();
+    let mut plugins = discover_with_config(&fixture.config);
+    assert!(!plugins.is_active("hello-extension"));
+    plugins.trust("hello-extension").unwrap();
+    assert!(
+        !plugins.is_active("hello-extension"),
+        "trust alone does not enable code"
+    );
+    plugins.enable("hello-extension").unwrap();
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(Arc::new(plugins));
+    engine.sync().await.unwrap();
+    let tool = host_tool(&engine, fixture.workspace(), "hello_greet");
+    assert_eq!(tool.approval_requirement(), ApprovalRequirement::Required);
+    let result = tool
+        .execute(
+            json!({"name": "Codewhale"}),
+            &ToolContext::new(fixture.workspace()),
+        )
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(payload["greeting"], "Hello, Codewhale!");
+    assert!(payload["callId"].as_str().is_some_and(|id| !id.is_empty()));
+    manager.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------

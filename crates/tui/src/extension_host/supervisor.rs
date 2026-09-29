@@ -225,6 +225,7 @@ pub(crate) trait HostEvents: Send + Sync + 'static {
     fn register(&self, params: &protocol::RegisterParams) -> RegisterResult;
     fn unregister(&self, params: &protocol::UnregisterParams);
     fn faulted(&self, params: &protocol::FaultedParams);
+    fn log(&self, params: &protocol::LogParams);
     fn exited(&self, host_generation: u64, reason: String, stderr_tail: String);
 }
 
@@ -780,6 +781,7 @@ fn handle_host_message(
             }
             HostNotification::Faulted(params) => events.faulted(&params),
             HostNotification::Log(log) => {
+                events.log(&log);
                 let plugin = log.plugin_id.as_deref().unwrap_or("host");
                 match log.level.as_str() {
                     "error" => tracing::warn!(target: "extension_host", plugin, "{}", log.msg),

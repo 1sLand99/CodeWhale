@@ -2049,6 +2049,13 @@ pub(crate) fn key_to_plugin_message_id(key: &str) -> Option<MessageId> {
     Some(match key {
         "cmd_plugin_action_failed" => MessageId::CmdPluginActionFailed,
         "cmd_plugin_bundle_detail" => MessageId::CmdPluginBundleDetail,
+        "cmd_plugin_owner_report" => MessageId::CmdPluginOwnerReport,
+        "cmd_plugin_owner_activating" => MessageId::CmdPluginOwnerActivating,
+        "cmd_plugin_owner_active" => MessageId::CmdPluginOwnerActive,
+        "cmd_plugin_owner_failed" => MessageId::CmdPluginOwnerFailed,
+        "cmd_plugin_owner_faulted" => MessageId::CmdPluginOwnerFaulted,
+        "cmd_plugin_owner_revoked" => MessageId::CmdPluginOwnerRevoked,
+        "cmd_plugin_owner_inactive" => MessageId::CmdPluginOwnerInactive,
         "cmd_plugin_bundle_diagnostics_header" => MessageId::CmdPluginBundleDiagnosticsHeader,
         "cmd_plugin_bundle_list_header" => MessageId::CmdPluginBundleListHeader,
         "cmd_plugin_bundle_mutation_success" => MessageId::CmdPluginBundleMutationSuccess,

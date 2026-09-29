@@ -145,11 +145,13 @@ Commands、Agents 和 Hooks 的路径声明放在 `plugin.json` 的
 [插件组件契约](../PLUGIN_BUNDLES.md#active-and-inactive-component-surfaces)。
 不要把 MCP 服务器字段或任意运行时入口放在清单根级。
 LSP 可以列入清单，但目前没有可执行的适配器。`native` 原生扩展默认只列入清单；
-开启实验性的 `[features] extension_host` 后，它必须指向一个 `.mjs` 或 `.js`
+开启实验性的 `[features] extension_host` 后，它必须指向一个 `.mjs`、`.js` 或 `.mts`
 ES 模块文件，由 TypeScript 扩展宿主运行，`/plugin validate` 会拒绝其他入口。
 其工具始终使用 `Required` 审批要求，不采信插件自行声明的只读提示；
 Full Access、Bypass 或针对该已审查版本和精确调用的会话授权可满足要求而不再弹出审批
 （[设计文档](../design/TS_EXTENSION_HOST.md#as-built-phase-1-2026-09-25)）。
+可运行的类型化示例、生命周期和按插件归属显示的诊断见
+[扩展工具编写指南](../EXTENSIONS.md)。`.mts` 仅支持 Node 可直接擦除的类型语法。
 
 插件信任**不是操作系统沙箱**。本地 MCP 服务器或 hook 可以启动进程；
 启用前需审查其代码和权限。Skills 不授予权限：仓库指令、权限规则、沙箱策略

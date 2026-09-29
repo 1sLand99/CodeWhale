@@ -41,10 +41,17 @@ Rust manager, owner registry, attachment snapshots, and approval gate:
   resets the unexpected-crash budget. Late old-process outcomes cannot dirty
   the replacement.
 
-This slice does **not** add per-owner author logs, `exec.cwd`, `.mts` entries,
-commands, hooks, MCP, `core/call`, or sandbox parity.
-Those remain subsequent work. The following phase-1 section is its historical
-receipt, including the earlier lack of heartbeat/restart.
+The authoring follow-up adds an escaped `/plugin show` owner section with state,
+live tools and up to 20 recent attributed messages from the bounded 64-entry
+shared diagnostic ring. Regular `.mts` entries use the same reviewed-byte and
+discovery rules as `.mjs`/`.js`; Node strips erasable types. The executable
+[hello extension](../examples/plugins/hello-extension/hello.mts) and
+[author guide](../EXTENSIONS.md) describe the actual services and trust loop.
+
+`exec.cwd` remains deferred: the current execution context does not expose the
+caller's workspace path. Commands, hooks, MCP, `core/call`, and sandbox parity
+also remain subsequent work. The following phase-1 section is its historical
+receipt, including the earlier lack of heartbeat/restart and `.mts` support.
 
 ## As built: phase 1 (2026-09-25)
 

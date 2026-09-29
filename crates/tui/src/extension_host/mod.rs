@@ -97,7 +97,25 @@ use crate::plugins::types::PluginAuthority;
 const BUNDLE: &[u8] = include_bytes!("../../extension-host/dist/codewhale-extension-host.mjs");
 const BUNDLE_FILE_NAME: &str = "codewhale-extension-host.mjs";
 const MAX_DIAGNOSTICS: usize = 64;
+const MAX_DIAGNOSTIC_BYTES: usize = 2048;
 const DIRTY_RESTART_REASON: &str = "planned restart after repeated dirty teardowns";
+
+struct Diagnostic {
+    plugin_id: Option<String>,
+    message: String,
+}
+
+fn bounded_diagnostic(mut message: String) -> String {
+    if message.len() > MAX_DIAGNOSTIC_BYTES {
+        let mut end = MAX_DIAGNOSTIC_BYTES;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.push('…');
+    }
+    message
+}
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
@@ -296,7 +314,7 @@ pub(crate) struct ManagerShared {
     host_generation: AtomicU64,
     spawn_attempts: AtomicU64,
     sync_lock: tokio::sync::Mutex<()>,
-    diagnostics: Mutex<VecDeque<String>>,
+    diagnostics: Mutex<VecDeque<Diagnostic>>,
     /// Lock order: host, supervision, registry. Never held across await.
     supervision: Mutex<SupervisionState>,
 }
@@ -325,7 +343,7 @@ impl ManagerShared {
             ),
             Err(error) => format!("extension `{}` teardown failed: {error}", owner.plugin_id),
         };
-        self.diagnostic(diagnostic);
+        self.plugin_diagnostic(&owner.plugin_id, diagnostic);
         self.record_dirty_teardown(host);
     }
 
@@ -343,9 +361,22 @@ impl ManagerShared {
     }
 
     fn diagnostic(&self, message: String) {
+        self.record_diagnostic(None, message);
+    }
+
+    fn plugin_diagnostic(&self, plugin_id: &str, message: String) {
+        // Refused registrations can contain an arbitrary host-supplied id.
+        // Keep an oversized id global instead of retaining unbounded metadata
+        // or truncating it into another plugin's identity.
+        let plugin_id = (plugin_id.len() <= MAX_DIAGNOSTIC_BYTES).then(|| plugin_id.to_string());
+        self.record_diagnostic(plugin_id, message);
+    }
+
+    fn record_diagnostic(&self, plugin_id: Option<String>, message: String) {
+        let message = bounded_diagnostic(message);
         tracing::info!(target: "extension_host", "{message}");
         let mut diagnostics = self.diagnostics.lock().expect("diagnostics lock");
-        diagnostics.push_back(message);
+        diagnostics.push_back(Diagnostic { plugin_id, message });
         while diagnostics.len() > MAX_DIAGNOSTICS {
             diagnostics.pop_front();
         }
@@ -423,10 +454,13 @@ impl HostEvents for Events {
         match result {
             Ok(handle) => RegisterResult::Admitted { handle },
             Err(reason) => {
-                shared.diagnostic(format!(
-                    "extension `{}` tool `{}` refused: {reason}",
-                    params.owner.plugin_id, params.spec.name
-                ));
+                shared.plugin_diagnostic(
+                    &params.owner.plugin_id,
+                    format!(
+                        "extension `{}` tool `{}` refused: {reason}",
+                        params.owner.plugin_id, params.spec.name
+                    ),
+                );
                 RegisterResult::Refused { refused: reason }
             }
         }
@@ -462,10 +496,13 @@ impl HostEvents for Events {
             host.revoke_calls_of(&params.owner.plugin_id);
         }
         drop(slot);
-        shared.diagnostic(format!(
-            "extension `{}` faulted and was disposed: {}",
-            params.owner.plugin_id, params.error
-        ));
+        shared.plugin_diagnostic(
+            &params.owner.plugin_id,
+            format!(
+                "extension `{}` faulted and was disposed: {}",
+                params.owner.plugin_id, params.error
+            ),
+        );
     }
 
     fn exited(&self, host_generation: u64, reason: String, stderr_tail: String) {
@@ -509,6 +546,30 @@ impl HostEvents for Events {
         if let Some((ticket, policy)) = retry {
             schedule_restart(&shared, host_generation, ticket, policy);
         }
+    }
+
+    fn log(&self, params: &protocol::LogParams) {
+        if !matches!(params.level.as_str(), "warn" | "error") {
+            return;
+        }
+        let Some(plugin_id) = params.plugin_id.as_deref() else {
+            return;
+        };
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let _slot = shared.host.lock().expect("host lock");
+        if shared.host_generation.load(Ordering::SeqCst) != self.generation
+            || shared
+                .registry
+                .lock()
+                .expect("registry lock")
+                .owner(plugin_id)
+                .is_none()
+        {
+            return;
+        }
+        shared.plugin_diagnostic(plugin_id, format!("{}: {}", params.level, params.msg));
     }
 }
 
@@ -735,8 +796,47 @@ impl ExtensionHostManager {
             .lock()
             .expect("diagnostics lock")
             .iter()
-            .cloned()
+            .map(|entry| entry.message.clone())
             .collect()
+    }
+
+    /// Recent retained diagnostics for exactly this plugin, not a persistent
+    /// log. The command renderer escapes each field before displaying it.
+    #[must_use]
+    pub fn owner_report(&self, plugin_id: &str) -> Option<OwnerReport> {
+        let registry = self.shared.registry.lock().expect("registry lock");
+        let state = registry.owner(plugin_id).map(|entry| match &entry.state {
+            OwnerState::Failed(reason) => OwnerState::Failed(bounded_diagnostic(reason.clone())),
+            OwnerState::Faulted(reason) => OwnerState::Faulted(bounded_diagnostic(reason.clone())),
+            state => state.clone(),
+        });
+        let tools = registry
+            .live_tools()
+            .into_iter()
+            .filter(|tool| tool.owner.plugin_id == plugin_id)
+            .map(|tool| tool.name)
+            .collect();
+        drop(registry);
+        let mut diagnostics: Vec<_> = self
+            .shared
+            .diagnostics
+            .lock()
+            .expect("diagnostics lock")
+            .iter()
+            .rev()
+            .filter(|entry| entry.plugin_id.as_deref() == Some(plugin_id))
+            .take(20)
+            .map(|entry| entry.message.clone())
+            .collect();
+        diagnostics.reverse();
+        if state.is_none() && diagnostics.is_empty() {
+            return None;
+        }
+        Some(OwnerReport {
+            state,
+            tools,
+            diagnostics,
+        })
     }
 
     #[cfg(test)]
@@ -905,7 +1005,7 @@ impl ExtensionHostManager {
                     .get(&registration.name)
                     .map(|existing| existing.registration_origin().into_owned())
                     .unwrap_or_else(|| "another tool".to_string());
-                self.shared.diagnostic(format!(
+                self.shared.plugin_diagnostic(&registration.owner.plugin_id, format!(
                     "extension tool `{}` from `{}` skipped: the name is already registered by {origin}",
                     registration.name, registration.plugin_name
                 ));
@@ -1010,7 +1110,10 @@ impl ExtensionHostManager {
         }
         let host = shared.ready_host();
         for owner in revoked {
-            shared.diagnostic(format!("extension `{}` revoked", owner.plugin_id));
+            shared.plugin_diagnostic(
+                &owner.plugin_id,
+                format!("extension `{}` revoked", owner.plugin_id),
+            );
             if let Some(host) = &host {
                 host.revoke_calls_of(&owner.plugin_id);
                 shared.deactivate_owner(host, &owner).await;
@@ -1081,11 +1184,14 @@ impl ExtensionHostManager {
                     .expect("registry lock")
                     .mark_active(&owner);
                 if active {
-                    shared.diagnostic(format!(
-                        "extension `{}` active (tools: {})",
-                        want.plugin_name,
-                        tools.join(", ")
-                    ));
+                    shared.plugin_diagnostic(
+                        plugin_id,
+                        format!(
+                            "extension `{}` active (tools: {})",
+                            want.plugin_name,
+                            tools.join(", ")
+                        ),
+                    );
                 }
             }
             Some(reason) => {
@@ -1096,10 +1202,13 @@ impl ExtensionHostManager {
                     .lock()
                     .expect("registry lock")
                     .mark_failed(&owner, OwnerState::Failed(reason.clone()));
-                shared.diagnostic(format!(
-                    "extension `{}` failed to activate: {reason}",
-                    want.plugin_name
-                ));
+                shared.plugin_diagnostic(
+                    plugin_id,
+                    format!(
+                        "extension `{}` failed to activate: {reason}",
+                        want.plugin_name
+                    ),
+                );
                 shared.deactivate_owner(host, &owner).await;
             }
         }
@@ -1357,6 +1466,20 @@ pub fn plugins_changed(plugins: Arc<PluginRegistry>) {
 #[must_use]
 pub fn status_report() -> Option<String> {
     activation::extension_host_policy_enabled().then(|| render_status(&manager()))
+}
+
+pub struct OwnerReport {
+    pub state: Option<OwnerState>,
+    pub tools: Vec<String>,
+    pub diagnostics: Vec<String>,
+}
+
+/// The resolved plugin id is supplied by the existing `/plugin show` facet.
+pub fn owner_report(plugin_id: &str) -> Option<OwnerReport> {
+    if !activation::extension_host_policy_enabled() {
+        return None;
+    }
+    manager().owner_report(plugin_id)
 }
 
 /// Reviewed, enabled plugins with `native` entries, keyed by plugin id, read
