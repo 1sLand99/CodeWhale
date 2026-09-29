@@ -1101,10 +1101,7 @@ pub(super) async fn git_diff(
     require_repo(&workspace)?;
     let base = diff_base(&workspace).await?;
     let path_arg = path.to_string_lossy().into_owned();
-    let mut args = vec!["diff", "--no-color"];
-    args.extend(Git::REVIEW_DIFF_ARGS);
-    args.extend([base.as_str(), "--", &path_arg]);
-    let run = git_read(&workspace, &args).await?;
+    let run = git_read(&workspace, &file_diff_args(&base, &path_arg)).await?;
     if !run.status_success {
         return Err(ApiError::internal(format!(
             "git diff failed: {}",
@@ -1116,6 +1113,7 @@ pub(super) async fn git_diff(
         let status = git_read(
             &workspace,
             &[
+                "--literal-pathspecs",
                 "status",
                 "--porcelain=v1",
                 "-z",
@@ -1140,6 +1138,16 @@ pub(super) async fn git_diff(
         "diff": diff,
         "truncated": truncated,
     })))
+}
+
+/// One file's diff against `base`. The path is literal, never pathspec magic
+/// or a glob, so `:/…`/`:(top)…` cannot reach outside a workspace that is a
+/// subdirectory of its repository.
+fn file_diff_args<'a>(base: &'a str, path: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["--literal-pathspecs", "diff", "--no-color"];
+    args.extend(Git::REVIEW_DIFF_ARGS);
+    args.extend([base, "--", path]);
+    args
 }
 
 #[derive(Deserialize)]
@@ -1836,6 +1844,24 @@ pub(super) async fn git_commit(
     guarded_write(&state, expect, args).await
 }
 
+/// A push target must be one of the repository's configured remotes: never an
+/// option lookalike (`--force`, `--mirror`) and never a path or URL.
+fn validate_push_remote(remote: &str, configured: &str) -> Result<(), ApiError> {
+    let shaped = !remote.starts_with('-')
+        && remote
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'));
+    if !shaped {
+        return Err(ApiError::bad_request("remote must be a remote name"));
+    }
+    if !configured.lines().any(|name| name.trim() == remote) {
+        return Err(ApiError::bad_request(format!(
+            "remote {remote} is not configured in this repository"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn git_push(
     State(state): State<RuntimeApiState>,
     Json(request): Json<GitPushRequest>,
@@ -1848,12 +1874,8 @@ pub(super) async fn git_push(
         .map(str::trim)
         .filter(|remote| !remote.is_empty())
         .map(str::to_string);
-    if let Some(remote) = &remote
-        && !remote
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
-    {
-        return Err(ApiError::bad_request("remote must be a remote name"));
+    if let Some(remote) = &remote {
+        validate_push_remote(remote, &run_git_sync(&workspace, &["remote"])?)?;
     }
     let mut args = vec!["push".to_string()];
     if request.set_upstream {
@@ -2637,5 +2659,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ok.files.unwrap().keys().collect::<Vec<_>>(), vec!["a.txt"]);
+    }
+
+    #[test]
+    fn file_diff_reads_the_path_literally_inside_a_subdirectory_workspace() {
+        let tmp = repo();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::create_dir_all(root.join("apps/other")).unwrap();
+        fs::write(root.join("apps/web/w.txt"), "w\n").unwrap();
+        fs::write(root.join("apps/other/secret.txt"), "old\n").unwrap();
+        git(root, &["add", "apps"]);
+        git(root, &["commit", "-q", "-m", "apps"]);
+        fs::write(root.join("apps/web/w.txt"), "w2\n").unwrap();
+        fs::write(root.join("apps/other/secret.txt"), "new\n").unwrap();
+        let workspace = root.join("apps/web");
+        let diff = |path: &str| {
+            let output = Git::review_command(&workspace)
+                .unwrap()
+                .args(file_diff_args("HEAD", path))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        assert!(diff("w.txt").contains("+w2"), "in-workspace diff works");
+        for path in [
+            ":/apps/other/secret.txt",
+            ":(top)apps/other/secret.txt",
+            "*",
+        ] {
+            let body = diff(path);
+            assert!(!body.contains("secret"), "{path} escaped: {body}");
+        }
+    }
+
+    #[test]
+    fn push_remote_must_be_a_configured_remote_name() {
+        let configured = "origin\nupstream\n";
+        assert!(validate_push_remote("origin", configured).is_ok());
+        assert!(validate_push_remote("upstream", configured).is_ok());
+        for remote in [
+            "--force",
+            "--mirror",
+            "-f",
+            "--delete",
+            "../other-repo",
+            "fork",
+        ] {
+            let error = validate_push_remote(remote, configured).expect_err(remote);
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{remote}");
+        }
     }
 }

@@ -177,6 +177,38 @@ pub(super) struct CreateJobResponse {
     job: JobView,
 }
 
+/// Resolve a job `cwd` the way the shell tool resolves its own: relative to
+/// the thread workspace (never the server's cwd) and, outside trust mode,
+/// still inside that workspace once symlinks resolve.
+fn resolve_job_cwd(
+    workspace: &std::path::Path,
+    raw: &str,
+    trust_mode: bool,
+) -> Result<std::path::PathBuf, ApiError> {
+    let requested = std::path::Path::new(raw);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        workspace.join(requested)
+    };
+    let resolved = candidate
+        .canonicalize()
+        .ok()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| ApiError::bad_request("cwd must be an existing directory"))?;
+    if !trust_mode {
+        let root = workspace
+            .canonicalize()
+            .map_err(|_| ApiError::internal("thread workspace is unavailable"))?;
+        if !resolved.starts_with(&root) {
+            return Err(ApiError::forbidden(
+                "cwd must stay inside the thread workspace",
+            ));
+        }
+    }
+    Ok(resolved)
+}
+
 /// `POST /v1/threads/{id}/jobs` — launch a client-owned background job under
 /// the thread's own sandbox policy. The client asking is the approval; the
 /// thread's posture still bounds what the job may touch.
@@ -227,17 +259,14 @@ pub(super) async fn create_thread_job(
         )
         .await
         .map_err(|error| ApiError::forbidden(error.to_string()))?;
-    if let Some(cwd) = request.cwd.as_deref() {
-        let resolved = std::path::Path::new(cwd);
-        let resolved = if resolved.is_absolute() {
-            resolved.to_path_buf()
-        } else {
-            thread.workspace.join(resolved)
-        };
-        if !resolved.is_dir() {
-            return Err(ApiError::bad_request("cwd must be an existing directory"));
-        }
-    }
+    // The manager resolves a relative `working_dir` against the server's own
+    // cwd, so hand it the directory resolved against the thread workspace.
+    let request_cwd = request
+        .cwd
+        .as_deref()
+        .map(|cwd| resolve_job_cwd(&thread.workspace, cwd, thread.trust_mode))
+        .transpose()?
+        .map(|cwd| cwd.to_string_lossy().into_owned());
     let policy = state
         .runtime_threads
         .thread_job_sandbox_policy(&thread)
@@ -247,7 +276,6 @@ pub(super) async fn create_thread_job(
     let request_timeout = request.timeout_ms;
     let request_tty = request.tty;
     let request_env = request.env;
-    let request_cwd = request.cwd;
     let command = command.to_string();
     let job = tokio::task::spawn_blocking(move || -> Result<JobView, ApiError> {
         let mut guard = manager.lock().unwrap_or_else(|e| e.into_inner());
@@ -561,4 +589,40 @@ pub(super) async fn resize_thread_job(
     })
     .await
     .map_err(|_| ApiError::internal("PTY resize failed"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_cwd_resolves_against_the_thread_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("packages/app")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let root = workspace.canonicalize().unwrap();
+
+        let resolved = resolve_job_cwd(&workspace, "packages/app", false).unwrap();
+        assert!(resolved.is_absolute(), "{resolved:?}");
+        assert_eq!(resolved, root.join("packages/app"));
+        let absolute = root.join("packages").to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_job_cwd(&workspace, &absolute, false).unwrap(),
+            root.join("packages")
+        );
+
+        let missing = resolve_job_cwd(&workspace, "packages/none", false).unwrap_err();
+        assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+        let outside_raw = outside.to_string_lossy().into_owned();
+        for raw in [outside_raw.as_str(), "../outside"] {
+            let error = resolve_job_cwd(&workspace, raw, false).unwrap_err();
+            assert_eq!(error.status, StatusCode::FORBIDDEN, "{raw}");
+        }
+        assert_eq!(
+            resolve_job_cwd(&workspace, "../outside", true).unwrap(),
+            outside.canonicalize().unwrap()
+        );
+    }
 }

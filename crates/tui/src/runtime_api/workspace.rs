@@ -412,11 +412,38 @@ pub(super) fn relative_request_path(raw: &str, allow_root: bool) -> Result<PathB
     }
     if path
         .components()
-        .any(|component| matches!(component, Component::Normal(name) if name == ".git"))
+        .any(|component| matches!(component, Component::Normal(name) if is_git_metadata_name(name)))
     {
         return Err(ApiError::forbidden("the .git directory is not served"));
     }
     Ok(path)
+}
+
+/// Whether one path component names the repository metadata directory as the
+/// filesystem resolves it, not just as spelled: `.git` in any letter case
+/// (macOS and Windows default to case-insensitive names) and, on Windows,
+/// with the trailing dots/spaces or `:stream` suffix it drops and the `GIT~N`
+/// short-name alias.
+pub(super) fn is_git_metadata_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let name = if cfg!(windows) {
+        name.split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(['.', ' '])
+    } else {
+        name
+    };
+    if name.eq_ignore_ascii_case(".git") {
+        return true;
+    }
+    cfg!(windows)
+        && name.len() > 4
+        && name.is_char_boundary(4)
+        && name[..4].eq_ignore_ascii_case("git~")
+        && name[4..].bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(super) fn canonical_workspace(workspace: &FsPath) -> Result<PathBuf, ApiError> {
@@ -495,7 +522,7 @@ fn list_workspace_directory(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name == ".git" {
+        if is_git_metadata_name(std::ffi::OsStr::new(&name)) {
             continue;
         }
         let Ok(file_type) = entry.file_type() else {
@@ -880,6 +907,39 @@ pub(super) async fn workspace_instructions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_metadata_directory_is_refused_in_any_letter_case() {
+        for raw in [
+            ".git",
+            ".git/config",
+            ".GIT/config",
+            ".Git/hooks/pre-commit",
+            "sub/.gIt/HEAD",
+        ] {
+            let error = relative_request_path(raw, false).expect_err(raw);
+            assert_eq!(error.status, StatusCode::FORBIDDEN, "{raw}");
+        }
+        for raw in [".github/workflows/ci.yml", "a.git/b", ".gitignore", "git"] {
+            assert!(relative_request_path(raw, false).is_ok(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn listing_hides_git_metadata_directory_in_any_letter_case() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        std::fs::create_dir_all(tmp.path().join(".Git"))?;
+        std::fs::write(tmp.path().join("kept.txt"), "kept")?;
+        let listing = list_workspace_directory(tmp.path(), FsPath::new(""), 100)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let names: Vec<&str> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["kept.txt"]);
+        Ok(())
+    }
 
     #[test]
     fn workspace_file_search_reuses_discovery_ignores() -> anyhow::Result<()> {

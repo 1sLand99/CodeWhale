@@ -1584,7 +1584,9 @@ routes are the contract for now.
   "tty"?, "env"? }` → `201 { "job" }`; runs as a background shell under the
   thread's projected sandbox policy. `tty: true` merges stderr into stdout
   and gives the command a terminal (required for interactive programs);
-  background jobs are never killed at `timeout_ms`
+  background jobs are never killed at `timeout_ms`. A relative `cwd`
+  resolves against the thread workspace, and outside trust mode `cwd` must
+  stay inside it
 - `GET /v1/threads/{id}/jobs/{job_id}` — one job's status + metadata
 - `GET /v1/threads/{id}/jobs/{job_id}/output?stream=<stdout|stderr>&cursor=
   <bytes>&max_bytes=<1-512KiB>&wait_ms=<0-30s>&format=<base64|text>` — the
@@ -1730,7 +1732,8 @@ also how a client sees model-spawned work.
   (tracked paths only — no `all`, an untracked path fails closed);
   `POST /v1/git/commit` `{ "message", "all"? }`; stage, unstage, discard
   and commit also take an optional `expect` (below); `POST /v1/git/push`
-  `{ "remote"?, "set_upstream"? }`; `POST /v1/git/branch`
+  `{ "remote"?, "set_upstream"? }` (`remote` must name a configured
+  remote); `POST /v1/git/branch`
   `{ "name", "create"? }`
 
 Diffs and precondition token reads run through the hardened review command
