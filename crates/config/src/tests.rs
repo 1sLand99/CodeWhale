@@ -10268,3 +10268,39 @@ fn named_custom_provider_never_resolves_to_legacy_custom_table() {
         Some("legacy-custom-key-1234567890")
     );
 }
+
+#[test]
+fn deepseek_scoped_headers_and_model_stay_out_of_root_keys() -> Result<()> {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let mut config = ConfigToml::default();
+    config.set_value("providers.deepseek.http_headers", "X-Gateway-Key=ds-only")?;
+    config.set_value("providers.deepseek.model", "deepseek-v4-pro")?;
+    assert!(config.http_headers.is_empty());
+    assert_eq!(config.default_text_model, None);
+
+    config.set_value("provider", "openrouter")?;
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert!(
+        !resolved.http_headers.contains_key("X-Gateway-Key"),
+        "{:?}",
+        resolved.http_headers
+    );
+
+    // Root values the user set apart survive unsetting the provider leg,
+    // while a mirrored copy left by an earlier release is cleared with it.
+    config.set_value("http_headers", "X-Everywhere=root")?;
+    config.set_value("default_text_model", "root-model")?;
+    config.unset_value("providers.deepseek.http_headers")?;
+    config.unset_value("providers.deepseek.model")?;
+    assert_eq!(
+        config.http_headers.get("X-Everywhere").map(String::as_str),
+        Some("root")
+    );
+    assert_eq!(config.default_text_model.as_deref(), Some("root-model"));
+
+    config.set_value("providers.deepseek.http_headers", "X-Everywhere=root")?;
+    config.unset_value("providers.deepseek.http_headers")?;
+    assert!(config.http_headers.is_empty());
+    Ok(())
+}

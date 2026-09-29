@@ -1188,12 +1188,12 @@ fn set_provider_config_value(
         ProviderConfigField::BaseUrl => {
             config.providers.for_provider_mut(provider).base_url = Some(value.to_string());
         }
+        // Provider-scoped values stay in their `[providers.<name>]` table.
+        // The root `http_headers` / `default_text_model` apply to every
+        // provider, so mirroring DeepSeek's values there sent them to other
+        // providers after a switch.
         ProviderConfigField::Model => {
-            let value = value.to_string();
-            config.providers.for_provider_mut(provider).model = Some(value.clone());
-            if provider == ProviderKind::Deepseek {
-                config.default_text_model = Some(value);
-            }
+            config.providers.for_provider_mut(provider).model = Some(value.to_string());
         }
         ProviderConfigField::ContextWindow => {
             config.providers.for_provider_mut(provider).context_window =
@@ -1221,11 +1221,7 @@ fn set_provider_config_value(
                 .allow_insecure_http = Some(parse_bool(value)?);
         }
         ProviderConfigField::HttpHeaders => {
-            let headers = parse_http_headers(value)?;
-            config.providers.for_provider_mut(provider).http_headers = headers.clone();
-            if provider == ProviderKind::Deepseek {
-                config.http_headers = headers;
-            }
+            config.providers.for_provider_mut(provider).http_headers = parse_http_headers(value)?;
         }
         ProviderConfigField::PathSuffix => {
             config.providers.for_provider_mut(provider).path_suffix = Some(value.to_string());
@@ -1250,8 +1246,13 @@ fn unset_provider_config_value(
             config.providers.for_provider_mut(provider).base_url = None;
         }
         ProviderConfigField::Model => {
-            config.providers.for_provider_mut(provider).model = None;
-            if provider == ProviderKind::Deepseek {
+            let removed = config.providers.for_provider_mut(provider).model.take();
+            // Earlier releases mirrored DeepSeek's model into the root key;
+            // clear that copy too, but never a root value the user set apart.
+            if provider == ProviderKind::Deepseek
+                && removed.is_some()
+                && config.default_text_model == removed
+            {
                 config.default_text_model = None;
             }
         }
@@ -1280,12 +1281,14 @@ fn unset_provider_config_value(
                 .allow_insecure_http = None;
         }
         ProviderConfigField::HttpHeaders => {
-            config
-                .providers
-                .for_provider_mut(provider)
-                .http_headers
-                .clear();
-            if provider == ProviderKind::Deepseek {
+            let removed =
+                std::mem::take(&mut config.providers.for_provider_mut(provider).http_headers);
+            // Earlier releases mirrored DeepSeek's headers into the root table;
+            // clear that copy too, but never root headers the user set apart.
+            if provider == ProviderKind::Deepseek
+                && !removed.is_empty()
+                && config.http_headers == removed
+            {
                 config.http_headers.clear();
             }
         }
