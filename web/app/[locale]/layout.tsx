@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import { notFound } from "next/navigation";
 import { Nav } from "@/components/nav";
 import { Footer } from "@/components/footer";
 import { UsageCounting } from "@/components/usage-counting";
 import { BUILD_FACTS } from "@/lib/facts";
-import { localeDirection, locales, type Locale } from "@/lib/i18n/config";
+import { isValidLocale, localeDirection, locales } from "@/lib/i18n/config";
 import { getChrome, getHome } from "@/lib/i18n/dictionaries";
 import { serializeJsonLd } from "@/lib/json-ld";
 import { buildPageMetadata } from "@/lib/page-meta";
@@ -74,6 +75,10 @@ export default async function LocaleLayout({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
+  // Middleware leaves dotted paths alone, so `/wp-login.php` reaches this
+  // segment with that "locale". Without this it rendered the home page with
+  // HTTP 200 and `<html lang="wp-login.php">`.
+  if (!isValidLocale(locale)) notFound();
   const chrome = getChrome(locale);
   // RTL locales (e.g. ar) set the document direction from the canonical
   // registry so the browser handles bidirectional layout from the root.
@@ -106,9 +111,9 @@ export default async function LocaleLayout({
         <a href="#main-content" className="skip-link">
           {chrome.skipToContent}
         </a>
-        <Nav locale={locale as Locale} />
+        <Nav locale={locale} />
         <main id="main-content">{children}</main>
-        <Footer locale={locale as Locale} />
+        <Footer locale={locale} />
         {/* Aggregate usage counting, on by default — see lib/telemetry. The
             choice lives on the privacy page; every opt-out stays off. */}
         <UsageCounting appVersion={BUILD_FACTS.version ?? "0.0.0"} />
