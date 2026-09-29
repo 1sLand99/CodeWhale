@@ -4639,9 +4639,16 @@ impl Engine {
                 }
                 let snapshot = state.snapshot();
                 if snapshot.status != GoalStatus::Blocked.as_str() {
-                    tracing::warn!(
+                    // Not an ordering bug: only an Active goal is moved to
+                    // Blocked above, so reaching here means there was no
+                    // active goal to block — most often no goal at all
+                    // (`status=none`) on an ordinary turn that failed, or one
+                    // the user paused or completed during the turn. The
+                    // turn's own failure already reached the host through
+                    // `TurnComplete`; there is nothing goal-side to publish.
+                    tracing::debug!(
                         status = %snapshot.status,
-                        "goal changed before continuation blocker could be published"
+                        "no active goal to block after a non-completed turn"
                     );
                     return;
                 }

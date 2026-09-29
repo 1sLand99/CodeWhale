@@ -1584,6 +1584,10 @@ pub struct App {
     /// that `TurnComplete { error: .. }` would otherwise emit on top of
     /// the in-transcript error cell.
     pub turn_error_posted: bool,
+    /// Text of the error cell posted for the current turn, when
+    /// `turn_error_posted`. A turn that then ends `Failed` persists exactly
+    /// this text, so resume shows what the live transcript showed.
+    pub(crate) turn_error_notice: Option<String>,
     /// Legacy status text sink retained for compatibility with existing call sites.
     pub status_message: Option<String>,
     /// Recent status toasts (ephemeral, newest at back).
@@ -2148,6 +2152,9 @@ pub struct App {
     pub(crate) current_session_metadata: Option<SessionMetadata>,
     /// Metadata-only registry of large tool outputs produced in this session.
     pub session_artifacts: Vec<ArtifactRecord>,
+    /// Turns in this session that ended `Failed`, persisted with the session
+    /// so the reason survives the TUI closing.
+    pub(crate) session_turn_outcomes: Vec<crate::session_manager::SavedTurnOutcome>,
     /// Trust mode - allow access outside workspace
     pub trust_mode: bool,
     /// Translation mode — when enabled, the model is instructed to respond in
@@ -4798,6 +4805,7 @@ impl App {
         self.context_references_by_cell.clear();
         self.session_context_references.clear();
         self.session_artifacts.clear();
+        self.session_turn_outcomes.clear();
         self.prune_transcript_index_state(0);
         self.history_version = self.history_version.wrapping_add(1);
         self.needs_redraw = true;

@@ -8949,6 +8949,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         work_state: None,
         window_title: None,
         last_auto_route: None,
+        turn_outcomes: Vec::new(),
     }
 }
 
@@ -17839,6 +17840,82 @@ fn an_engine_stopped_turn_keeps_its_reason_in_the_transcript() {
             .history
             .iter()
             .any(|cell| matches!(cell, HistoryCell::Error { .. }))
+    );
+}
+
+/// Founder run 2026-09-28: two turns ended `Failed` and the session record
+/// kept only the user prompts, so the reason was gone once the TUI closed.
+/// The failure the transcript showed is persisted (redacted) with the session
+/// and replayed in place on resume.
+#[test]
+fn a_failed_turn_reason_is_persisted_and_replayed_on_resume() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let mut app = create_test_app();
+    app.api_messages_mut()
+        .push(text_message("user", "first question"));
+    app.api_messages_mut()
+        .push(text_message("assistant", "first answer"));
+    app.api_messages_mut()
+        .push(text_message("user", "second question"));
+    let reason = "provider rejected the request: invalid key sk-live1234567890abcdef";
+    super::event_loop::present_turn_failure(
+        &mut app,
+        crate::core::events::TurnOutcomeStatus::Failed,
+        Some(reason),
+    );
+    let shown = app
+        .history
+        .iter()
+        .find_map(|cell| match cell {
+            HistoryCell::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("the failure is in the live transcript");
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    assert_eq!(snapshot.turn_outcomes.len(), 1);
+    let outcome = &snapshot.turn_outcomes[0];
+    assert_eq!(
+        outcome.status,
+        crate::core::events::TurnOutcomeStatus::Failed
+    );
+    assert_eq!(outcome.after_message_count, 3);
+    assert!(outcome.error.contains("provider rejected the request"));
+    assert!(
+        !outcome.error.contains("sk-live1234567890abcdef"),
+        "the persisted reason is redacted: {}",
+        outcome.error
+    );
+    assert_eq!(
+        outcome.error,
+        codewhale_secrets::redact::redact_secrets(&shown),
+        "the record is what the live transcript showed"
+    );
+
+    // Survives a disk round trip and comes back in place on resume.
+    manager.save_session(&snapshot).expect("save");
+    let loaded = manager
+        .load_session(&snapshot.metadata.id)
+        .expect("load session");
+    assert_eq!(loaded.turn_outcomes, snapshot.turn_outcomes);
+    let mut resumed = create_test_app();
+    apply_loaded_session(&mut resumed, &mut Config::default(), &loaded).expect("resume");
+    assert_eq!(resumed.session_turn_outcomes, loaded.turn_outcomes);
+    let replayed = resumed
+        .history
+        .iter()
+        .position(
+            |cell| matches!(cell, HistoryCell::Error { message, .. } if *message == outcome.error),
+        )
+        .expect("the failure is replayed on resume");
+    assert!(
+        matches!(
+            &resumed.history[replayed - 1],
+            HistoryCell::User { content } if content.contains("second question")
+        ),
+        "the failure is replayed after the prompt it failed on"
     );
 }
 

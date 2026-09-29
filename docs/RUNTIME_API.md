@@ -759,7 +759,10 @@ a TLS or verified transport boundary.
 - `GET /v1/sessions?limit=50&search=<fuzzy>&include_archived=false&archived_only=false&workspace=<path>&sort=recent|name|size`
 - `GET /v1/sessions/summary?…` (same query params; projected row shape)
 - `GET /v1/sessions/{id}` (add `?peek=true&entries=12` for a bounded, redacted
-  read-only peek instead of the full transcript)
+  read-only peek instead of the full transcript). The full response carries
+  `turn_outcomes` when a turn ended `Failed`: `{ status, error, ended_at,
+  after_message_count }` per failure, oldest first, bounded to 64, with the
+  error text the transcript showed and secrets redacted
 - `PATCH /v1/sessions/{id}` (`{ "title"?: string, "archived"?: bool }`)
 - `DELETE /v1/sessions/{id}`
 - `POST /v1/sessions/{id}/resume-thread` returns the open thread that already
