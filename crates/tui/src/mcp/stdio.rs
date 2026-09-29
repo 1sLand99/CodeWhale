@@ -67,6 +67,17 @@ impl StderrTail {
     async fn snapshot(&self) -> Vec<String> {
         self.lines.lock().await.iter().cloned().collect()
     }
+
+    async fn last_line(&self) -> Option<String> {
+        self.lines
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .map(|line| line.trim())
+            .find(|line| !line.is_empty())
+            .map(str::to_string)
+    }
 }
 
 impl StdioTransport {
@@ -305,6 +316,17 @@ async fn terminate_child(child: &mut Child) {
 
 #[async_trait::async_trait]
 impl McpTransport for StdioTransport {
+    async fn last_stderr_line(&self) -> Option<String> {
+        // The child usually writes its reason to stderr just before the error
+        // reply; give the drain task a bounded moment to catch up.
+        tokio::task::yield_now().await;
+        if let Some(line) = self.stderr_tail.last_line().await {
+            return Some(line);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.stderr_tail.last_line().await
+    }
+
     async fn send(&mut self, mut msg: Vec<u8>) -> Result<()> {
         msg.push(b'\n');
         self.stdin.write_all(&msg).await?;

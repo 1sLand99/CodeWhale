@@ -522,7 +522,11 @@ mod tests {
     #[test]
     fn loader_choice_errors_redact_pasted_keys_but_keep_ordinary_typos() {
         let token = ["sk-live-", "Z7qX4mNb2Vc9Lk3PwR8t"].concat();
-        for key in ["approval_policy", "verbosity", "sandbox_mode"] {
+        for (key, correction) in [
+            ("approval_policy", "on-request"),
+            ("verbosity", "normal"),
+            ("sandbox_mode", "workspace-write"),
+        ] {
             for value in [token.as_str(), "misspelled-choice"] {
                 let mut config = crate::config::Config::default();
                 match key {
@@ -531,7 +535,30 @@ mod tests {
                     "sandbox_mode" => config.sandbox_mode = Some(value.to_string()),
                     _ => unreachable!(),
                 }
-                let error = config.validate().expect_err("invalid choice").to_string();
+                let error = config.validate().expect_err("invalid choice");
+                let diagnostic = crate::config::SafeConfigDiagnostic::find_in(&error)
+                    .expect("shared choice validation keeps the structured diagnostic");
+                let shareable = diagnostic.display_message();
+                assert!(shareable.starts_with(&format!("Invalid {key} (value not shown):")));
+                assert!(!shareable.contains(value), "{shareable}");
+                let fix = diagnostic
+                    .fix()
+                    .expect("invalid choices keep a recovery action");
+                assert!(
+                    fix.starts_with(&format!("codewhale config set {key} {correction} (if ")),
+                    "{fix}"
+                );
+                assert!(
+                    fix.contains("profile") && fix.contains("managed config"),
+                    "{fix}"
+                );
+                if key != "verbosity" {
+                    assert!(
+                        fix.contains(&format!("CODEWHALE_{}", key.to_ascii_uppercase())),
+                        "{fix}"
+                    );
+                }
+                let error = error.to_string();
                 assert!(!error.contains(&token));
                 assert!(error.contains("expected"));
                 assert!(error.contains(if value == token {

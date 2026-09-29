@@ -1100,12 +1100,20 @@ fn resolve_exec_resume_session_id(args: &ExecArgs, workspace: &Path) -> Result<O
 }
 
 fn load_exec_resume_session(session_id: &str) -> Result<session_manager::SavedSession> {
-    let session_ref = exec_stream_session_ref(session_id);
     SessionManager::default_location()
         .context("could not open session manager for resume")?
         .resume_session_by_prefix(session_id)
         .map(|recovery| recovery.session)
-        .with_context(|| format!("could not load session {session_ref}"))
+        .with_context(|| exec_resume_load_error(session_id))
+}
+
+/// The typed `--resume` value stays redacted in every output mode: exec runs
+/// in CI logs, and a mistyped or pasted value can be a secret.
+fn exec_resume_load_error(session_id: &str) -> String {
+    format!(
+        "could not load session {}. Run `codewhale sessions` to list ids.",
+        exec_stream_session_ref(session_id)
+    )
 }
 
 /// Select the route for `exec --resume` before any engine/client is built.
@@ -2381,11 +2389,7 @@ async fn run_async_main_dispatch(
                 let config = match load_doctor_config_from_cli(&cli, &args) {
                     Ok(config) => config,
                     Err(error) if args.json => return run_doctor_json_config_error(&error),
-                    Err(_) => {
-                        bail!(
-                            "doctor configuration validation failed; details omitted because configuration errors may contain credential material"
-                        )
-                    }
+                    Err(error) => bail!(doctor_config_error_text(&error)),
                 };
                 let workspace = resolve_workspace(&cli);
                 if args.repair_sessions {
@@ -2551,6 +2555,25 @@ async fn run_async_main_dispatch(
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
                 initialize_cloud_facts(&config);
+                // #6705: OpenCode Zen's per-model wire comes from its
+                // Models.dev catalog. Seed the persisted snapshot (disk only,
+                // no network) so exec routes the models the picker offers
+                // instead of only the ones compiled into this build. This runs
+                // unconditionally, as in the interactive path: the final route
+                // is not known yet (a selected Fleet operator or `--resume` can
+                // still move it onto Zen, and both resolve through the lake).
+                // The read and JSON parse are blocking, so they leave the
+                // runtime's worker threads.
+                if let Err(error) =
+                    tokio::task::spawn_blocking(crate::models_dev_live::maybe_load_persisted_cache)
+                        .await
+                {
+                    tracing::warn!(
+                        target: "models_dev_live",
+                        %error,
+                        "persisted Models.dev cache load did not complete; keeping bundled"
+                    );
+                }
                 let prompt = resolve_exec_prompt(&args)?;
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
                 validate_exec_tool_authority_resume(
@@ -4679,7 +4702,7 @@ async fn run_doctor(
     println!("{}", "==================".truecolor(sky_r, sky_g, sky_b));
     // Verdict first (U7): the answer and the next step, before the detail.
     let (verdict_state, _) = doctor_setup_state(config, workspace);
-    let verdict = doctor_verdict(&verdict_state);
+    let verdict = doctor_verdict(&verdict_state, config.api_provider().as_str());
     println!("{}", verdict.truecolor(aqua_r, aqua_g, aqua_b).bold());
     println!();
 
@@ -5669,24 +5692,28 @@ async fn run_doctor(
 }
 
 /// Doctor's one-line answer: ready, or the single next step (U7). Readiness
-/// is the setup lane's own verdict; doctor never probes credential values to
-/// decide it.
-fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
-    // NeedsAction means a named route needs repair (missing credentials or a
-    // failed check). Configured routes can be used without a prior probe.
+/// is the setup lane's own verdict; doctor never reads the environment or the
+/// secret store to decide it, so a key saved outside setup shows as an
+/// unverified route (`credential: availability=not_probed`), not a missing one.
+fn doctor_verdict(state: &codewhale_config::SetupState, provider: &str) -> String {
+    use codewhale_config::StepStatus;
+    // NeedsAction means a named route exists but its key is missing, unchecked
+    // or failed. Configured routes can be used without a prior probe.
     // `first_run_ready` accepts NeedsAction (a failed key still reaches the
-    // wizard's ready screen), so check the provider first: finished setup
-    // with a route needing repair is not "Ready".
-    let provider_configured = matches!(
-        state.status(codewhale_config::SetupStep::ProviderModel),
-        codewhale_config::StepStatus::Configured | codewhale_config::StepStatus::Verified
-    );
-    if !provider_configured {
-        "Not ready: no model provider set up → run /provider in Codewhale, or `codewhale setup`."
-    } else if state.first_run_ready() {
-        "Ready: setup is complete."
-    } else {
-        "Not ready: first-run setup is unfinished → run `codewhale setup`."
+    // wizard's ready screen), so check the provider first.
+    match state.status(codewhale_config::SetupStep::ProviderModel) {
+        StepStatus::Configured | StepStatus::Verified => {
+            if state.first_run_ready() {
+                "Ready: setup is complete.".to_string()
+            } else {
+                "Not ready: first-run setup is unfinished → run `codewhale setup`.".to_string()
+            }
+        }
+        StepStatus::NeedsAction => format!(
+            "Not ready: the {provider} route has no verified key → save one with /provider in Codewhale or `codewhale auth set --provider {provider}`; `codewhale doctor --probe-api` checks a key already saved."
+        ),
+        _ => "Not ready: no model provider set up → run /provider in Codewhale, or `codewhale setup`."
+            .to_string(),
     }
 }
 
@@ -5694,9 +5721,30 @@ fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
 mod doctor_verdict_tests {
     #[test]
     fn a_fresh_home_is_not_ready_and_names_the_provider_step() {
-        let verdict = super::doctor_verdict(&codewhale_config::SetupState::default());
+        let verdict = super::doctor_verdict(&codewhale_config::SetupState::default(), "deepseek");
         assert!(verdict.starts_with("Not ready"), "{verdict}");
         assert!(verdict.contains("/provider"), "{verdict}");
+    }
+
+    #[test]
+    fn a_route_without_a_verified_key_is_not_called_missing() {
+        // A fresh home derives NeedsAction for the default route because
+        // doctor does not read saved keys; the verdict must not claim there is
+        // no provider, and names both the headless fix and the probe.
+        use codewhale_config::{SetupState, SetupStep, StepEntry, StepStatus};
+        let mut state = SetupState::default();
+        state.set_step(
+            SetupStep::ProviderModel,
+            StepEntry::new(StepStatus::NeedsAction, true, "inherited"),
+        );
+        let verdict = super::doctor_verdict(&state, "deepseek");
+        assert!(verdict.starts_with("Not ready"), "{verdict}");
+        assert!(!verdict.contains("no model provider"), "{verdict}");
+        assert!(
+            verdict.contains("`codewhale auth set --provider deepseek`"),
+            "{verdict}"
+        );
+        assert!(verdict.contains("--probe-api"), "{verdict}");
     }
 
     #[test]
@@ -5716,7 +5764,7 @@ mod doctor_verdict_tests {
         state.runtime_posture_source = RuntimePostureSource::Confirmed;
         state.constitution_choice = ConstitutionChoice::Bundled;
         assert!(state.first_run_ready(), "fixture must be wizard-ready");
-        let verdict = super::doctor_verdict(&state);
+        let verdict = super::doctor_verdict(&state, "deepseek");
         assert!(verdict.starts_with("Not ready"), "{verdict}");
         assert!(verdict.contains("/provider"), "{verdict}");
 
@@ -5724,7 +5772,10 @@ mod doctor_verdict_tests {
             SetupStep::ProviderModel,
             StepEntry::new(StepStatus::Verified, true, "0.10.1"),
         );
-        assert_eq!(super::doctor_verdict(&state), "Ready: setup is complete.");
+        assert_eq!(
+            super::doctor_verdict(&state, "deepseek"),
+            "Ready: setup is complete."
+        );
     }
 }
 
@@ -7294,15 +7345,35 @@ fn run_doctor_repair_sessions(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+const DOCTOR_CONFIG_ERROR_OMITTED: &str = "configuration validation failed; details omitted because configuration errors may contain credential material";
+
+/// Human doctor text for a config load failure. Plain value/profile
+/// validation errors are shown with their fix; anything else (parse errors,
+/// credential fields) stays suppressed because it may echo secret material.
+fn doctor_config_error_text(error: &anyhow::Error) -> String {
+    let Some(diagnostic) = crate::config::SafeConfigDiagnostic::find_in(error) else {
+        return format!("doctor {DOCTOR_CONFIG_ERROR_OMITTED}");
+    };
+    let mut text = format!(
+        "doctor configuration validation failed: {}",
+        diagnostic.display_message()
+    );
+    if let Some(fix) = diagnostic.fix() {
+        text.push_str("\nfix: ");
+        text.push_str(fix);
+    }
+    text
+}
+
 fn run_doctor_json_config_error(error: &anyhow::Error) -> Result<()> {
-    let safe_message = error
-        .downcast_ref::<crate::config::SafeConfigDiagnostic>()
-        .map(ToString::to_string);
+    let diagnostic = crate::config::SafeConfigDiagnostic::find_in(error);
+    let safe_message = diagnostic.map(crate::config::SafeConfigDiagnostic::display_message);
     let report = serde_json::json!({
         "status": "error",
         "error": {
             "kind": "config_validation",
-            "message": safe_message.as_deref().unwrap_or("configuration validation failed; details omitted because configuration errors may contain credential material"),
+            "message": safe_message.as_deref().unwrap_or(DOCTOR_CONFIG_ERROR_OMITTED),
+            "fix": diagnostic.and_then(crate::config::SafeConfigDiagnostic::fix),
         },
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -10361,12 +10432,15 @@ fn collect_diff(
             cmd.arg("--").arg(path);
         }
 
+        ensure_review_workspace_is_git_repo(workspace)?;
         let output = cmd
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to run git diff. Is git installed? ({e})"))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git diff failed: {}", stderr.trim());
+            bail!(
+                "git diff failed: {}",
+                first_stderr_line(&String::from_utf8_lossy(&output.stderr))
+            );
         }
         String::from_utf8_lossy(&output.stdout).to_string()
     };
@@ -10374,6 +10448,45 @@ fn collect_diff(
         ensure_local_review_diff_fits(&diff, args.max_chars)?;
     }
     Ok(diff)
+}
+
+/// Outside a work tree `git diff` prints its whole `--no-index` usage; say
+/// what is actually wrong instead. Only git's own "not a git repository"
+/// becomes that one line; any other failure (dubious ownership, permissions,
+/// a corrupt repository) keeps git's stderr, which names the fix.
+fn ensure_review_workspace_is_git_repo(workspace: &std::path::Path) -> Result<()> {
+    let output = crate::dependencies::Git::review_command(workspace)?
+        .current_dir(workspace)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run git. Is git installed? ({e})"))?;
+    if output.status.success() {
+        if String::from_utf8_lossy(&output.stdout).trim() == "true" {
+            return Ok(());
+        }
+        // Inside `.git` or a bare repository: a repository, but no work tree.
+        bail!(
+            "Not inside a git work tree (cwd: {}); run review from a checkout, not a bare repository or .git directory",
+            workspace.display()
+        );
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.to_ascii_lowercase().contains("not a git repository") {
+        bail!("Not inside a git repository (cwd: {})", workspace.display());
+    }
+    bail!(
+        "git could not read the repository at {}: {}",
+        workspace.display(),
+        stderr.trim()
+    );
+}
+
+fn first_stderr_line(stderr: &str) -> &str {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(no error output)")
 }
 
 fn ensure_local_review_diff_fits(diff: &str, max_chars: usize) -> Result<()> {
@@ -17406,6 +17519,73 @@ api_key = "test-only-key"
                     .contains("no receipt was written or accepted")
             );
         }
+    }
+
+    #[test]
+    fn review_in_a_bare_repository_is_not_called_outside_git() {
+        let bare = tempfile::tempdir().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .current_dir(bare.path())
+            .status()
+            .expect("git init --bare");
+        assert!(init.success());
+        let error = ensure_review_workspace_is_git_repo(bare.path())
+            .expect_err("a bare repository has no work tree");
+        let text = error.to_string();
+        assert!(text.starts_with("Not inside a git work tree"), "{text}");
+    }
+
+    #[test]
+    fn review_outside_a_git_repository_says_so_in_one_line() {
+        let outside = tempfile::tempdir().expect("tempdir");
+        let error = ensure_review_workspace_is_git_repo(outside.path())
+            .expect_err("a plain directory is not a work tree");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Not inside a git repository (cwd: {})",
+                outside.path().display()
+            )
+        );
+        assert_eq!(
+            first_stderr_line("\nfatal: bad revision 'nope...HEAD'\nusage: git diff\n  --stat\n"),
+            "fatal: bad revision 'nope...HEAD'"
+        );
+    }
+
+    #[test]
+    fn exec_resume_error_redacts_the_typed_id_and_names_the_list_command() {
+        let id = "sk-live-pasted-by-mistake";
+        let text = exec_resume_load_error(id);
+        assert!(!text.contains(id), "{text}");
+        assert!(text.contains("<redacted:"), "{text}");
+        assert!(
+            text.ends_with("Run `codewhale sessions` to list ids."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn doctor_shows_plain_value_errors_with_a_fix_and_hides_the_rest() {
+        let invalid = crate::config::Config {
+            verbosity: Some("chatty".to_string()),
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("unknown verbosity");
+        let wrapped = invalid.context("Failed to load config file /tmp/config.toml");
+        let text = doctor_config_error_text(&wrapped);
+        assert_eq!(
+            text,
+            "doctor configuration validation failed: Invalid verbosity (value not shown): expected normal or concise.\nfix: codewhale config set verbosity normal (if a profile or managed config sets it, correct it there)"
+        );
+        assert!(!text.contains("chatty"), "{text}");
+
+        let opaque = anyhow::anyhow!("TOML parse error near api_key = \"sk-live-secret\"");
+        let text = doctor_config_error_text(&opaque);
+        assert!(text.contains("details omitted"), "{text}");
+        assert!(!text.contains("sk-live-secret"), "{text}");
     }
 
     #[test]

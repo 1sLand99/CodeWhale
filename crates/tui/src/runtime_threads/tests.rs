@@ -2391,52 +2391,6 @@ fn test_manager(data_dir: PathBuf) -> Result<RuntimeThreadManager> {
     )
 }
 
-/// Serializes tests that set or read the process-wide approval-timeout
-/// override, so a parallel test never sees another test's value.
-static APPROVAL_TIMEOUT_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn lock_approval_timeout_override() -> std::sync::MutexGuard<'static, ()> {
-    APPROVAL_TIMEOUT_OVERRIDE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-struct ApprovalTimeoutGuard {
-    previous_ms: u64,
-    // Dropped after `drop` restores the previous value.
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for ApprovalTimeoutGuard {
-    fn drop(&mut self) {
-        set_test_approval_decision_timeout_ms(self.previous_ms);
-    }
-}
-
-fn test_approval_timeout_ms(ms: u64) -> ApprovalTimeoutGuard {
-    let lock = lock_approval_timeout_override();
-    ApprovalTimeoutGuard {
-        previous_ms: set_test_approval_decision_timeout_ms(ms),
-        _lock: lock,
-    }
-}
-
-struct DynamicToolTimeoutGuard {
-    previous_ms: u64,
-}
-
-impl Drop for DynamicToolTimeoutGuard {
-    fn drop(&mut self) {
-        set_test_dynamic_tool_result_timeout_ms(self.previous_ms);
-    }
-}
-
-fn test_dynamic_tool_timeout_ms(ms: u64) -> DynamicToolTimeoutGuard {
-    DynamicToolTimeoutGuard {
-        previous_ms: set_test_dynamic_tool_result_timeout_ms(ms),
-    }
-}
-
 struct EventAppendFaultGuard {
     restore: Option<EventAppendTestFaultRestore>,
 }
@@ -12099,6 +12053,12 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
     Ok(())
 }
 
+/// Readiness ceiling for an approval to be persisted, registered, or resolved.
+/// Every wait under it ends as soon as its condition holds, so it only bounds
+/// how long a stuck case takes to fail; a loaded shared-process `cargo test`
+/// run overran the earlier 2s ceiling (#6698).
+const APPROVAL_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Reads the approval identity exactly as an external client does: off the
 /// `approval.required` event for `raw_call_id`, returning the opaque ID that
 /// client must echo back. Also pins the two properties every caller below
@@ -12109,7 +12069,7 @@ async fn await_approval_identity(
     thread_id: &str,
     raw_call_id: &str,
 ) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     loop {
         let found = manager
             .events_since(thread_id, None)?
@@ -12202,7 +12162,7 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
         sleep(Duration::from_millis(20)).await;
     }
@@ -14455,8 +14415,8 @@ fn pending_dynamic_tool_registry_rejects_duplicates_and_is_bounded() -> Result<(
 async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
     use crate::tools::spec::{DynamicToolExecutor, ToolError};
 
-    let _timeout_guard = test_dynamic_tool_timeout_ms(25);
     let manager = test_manager(test_runtime_dir())?;
+    manager.set_test_dynamic_tool_result_timeout_ms(25);
     let thread = manager
         .create_thread(CreateThreadRequest::default())
         .await?;
@@ -14637,9 +14597,6 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
 /// reads as a live claim that the (already answered) call is still waiting.
 #[tokio::test]
 async fn approval_wait_heartbeat_is_never_sequenced_after_the_decision() -> Result<()> {
-    // The timeout test changes a process-wide override to 25 ms. This case
-    // checks heartbeat ordering while a decision is still pending.
-    let _timeout_guard = test_approval_timeout_ms(0);
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
         .create_thread(CreateThreadRequest::default())
@@ -14795,7 +14752,7 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
         sleep(Duration::from_millis(20)).await;
     }
@@ -15226,8 +15183,8 @@ async fn approval_interrupt_revokes_waiter_and_rejects_late_actions() -> Result<
 
 #[tokio::test]
 async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<()> {
-    let _timeout_guard = test_approval_timeout_ms(25);
     let manager = test_manager(test_runtime_dir())?;
+    manager.set_test_approval_decision_timeout_ms(25);
     let thread = manager
         .create_thread(CreateThreadRequest {
             model: None,
@@ -15278,7 +15235,7 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
         })
         .await?;
 
-    let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+    let decision = tokio::time::timeout(APPROVAL_READINESS_TIMEOUT, harness.recv_approval_event())
         .await
         .context("approval timeout should resolve the engine's wait")?;
     // The engine hears a timeout, not the user's denial, so the model and the
@@ -19485,6 +19442,480 @@ fn newest_message_text_by_turn_picks_the_latest_message_ignoring_non_messages() 
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The thread rail's preview is read from each row's own newest turn.
+///
+/// The batch read this replaced walked the whole items directory to answer the
+/// same question, which on a 658MB / 58k-item store cost ~1.4s on every
+/// summary. The row still has to carry the newest message the turn appended —
+/// not the first one it wrote, and not a trailing status or tool record.
+#[tokio::test]
+async fn thread_list_facts_reads_each_preview_from_its_own_turn() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(dir.clone()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+
+    let message = |turn_id: &str, item_id: &str, kind: TurnItemKind, text: &str| {
+        let mut item = sample_item(turn_id, item_id, TurnItemLifecycleStatus::Completed);
+        item.kind = kind;
+        item.summary = text.to_string();
+        item.detail = Some(text.to_string());
+        item
+    };
+
+    let older_at = Utc::now() - chrono::Duration::seconds(60);
+    let mut older = sample_turn(&thread.id, "trn_older", RuntimeTurnStatus::Completed);
+    older.created_at = older_at;
+    older.started_at = Some(older_at);
+    let newer_at = Utc::now();
+    let mut newer = sample_turn(&thread.id, "trn_newer", RuntimeTurnStatus::Completed);
+    newer.created_at = newer_at;
+    newer.started_at = Some(newer_at);
+
+    // The older turn's reply must not win, and the newer turn's own prompt has
+    // to lose to its reply: both are earlier in the turn's append order.
+    let older_items = [
+        message(
+            "trn_older",
+            "itm_older_prompt",
+            TurnItemKind::UserMessage,
+            "older prompt",
+        ),
+        message(
+            "trn_older",
+            "itm_older_reply",
+            TurnItemKind::AgentMessage,
+            "older reply",
+        ),
+    ];
+    let mut newer_items = [
+        message(
+            "trn_newer",
+            "itm_newer_prompt",
+            TurnItemKind::UserMessage,
+            "newest prompt",
+        ),
+        message(
+            "trn_newer",
+            "itm_newer_reply",
+            TurnItemKind::AgentMessage,
+            "newest reply",
+        ),
+        // A trailing blank message and a trailing non-message both have to be
+        // stepped over: the walk ends on the reply above, not on either of
+        // these, and not on the three records after them.
+        message(
+            "trn_newer",
+            "itm_newer_blank",
+            TurnItemKind::AgentMessage,
+            "   ",
+        ),
+        sample_item(
+            "trn_newer",
+            "itm_newer_tool",
+            TurnItemLifecycleStatus::Completed,
+        ),
+        sample_item(
+            "trn_newer",
+            "itm_newer_status",
+            TurnItemLifecycleStatus::Completed,
+        ),
+    ];
+    newer_items.iter_mut().for_each(|item| {
+        item.started_at = Some(newer_at);
+    });
+    older.item_ids = older_items.iter().map(|item| item.id.clone()).collect();
+    newer.item_ids = newer_items.iter().map(|item| item.id.clone()).collect();
+
+    for item in older_items.iter().chain(newer_items.iter()) {
+        manager.store.save_item(item)?;
+    }
+    manager.store.save_turn(&older)?;
+    manager.store.save_turn(&newer)?;
+
+    // A second thread whose items the walk must never need. If the rail went
+    // back to scanning the items directory, the read count below would cover
+    // these too.
+    let decoy = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut decoy_turn = sample_turn(&decoy.id, "trn_decoy", RuntimeTurnStatus::Completed);
+    decoy_turn.item_ids = vec!["itm_decoy".to_string()];
+    manager.store.save_item(&message(
+        "trn_decoy",
+        "itm_decoy",
+        TurnItemKind::AgentMessage,
+        "decoy reply",
+    ))?;
+    manager.store.save_turn(&decoy_turn)?;
+
+    manager.reset_whole_store_scan_file_reads();
+    let facts = manager
+        .thread_list_facts(std::slice::from_ref(&thread.id))
+        .await?;
+    let (turn_reads, item_reads) = manager.whole_store_scan_file_reads();
+
+    assert_eq!(
+        item_reads, 0,
+        "a thread list must not walk the items directory to fill a preview"
+    );
+    assert!(
+        turn_reads >= 2,
+        "every turn record is still read: {turn_reads}"
+    );
+    assert_eq!(
+        facts[&thread.id].preview.as_deref(),
+        Some("newest reply"),
+        "expected the last message the newest turn appended"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+/// A newest turn that holds no message at all falls back to an older turn,
+/// exactly as the batch read did: the row would otherwise lose its preview.
+#[tokio::test]
+async fn thread_list_facts_falls_back_to_an_older_turn_for_a_preview() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(dir.clone()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+
+    let older_at = Utc::now() - chrono::Duration::seconds(60);
+    let mut older = sample_turn(&thread.id, "trn_older", RuntimeTurnStatus::Completed);
+    older.created_at = older_at;
+    older.started_at = Some(older_at);
+    let mut reply = sample_item("trn_older", "itm_reply", TurnItemLifecycleStatus::Completed);
+    reply.kind = TurnItemKind::AgentMessage;
+    reply.summary = "older reply".to_string();
+    reply.detail = Some("older reply".to_string());
+    older.item_ids = vec![reply.id.clone()];
+
+    // The newest turn is a status-only record: a routing settlement, or a turn
+    // whose items never carried a message.
+    let newer_at = Utc::now();
+    let mut newer = sample_turn(&thread.id, "trn_newer", RuntimeTurnStatus::Completed);
+    newer.created_at = newer_at;
+    newer.started_at = Some(newer_at);
+    newer.item_ids = vec!["itm_status".to_string()];
+
+    manager.store.save_item(&reply)?;
+    manager.store.save_item(&sample_item(
+        "trn_newer",
+        "itm_status",
+        TurnItemLifecycleStatus::Completed,
+    ))?;
+    manager.store.save_turn(&older)?;
+    manager.store.save_turn(&newer)?;
+
+    manager.reset_whole_store_scan_file_reads();
+    let facts = manager
+        .thread_list_facts(std::slice::from_ref(&thread.id))
+        .await?;
+    let (_, item_reads) = manager.whole_store_scan_file_reads();
+
+    assert_eq!(
+        item_reads, 0,
+        "the fallback still reads turns, not the store"
+    );
+    assert_eq!(facts[&thread.id].preview.as_deref(), Some("older reply"));
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+/// A turn written before `item_ids` existed has no item list to read by, so the
+/// summary still reaches it through the directory scan that answered every turn
+/// before this change — one pass for the page, and the thread's walk resumes
+/// from the turn it stopped on.
+#[tokio::test]
+async fn thread_list_facts_still_answers_a_turn_without_item_ids() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(dir.clone()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+
+    let mut turn = sample_turn(&thread.id, "trn_legacy", RuntimeTurnStatus::Completed);
+    turn.item_ids = Vec::new();
+    let mut reply = sample_item(
+        "trn_legacy",
+        "itm_legacy_reply",
+        TurnItemLifecycleStatus::Completed,
+    );
+    reply.kind = TurnItemKind::AgentMessage;
+    reply.summary = "legacy reply".to_string();
+    reply.detail = Some("legacy reply".to_string());
+    manager.store.save_item(&reply)?;
+    manager.store.save_turn(&turn)?;
+
+    manager.reset_whole_store_scan_file_reads();
+    let facts = manager
+        .thread_list_facts(std::slice::from_ref(&thread.id))
+        .await?;
+    let (_, item_reads) = manager.whole_store_scan_file_reads();
+
+    assert!(
+        item_reads > 0,
+        "a turn with no item list can only be found by scanning"
+    );
+    assert_eq!(facts[&thread.id].preview.as_deref(), Some("legacy reply"));
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+/// Opening threads costs one items-directory read per store, not one per open,
+/// and the later opens still answer with the same items.
+#[test]
+fn list_items_for_turns_map_reads_the_items_directory_once_per_store() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+
+    let mut saved = Vec::new();
+    for turn in 0..3 {
+        for position in 0..4 {
+            let id = format!("itm_{turn}_{position}");
+            saved.push(id.clone());
+            store
+                .save_item(&sample_item(
+                    &format!("trn_{turn}"),
+                    &id,
+                    TurnItemLifecycleStatus::Completed,
+                ))
+                .expect("save item");
+        }
+    }
+    let turn_ids: Vec<String> = (0..3).map(|turn| format!("trn_{turn}")).collect();
+    let read_items = |map: &HashMap<String, Vec<TurnItemRecord>>| {
+        let mut ids: Vec<String> = map.values().flatten().map(|item| item.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+
+    store
+        .item_dir_files_read
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let first = store
+        .list_items_for_turns_map(&turn_ids)
+        .expect("first read");
+    assert_eq!(
+        store
+            .item_dir_files_read
+            .load(std::sync::atomic::Ordering::SeqCst),
+        saved.len() as u64,
+        "the first read of a store has to find its items the only way there is"
+    );
+
+    store
+        .item_dir_files_read
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let second = store
+        .list_items_for_turns_map(&turn_ids)
+        .expect("second read");
+    assert_eq!(
+        store
+            .item_dir_files_read
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a later read must come off the index, not the directory"
+    );
+
+    let ids = read_items(&first);
+    assert_eq!(ids, saved);
+    assert_eq!(read_items(&second), saved);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// What the server's startup warm-up buys: the first thread a client opens no
+/// longer pays the whole-directory read.
+#[test]
+fn a_warmed_store_opens_a_thread_without_reading_the_items_directory() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn_id = "trn_warm".to_string();
+    store
+        .save_item(&sample_item(
+            &turn_id,
+            "itm_warm",
+            TurnItemLifecycleStatus::Completed,
+        ))
+        .expect("save item");
+
+    store.ensure_item_index().expect("warm the index");
+    store
+        .item_dir_files_read
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+
+    let items = store
+        .list_items_for_turns_map(std::slice::from_ref(&turn_id))
+        .expect("read a thread's items");
+    assert_eq!(items[&turn_id].len(), 1);
+    assert_eq!(
+        store
+            .item_dir_files_read
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a warmed store must answer from the index alone"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The index is exact, not a snapshot: an item the store holds is returned
+/// whether or not the turn ever registered it, and whether it was written
+/// before or after the index was built.
+///
+/// An item that lands after its turn settled is deliberately never pushed into
+/// that turn's `item_ids` (`attach_item_to_turn`), and the rebuild paths read it
+/// out of the directory anyway. A read that trusted `item_ids` would lose it —
+/// which is the whole reason the index exists rather than a narrower lookup.
+#[test]
+fn item_reads_include_items_a_turn_never_registered() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn_id = "trn_unregistered".to_string();
+
+    // The first item is what a read finds before the index exists.
+    store
+        .save_item(&sample_item(
+            &turn_id,
+            "itm_before_index",
+            TurnItemLifecycleStatus::Completed,
+        ))
+        .expect("save item");
+    let seeded = store
+        .list_items_for_turns_map(std::slice::from_ref(&turn_id))
+        .expect("seed the index");
+    assert_eq!(seeded[&turn_id].len(), 1);
+
+    // And this one is written after it, registered by nothing.
+    store
+        .save_item(&sample_item(
+            &turn_id,
+            "itm_after_index",
+            TurnItemLifecycleStatus::Completed,
+        ))
+        .expect("save late item");
+    let read = store
+        .list_items_for_turns_map(std::slice::from_ref(&turn_id))
+        .expect("read after the write");
+    let mut ids: Vec<String> = read[&turn_id].iter().map(|item| item.id.clone()).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["itm_after_index", "itm_before_index"]);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A write that races the directory read is recorded, and the published map
+/// drains that record once — not twice, even though the read also saw the file
+/// on disk.
+///
+/// Holding the seed guard is what a running read does, so the write below takes
+/// the recorded branch rather than the map's. Without it the branch is only
+/// reachable by timing, and a duplicate would show up as the same item twice in
+/// a thread's transcript.
+#[test]
+fn an_item_written_while_the_index_is_being_built_is_published_once() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn_id = "trn_racing_write".to_string();
+
+    let seed = store.item_index_seed.lock();
+    store
+        .save_item(&sample_item(
+            &turn_id,
+            "itm_racing_write",
+            TurnItemLifecycleStatus::Completed,
+        ))
+        .expect("save an item while a read is running");
+    drop(seed);
+
+    let read = store
+        .list_items_for_turns_map(std::slice::from_ref(&turn_id))
+        .expect("read after the write");
+    let ids: Vec<&str> = read[&turn_id].iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, vec!["itm_racing_write"]);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The runtime saves one item id several times (in progress, then completed or
+/// failed). Once the index is warm, every one of those saves reaches the
+/// published map, and the item must still come back once, not once per save.
+#[test]
+fn an_item_saved_again_after_the_index_is_warm_is_listed_once() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn_id = "trn_resaved".to_string();
+
+    store.ensure_item_index().expect("warm the index");
+    for status in [
+        TurnItemLifecycleStatus::InProgress,
+        TurnItemLifecycleStatus::Completed,
+    ] {
+        store
+            .save_item(&sample_item(&turn_id, "itm_resaved", status))
+            .expect("save item");
+    }
+    // A batch write of the same id takes the same path.
+    let again = sample_item(&turn_id, "itm_resaved", TurnItemLifecycleStatus::Completed);
+    store.save_items_batch(&[&again]).expect("batch save item");
+
+    let read = store
+        .list_items_for_turns_map(std::slice::from_ref(&turn_id))
+        .expect("read the turn");
+    let items = &read[&turn_id];
+    assert_eq!(items.len(), 1, "one item id, one item");
+    assert_eq!(items[0].status, TurnItemLifecycleStatus::Completed);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A turn can still name an item whose file was removed. The thread list skips
+/// that id and keeps looking, instead of failing the whole summary page.
+#[tokio::test]
+async fn thread_list_facts_skips_an_item_file_that_is_gone() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(dir.clone()),
+            ..CreateThreadRequest::default()
+        })
+        .await?;
+
+    let mut turn = sample_turn(&thread.id, "trn_gone", RuntimeTurnStatus::Completed);
+    let mut reply = sample_item("trn_gone", "itm_reply", TurnItemLifecycleStatus::Completed);
+    reply.kind = TurnItemKind::AgentMessage;
+    reply.summary = "kept reply".to_string();
+    reply.detail = Some("kept reply".to_string());
+    turn.item_ids = vec![reply.id.clone(), "itm_removed".to_string()];
+    manager.store.save_item(&reply)?;
+    manager.store.save_turn(&turn)?;
+
+    let facts = manager
+        .thread_list_facts(std::slice::from_ref(&thread.id))
+        .await?;
+    assert_eq!(facts[&thread.id].preview.as_deref(), Some("kept reply"));
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
 /// The summary route settles recovered turns through
 /// `flush_recovery_receipts` now that its rows no longer go through
 /// `get_thread_detail`. That settled state is what the page's attention count
@@ -20305,7 +20736,6 @@ async fn runtime_receipts_mask_configured_secrets() -> Result<()> {
 /// `[tools] user_input_timeout_seconds` no longer bounds approvals.
 #[test]
 fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Result<()> {
-    let _override = lock_approval_timeout_override();
     let manager = test_manager(test_runtime_dir())?;
     assert_eq!(manager.approval_decision_timeout(), None);
 

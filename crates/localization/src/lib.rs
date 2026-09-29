@@ -632,6 +632,7 @@ pub enum MessageId {
     ExtensionsStateInapplicable,
     ExtensionsStateInvalid,
     ExtensionsStateNotInspected,
+    ExtensionsStateDisconnected,
     ExtensionsStateRejected,
     ExtensionsStateReviewedCandidate,
     ExtensionsStateUnderEvaluation,
@@ -2636,6 +2637,10 @@ pub enum MessageId {
     McpShowUnavailableWhileTurnRuns,
     McpLivePoolRefreshDeferredWhileTurnRuns,
     McpRetryDeferredWhileTurnRuns,
+    McpRetryStarted,
+    McpRetryConnected,
+    McpRetryNeedsLogin,
+    McpRetryFailed,
     WorkflowCountRunning,
     WorkflowCountDone,
     WorkflowCountFailed,
@@ -3163,6 +3168,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ExtensionsStateInapplicable,
     MessageId::ExtensionsStateInvalid,
     MessageId::ExtensionsStateNotInspected,
+    MessageId::ExtensionsStateDisconnected,
     MessageId::ExtensionsStateRejected,
     MessageId::ExtensionsStateReviewedCandidate,
     MessageId::ExtensionsStateUnderEvaluation,
@@ -5061,6 +5067,10 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::McpShowUnavailableWhileTurnRuns,
     MessageId::McpLivePoolRefreshDeferredWhileTurnRuns,
     MessageId::McpRetryDeferredWhileTurnRuns,
+    MessageId::McpRetryStarted,
+    MessageId::McpRetryConnected,
+    MessageId::McpRetryNeedsLogin,
+    MessageId::McpRetryFailed,
     MessageId::WorkflowCountRunning,
     MessageId::WorkflowCountDone,
     MessageId::WorkflowCountFailed,
@@ -6504,7 +6514,11 @@ mod tests {
             .filter(|key| key.starts_with("Extensions"))
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 99, "the complete extensions locale set changed");
+        assert_eq!(
+            keys.len(),
+            100,
+            "the complete extensions locale set changed"
+        );
 
         let prose_keys = [
             "ExtensionsMcpEmpty",
