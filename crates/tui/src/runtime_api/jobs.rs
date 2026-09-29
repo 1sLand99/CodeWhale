@@ -177,10 +177,17 @@ pub(super) struct CreateJobResponse {
     job: JobView,
 }
 
-/// Resolve a job `cwd` the way the shell tool resolves its own: relative to
-/// the thread workspace (never the server's cwd) and, outside trust mode,
-/// still inside that workspace once symlinks resolve.
-fn resolve_job_cwd(
+/// Resolve a job `cwd` against the thread workspace, never the server's cwd.
+/// Outside trust mode the directory must stay inside the workspace once
+/// symlinks resolve. This is stricter than the shell tool's `resolve_path`:
+/// the route has no `workspace_follow_symlinks` or `/trust add` roots and no
+/// `~` expansion, so a symlink leading out of the workspace is refused.
+///
+/// Containment is checked on the canonical path, but the manager receives the
+/// joined spelling, as it did before: Windows `canonicalize` returns a `\\?\`
+/// verbatim path that `cmd.exe` refuses as a current directory. Runs on
+/// `tokio::fs`, so no path resolution blocks a runtime worker.
+async fn resolve_job_cwd(
     workspace: &std::path::Path,
     raw: &str,
     trust_mode: bool,
@@ -191,14 +198,19 @@ fn resolve_job_cwd(
     } else {
         workspace.join(requested)
     };
-    let resolved = candidate
-        .canonicalize()
-        .ok()
-        .filter(|path| path.is_dir())
-        .ok_or_else(|| ApiError::bad_request("cwd must be an existing directory"))?;
+    let not_a_directory = || ApiError::bad_request("cwd must be an existing directory");
+    let resolved = tokio::fs::canonicalize(&candidate)
+        .await
+        .map_err(|_| not_a_directory())?;
+    if !tokio::fs::metadata(&resolved)
+        .await
+        .is_ok_and(|meta| meta.is_dir())
+    {
+        return Err(not_a_directory());
+    }
     if !trust_mode {
-        let root = workspace
-            .canonicalize()
+        let root = tokio::fs::canonicalize(workspace)
+            .await
             .map_err(|_| ApiError::internal("thread workspace is unavailable"))?;
         if !resolved.starts_with(&root) {
             return Err(ApiError::forbidden(
@@ -206,7 +218,11 @@ fn resolve_job_cwd(
             ));
         }
     }
-    Ok(resolved)
+    Ok(if candidate.is_absolute() {
+        candidate
+    } else {
+        resolved
+    })
 }
 
 /// `POST /v1/threads/{id}/jobs` — launch a client-owned background job under
@@ -261,12 +277,15 @@ pub(super) async fn create_thread_job(
         .map_err(|error| ApiError::forbidden(error.to_string()))?;
     // The manager resolves a relative `working_dir` against the server's own
     // cwd, so hand it the directory resolved against the thread workspace.
-    let request_cwd = request
-        .cwd
-        .as_deref()
-        .map(|cwd| resolve_job_cwd(&thread.workspace, cwd, thread.trust_mode))
-        .transpose()?
-        .map(|cwd| cwd.to_string_lossy().into_owned());
+    let request_cwd = match request.cwd.as_deref() {
+        Some(cwd) => Some(
+            resolve_job_cwd(&thread.workspace, cwd, thread.trust_mode)
+                .await?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => None,
+    };
     let policy = state
         .runtime_threads
         .thread_job_sandbox_policy(&thread)
@@ -595,33 +614,53 @@ pub(super) async fn resize_thread_job(
 mod tests {
     use super::*;
 
-    #[test]
-    fn job_cwd_resolves_against_the_thread_workspace() {
+    #[tokio::test]
+    async fn job_cwd_resolves_against_the_thread_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("packages/app")).unwrap();
         let outside = tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        let root = workspace.canonicalize().unwrap();
 
-        let resolved = resolve_job_cwd(&workspace, "packages/app", false).unwrap();
+        // Relative and absolute requests come back absolute, in the caller's
+        // spelling rather than the canonical one (no `\\?\` on Windows,
+        // no `/private` on macOS temp dirs).
+        let resolved = resolve_job_cwd(&workspace, "packages/app", false)
+            .await
+            .unwrap();
         assert!(resolved.is_absolute(), "{resolved:?}");
-        assert_eq!(resolved, root.join("packages/app"));
-        let absolute = root.join("packages").to_string_lossy().into_owned();
+        assert_eq!(resolved, workspace.join("packages/app"));
+        let absolute = workspace.join("packages");
         assert_eq!(
-            resolve_job_cwd(&workspace, &absolute, false).unwrap(),
-            root.join("packages")
+            resolve_job_cwd(&workspace, &absolute.to_string_lossy(), false)
+                .await
+                .unwrap(),
+            absolute
         );
 
-        let missing = resolve_job_cwd(&workspace, "packages/none", false).unwrap_err();
+        let missing = resolve_job_cwd(&workspace, "packages/none", false)
+            .await
+            .unwrap_err();
         assert_eq!(missing.status, StatusCode::BAD_REQUEST);
         let outside_raw = outside.to_string_lossy().into_owned();
         for raw in [outside_raw.as_str(), "../outside"] {
-            let error = resolve_job_cwd(&workspace, raw, false).unwrap_err();
+            let error = resolve_job_cwd(&workspace, raw, false).await.unwrap_err();
             assert_eq!(error.status, StatusCode::FORBIDDEN, "{raw}");
         }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, workspace.join("escape")).unwrap();
+            let error = resolve_job_cwd(&workspace, "escape", false)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+        }
         assert_eq!(
-            resolve_job_cwd(&workspace, "../outside", true).unwrap(),
+            resolve_job_cwd(&workspace, "../outside", true)
+                .await
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
             outside.canonicalize().unwrap()
         );
     }

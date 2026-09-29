@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::dependencies::{ExternalTool as _, Git};
+use crate::snapshot::is_git_metadata_name;
 
 use super::{ApiError, RuntimeApiState};
 
@@ -417,33 +418,6 @@ pub(super) fn relative_request_path(raw: &str, allow_root: bool) -> Result<PathB
         return Err(ApiError::forbidden("the .git directory is not served"));
     }
     Ok(path)
-}
-
-/// Whether one path component names the repository metadata directory as the
-/// filesystem resolves it, not just as spelled: `.git` in any letter case
-/// (macOS and Windows default to case-insensitive names) and, on Windows,
-/// with the trailing dots/spaces or `:stream` suffix it drops and the `GIT~N`
-/// short-name alias.
-pub(super) fn is_git_metadata_name(name: &std::ffi::OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    let name = if cfg!(windows) {
-        name.split(':')
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches(['.', ' '])
-    } else {
-        name
-    };
-    if name.eq_ignore_ascii_case(".git") {
-        return true;
-    }
-    cfg!(windows)
-        && name.len() > 4
-        && name.is_char_boundary(4)
-        && name[..4].eq_ignore_ascii_case("git~")
-        && name[4..].bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(super) fn canonical_workspace(workspace: &FsPath) -> Result<PathBuf, ApiError> {

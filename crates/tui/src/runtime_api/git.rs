@@ -1862,24 +1862,27 @@ fn validate_push_remote(remote: &str, configured: &str) -> Result<(), ApiError> 
     Ok(())
 }
 
-pub(super) async fn git_push(
-    State(state): State<RuntimeApiState>,
-    Json(request): Json<GitPushRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let workspace = canonical_workspace(&state.workspace)?;
-    require_repo(&workspace)?;
-    let remote = request
-        .remote
-        .as_deref()
-        .map(str::trim)
-        .filter(|remote| !remote.is_empty())
-        .map(str::to_string);
-    if let Some(remote) = &remote {
-        validate_push_remote(remote, &run_git_sync(&workspace, &["remote"])?)?;
-    }
+/// `git push` arguments for a request. The remote that will be pushed to —
+/// the requested one, or `origin` when only `set_upstream` is asked — must be
+/// a configured remote, and `--` keeps it from ever parsing as an option.
+fn push_args(
+    workspace: &FsPath,
+    remote: Option<&str>,
+    set_upstream: bool,
+) -> Result<Vec<String>, ApiError> {
+    let remote = remote.map(str::trim).filter(|remote| !remote.is_empty());
+    let remote = match (remote, set_upstream) {
+        (Some(remote), _) => Some(remote),
+        (None, true) => Some("origin"),
+        (None, false) => None,
+    };
     let mut args = vec!["push".to_string()];
-    if request.set_upstream {
-        let branch = run_git_sync(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let Some(remote) = remote else {
+        return Ok(args);
+    };
+    validate_push_remote(remote, &run_git_sync(workspace, &["remote"])?)?;
+    if set_upstream {
+        let branch = run_git_sync(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         let branch = branch.trim();
         if branch.is_empty() || branch == "HEAD" {
             return Err(ApiError::bad_request(
@@ -1887,11 +1890,20 @@ pub(super) async fn git_push(
             ));
         }
         args.push("--set-upstream".to_string());
-        args.push(remote.unwrap_or_else(|| "origin".to_string()));
-        args.push(branch.to_string());
-    } else if let Some(remote) = remote {
-        args.push(remote);
+        args.extend(["--".to_string(), remote.to_string(), branch.to_string()]);
+    } else {
+        args.extend(["--".to_string(), remote.to_string()]);
     }
+    Ok(args)
+}
+
+pub(super) async fn git_push(
+    State(state): State<RuntimeApiState>,
+    Json(request): Json<GitPushRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = canonical_workspace(&state.workspace)?;
+    require_repo(&workspace)?;
+    let args = push_args(&workspace, request.remote.as_deref(), request.set_upstream)?;
     // Push stays outside the write lock: it crosses the network under a
     // 120 s bound and only moves a remote ref, never the index or worktree.
     mutation_response(&workspace, git_write(&workspace, args).await?).await
@@ -2692,6 +2704,50 @@ mod tests {
             let body = diff(path);
             assert!(!body.contains("secret"), "{path} escaped: {body}");
         }
+    }
+
+    #[test]
+    fn push_args_validate_the_effective_remote_and_end_options() {
+        let tmp = repo();
+        let root = tmp.path();
+        let status = |error: ApiError| error.status;
+
+        // No remote configured: plain `push` stays git's call, but an
+        // upstream push defaults to `origin`, which must exist too.
+        assert_eq!(push_args(root, None, false).unwrap(), ["push"]);
+        assert_eq!(push_args(root, Some("  "), false).unwrap(), ["push"]);
+        assert_eq!(
+            push_args(root, None, true).map_err(status).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            root,
+            &["remote", "add", "origin", &bare.path().to_string_lossy()],
+        );
+        assert_eq!(
+            push_args(root, Some(" origin "), false).unwrap(),
+            ["push", "--", "origin"]
+        );
+        for remote in ["--mirror", "fork", "../other"] {
+            assert_eq!(
+                push_args(root, Some(remote), true)
+                    .map_err(status)
+                    .unwrap_err(),
+                StatusCode::BAD_REQUEST,
+                "{remote}"
+            );
+        }
+        let args = push_args(root, None, true).unwrap();
+        assert_eq!(args, ["push", "--set-upstream", "--", "origin", "main"]);
+
+        // The built arguments are ones git accepts: the push lands in the
+        // bare remote and records the upstream.
+        git(root, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        let upstream = run_git_sync(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]).unwrap();
+        assert_eq!(upstream.trim(), "origin/main");
     }
 
     #[test]
