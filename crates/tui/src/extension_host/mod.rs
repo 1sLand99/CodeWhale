@@ -1135,6 +1135,7 @@ impl HostAttachment {
     }
 
     /// Reconcile the host against every attachment, waiting for it.
+    #[cfg(test)]
     pub async fn sync(&self) -> Result<(), String> {
         self.manager.reconcile().await
     }
