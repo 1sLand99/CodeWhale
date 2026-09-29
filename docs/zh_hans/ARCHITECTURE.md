@@ -1,7 +1,7 @@
 # Codewhale 架构
 
 > 英文原文：[ARCHITECTURE.md](../ARCHITECTURE.md)。
-> 最后与英文同步日期（last synced with English revision）：2026-09-27。
+> 最后与英文同步日期（last synced with English revision）：2026-09-28。
 
 本文面向开发者和贡献者，概览 Codewhale 的架构。
 
@@ -191,8 +191,8 @@ Chat Completions 驱动回合。
     `agents/coordinate`）。`agent_open`/`agent_eval`/`agent_close` 生命周期接口面
     已退役（见 `subagent/coord.rs` 模块文档）
   - `spec.rs` - 工具规格
-  - `rlm.rs` - 持久化的递归语言模型（RLM）会话——沙箱化的 Python REPL，
-    支持语义化辅助调用和 `var_handle` 输出
+  - `rlm.rs` - 持久化的递归语言模型（RLM）会话——持久的本地 Python REPL 子进程
+    （清理过环境变量，但没有操作系统级沙箱），支持语义化辅助调用和 `var_handle` 输出
 
 ### 扩展系统
 
@@ -378,4 +378,5 @@ command = "echo 'Running tool: $TOOL_NAME'"
 - `~/.codewhale/sessions/checkpoints/` - 崩溃检查点 + 离线队列持久化
 - `~/.codewhale/snapshots/` - 供 `/restore` 和 `revert_turn` 使用的 side-git 回合前/后工作区快照
 - `~/.codewhale/tasks/` - 后台任务记录、队列、时间线、工件
-- `~/.codewhale/audit.log` - 仅追加的审计事件，记录凭证以及审批/提权动作
+- `~/.codewhale/audit.log` - 仅追加的安全事件：凭据的保存与清除、钩子环境变量的键名、压缩轮次、目标完成、终端的审批路由、Auto-Review 裁决，以及开启 `[network]` 审计时的出站网络决定。它不是操作记录：不包含命令或文件改动，app 或 `serve` 回合也不会在这里写入审批。一个会话做了什么，见 `docs/RECEIPTS.md`
+- `~/.codewhale/sessions/<id>/approval_receipts.jsonl` - 一个会话的每一次审批请求与决定，包括由谁决定

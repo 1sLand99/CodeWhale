@@ -1,7 +1,7 @@
 # 运行时 API 与集成契约
 
 > 英文原文：[RUNTIME_API.md](../RUNTIME_API.md)。
-> 最后与英文同步日期（last synced with English revision）：2026-09-27。
+> 最后与英文同步日期（last synced with English revision）：2026-09-28。
 
 `codewhale app-server` 是本地运行时的规范 API 与控制面。本地 SDK、移动端/远程控制客户端
 以及编辑器集成都与它对话，而不是去抓取终端输出。它提供完整的 HTTP/SSE 运行时
@@ -139,6 +139,112 @@ local supervisor / SDK / automation harness
 - `GET /v1/sessions/{id}/artifacts/{artifact_id}?offset=&limit=` 读取单个
   工件，使用与工作区文件读取相同的窗口、`revision` 与 `encoding` 契约。
   存储路径为绝对路径或逃出会话目录的记录返回 403；记录对应的文件已消失时返回 404。
+
+这些路由只提供 SavedSession 索引到的内容（外加不可变的图片证据）。运行时回合的
+溢出（spill）通过下文的回合路由读取。未绑定的运行时线程，其引擎根本没有
+SavedSession 索引，所以对它的溢出而言，回合记录是唯一入口。
+
+#### 回合工件
+
+回合把它产出的东西，以类型化引用的形式记录在它的条目和回合自身上。构建这些引用
+不做任何扫描。每条事实都记录在写入字节的地方：
+- 文件工具和 `apply_patch` 在 `mutation.files[]` 中报告 `size`/`sha256`；
+- 溢出报告 `artifact_digest`；
+- 工具媒体报告 `sha256`。
+
+工作区层面的那一半来自回合自己的恢复点：`TurnRecord.workspace_snapshots` 中的
+`pre_turn` 与 `post_turn` 回执（见下文“工作区恢复点”），在已有的 side 仓库里按
+tree id 做 diff。不涉及第二个存储、快照或事件。
+
+一个引用（`TurnArtifactRef`）携带：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 在回合内稳定。文件的 id 是 `file_` 加上 SHA-256(path) 的前 32 位十六进制数字。溢出的 id 是 `art_<call>`。媒体的 id 是 `art_image_<sha256>`。 |
+| `kind` | `file`、`tool_output` 或 `media`。 |
+| `path` | 对 `file`：工作区相对路径，使用 `/` 分隔。对 `tool_output` 与 `media`：会话相对路径（`artifacts/...`）。 |
+| `change` | 仅对 `file`：`created`、`updated`、`deleted` 或 `renamed`。重命名还带有 `previous_path`。 |
+| `size` | 字节大小。文件已删除时不存在。 |
+| `revision` | 整个内容的 SHA-256 十六进制值。它就是 `GET /v1/workspace/files/read` 报告为 `revision` 的值，而 file-revert 的 `expected_hash` 是 `sha256:` + `revision`。文件已删除时，或 delta blob 超过 16 MiB 时不存在。 |
+| `content_type` | 对 `media`：确切的媒体类型。 |
+| `session_id` | 对 `tool_output` 与 `media`：拥有这些字节的工件会话。 |
+| `item_id`、`tool_call_id`、`tool_name` | 写入它的那次工具调用。只在工作区 delta 中看到的改动没有这些字段。 |
+| `source` | `tool_mutation`、`tool_output_spill`、`tool_media` 或 `workspace_changed_during_turn`。 |
+| `restore_snapshot_id` | 一个 `POST /v1/threads/{id}/file-revert` 在此线程上对该路径接受的恢复点：记录在本回合 `workspace_snapshots` 上的某个回执的 `tree_id`，因此无论线程是否绑定到已保存会话，它都归该线程所有。对工具写入，它是该调用的 `tool` 回执；对 delta 改动，它是回合的 `pre_turn` 回执。回合没有记录此类回执时不存在。 |
+| `recorded_at` | 记录该引用的时间。 |
+
+引用出现在哪里：
+- **条目。** `TurnItemRecord.artifacts` 列出一次工具调用产出的东西。它在调用
+  完成时设置（无论成功或失败），所以 `item.completed` 与 `item.failed` 会实时携带它。
+- **旧版投影。** `artifact_refs` 由 `artifacts` 派生。它只保存仍然存在的文件的
+  工作区相对路径：从不包含溢出、媒体或已删除的文件。
+- **回合。** `TurnRecord.artifacts` 是回合汇总。它由一次合并计算得出，
+  按最新在前排序。
+  - 溢出与媒体引用总是保留。
+  - 文件引用按条目顺序组合：先创建后删除则去掉该文件，先创建后更新仍为
+    `created`，重命名会折叠它的来源。
+  - 工作区 delta 一旦结算，就对快照能看到的每个路径的净改动、`size` 与
+    `revision` 具有权威。它会补上没有任何工具回执点名的文件，例如 shell 和
+    子代理的写入。对于快照跟踪到、但在回合结束时未改变的条目路径，它会去掉。
+  - 汇总上限为 1000 个引用，`workspace.truncated` / `workspace.omitted`
+    报告截断情况。
+
+`TurnRecord.workspace` 跟随 delta 的生命周期。回合运行期间它是 `null`。
+`turn.completed` 携带它，状态为以下之一：
+- `pending`：回合同时记录了 `pre_turn` 与 `post_turn` 回执，它们的 diff 仍在
+  运行。完成后，运行时发布 `turn.artifacts`
+  （`{turn_id, workspace, artifacts}`）。该事件可能在下一个回合的
+  `turn.started` 之后才到达，所以请按 `turn_id` 关联。
+- `settled`：delta 已合并。`pre_turn_snapshot_id` 与 `post_turn_snapshot_id`
+  是这一对快照的 tree id。
+- `unavailable`：不会有 delta。`reason` 说明原因：
+  - `snapshots_disabled`、`workspace_too_large`、`too_many_files`、
+    `unsafe_location`、`snapshot_failed`：快照门槛。有 `pre_turn` 回执但没有
+    `post_turn` 回执的回合保留 `pre_turn_snapshot_id`。
+  - `not_captured`：回合没有记录恢复点：压缩或清除操作，或引擎在拍快照之前
+    就结束的回合。
+  - `runtime_restarted`：进程在 delta 结算前停止。这会在启动时对账，永不重新计算。
+  - `delta_failed`：diff 本身失败。
+
+  `artifacts` 仍保存工具回执记录的内容。`turn.artifacts` 会为每一种结算结果发布，
+  所以等待 `pending` 的客户端总能收到回音。
+
+delta 意味着什么，以及它看不到什么：
+- **它是工作区 diff，不是归属。** delta 改动是回合运行期间工作区里改变的一切。
+  这包括同时写同一工作区的编辑器、另一个线程或后台任务。
+  `source: workspace_changed_during_turn` 说的正是这一点。
+- **被排除的路径对快照不可见。** 这包括内置排除项（例如 `node_modules/`、
+  `target/`、`dist/`、`build/`、`.next/`，以及二进制与媒体扩展名）和工作区的
+  `.gitignore`。文件工具写入此类路径时，仍会根据其回执报告。shell 命令写入
+  此类路径时，则完全不会报告。
+- **shell 写入没有逐调用记录。** shell 命令的写入永远不会归到它的条目，只会
+  归到回合，而且只在启用快照时。
+
+路由：
+
+- `GET /v1/threads/{id}/turns/{turn_id}/artifacts` 从运行时存储的回合记录返回
+  `{thread_id, turn_id, workspace, artifacts}`。回合运行期间，`artifacts` 由其
+  条目即时合并，`workspace` 为 `null`。未知回合，或属于另一个线程的回合，返回 404。
+- `GET /v1/threads/{id}/turns/{turn_id}/artifacts/{artifact_id}?offset=&limit=&revision=`
+  读取一个引用。
+  - 它使用工作区文件读取的窗口契约（`size`、`revision`、`offset`、`bytes`、
+    `truncated`、`encoding`、`content`），并额外添加：
+    - `artifact`：该引用；
+    - `source`：`workspace`、`snapshot` 或 `session_artifact`；
+    - `current`：工作区是否仍持有这些字节；对该引用而言这不是一个问题时为 `null`。
+  - `revision` 选择回合的某个条目记录过的中间修订。默认是该引用自己的修订。
+  - 当工作区仍持有记录的修订时，`file` 从工作区提供（`current: true`）。
+    否则来自回合的 post-turn 快照（`current: false`）。
+  - `tool_output` 或 `media` 引用在写入方使用的会话工件根下读取。适用与会话
+    路由相同的限制、图片清单与完整性检查。
+
+| 状态 | 何时 |
+| --- | --- |
+| 404 | 未知的线程、回合或工件 id，或本回合从未记录过的 `revision`。 |
+| 409 | 文件记录的修订既不在工作区也不在快照存储中（快照在每个工作区超过 50 个或 7 天后被修剪），或会话工件的字节不再哈希为记录的修订。消息会给出当前修订。 |
+| 410 | 回合删除了该文件（用 `file-revert` 和 `restore_snapshot_id` 恢复它），或会话工件的字节已被修剪。 |
+| 413 | 内容超过 16 MiB。 |
+| 403 | 符号链接，或逃出其根的引用。 |
 
 Fleet 回执工件保留自己的路由
 （`GET /v1/fleet/runs/{run_id}/receipts/{task_id}/evidence`）。
@@ -332,7 +438,7 @@ app-server 存在的意义是让外部 SDK 无需抓取 TUI
 | 事件流 | `GET /v1/threads/{id}/events`（回放 + 实时 SSE） | 可用 |
 | 回合状态 / 终态分类 | `TurnRecord.status` + 错误摘要 | 可用 |
 | Token 用量 | `TurnRecord.usage`；通过 `GET /v1/usage` 聚合 | 可用 |
-| 单次读取的运行回执（路由 + 用量 + 成本） | `GET /v1/threads/{id}/turns/{turn_id}/receipt` | 提议中（[RECEIPTS.md](../RECEIPTS.md)） |
+| 动作回执（文件、命令、web/MCP 调用、代理、审批及由谁决定、失败） | `GET /v1/threads/{id}/receipt`、`GET /v1/threads/{id}/turns/{turn_id}/receipt` | 可用（[RECEIPTS.md](../RECEIPTS.md)） |
 
 对于一次性/无头自动化，优先使用 `codewhale exec` 并显式给出
 `--provider <id> --model <id>`，这样一旦失败就能确定是哪一对提供商/模型。
@@ -537,11 +643,17 @@ codewhale serve --mobile [...] [--insecure]
 进程可能抢在浏览器之前完成交换，这正是该能力
 只能用一次、仅限回环并在十分钟后过期的原因——也是为什么同用户
 攻击者有严格比这个竞争更简单的本地途径。
-`/v1/*` 既有的 bearer/header/cookie 授权在 web 模式之外保持不变。
-在 web 模式下，cookie 认证的不安全请求还必须携带
-精确的本地 web 源（origin），并且被识别为跨源 cookie
-请求的 Fetch Metadata 会被拒绝。显式的 bearer 与 Runtime 令牌 header 客户端保持
-其既有行为。
+Web 请求需要会话 cookie 加上一个限定于源（origin）的请求证明；
+流使用一张新的一次性票据。初始重定向把证明放在 fragment 中，客户端将其移除并
+保存到限定于源的 `sessionStorage`。重新加载或在第二个标签页中打开时，
+当 `Sec-Fetch-Site` 为 `same-origin` 或 `none`（直接导航）时，
+经过认证的 `GET /` 还会把证明嵌入一个 meta 标签。该页面使用 `no-store`、
+禁止被嵌入框架，也不授予任何跨源读取权限。这让新标签页无需复用 bootstrap URL
+即可恢复，包括存储不可用的情况。不支持 Fetch Metadata 的客户端只能复用 fragment
+或它已存储的证明；恢复不会延长服务器会话，也不会替换已过期的 cookie。
+跨源的 Fetch Metadata 或不匹配的 Origin 会在 web API 请求上被拒绝。显式的
+bearer 与 Runtime 令牌 header 客户端保持其既有行为。暂时性的流票据失败会以
+有上限的退避重试；HTTP 401/403 会停止票据重试，直到打开新的会话。
 
 内嵌客户端提供一个响应式线程/搜索侧栏、Runtime 拥有的
 会话事实、转录与工具回执，以及底部输入区。它可以
@@ -561,8 +673,8 @@ codewhale serve --mobile [...] [--insecure]
 既有线程的模型、模式、权限姿态、工作区与分支在该客户端中
 仅作展示。Files/Changes、PTY/终端、预览、工件、
 提供商登录或全局默认值切换、Fleet 创建，以及
-撤销/重试/恢复控件都被有意省略，直到 Runtime 为它们发布
-显式契约。
+撤销/重试/恢复控件都没有内置在这个页面里。原生桌面
+客户端通过本文记录的工作区文件、回合工件、终端与工作区恢复路由提供它们。
 
 ### 移动端控制页
 
@@ -597,9 +709,18 @@ bootstrap URL。该能力会创建一个 30 分钟的进程内
   只读窥视，而不是完整转录）
 - `PATCH /v1/sessions/{id}`（`{ "title"?: string, "archived"?: bool }`）
 - `DELETE /v1/sessions/{id}`
-- `POST /v1/sessions/{id}/resume-thread`
+- `POST /v1/sessions/{id}/resume-thread` 返回已经持有整个已保存会话的打开线程
+  （`200`）；没有这样的线程时，从该会话播种一个新线程（`201`），包括会话在那个
+  线程打开它之后又有增长的情况。
 - `GET /v1/sessions/{id}/artifacts` 与 `GET /v1/sessions/{id}/artifacts/{artifact_id}?offset=&limit=`
-  （参见上文的工作区文件与会话工件）
+  （参见上文的工作区文件与会话工件；运行时回合的溢出通过
+  `GET /v1/threads/{id}/turns/{turn_id}/artifacts/{artifact_id}` 读取）
+- `POST /v1/sessions`（`{ "thread_id": string, "title"?: string }`）把线程导出为
+  已保存会话。它是幂等的：只写入 id 由该线程派生的那份文档，第一次创建它（`201`），
+  之后更新它（`200`），所以重试永远不会产生重复。线程从中恢复而来的会话保持不变。
+- `PUT /v1/sessions`（`{ "thread_id"?: string, "session_id"?: string }`）保存线程的
+  实时对话。指名一个已绑定到另一个线程的 `session_id` 会返回 `409 Conflict`。
+- `GET /v1/sessions/repair` 返回最近一次会话存储修复的摘要；从未运行过时为 `null`
 
 会话与线程对同一对 `include_archived` / `archived_only`
 给出含义相同的响应，并且 `search` 与 TUI 会话选择器及 workbar
@@ -635,9 +756,18 @@ Sessions 列表使用的是同一个模糊匹配（标题、id、
 归档概念。
 
 当一个会话在某个交互式 Codewhale 进程中处于打开状态时，该进程持有
-内存中的权威副本，并在下一次自动保存时重写整个文档。因此对它的 `PATCH`
-会失败关闭并返回 `409 Conflict`，而不是写入一个会被静默回滚的内容。
-请在终端中修改它。独立的 `codewhale web` 不持有任何打开的东西，因此永不会被阻止。
+内存中的权威副本，并在下一次自动保存时重写整个文档。因此对它的 `PATCH`、`PUT`
+与 `DELETE` 会失败关闭并返回 `409 Conflict`，而不是写入一个会被静默回滚的内容。
+请在终端中修改它。打开它的进程持有该会话的锁（`sessions/.late-usage/<id>.live`），
+所以无论请求到达的是该进程内部的 API，还是另一个独立的 `codewhale serve`，这一点都成立。
+
+会话存储会在每次启动和每次 `codewhale serve` 启动时在后台修复。修复会为 Runtime
+存储中每个没有绑定任何会话的线程分配一个“Recovered:”会话。它会解除那些会话文档
+已消失的线程的绑定；这些线程随后从它们自己的回合加载。它会把不可读的文档、空的
+未绑定存储，以及没有任何会话引用的旧工件目录移到 `sessions/.set-aside/<run>/`，
+并在那里写入一份 `MANIFEST.jsonl`。不会删除任何东西。`GET /v1/sessions/repair`
+与 `codewhale doctor` 报告最近一次运行；`codewhale doctor --repair-sessions [--dry-run]`
+按需运行一次。
 
 `GET /v1/sessions/{id}?peek=true` 返回一个有界的、已脱敏的、只读的视图，
 而不是转录本身：最多 12 个条目、每个最多 400 个字符
@@ -658,6 +788,10 @@ Sessions 列表使用的是同一个模糊匹配（标题、id、
 - `PATCH /v1/threads/{id}`（请求体形态见下文）
 - `POST /v1/threads/{id}/resume`
 - `POST /v1/threads/{id}/fork`
+- `GET /v1/threads/{id}/receipt` — 线程做了什么，每个动作一条
+  （只读；形态见 [RECEIPTS.md](../RECEIPTS.md)）
+- `GET /v1/threads/{id}/turns/{turn_id}/receipt` — 同上，针对一个回合；
+  未知线程或不属于该线程的回合返回 `404`
 
 `POST /v1/threads` 除了提供商、模型、工作区与权限字段外，还接受可选的执行默认值：
 
@@ -773,11 +907,13 @@ fork 还可能包含 `backtrack_depth_from_tail` 与 `dropped_turn_id`，而
 - `POST /v1/threads/{id}/turns`
 - `POST /v1/threads/{id}/turns/{turn_id}/steer` - 向进行中的回合注入引导。响应是一份描述实际发生了什么的回执，而不是描述尝试过什么的回执；参见 [引导送达](#引导送达)。
 - `POST /v1/threads/{id}/turns/{turn_id}/interrupt`
+- `GET /v1/threads/{id}/turns/{turn_id}/artifacts` - 回合产出了什么：类型化引用加上工作区 delta 状态。参见 [回合工件](#回合工件)。
+- `GET /v1/threads/{id}/turns/{turn_id}/artifacts/{artifact_id}?offset=&limit=&revision=` - 从工作区、post-turn 快照或会话工件目录读取一个引用。
 - `POST /v1/threads/{id}/compact`（手动压缩）
 - `POST /v1/threads/{id}/undo` - 以去掉最后 N 个回合的方式 fork 线程（`{"depth": N}`，默认 0 = 仅最后一个回合）；返回 fork 出的线程以及 `original_user_text`，以便 GUI 预填输入框
 - `POST /v1/threads/{id}/fork-at-turn` - 在一个具名用户回合处 fork（`{"turn_id": "turn_…"}`，即 `GET /v1/threads/{id}` 报告的那个）。该 fork *保留*那个回合及其之前的每个回合，丢弃其后的回合；因此指名最后一个回合会保留整个对话。回执与 `/undo` 相同（`thread`、`original_user_text`、`original_user_images`），携带*第一个被丢弃*的用户回合的提示词——即接下来被问的是什么，即使中间夹着一个无提示词回合（如一次手动 `/compact`）——这样客户端可以把它放回输入区供编辑。源线程、它的会话文档与工作区都不受影响，也没有文件回滚：fork 是一个兄弟对话，而回退工作区会把随之留下的分支一起回退。客户端应当指名回合，而不是计算 `depth`——它们渲染的转录与这里裁剪的回合列表不是同一个列表（引导、仅图片提示词与注入的交接各自只位于一侧），一个差一的客户端计数会在回答 `201` 的同时 fork 错前缀。当该回合不是该线程的用户回合时返回 `400`。
-- `POST /v1/threads/{id}/patch-undo` - 基于快照的整工作区回滚，随后做同样的 fork（`{"depth": N}`）；除 fork 出的线程外还返回 `patch_result`（`files_restored`、`summary`、`snapshot_label`）。信任、准入与中止规则参见 [工作区恢复端点](#工作区恢复端点)。
-- `POST /v1/threads/{id}/file-revert` - 从一个具名快照中恢复恰好一个文件（`{"path", "snapshot_id", "expected_hash"}`）；永不 fork 对话。参见 [工作区恢复端点](#工作区恢复端点)。
+- `POST /v1/threads/{id}/patch-undo` - 回滚被丢弃回合改动过的文件，随后做同样的 fork（`{"depth": N}`）；除 fork 出的线程外还返回 `patch_result`（`files_restored`、`summary`、`snapshot_label`）。所有权、信任、准入与中止规则，以及拒绝时的 `error.code` 取值，参见 [工作区恢复端点](#工作区恢复端点)。
+- `POST /v1/threads/{id}/file-revert` - 从线程拥有的一个恢复点中恢复恰好一个文件（`{"path", "snapshot_id", "expected_hash"}`）；永不 fork 对话。参见 [工作区恢复端点](#工作区恢复端点)。
 - `POST /v1/threads/{id}/retry` - 以去掉最后 N 个回合的方式 fork，并立即启动一个新回合（`{"depth": N, "prompt": "..."}`；`prompt` 覆盖原始用户文本，省略时复用后者）
 
 `POST /v1/threads/{id}/turns` 接受与逐回合覆盖相同的可选
@@ -912,10 +1048,15 @@ Runtime 会移除它。客户端回显它所得到的值，不得自行构造、
 对该受门控调用的一行描述，只由工具名与其参数构建，
 绝不来自模型文本（“Search the web for 'espresso'”、
 “Write notes/espresso.md”）；工作区内的路径为工作区相对路径。
-客户端应先展示它，并把原始参数留在其后。
+客户端应先展示它，并把原始参数留在其后。对任务与自动化的创建/更新，
+`summary` 还会写出所请求的信任模式、shell、自动批准、模式和工作区。
 
 在 `allow` 上带上 `"remember": true` 会为该工具及其参数类别记录一份**会话授权**
-（审批分组键：一个 shell 命令族、一个 patch 的文件集、一个 `fetch_url` 主机、一个 MCP 工具、一种 `web.run` 动作类型——对
+（审批分组键：对简单的已知命令（例如 `git status`，其选项都是 `-s` 或 `--porcelain`
+这类不带值的选项）是一个 shell 命令族——复合命令、包装命令、解释器或无法识别的命令，
+带有任何其他选项的命令，或其参数就是要运行或安装的东西的命令（`go run`、`make`、
+`git bisect`、包安装），按完整的规范化命令授予；shell 交互或等待调用按精确调用授予——
+一个 patch 的文件集、一个 `fetch_url` 主机、一个 MCP 工具、一种 `web.run` 动作类型——对
 `open` 而言是它打开的那些主机）。Computer Use 同意与 `app_script` 调用，以及
 任何没有类别的工具，都只针对那一次精确调用授予。授权永不
 改变线程的权限姿态。该线程上之后匹配的调用无需提示词即被批准：
@@ -969,14 +1110,40 @@ HTTP `202 Accepted` 与 `tool_call.resolved` 共享“持久接受”这层含�
 接受了结果，该调用就是终态的，重复结果返回 404。
 
 **事件**（SSE 回放 + 实时流）
-- `GET /v1/threads/{id}/events?since_seq=<u64>`
+- `GET /v1/threads/{id}/events?since_seq=<u64>&replay_limit=<n>&progress=true`
+
+游标：
+
+- `since_seq` 是逐线程的游标：发送 `seq > since_seq` 的事件。省略它（且没有
+  `Last-Event-ID`）时，流从线程历史的开头开始。
+- 每个日志帧都带有 `id: <seq>`，因此浏览器的 `EventSource` 可以通过它在重连时
+  发送的 `Last-Event-ID` 头恢复。显式的 `since_seq` 优先于该头，所以一次有意
+  从 `0` 开始的回放永远不会被过期的 id 覆盖。不是十进制整数的头值会被忽略。
+- `replay_limit`（最多 4096）只返回所请求历史的最新尾部；第一个返回事件上的
+  `previous_seq` 会精确越过被省略的那段历史。
 
 持久历史的解析在异步服务器 worker 之外运行，并通过一个有背压的通道，
 以最多 256 个事件的有界批次送达 SSE。广播
 送达只是一次唤醒优化：一个落后的接收方会从它最后接受的游标
-打开同一个有界持久回放。可选的 `replay_limit`
-返回所请求的最新尾部，且不得超过 4096；
-第一个返回事件上的 `previous_seq` 会精确越过被省略的那段历史。
+打开同一个有界持久回放。
+
+`progress=true` 会在当前游标处添加 `stream.progress` 传输帧
+（`{schema_version, event, kind, thread_id, seq, state}`，`state` 为 `replaying`
+或 `live`），并以 `x-codewhale-event-progress: 1` 声明它们。只有在持久历史和
+已排队的实时尾部都被排空之后，流才报告 `live`；广播落后后的恢复会让它回到
+`replaying`。进度帧永远不携带新的序号。
+
+流打开之前的失败是普通的 HTTP 错误，带 JSON 错误体，从不是 SSE：
+
+| 状态 | 何时 |
+| --- | --- |
+| `401` / `403` | 缺少 Runtime 凭据或凭据错误 |
+| `404` | 未知线程 |
+| `400` | `replay_limit` 超过 4096 |
+| `500` | 无法打开持久历史（包括第一个游标之前回放 worker 崩溃） |
+
+一旦响应为 `200`，服务器主动选择的每一种结束都是最后一个 `stream.end` 帧；
+参见 [结束与恢复线程流](#结束与恢复线程流)。
 
 **快照**（side-git 恢复点列表 + 恢复）
 - `GET /v1/snapshots?limit=20`
@@ -1009,7 +1176,7 @@ HTTP `202 Accepted` 与 `tool_call.resolved` 共享“持久接受”这层含�
 | 路由 | 范围 | 信任 | 是否 fork 线程 |
 | --- | --- | --- | --- |
 | `POST /v1/snapshots/{id}/restore` | 整个服务器工作区 | 仅需 bearer 令牌（操作者动作） | 否 |
-| `POST /v1/threads/{id}/patch-undo` | 整个线程工作区 | 当文件将被改动时需要线程 `trust_mode` 或 `auto_approve` | 是 |
+| `POST /v1/threads/{id}/patch-undo` | 被丢弃回合改动过的文件 | 当文件将被改动时需要线程 `trust_mode` 或 `auto_approve` | 是 |
 | `POST /v1/threads/{id}/file-revert` | 恰好一个常规文件 | 总是需要线程 `trust_mode` 或 `auto_approve` | 否 |
 
 **准入。** 一次恢复会预定 Runtime 用于配置重载与会话检查点的同一个准入，
@@ -1024,6 +1191,40 @@ HTTP `202 Accepted` 与 `tool_call.resolved` 共享“持久接受”这层含�
 工作区目录不可用（卷未挂载、共享断开、目录缺失）的线程会以 `409` 被拒绝，
 而不是被当作没有东西可恢复。
 
+**所有权。** 一个线程恰好拥有记录在它自己回合上的那些工作区恢复点。回合运行期间，
+引擎报告它拍下的每个快照——回合之前的 `pre_turn`；每次可能写入的工具调用（所有
+不是只读的调用：文件工具、shell 命令、程序、可写的 MCP 工具）之前的 `tool` 和之后的
+`post_tool`；回合结束时的 `post_turn`（总是在回合结算之前）——Runtime 按顺序把它
+追加到回合记录的 `workspace_snapshots`：
+
+```json
+"workspace_snapshots": [
+  { "kind": "pre_turn", "snapshot_id": "<commit>", "tree_id": "<tree>", "session_id": "thr_1a2b3c4d" },
+  { "kind": "tool", "snapshot_id": "<commit>", "tree_id": "<tree>", "session_id": "thr_1a2b3c4d", "tool_call_id": "call_…", "write_paths": ["src/lib.rs"], "changed_paths": [] },
+  { "kind": "post_tool", "snapshot_id": "<commit>", "tree_id": "<tree>", "session_id": "thr_1a2b3c4d", "tool_call_id": "call_…", "changed_paths": ["src/lib.rs"] },
+  { "kind": "post_turn", "snapshot_id": "<commit>", "tree_id": "<tree>", "session_id": "thr_1a2b3c4d", "changed_paths": [] }
+]
+```
+
+`changed_paths` 列出自回合上一个回执以来内容发生变化的工作区相对路径——即该回执
+所关闭的那段时间里发生的事；它在 `pre_turn` 上不存在，无法计算时（中间某个快照失败）
+也不存在。`write_paths` 设置在文件工具（`write_file`、`edit_file`、`apply_patch`）的
+`tool` 回执上，值为该调用声明的路径，按它给出的写法；没有它的工具（shell 命令）
+可能写入任何路径。在用户 shell 回合上，`pre_turn` 回执携带该命令的 `tool_call_id`，
+因为命令从它一直运行到 `post_turn`。
+
+每个回执也会作为 `turn.workspace_snapshot` 事件发布（负载就是该回执）。引擎在线程
+自己的 id 下运行每个 Runtime 线程，跨越重启和引擎逐出，所以对线程自己运行的回合，
+`session_id` 就是线程 id；它不跟随线程的已保存会话绑定（`PUT`/`POST /v1/sessions`、
+恢复），后者只是命名一份文档。fork 会克隆其来源的回合记录，因此拥有它继承的那些
+回合的恢复点。同一工作区中另一个线程或 TUI 会话的快照永远不是候选。`tree_id` 是
+持久身份：修剪会重建 side 仓库并重写每个 commit id，但保留每棵树，而恢复点只解析为
+具有相同树、会话标签和种类的已存储快照。每次拍快照后的数量修剪会保留最新的 50 个
+快照加上最新的 50 个回合边界（`pre-turn:`/`post-turn:`），所以一个工具调用多于此数的
+回合，或来自另一个线程的突发，永远不会把最近回合自己的恢复点挤出去。在回执出现之前
+记录的回合、由 `resume-thread` 导入的回合，以及在快照关闭或不可用时运行的回合，
+都没有恢复点。
+
 **安全网。** 每次恢复都会先记录当前工作区的一个 `pre-restore:<target>` 快照。
 该标签永不会是 `/undo`、`patch-undo` 或
 `file-revert` 的候选，因此这张网不会改变之后的撤销选择什么。
@@ -1031,18 +1232,39 @@ HTTP `202 Accepted` 与 `tool_call.resolved` 共享“持久接受”这层含�
 请求的文件被它排除（例如被 `.gitignore` 排除），请求
 失败且什么都不改变。
 
-**`patch-undo`。** 选出由该线程自身会话拥有、且其树与工作区不同的最新
-`tool:`/`pre-turn:` 快照，从它恢复整棵树，然后完全按
-`/undo` 的方式 fork 对话。`Ok` 意味着
-文件已被恢复，或可证明没有任何东西可恢复（没有绑定
-会话，或没有不同的会话拥有快照）；`files_restored` 说明是哪一种。
-当确实有东西可恢复且线程不受信任时，整个
-撤销以 `409` 中止，文件和对话都不变。快照
-仓库、列表或比较失败以 `500` 中止，工作区目录不可用
-以 `409` 中止；两者都保留对话，因此一个回合永远不会在其文件改动仍留在磁盘上时被丢弃。
-深度与历史在任何文件改动之前都被校验。如果文件已恢复后 fork 无法
-被持久化，响应是一个 `500`，并点名被恢复的那个快照；
-原线程仍持有该回合，而 `pre-restore:` 快照持有先前的文件。
+**`patch-undo`。** 撤销整个回合。对每个被丢弃回合的 `pre_turn` → `post_turn`
+窗口，两个快照之间不同的路径必须全部属于该回合自己：只在该回合某次工具调用的时间段
+内改变（一个 `tool` → `post_tool` 时间段，或 shell 回合的整个窗口），并且在文件工具的
+时间段内，是该调用声明过的路径。在回合的任何工具都不可能写入它的时候改变的路径——
+另一个线程、编辑器、后台进程——是别人的改动，撤销会被拒绝，而不是把它回退。回合的
+每个路径都恢复到改动它的第一个被丢弃回合之前的内容，其他任何东西都不碰，所以同一
+工作区里用户或另一个线程之后的工作得以保留。然后对话完全按 `/undo` 的方式 fork。
+
+快照从不保存被工作区 `.gitignore` 文件或内置快照排除项（`node_modules/`、`target/`、
+`dist/`、构建缓存、二进制产物）排除的路径，也不保存工作区之外的路径。声明了此类路径的
+被丢弃文件工具调用会以 `path_not_snapshotted` 被拒绝，因为没有快照能把它放回去。
+shell 命令不声明路径：它在被排除路径下写入的东西（构建输出、依赖安装）不在
+`patch-undo` 恢复的范围内，也不会被报告。`201` 意味着文件已被恢复
+（`files_restored: true`，`summary` 中每个文件一行 `<action> <path>`，
+`snapshot_label` 指名 pre-turn 快照），或可证明没有任何东西可恢复
+（`files_restored: false`）：每个被丢弃的回合都在这里没有调用工具就运行完、没有改动
+文件，或它的文件已经回到回合前的内容。任何无法恢复的情况都会以 `409` 中止整个撤销，
+什么都不改变，也不发布 fork；`error.code` 说明原因：
+
+| `error.code` | 含义 |
+| --- | --- |
+| `restore_point_unavailable` | 某个可能改动过文件的被丢弃回合没有完整记录的恢复点（较旧的记录、由 `resume-thread` 导入、快照关闭，或快照失败） |
+| `restore_point_pruned` | 恢复点已不在快照存储中 |
+| `path_not_snapshotted` | 某个被丢弃的文件工具调用写入了快照不保存的路径（被忽略、内置排除，或在工作区之外） |
+| `workspace_changed_since_turn` | 这些回合改动过的某个路径之后又被改动（或在两个被丢弃回合之间被改动）、某个路径在被丢弃回合运行期间但在其自身工具调用之外被改动，或某个路径不是常规文件 |
+| `restore_requires_trust` | 有东西要恢复，而线程不处于受信任模式或 Full Access |
+| `workspace_unavailable` | 工作区目录不可用 |
+
+对前四种情况，客户端可以改为提供只作用于对话的 `POST /v1/threads/{id}/undo`，
+以及针对单个文件的 `file-revert`。快照仓库、列表或比较失败以 `500` 中止，同样保留
+对话，因此一个回合永远不会在其文件改动仍留在磁盘上时被丢弃。深度与历史在任何文件
+改动之前都被校验。如果文件已恢复后 fork 无法被持久化，响应是一个 `500`，并点名被
+恢复的那个快照；原线程仍持有该回合，而 `pre-restore:` 快照持有先前的文件。
 
 **`file-revert`。** 请求体：
 
@@ -1058,10 +1280,10 @@ HTTP `202 Accepted` 与 `tool_call.resolved` 共享“持久接受”这层含�
   名称是字面的（方括号、空格与 glob 字符都是文件名字节；
   Git 以 `--literal-pathspecs` 运行）。它必须指名一个常规文件：目录、
   路径中任何位置的符号链接以及 `.git` 组成部分都返回 `400`。
-- `snapshot_id`：用户所选那次改动对应的精确 `tool:<call_id>` 或 `pre-turn:<n>` 快照。
-  客户端从 `GET /v1/snapshots` 获得 id（标签
-  带有工具调用 id），并且必须保留所选那项改动的身份；
-  服务器永不自行挑选“最新的不同快照”，因为一个不相关的
+- `snapshot_id`：用户所选那次改动的精确 `tool` 或 `pre_turn` 恢复点，来自线程自己的
+  回合记录：某个回执的 `snapshot_id` 或 `tree_id`（对工具调用而言，是 `tool_call_id`
+  匹配的那个回执），或 `GET /v1/snapshots` 为它列出的当前 commit id。它必须是记录在
+  该线程某个回合上的恢复点；服务器永不自行挑选“最新的不同快照”，因为一个不相关的
   较新快照可能在保留工具改动的同时抹掉之后的用户编辑。
 - `expected_hash`：客户端展示的当前文件字节的 `sha256:`，
   或当客户端看到该文件为已删除时的 `absent`。它会在
@@ -1076,10 +1298,9 @@ HTTP `202 Accepted` 与 `tool_call.resolved` 共享“持久接受”这层含�
 - `400`：格式错误的 `snapshot_id`/`expected_hash`、路径在工作区之外，
   或两侧中任一侧不是常规文件的路径。
 - `404`：未知线程。
-- `409`：线程未处于受信任模式或 Full Access；没有绑定
-  会话；重叠工作区中有活动回合；工作区目录不可用；
-  快照未知、由另一个会话拥有
-  或不是恢复点（请刷新改动记录）；文件已经与快照
+- `409`：线程未处于受信任模式或 Full Access；重叠工作区中有活动回合；
+  工作区目录不可用；快照未知、已被修剪、未记录在该线程的回合上（属于另一个线程
+  或某个 TUI 会话），或不是恢复点（请刷新改动记录）；文件已经与快照
   一致（没有东西可回退）；或文件在被审阅的
   `expected_hash` 之后发生了变化（请刷新并重新审阅）。在这些情况下
   什么都不会被改动。
@@ -1335,13 +1556,34 @@ Engine 并不知道的终端。输入可按路由归因：
   被解析出来的响应。
 
 **Git**（工作区仓库操作，APPS-106）
-- `GET /v1/git` — 状态详情：`git_repo`、`branch`、`head`、
+- `GET /v1/git` — 状态详情：`git_repo`、`branch`、`head`
+  （缩写，仅供展示）、`head_oid`、`index_token`、`revision`、
   `ahead`/`behind`、计数、逐文件的 porcelain `files[]`
-  （`{path, index, worktree, staged, status, old_path?}`）、`branches`、
-  `remotes`
-- `GET /v1/changes` — 同一个 porcelain `files[]` 投影，只是去掉了仓库
-  外壳（branches/remotes）：只有一份权威，因此改动列表永不会
-  与状态读取不一致
+  （`{path, index, worktree, staged, status, old_path?, rev}`）、`branches`、
+  `remotes`。`files[].path` 与 `old_path` 是工作区相对路径，与写入路由使用同一坐标系；
+  当工作区是其仓库的一个子目录时，工作区之外的行不会列出（计数仍是整个仓库的）。
+  移出工作区的重命名显示为其来源的删除。普通 Git 过滤器和未跟踪设置照常生效。
+  未跟踪目录保持折叠；只有指名工作区本身的那一行会展开为可逐个寻址的文件。
+  前置条件令牌是不透明的：
+  - `head_oid` — 完整的 HEAD commit id；在未出生分支上或无法读取 HEAD 时为 `null`
+  - `index_token` — 整个索引（每个条目的模式、blob、stage 与路径，覆盖整个仓库）。
+    `git status` 只刷新 stat 信息时不会改变它。仓库读取失败时状态仍是尽力而为；
+    不可用的令牌为 `null`，损坏的 HEAD 无法满足守卫
+  - `files[].rev` — 一行：它的索引条目，加上它覆盖的每个文件的工作树状态（包括
+    重命名在工作区内的来源）。内容令牌（`c-…`）包含文件字节、Unix 上的可执行位、
+    符号链接目标，以及子模块的 HEAD/状态。子模块的脏内容由 porcelain 状态概括，
+    不做递归哈希；普通的 stage/discard 不会写入这些内容。一次读取最多哈希
+    64 MiB / 4,096 个文件；超出该预算或包含超过 16 MiB 文件的行，携带仅供展示的
+    大小加修改时间令牌（`s-…`）。这些令牌不能守卫写入。不可读路径、位于符号链接
+    目录之下的路径、特殊文件和损坏的嵌套仓库的 `rev` 为 `null`；其他行保留各自的令牌。
+    如果一个损坏的已跟踪子模块让 porcelain 中止，普通行会在不递归子模块的情况下
+    恢复，不可读的子模块显示为 `status: "unknown"`、`worktree: "?"`
+  - `revision` — 整棵树：`head_oid`、`index_token`、每一行的 `rev`，包括子目录工作区
+    之外的行的工作树状态。当任何一行是仅 stat 或不可读、某次仓库读取不完整，或未跟踪
+    路径被隐藏时为 `null`；这种情况下整棵树的受守卫写入不可用。客户端不得静默省略守卫
+- `GET /v1/changes` — 同一个 porcelain `files[]` 投影，加上 `head_oid`、
+  `index_token` 与 `revision`，只是去掉了仓库外壳（branches/remotes）：
+  只有一份权威，因此改动列表永不会与状态读取不一致
 - `GET /v1/diff?path=` — 单个文件相对 `base`（`HEAD`，
   或在未出生分支上的空树——它把已暂存的新增读作新
   文件）的统一 `diff`。一个 patch 覆盖已暂存+未暂存；`truncated` 报告
@@ -1357,19 +1599,61 @@ Engine 并不知道的终端。输入可按路由归因：
 - `POST /v1/git/stage` `{ "paths": [...] }` 或 `{ "all": true }`；
   `POST /v1/git/unstage` 相同；`POST /v1/git/discard` `{ "paths": [...] }`
   （仅已跟踪路径——没有 `all`，未跟踪路径失败关闭）；
-  `POST /v1/git/commit` `{ "message", "all"? }`；`POST /v1/git/push`
+  `POST /v1/git/commit` `{ "message", "all"? }`；stage、unstage、discard
+  与 commit 还接受一个可选的 `expect`（见下文）；`POST /v1/git/push`
   `{ "remote"?, "set_upstream"? }`；`POST /v1/git/branch`
   `{ "name", "create"? }`
 
-读取通过加固过的审阅命令运行（过滤器、fsmonitor、钩子、
-惰性抓取与 replace-objects 均被中和）；写入通过
-非交互式命令路径运行（`GIT_TERMINAL_PROMPT=0`、BatchMode ssh），因此
-凭据或主机密钥提示永不会挂住一个请求。路径列表是
-工作区相对的，并受与文件路由相同的限制（穿越
-→ 400，`.git` → 403），在 `--` 之后以字面 pathspec 传入。变更操作
-回答 `{ok, output, status}` 与刷新后的状态，因此客户端
-在一次操作后不需要再读取任何东西。不是仓库的工作区
-回答 `404`。
+diff 与前置条件令牌的读取通过加固过的审阅命令运行（过滤器、fsmonitor、钩子、
+惰性抓取与 replace-objects 均被中和）。porcelain 状态使用普通 Git，与工作区的计数和
+过滤器一致；写入通过非交互式命令路径运行（`GIT_TERMINAL_PROMPT=0`、BatchMode ssh），
+因此凭据或主机密钥提示永不会挂住一个请求。路径列表是工作区相对的，并受与文件路由
+相同的限制（穿越 → 400，`.git` → 403），在 `--` 之后以 `--literal-pathspecs` 传入，
+所以 `src/*` 指名一个叫 `*` 的文件，永远不是 glob。（对整棵树的 unstage 使用 `:/`
+根 pathspec。）变更操作回答 `{ok, output, status, current}`：刷新后的状态与完整的
+`GET /v1/git` 详情，因此客户端在一次操作后不需要再读取任何东西，并可以用新的令牌
+串接下一次写入。不是仓库的工作区回答 `404`。
+
+*前置条件。* stage、unstage、discard 与 commit 接受
+`expect: { head?, index?, revision?, files? }`，由最近一次 `GET /v1/git` 构建。
+出现的字段会被检查，缺失的不会；`head: null` 表示“HEAD 必须仍是未出生的”。
+不带 `expect`（或带 `expect: {}`）时，写入的行为与以前完全一样。推荐用法：
+
+| 操作 | `expect` |
+| --- | --- |
+| stage / unstage `paths` | `{head, files: {path: rev}}` |
+| stage / unstage `all` | `{head, revision}` |
+| discard（总是——它会销毁编辑） | `{head, files: {path: rev}}` |
+| commit | `{head, index}` |
+| commit `all` | `{head, revision}` |
+
+格式错误的前置条件在任何操作运行之前就回答 `400`：`head` 必须是 40 或 64 位十六进制
+id 或 `null`；`index` 与 `revision` 为 64 位十六进制（显式的 `revision: null` 会被拒绝）；
+`files` 的值必须是内容安全的 `c-` rev（`s-` 令牌回答 `400`）。`files` 的键
+（工作区相对；`dir/` 与 `dir` 是同一个键）必须恰好指名所请求的路径，这样就不会有路径
+意外地没有守卫。`files` 与 `all: true` 一起时会被拒绝（请用 `revision`），在 commit 上
+也会被拒绝。`expect` 内的未知键与其他未知字段一样被拒绝。当仓库已不再匹配时，路由
+什么都不写，并回答 `409`：
+
+```json
+{ "error": { "message": "The repository changed since it was read (HEAD moved; src/a.rs changed). Nothing was written; refresh and review again.",
+             "status": 409, "code": "git_state_changed" },
+  "stale": ["head", "files"], "stale_paths": ["src/a.rs"],
+  "current": { "...": "the GET /v1/git detail" } }
+```
+
+`stale` 列出移动了的组成部分（`head`、`index`、`files`、`revision`）；`stale_paths`
+列出 `rev` 发生变化的 `files` 键。客户端从 `current` 重新渲染，保留用户的选择，
+然后再次询问。
+
+来自同一个运行时的 stage、unstage、discard、commit 与 branch 是串行化的，因此一次
+检查和它的写入相对于该运行时的其他窗口是原子的；第二个并发写入会回答 `409`，
+`error.code: "git_busy"`，而不是排在一个很长的 commit 钩子后面。push 不串行化：它只
+移动远程 ref，并且可能为网络等待最多 120 秒。该锁不覆盖此运行时之外的进程——终端、
+编辑器，或 Codewhale 自己的代理工具——它们仍可能在检查与 git 取得 `index.lock` 之间
+的那一刻改动仓库；真正并发的 git 写入随后会在 git 自己的 `index.lock` 上失败（一个携带
+git 消息的 `400`）。通过 `commit-tree` 与 `update-ref` 做比较并交换的 commit 可以关闭
+这个窗口，但会跳过仓库的钩子，而审阅面板的 commit 必须运行这些钩子，所以没有采用。
 
 **诊断**（只读日志、崩溃、进程——APPS-103）
 - `GET /v1/logs` → `{sources: [{dir, files: [{name, size, modified}]}]}` —
@@ -1683,10 +1967,11 @@ Runtime 的提供商或模型默认值。
   `latest_response_bookmark`、`archived`
 - **TurnRecord** — `id`、`thread_id`、`status`（`queued|in_progress|completed|
   failed|interrupted|canceled`）、`effective_provider`、`effective_model`、
-  `effective_billing_surface`、时间戳、时长、用量、错误摘要
+  `effective_billing_surface`、时间戳、时长、用量、错误摘要、
+  `artifacts` 与 `workspace`（参见 [回合工件](#回合工件)）
 - **TurnItemRecord** — `id`、`turn_id`、`kind`（`user_message|agent_message|
   tool_call|file_change|command_execution|context_compaction|status|error`）、
-  生命周期 `status`、`metadata`
+  生命周期 `status`、`metadata`、`artifacts` 以及旧版的 `artifact_refs` 投影
 
 事件是只追加的，带一个全局单调递增的 `seq` 用于回放/恢复。
 
@@ -1769,6 +2054,54 @@ Runtime 的提供商或模型默认值。
   是给那些在其他地方使用 `created_at` 命名的客户端准备的等价别名；
   不要把两个字段都要求为存在。
 
+### 结束与恢复线程流
+
+每当服务器结束一个已经返回 `200` 的 `/v1/threads/{id}/events` 流时，最后一帧是
+`stream.end`，恰好发送一次，而且总会发送（不需要 `progress=true`）：
+
+```
+event: stream.end
+data: {"schema_version":1,"event":"stream.end","kind":"stream.end","thread_id":"thr_1234abcd","reason":"replay_failed","last_seq":42,"retryable":true}
+```
+
+- 它是传输帧，不是日志事件：它**没有 `seq`**，也**没有 SSE `id:`**。按 `seq` 确认的
+  客户端会跳过它，浏览器的 `Last-Event-ID` 停留在最后一个真实事件上。
+- `last_seq` 是流结束时的游标：在该连接上送达的最后一个日志 `seq`；如果一个都没有，
+  则是实际的起始游标（在 `replay_limit` 尾部之后，它已经越过了被省略的历史）。它正是
+  那个能无丢失、无重复地恢复的 `since_seq`。
+- `retryable` 说明从 `last_seq` 恢复能否成功。客户端应以它为准，而不是以原因列表为准。
+  对未知的 `reason`，按它的 `retryable` 处理。
+- 没有自由文本消息。底层错误在 Runtime 日志里，其中可能包含存储路径。
+
+| `reason` | 含义 | `retryable` |
+| --- | --- | --- |
+| `replay_failed` | 为开头回放提供数据的持久历史读取失败，包括第一个游标之后回放 worker 崩溃 | `true` |
+| `catch_up_failed` | 广播落后之后，从流的游标开始的持久重读无法打开或失败 | `true` |
+| `runtime_shutdown` | Runtime API 服务器正在停止（SIGINT、SIGTERM 或 SIGHUP；Windows 上为 Ctrl+C 或 Ctrl+Break）。打开的流会在进程退出前的一个有界排空窗口内收到此帧 | `true` |
+
+每个 `200` 响应都带有 `x-codewhale-stream-end: 1`。有这个头时，**没有** `stream.end`
+的 EOF 意味着连接或 Runtime 进程在服务器没有选择结束流的情况下死掉了：网络或代理
+中断、崩溃，或不允许排空的终止（例如 `SIGKILL`）。早于此帧的 Runtime 不发送该头；
+那时 EOF 仍然含义不明，应视为连接丢失。
+
+客户端恢复规则：
+
+1. 保持 `cursor` = 你接受的最后一个日志帧的 `seq`。忽略 `seq <= cursor` 的帧。
+   如果某帧的 `previous_seq` 不是你的 `cursor`，说明你漏了事件：重新加载线程快照，
+   而不是信任本地状态。
+2. 收到 `retryable: true` 的 `stream.end` 时，在有界退避之后以 `since_seq = last_seq`
+   重连，并告诉用户 Runtime 说了什么（例如“Runtime 正在关闭——正在重连”）。
+   收到 `retryable: false` 时，停止，显示原因，并退回到快照。
+3. 遇到没有 `stream.end` 的 EOF 或传输错误时，在有界退避之后以 `since_seq = cursor`
+   重连，并显示为连接问题，而不是 Runtime 错误。
+4. 流打开之前的 `401`/`403` 或 `404` 是终态（凭据或线程问题）。`5xx` 以退避重试。
+5. 永远不要从 `0` 重连来“重新开始”：回放只有按游标才是幂等的。
+
+Fleet 流（`/v1/fleet/runs/{run_id}/events`）保留自己的结束帧，
+`fleet.stream.error {retryable}` 与 `fleet.replay.cursor_unavailable`。它们与
+`stream.end` 不同：它们不携带游标，因为 Fleet 客户端从它接受的最后一个 Fleet 事件的
+不透明 `cursor` 恢复。
+
 ### 引导送达
 
 把一条引导放进引擎邮箱，与模型读到它是两回事。引擎会丢弃一条其回合已经推进的引导，
@@ -1794,12 +2127,12 @@ Runtime 的提供商或模型默认值。
 
 常见事件名：`thread.started`、`thread.forked`、`turn.started`、
 `turn.lifecycle`、`turn.steered`、`turn.steer_dropped`、`turn.interrupt_requested`、
-`turn.completed`、`item.started`、`item.delta`、`item.completed`、
+`turn.completed`、`turn.artifacts`、`item.started`、`item.delta`、`item.completed`、
 `item.failed`、`item.interrupted`、`approval.required`、`approval.decided`、
 `approval.timeout`、`user_input.required`、`user_input.answered`、
 `user_input.canceled`、`tool_call.requested`、`tool_call.resolved`、
 `tool_call.timeout`、`tool_call.canceled`、`sandbox.denied`、
-`runtime.store_failure`。
+`turn.workspace_snapshot`、`runtime.store_failure`。
 
 `runtime.store_failure` 是运行时报告操作者自己磁盘状态的故障：会话运行时
 存储下的一个线程、回合或条目记录无法被读取、解析或写入。负载携带 `operation`
@@ -2018,6 +2351,7 @@ app/编辑器/无头客户端可以检查 TUI 与
 | 获取会话 | `GET /v1/sessions/{id}` |
 | 重命名 / 归档会话 | `PATCH /v1/sessions/{id}` |
 | 删除会话 | `DELETE /v1/sessions/{id}` |
+| 会话存储修复摘要 | `GET /v1/sessions/repair` |
 | 恢复为线程 | `POST /v1/sessions/{id}/resume-thread` |
 | 创建线程 | `POST /v1/threads` |
 | 列出线程 | `GET /v1/threads` |

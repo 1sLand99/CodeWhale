@@ -1,7 +1,7 @@
 # 工具表面（tool surface）
 
 > 英文原文：[TOOL_SURFACE.md](../TOOL_SURFACE.md)。
-> 最后与英文同步日期（last synced with English revision）：2026-09-27。
+> 最后与英文同步日期（last synced with English revision）：2026-09-28。
 
 本文描述当前面向模型的工具（tool）契约。产生它的 v0.9.1 切换记录在
 `docs/RUNTIME_SIMPLIFICATION_DESIGN.md` 中；工作区版本请从 `Cargo.toml` 读取，
@@ -72,7 +72,10 @@ Full Access 会改变常规审批行为，但不会绕过硬性安全或仓库�
 只读权威并不意味着“无法做研究”。
 
 可持久使用的 `github`、`automation` 和 `rlm` 动作族默认也是延迟的。
-`rlm` 掌管一个持久沙箱化 Python 会话的 `open`、`eval`、`configure` 和 `close` 动作。
+`rlm` 掌管一个持久本地 Python 会话（一个清理过环境变量的子进程，而不是操作系统级沙箱）的
+`open`、`eval`、`configure` 和 `close` 动作。回复中内联的 ```` ```repl ```` 围栏也在同类内核中运行，
+但仅当 `code_execution` 出现在该回合的工具表面上（Plan 模式下永远不会）、围栏独占一行开头，
+并且在会话审批姿态下通过了 `code_execution` 的审批之后。
 受特性开关控制的原生工具，只有在实现与宿主依赖都可用时，
 才可以加入激活或延迟目录。
 
