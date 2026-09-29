@@ -1476,6 +1476,9 @@ fn parse_sse_frame(frame: &str) -> Result<(String, serde_json::Value)> {
     Ok((event_name, payload))
 }
 
+/// Polls until the turn is terminal. `timeout` only bounds how long a stuck
+/// turn takes to fail the test, so keep it generous: a loaded shared-process
+/// `cargo test` run can take seconds to settle a mock turn (#6698).
 async fn wait_for_terminal_turn_status(
     client: &reqwest::Client,
     addr: SocketAddr,
@@ -4382,7 +4385,7 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
         .to_string();
 
     let _ =
-        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(2))
+        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(10))
             .await?;
 
     let resp_a = client
@@ -5347,7 +5350,7 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
     assert_eq!(interrupt_resp["id"], turn_id);
 
     let terminal =
-        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(3))
+        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(10))
             .await?;
     assert_eq!(terminal, "interrupted");
 
@@ -5786,7 +5789,7 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
         .to_string();
 
     let _ =
-        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(2))
+        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(10))
             .await?;
 
     // Verify that the persisted events include the expected turn lifecycle events.
@@ -8366,7 +8369,7 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
 
     let _ = finish_tx.send(());
     let terminal =
-        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(2))
+        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(10))
             .await?;
     assert_eq!(terminal, "completed");
 

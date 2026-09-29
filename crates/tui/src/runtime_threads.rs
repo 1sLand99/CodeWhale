@@ -607,14 +607,6 @@ const RUNTIME_RESTART_REASON: &str = "Interrupted by process restart";
 const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
 const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(300);
 
-#[cfg(test)]
-static TEST_APPROVAL_DECISION_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-static TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 impl RuntimeThreadManager {
     /// Wait for one external approval decision. The one approval clock,
     /// `[approval] timeout_seconds`, governs here as it does for the TUI
@@ -624,12 +616,42 @@ impl RuntimeThreadManager {
     pub(crate) fn approval_decision_timeout(&self) -> Option<Duration> {
         #[cfg(test)]
         {
-            let ms = TEST_APPROVAL_DECISION_TIMEOUT_MS.load(std::sync::atomic::Ordering::SeqCst);
+            let ms = self
+                .test_approval_decision_timeout_ms
+                .load(std::sync::atomic::Ordering::SeqCst);
             if ms > 0 {
                 return Some(Duration::from_millis(ms));
             }
         }
         self.read_config().approval_timeout()
+    }
+
+    fn dynamic_tool_result_timeout(&self) -> Duration {
+        #[cfg(test)]
+        {
+            let ms = self
+                .test_dynamic_tool_result_timeout_ms
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if ms > 0 {
+                return Duration::from_millis(ms);
+            }
+        }
+        DYNAMIC_TOOL_RESULT_TIMEOUT
+    }
+
+    /// Test seam: shorten this manager's external approval wait. Scoped to
+    /// one manager so parallel libtest cases never see another's value (#6698).
+    #[cfg(test)]
+    pub(crate) fn set_test_approval_decision_timeout_ms(&self, ms: u64) {
+        self.test_approval_decision_timeout_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: shorten this manager's dynamic tool result wait.
+    #[cfg(test)]
+    pub(crate) fn set_test_dynamic_tool_result_timeout_ms(&self, ms: u64) {
+        self.test_dynamic_tool_result_timeout_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -670,27 +692,6 @@ fn fire_runtime_tool_completion_hooks(
     {
         tracing::warn!(target: "hooks", %error, thread_id, "on_error hook was not submitted");
     }
-}
-
-fn dynamic_tool_result_timeout() -> Duration {
-    #[cfg(test)]
-    {
-        let ms = TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS.load(std::sync::atomic::Ordering::SeqCst);
-        if ms > 0 {
-            return Duration::from_millis(ms);
-        }
-    }
-    DYNAMIC_TOOL_RESULT_TIMEOUT
-}
-
-#[cfg(test)]
-pub(crate) fn set_test_approval_decision_timeout_ms(ms: u64) -> u64 {
-    TEST_APPROVAL_DECISION_TIMEOUT_MS.swap(ms, std::sync::atomic::Ordering::SeqCst)
-}
-
-#[cfg(test)]
-pub(crate) fn set_test_dynamic_tool_result_timeout_ms(ms: u64) -> u64 {
-    TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS.swap(ms, std::sync::atomic::Ordering::SeqCst)
 }
 
 const fn default_runtime_schema_version() -> u32 {
@@ -5259,6 +5260,12 @@ pub struct RuntimeThreadManager {
     #[cfg(test)]
     test_model_client:
         Arc<parking_lot::Mutex<Option<crate::core::model_client::SharedModelClient>>>,
+    /// Test seams for the external approval and dynamic tool waits; `0`
+    /// keeps the production behavior.
+    #[cfg(test)]
+    test_approval_decision_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    test_dynamic_tool_result_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RuntimeStoreBinding {
@@ -6263,6 +6270,10 @@ impl RuntimeThreadManager {
             replay_test_hook: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(test)]
             test_model_client: Arc::new(parking_lot::Mutex::new(None)),
+            #[cfg(test)]
+            test_approval_decision_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            test_dynamic_tool_result_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         manager.recover_interrupted_state()?;
         Ok(manager)
@@ -16338,7 +16349,7 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
         }
         drop(projection);
 
-        let result_timeout = dynamic_tool_result_timeout();
+        let result_timeout = self.dynamic_tool_result_timeout();
         match tokio::time::timeout(result_timeout, &mut rx).await {
             Ok(Ok(result)) => Ok(dynamic_tool_result_to_tool_result(result)),
             Ok(Err(_recv_err)) => Err(crate::tools::spec::ToolError::execution_failed(format!(
