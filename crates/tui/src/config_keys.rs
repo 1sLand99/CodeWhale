@@ -212,6 +212,9 @@ pub(crate) fn settings_toml_keys() -> impl Iterator<Item = &'static str> {
 /// whose reader needs more than `ConfigToml::set_value`'s string fallthrough,
 /// or `Ok(None)` when that fallthrough is already right.
 ///
+/// - `approval_policy`, `sandbox_mode` and `verbosity` are refused unless
+///   the value is one [`codewhale_config::config_toml_choices`] names, since
+///   the TUI loader rejects the whole file otherwise.
 /// - `reasoning_effort` is checked against its reader,
 ///   [`ReasoningEffort::parse_strict`], and stored in canonical spelling.
 /// - A root field the TUI [`Config`] reads but `SETTINGS_SCHEMA` does not
@@ -224,6 +227,7 @@ pub(crate) fn settings_toml_keys() -> impl Iterator<Item = &'static str> {
 /// [`ReasoningEffort::parse_strict`]: crate::reasoning_preference::ReasoningEffort::parse_strict
 pub fn config_toml_value(key: &str, value: &str) -> Result<Option<toml::Value>> {
     let key = key.trim();
+    codewhale_config::check_config_toml_choice(key, value)?;
     if key == "reasoning_effort" {
         let effort = crate::reasoning_preference::ReasoningEffort::parse_strict(value)
             .map_err(|error| anyhow::anyhow!("invalid value for '{key}': {error}"))?;
@@ -412,6 +416,43 @@ mod tests {
             );
         }
         assert!(config_toml_value("reasoning_effort", "bogus").is_err());
+    }
+
+    #[test]
+    fn config_toml_value_refuses_values_the_loader_rejects() {
+        for (key, value) in [
+            ("approval_policy", " On-Request "),
+            ("approval_policy", "never"),
+            ("sandbox_mode", "workspace-write"),
+            ("verbosity", "concise"),
+        ] {
+            assert_eq!(
+                config_toml_value(key, value).unwrap(),
+                None,
+                "{key}={value}"
+            );
+        }
+        for (key, value, fix) in [
+            ("approval_policy", "ask", "on-request"),
+            ("sandbox_mode", "full", "read-only"),
+            ("verbosity", "quiet", "normal"),
+        ] {
+            let error = format!("{:#}", config_toml_value(key, value).expect_err(key));
+            assert!(
+                error.contains(&format!("invalid value '{value}' for '{key}'")),
+                "{error}"
+            );
+            assert!(
+                error.contains(&format!("fix: codewhale config set {key} {fix}")),
+                "{error}"
+            );
+        }
+        let error = format!(
+            "{:#}",
+            config_toml_value("approval_policy", "ask").unwrap_err()
+        );
+        assert!(error.contains("on-request, untrusted, never"), "{error}");
+        assert!(error.contains("settings.toml"), "{error}");
     }
 
     #[test]

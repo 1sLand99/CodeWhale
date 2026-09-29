@@ -3707,6 +3707,55 @@ fn telemetry_consent_from_env(
     (on, source)
 }
 
+/// Values config.toml's root `approval_policy` accepts, compared trimmed and
+/// case-insensitively. settings.toml's `approval_policy` is a different
+/// vocabulary (`use-tui-default`, `ask`, `auto-review`, `full-access`).
+pub const CONFIG_TOML_APPROVAL_POLICIES: &[&str] =
+    &["on-request", "untrusted", "never", "auto", "suggest"];
+/// Values config.toml's root `sandbox_mode` accepts.
+pub const CONFIG_TOML_SANDBOX_MODES: &[&str] = &[
+    "read-only",
+    "workspace-write",
+    "danger-full-access",
+    "external-sandbox",
+];
+/// Values config.toml's root `verbosity` accepts.
+pub const CONFIG_TOML_VERBOSITIES: &[&str] = &["normal", "concise"];
+
+/// The closed vocabulary of a config.toml root key, if it has one.
+#[must_use]
+pub fn config_toml_choices(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        "approval_policy" => Some(CONFIG_TOML_APPROVAL_POLICIES),
+        "sandbox_mode" => Some(CONFIG_TOML_SANDBOX_MODES),
+        "verbosity" => Some(CONFIG_TOML_VERBOSITIES),
+        _ => None,
+    }
+}
+
+/// Refuse a value the config.toml loader would reject for a closed-vocabulary
+/// root key, so `config set` cannot write a file the TUI then fails to load.
+pub fn check_config_toml_choice(key: &str, value: &str) -> Result<()> {
+    let Some(choices) = config_toml_choices(key) else {
+        return Ok(());
+    };
+    if choices.contains(&value.trim().to_ascii_lowercase().as_str()) {
+        return Ok(());
+    }
+    let settings_note = if key == "approval_policy" {
+        " (`use-tui-default`, `ask`, `auto-review` and `full-access` are settings.toml \
+         values for the /settings editor; config.toml does not read them.)"
+    } else {
+        ""
+    };
+    bail!(
+        "invalid value '{value}' for '{key}': config.toml accepts {}.{settings_note} \
+         No value was changed.\nfix: codewhale config set {key} {}",
+        choices.join(", "),
+        choices[0]
+    )
+}
+
 #[must_use]
 pub fn project_approval_policy_is_allowed(current: Option<&str>, project: &str) -> bool {
     let Some(project_rank) = approval_policy_rank(project) else {
