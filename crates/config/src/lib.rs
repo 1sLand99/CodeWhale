@@ -2742,6 +2742,17 @@ impl ConfigToml {
     /// survive later typed saves. This does not apply environment overrides.
     pub fn bind_persisted_provider_id(&mut self, provider_id: &str) -> Result<()> {
         let provider_id = provider_id.trim();
+        // Earlier typed saves wrote the serde kebab-case spelling
+        // `siliconflow-c-n` instead of the canonical `siliconflow-CN`. Read it
+        // back as the built-in so those files load and the next save repairs
+        // them, unless the user really declared a table by that name.
+        let provider_id = if provider_id.eq_ignore_ascii_case("siliconflow-c-n")
+            && !self.providers.extras.contains_key(provider_id)
+        {
+            ProviderKind::SiliconflowCN.as_str()
+        } else {
+            provider_id
+        };
         let parsed = ProviderKind::parse_config_identity(provider_id);
         // Kindless tables mirroring a built-in alias remain inert. An explicit
         // custom declaration must validate; never fall back to a different

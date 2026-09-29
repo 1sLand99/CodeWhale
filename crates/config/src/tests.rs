@@ -10087,3 +10087,54 @@ api_key = "sk-table"
         assert_eq!(project_config.approval_policy.as_deref(), Some("never"));
     }
 }
+
+#[test]
+fn typed_save_round_trips_every_builtin_provider_selector() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    let mismatched: Vec<String> = provider::all_providers()
+        .iter()
+        .map(|entry| entry.kind())
+        .filter_map(|kind| {
+            let serialized = toml::Value::try_from(kind).expect("serialize provider kind");
+            (serialized.as_str() != Some(kind.as_str()))
+                .then(|| format!("{} -> {serialized}", kind.as_str()))
+        })
+        .collect();
+    assert!(
+        mismatched.is_empty(),
+        "serde spelling must be the canonical id: {mismatched:?}"
+    );
+    for entry in provider::all_providers() {
+        let kind = entry.kind();
+        fs::write(&path, format!("provider = \"{}\"\n", entry.id())).expect("write config");
+        let Ok(mut store) = ConfigStore::load(Some(path.clone())) else {
+            // A retired tombstone may refuse to load; it must not be written.
+            continue;
+        };
+        store
+            .config
+            .set_value("verbosity", "quiet")
+            .expect("set verbosity");
+        store.save().expect("typed save");
+        let reloaded = ConfigStore::load(Some(path.clone()))
+            .unwrap_or_else(|err| panic!("reload after saving {}: {err:#}", entry.id()));
+        assert_eq!(reloaded.config.provider, kind, "{}", entry.id());
+    }
+}
+
+#[test]
+fn legacy_siliconflow_cn_spelling_loads_and_is_repaired_on_save() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(&path, "provider = \"siliconflow-c-n\"\n").expect("write config");
+    let mut store = ConfigStore::load(Some(path.clone())).expect("load legacy spelling");
+    assert_eq!(store.config.provider, ProviderKind::SiliconflowCN);
+    store
+        .config
+        .set_value("verbosity", "quiet")
+        .expect("set verbosity");
+    store.save().expect("typed save");
+    let body = fs::read_to_string(&path).expect("read config");
+    assert!(body.contains("provider = \"siliconflow-CN\""), "{body}");
+}
