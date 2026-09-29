@@ -575,6 +575,14 @@ describe("admin post action is idempotent and bounded", () => {
     kv.beforePut = async (key, value) => {
       const isClaim = key.startsWith("draft-claim:") || (key.startsWith("draft-resolved:") && value.includes('"claim"'));
       if (!isClaim) return;
+      // A discard only ever overlaps a post already at GitHub. Gate it on
+      // that directly so the test does not depend on which request the
+      // scheduler lets claim first (a discard claiming first would park the
+      // post forever waiting for a GitHub call that never happens).
+      if (value.startsWith("discard:") || value.includes('"discard')) {
+        await firstAtGitHubP;
+        return;
+      }
       claimPuts += 1;
       await (claimPuts === 1 ? bothCheckedP : firstAtGitHubP);
     };
