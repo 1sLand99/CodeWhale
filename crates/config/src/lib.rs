@@ -2559,15 +2559,17 @@ impl ConfigToml {
         Ok(table)
     }
 
-    fn named_custom_provider_config(&self) -> Option<ProviderConfigToml> {
-        let provider_id = self.named_custom_provider_id()?;
-        self.named_custom_provider_table(provider_id).ok()?;
-        self.providers
-            .extras
-            .get(provider_id)
-            .cloned()?
-            .try_into()
-            .ok()
+    /// The typed `[providers.<id>]` table of a named custom provider. A table
+    /// that fails validation is an error, never a reason to read another one.
+    fn named_custom_provider_config_for(&self, provider_id: &str) -> Result<ProviderConfigToml> {
+        let table = self.named_custom_provider_table(provider_id)?;
+        // The deserializer error can quote the offending value, which may be a
+        // credential, so report only which table is wrong.
+        toml::Value::Table(table.clone()).try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "custom provider '{provider_id}' has an invalid [providers.{provider_id}] table: a field has the wrong type"
+            )
+        })
     }
 
     /// Mutable access to a custom provider's `[providers.<id>]` table,
@@ -2788,12 +2790,12 @@ impl ConfigToml {
             && custom_table.is_some()
             && !kindless_alias
         {
-            self.named_custom_provider_table(provider_id)?;
+            self.named_custom_provider_config_for(provider_id)?;
             ProviderKind::Custom
         } else if let Some(provider) = parsed {
             provider
         } else {
-            self.named_custom_provider_table(provider_id)?;
+            self.named_custom_provider_config_for(provider_id)?;
             ProviderKind::Custom
         };
         self.provider = provider;
@@ -3225,11 +3227,19 @@ impl ConfigToml {
             (self.provider, ProviderSource::Config)
         };
 
-        let mut provider_cfg = if provider == ProviderKind::Custom
-            && matches!(provider_source, ProviderSource::Config)
-        {
-            self.named_custom_provider_config()
-                .unwrap_or_else(|| self.providers.for_provider(provider).clone())
+        let named_custom_provider = (provider == ProviderKind::Custom
+            && matches!(provider_source, ProviderSource::Config))
+        .then(|| self.named_custom_provider_id())
+        .flatten();
+        let mut provider_cfg = if let Some(provider_id) = named_custom_provider {
+            // A named route whose table became invalid after binding resolves
+            // to the fail-closed loopback placeholder, never to the legacy
+            // `[providers.custom]` endpoint, model and key.
+            self.named_custom_provider_config_for(provider_id)
+                .unwrap_or_else(|err| {
+                    tracing::warn!("{err:#}");
+                    ProviderConfigToml::default()
+                })
         } else {
             self.providers.for_provider(provider).clone()
         };

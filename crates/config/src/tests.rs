@@ -10197,3 +10197,74 @@ fn typed_save_keeps_runtime_owned_keys_in_typed_sub_tables() {
         Some(&toml::Value::Integer(3))
     );
 }
+
+const NAMED_CUSTOM_WITH_LEGACY_CUSTOM: &str = r#"provider = "acme"
+
+[providers.acme]
+kind = "openai-compatible"
+base_url = "https://acme.example/v1"
+model = "acme-model"
+context_window = CONTEXT_WINDOW
+
+[providers.custom]
+base_url = "https://legacy-custom.example/v1"
+model = "legacy-model"
+api_key = "legacy-custom-key-1234567890"
+"#;
+
+#[test]
+fn named_custom_provider_with_invalid_table_is_rejected_on_load() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(
+        &path,
+        NAMED_CUSTOM_WITH_LEGACY_CUSTOM.replace("CONTEXT_WINDOW", "\"big-secret-value\""),
+    )
+    .expect("write config");
+    let err = ConfigStore::load(Some(path)).expect_err("invalid named table must not load");
+    let message = format!("{err:#}");
+    assert!(message.contains("[providers.acme]"), "{message}");
+    assert!(!message.contains("big-secret-value"), "{message}");
+}
+
+#[test]
+fn named_custom_provider_never_resolves_to_legacy_custom_table() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(
+        &path,
+        NAMED_CUSTOM_WITH_LEGACY_CUSTOM.replace("CONTEXT_WINDOW", "128000"),
+    )
+    .expect("write config");
+    let mut store = ConfigStore::load(Some(path)).expect("load valid named table");
+    let resolved = store
+        .config
+        .resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.base_url, "https://acme.example/v1");
+
+    // The table turns invalid after binding: resolution fails closed instead
+    // of reading `[providers.custom]`.
+    store
+        .config
+        .providers
+        .extras
+        .get_mut("acme")
+        .and_then(toml::Value::as_table_mut)
+        .expect("acme table")
+        .insert("context_window".to_string(), toml::Value::from("big"));
+    let resolved = store
+        .config
+        .resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert!(
+        !resolved.base_url.contains("legacy-custom"),
+        "{}",
+        resolved.base_url
+    );
+    assert_ne!(resolved.model, "legacy-model");
+    assert_ne!(
+        resolved.api_key.as_deref(),
+        Some("legacy-custom-key-1234567890")
+    );
+}
