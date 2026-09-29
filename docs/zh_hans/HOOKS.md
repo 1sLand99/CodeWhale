@@ -177,18 +177,18 @@ Observer 并**不**意味着无副作用。observer hook 是以你的凭据运�
 | 字段 | 含义 |
 | --- | --- |
 | `command` | 交给 shell 的已准入命令源码，而不是 shell 可执行文件或其 argv 包装 |
-| `cwd` | 进程启动时所在目录的规范绝对路径：解析符号链接，因此无论调用是否传入 `cwd`，同一目录只有一种写法；在运行结束时解析 |
+| `cwd` | 进程启动时所在目录的规范绝对路径：解析符号链接，因此无论调用是否传入 `cwd`，同一目录只有一种写法；在启动前解析，并将同一路径交给操作系统 |
 | `state` | 观察到退出（包括非零退出）为 `completed`；信号、kill、取消或超时为 `interrupted` |
 | `scope` | schema 1 中始终为 `local` |
 | `exit_code` | 观察到的整数，或 `null`；绝不根据 `state` 合成 |
-| `stdout`、`stderr` | 输出预览；过长的流保留首尾字节，中间以 `[receipt preview truncated]` 标记 |
+| `stdout`、`stderr` | 工具已保留输出的预览，其中可能已经缺少进程输出的开头；过长的预览保留自身的首尾字节，中间以 `[receipt preview truncated]` 标记 |
 | `stdout_truncated`、`stderr_truncated` | 工具自身的输出捕获或预览丢弃了字节时为 `true` |
 | `output_kind` | `Bash` / `exec_shell` 为 `separate`；小写 `bash` 的 stdout 与 stderr 共用一个管道，为 `combined`——此时 `stdout` 是合并后的预览，`stderr` 为空 |
 
 规则是保守的：
 
-- **要么精确，要么不存在。** `command` 和 `cwd` 绝不截断。任一超过 8 KiB、包含 NUL，或目录是相对路径、非 UTF-8 或已无法解析时，不导出回执。shell 工具无法观察到运行如何结束（操作系统的 wait 调用本身失败）时同样不导出：其状态未知，回执不做猜测。预览会缩短直到序列化后的 JSON 不超过 32 KiB；仍然放不下时不导出回执，而不是截断。
-- **不存在不代表任何结果。** 既不意味着成功，也不意味着失败。
+- **要么精确，要么不存在。** `command` 和 `cwd` 绝不截断。任一超过 8 KiB、包含 NUL，或目录是相对路径、非 UTF-8 或在启动前无法解析时，不导出回执。shell 工具无法观察到运行如何结束（操作系统的 wait 调用本身失败）时同样不导出：其状态未知，回执不做猜测。预览会缩短直到序列化后的 JSON 不超过 32 KiB；仍然放不下时不导出回执，而不是截断。
+- **不存在不代表任何结果。** 既不意味着成功，也不意味着失败。应用当前调用的上下文前，会清除继承的 `DEEPSEEK_TOOL_EXECUTION_RECEIPT`。
 - **范围。** 只有配置了 `tool_call_after` 或 `on_error` hook 时才会生成回执，且仅限已结束、基于管道、未沙箱化的本地前台运行。后台启动、转入 `/jobs` 的前台运行、PTY（`tty` / `combined_output`）与交互会话、OS 沙箱与外部后端执行、只读 shell 的加固 argv、Windows、任何平台上的 PowerShell（它会包装源码或通过临时脚本运行），以及执行前就被拒绝的调用都没有回执。
 - **仅供 hook 使用。** 回执不写入持久化的 Runtime API 条目记录；该记录已包含工具输出。
 - 失败的运行与成功的运行同样设置，因此 shell 调用失败时的 `on_error` 也带有它。其他变量均不变。

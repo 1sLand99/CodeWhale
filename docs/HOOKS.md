@@ -329,23 +329,24 @@ any rewrite.
 | Field | Meaning |
 | --- | --- |
 | `command` | the admitted shell source handed to the shell, not the shell executable or its argv wrapper |
-| `cwd` | the canonical absolute path of the directory the process started in: symlinks are resolved, so a directory has one spelling whether or not the call passed `cwd`; it is resolved when the run settles |
+| `cwd` | the canonical absolute path of the directory the process started in: symlinks are resolved, so a directory has one spelling whether or not the call passed `cwd`; it is resolved before spawn and that same path is handed to the OS |
 | `state` | `completed` for an observed exit, including a nonzero one; `interrupted` for a signal, kill, cancel, or timeout |
 | `scope` | always `local` in schema 1 |
 | `exit_code` | the observed integer, or `null`; never synthesized from `state` |
-| `stdout`, `stderr` | output previews; a long stream keeps its first and last bytes around a `[receipt preview truncated]` marker |
+| `stdout`, `stderr` | previews of the tool's retained output, which may already omit early process output; long previews keep their first and last bytes around a `[receipt preview truncated]` marker |
 | `stdout_truncated`, `stderr_truncated` | `true` when the tool's own output capture or the preview dropped bytes |
 | `output_kind` | `separate` for `Bash` / `exec_shell`; `combined` for lowercase `bash`, whose stdout and stderr share one pipe — `stdout` then holds the combined preview and `stderr` is empty |
 
 The rules are conservative:
 
 - **Exact or absent.** `command` and `cwd` are never truncated. If either is
-  over 8 KiB, contains NUL, or the directory is relative, not UTF-8, or no
-  longer resolves, the receipt is left out. So is a run whose end the shell
+  over 8 KiB, contains NUL, or the directory is relative, not UTF-8, or cannot
+  resolve before spawn, the receipt is left out. So is a run whose end the shell
   tool could not observe (the OS wait itself failed): its state is unknown,
   and the receipt does not guess it. Previews shrink until the serialized JSON fits 32 KiB;
   if it still cannot fit, the receipt is left out rather than cut.
-- **Absence means nothing.** It implies neither success nor failure.
+- **Absence means nothing.** It implies neither success nor failure. An inherited
+  `DEEPSEEK_TOOL_EXECUTION_RECEIPT` is cleared before applying the current call's context.
 - **Scope.** A receipt is built only while a `tool_call_after` or `on_error`
   hook is configured, and only for a settled, pipe-backed, unsandboxed, local
   foreground run. Background launches, a foreground run moved to `/jobs`,

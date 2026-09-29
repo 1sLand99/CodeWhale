@@ -4769,11 +4769,29 @@ async fn execute_foreground_via_background(
     extra_env: HashMap<String, String>,
     direct_argv: bool,
     timeout_bounds_ms: (u64, u64),
+    wants_receipt: bool,
     receipt_identity: &mut Option<ShellExecutionIdentity>,
 ) -> Result<ShellResult> {
     let timeout_ms =
         timeout_ms.map(|timeout| timeout.clamp(timeout_bounds_ms.0, timeout_bounds_ms.1));
     let spawn_timeout_ms = timeout_ms.unwrap_or(timeout_bounds_ms.1);
+    // Freeze the receipt's directory before execution and hand that same
+    // resolved spelling to the OS. Looking up the original symlink after
+    // the command runs can name a different directory than the one it used.
+    // Resolution is asynchronous; failure leaves the ordinary execution
+    // path intact but cannot produce an exact receipt.
+    let receipt_cwd = if wants_receipt {
+        match working_dir.as_deref() {
+            Some(cwd) => tokio::fs::canonicalize(cwd)
+                .await
+                .ok()
+                .and_then(|path| path.into_os_string().into_string().ok()),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let working_dir = receipt_cwd.clone().or(working_dir);
     let task_id = {
         let mut manager = context
             .shell_manager
@@ -4818,7 +4836,8 @@ async fn execute_foreground_via_background(
         // wrapper, Windows shell prefixes, and a PowerShell dispatcher (even
         // `$SHELL=pwsh` on Unix, which wraps the source or runs it from a temp
         // `-File`) all change what the process executes relative to this string.
-        if !cfg!(windows)
+        if receipt_cwd.is_some()
+            && !cfg!(windows)
             && !tty
             && !direct_argv
             && !spawned.sandboxed
@@ -6166,21 +6185,10 @@ impl ToolSpec for BashTool {
                 } else {
                     (1_000, 600_000)
                 },
+                wants_receipt,
                 &mut receipt_identity,
             )
             .await
-        };
-        // One spelling per directory. An explicit `cwd` reaches the spawn
-        // already canonicalized by `resolve_path`; the default workspace
-        // arrives as the session opened it, possibly through a symlink.
-        // Resolve both the same way, off the runtime thread. A directory that
-        // no longer resolves when the run settles gets no receipt.
-        let receipt_identity = match receipt_identity.filter(|_| wants_receipt) {
-            Some(identity) => tokio::fs::canonicalize(&identity.cwd)
-                .await
-                .ok()
-                .map(|cwd| ShellExecutionIdentity { cwd, ..identity }),
-            None => None,
         };
 
         match result {

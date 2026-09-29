@@ -1463,6 +1463,9 @@ impl HookExecutor {
             // raw_arg: cmd.exe does not parse the CRT-style \" escapes that
             // Command::arg would insert, so pass the command line verbatim.
             cmd.arg("/C").raw_arg(command);
+            // Only this call's context may supply a receipt. In particular,
+            // a Codewhale launched from another hook must not inherit one.
+            cmd.env_remove("DEEPSEEK_TOOL_EXECUTION_RECEIPT");
             cmd
         }
         #[cfg(not(windows))]
@@ -1474,6 +1477,9 @@ impl HookExecutor {
                 use std::os::unix::process::CommandExt as _;
                 cmd.process_group(0);
             }
+            // Only this call's context may supply a receipt. In particular,
+            // a Codewhale launched from another hook must not inherit one.
+            cmd.env_remove("DEEPSEEK_TOOL_EXECUTION_RECEIPT");
             cmd
         }
     }
@@ -5733,6 +5739,58 @@ command = "echo project"
                 .tool_execution_receipt
                 .is_none()
         );
+    }
+
+    /// An absent receipt must be absent in the actual child environment,
+    /// even when a nested Codewhale inherited an outer hook's receipt.
+    #[cfg(unix)]
+    #[test]
+    fn execution_receipt_never_inherits_another_calls_environment() {
+        let _env = lock_test_env();
+        let _stale = EnvVarGuard::set("DEEPSEEK_TOOL_EXECUTION_RECEIPT", "stale-outer-receipt");
+        let current = r#"{"schema_version":1,"command":"current call"}"#;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("receipt-env.txt");
+        let command = write_hook_script(
+            &dir,
+            "capture_receipt_env.sh",
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"${{DEEPSEEK_TOOL_EXECUTION_RECEIPT-unset}}\" > {}\n",
+                out.display()
+            ),
+        );
+        for background in [false, true] {
+            let mut hook = Hook::new(HookEvent::ToolCallAfter, &command);
+            hook.background = background;
+            let executor = HookExecutor::new(
+                HooksConfig {
+                    enabled: true,
+                    hooks: vec![hook],
+                    ..HooksConfig::default()
+                },
+                dir.path().to_path_buf(),
+            );
+            for (receipt, expected) in [
+                (None, "unset"),
+                (
+                    Some("x".repeat(HOOK_EXECUTION_RECEIPT_MAX_BYTES + 1)),
+                    "unset",
+                ),
+                (Some(current.to_string()), current),
+            ] {
+                if out.exists() {
+                    std::fs::remove_file(&out).unwrap();
+                }
+                let context = HookContext {
+                    tool_execution_receipt: receipt,
+                    ..HookContext::new()
+                };
+                let results = executor.execute(HookEvent::ToolCallAfter, &context);
+                assert_eq!(results.len(), 1);
+                assert!(results[0].success);
+                assert_eq!(wait_for_captured_output(&out), expected);
+            }
+        }
     }
 
     #[test]

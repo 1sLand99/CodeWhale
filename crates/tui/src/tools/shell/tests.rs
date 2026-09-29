@@ -492,6 +492,51 @@ async fn foreground_shell_results_carry_the_spawned_execution_receipt() {
     assert_eq!(receipt["cwd"], real_str);
 }
 
+/// A post-run lookup of a retargeted workspace symlink would falsely name
+/// the replacement directory. The receipt must keep the actual spawn path.
+#[cfg(unix)]
+#[tokio::test]
+async fn execution_receipt_keeps_spawn_cwd_when_the_command_retargets_the_workspace() {
+    let tmp = tempdir().unwrap();
+    let real = tmp.path().join("real");
+    let other = tmp.path().join("other");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let workspace = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &workspace).unwrap();
+    let mut context = ToolContext::new(workspace.clone())
+        .with_elevated_sandbox_policy(ExecutionSandboxPolicy::DangerFullAccess);
+    context.auto_approve = true;
+    context.runtime.hook_executor = Some(std::sync::Arc::new(crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![crate::hooks::Hook::new(
+                crate::hooks::HookEvent::ToolCallAfter,
+                "true",
+            )],
+            ..crate::hooks::HooksConfig::default()
+        },
+        workspace.clone(),
+    )));
+    let command = "pwd -P; rm ../link; ln -s other ../link; pwd -P";
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": command}), &context)
+        .await
+        .unwrap();
+    assert!(result.success);
+    let receipt = &result.metadata.as_ref().unwrap()["execution_receipt"];
+    let actual = real.canonicalize().unwrap();
+    let actual = actual.to_str().unwrap();
+    assert_eq!(receipt["command"], command);
+    assert_eq!(receipt["cwd"], actual);
+    assert_eq!(receipt["stdout"], format!("{actual}\n{actual}\n"));
+    assert_eq!(receipt["exit_code"], 0);
+    assert_eq!(
+        workspace.canonicalize().unwrap(),
+        other.canonicalize().unwrap()
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn lowercase_bash_keeps_raw_command_under_readonly_policy() {
