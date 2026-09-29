@@ -10161,3 +10161,39 @@ fn typed_save_keeps_a_providers_section_holding_only_a_legacy_kind_table() {
         );
     }
 }
+
+#[test]
+fn typed_save_keeps_runtime_owned_keys_in_typed_sub_tables() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(
+        &path,
+        "[snapshots]\nmax_workspace_gb = 8\n\n[skills]\nscan_codewhale_only = true\n\n\
+         [network]\nfuture_network_key = \"kept\"\n\n[lsp]\nfuture_lsp_key = 3\n",
+    )
+    .expect("write config");
+    let mut store = ConfigStore::load(Some(path.clone())).expect("load config");
+    store
+        .config
+        .set_value("verbosity", "quiet")
+        .expect("set verbosity");
+    store.save().expect("typed save");
+    let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).expect("read config"))
+        .expect("parse saved config");
+    assert_eq!(
+        saved["snapshots"].get("max_workspace_gb"),
+        Some(&toml::Value::Integer(8))
+    );
+    assert_eq!(
+        saved["skills"].get("scan_codewhale_only"),
+        Some(&toml::Value::Boolean(true))
+    );
+    assert_eq!(
+        saved["network"].get("future_network_key"),
+        Some(&toml::Value::String("kept".to_string()))
+    );
+    assert_eq!(
+        saved["lsp"].get("future_lsp_key"),
+        Some(&toml::Value::Integer(3))
+    );
+}

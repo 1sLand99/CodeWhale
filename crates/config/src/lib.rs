@@ -1692,6 +1692,10 @@ pub struct SkillsToml {
     /// uses 5 MiB.
     #[serde(default)]
     pub max_install_size_bytes: Option<u64>,
+    /// Keys owned by the TUI runtime (for example `scan_codewhale_only`) or
+    /// added by newer releases must survive dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 /// On-disk schema for the `[tools]` table (#2076).
@@ -1714,6 +1718,10 @@ pub struct SnapshotsToml {
     pub enabled: bool,
     #[serde(default = "default_snapshot_max_age_days")]
     pub max_age_days: u64,
+    /// Keys owned by the TUI runtime (for example `max_workspace_gb`) or
+    /// added by newer releases must survive dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 fn default_snapshots_enabled() -> bool {
@@ -1729,6 +1737,7 @@ impl Default for SnapshotsToml {
         Self {
             enabled: default_snapshots_enabled(),
             max_age_days: default_snapshot_max_age_days(),
+            extras: BTreeMap::new(),
         }
     }
 }
@@ -2407,6 +2416,10 @@ pub struct NetworkPolicyToml {
     /// Whether to record one audit-log line per outbound network call.
     #[serde(default = "default_network_audit")]
     pub audit: bool,
+    /// Keys owned by the TUI runtime or added by newer releases must survive
+    /// dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 fn default_network_decision() -> String {
@@ -2426,6 +2439,7 @@ impl Default for NetworkPolicyToml {
             proxy: Vec::new(),
             proxy_fake_ip_cidrs: Vec::new(),
             audit: default_network_audit(),
+            extras: BTreeMap::new(),
         }
     }
 }
@@ -2461,6 +2475,10 @@ pub struct LspConfigToml {
     /// User-defined LSP servers for file extensions not in the built-in
     /// registry. Keyed by extension (e.g. `"php"`, `"rb"`).
     pub custom: Option<BTreeMap<String, CustomLspDef>>,
+    /// Keys owned by the TUI runtime or added by newer releases must survive
+    /// dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 impl ConfigToml {
