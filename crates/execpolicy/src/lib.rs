@@ -125,7 +125,8 @@ pub struct ToolAskRule {
     /// normalizes against the call's workspace; a ROOTED rule (leading `/`,
     /// `~/`, or a Windows drive) matches the call path exactly after
     /// separator and case folding, so it can pin locations outside the
-    /// workspace. Traversal segments never match on either channel.
+    /// workspace. Traversal never matches Allow; a call with a parent
+    /// component conservatively meets applicable Deny/Ask rules instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Optional absolute workspace root that limits this rule to one repo.
@@ -451,6 +452,15 @@ impl ExecPolicyEngine {
             })
             .filter(|(_, rule)| match (rule.path.as_deref(), ctx.path) {
                 (Some(pattern), Some(call_path)) => {
+                    // Parent components cannot be resolved reliably here (a
+                    // component may be a symlink). Keep Allow exact, but do
+                    // not drop a scoped Deny/Ask merely because the target
+                    // is ambiguous. The caller can retry an unambiguous path.
+                    if rule.action != PermissionAction::Allow
+                        && call_path.replace('\\', "/").split('/').any(|part| part == "..")
+                    {
+                        return true;
+                    }
                     // A literal home spelling is not a directory named `~`
                     // inside the workspace. Keep its rooted channel exclusive.
                     if pattern.trim().replace('\\', "/").starts_with("~/") {
@@ -2386,10 +2396,8 @@ mod tests {
     }
 
     #[test]
-    fn typed_ask_path_matching_rejects_traversal_and_external_paths() {
+    fn typed_ask_path_matching_rejects_unrelated_external_paths_and_invalid_rules() {
         for (rule_path, path) in [
-            ("src/a.rs", "../src/a.rs"),
-            ("src/a.rs", "/workspace/src/../src/a.rs"),
             ("src/a.rs", "/src/a.rs"),
             ("../src/a.rs", "src/a.rs"),
             ("/src/a.rs", "src/a.rs"),
@@ -2412,6 +2420,67 @@ mod tests {
                 decision.matched_rule, None,
                 "rule {rule_path:?} and path {path:?} must not match"
             );
+        }
+    }
+
+    #[test]
+    fn typed_path_rules_keep_restrictions_on_parent_components_without_widening_allow() {
+        for (cwd, rule_path, call_path) in [
+            ("/workspace", "protected.txt", "sub/../protected.txt"),
+            (
+                "/workspace",
+                "protected.txt",
+                "/workspace/sub/../protected.txt",
+            ),
+            ("/workspace", "protected.txt", "../protected.txt"),
+            (
+                "/workspace",
+                "/outside/protected.txt",
+                "/outside/sub/../protected.txt",
+            ),
+            ("/workspace", "~/protected.txt", "~/sub/../protected.txt"),
+            (
+                r"C:\workspace",
+                "protected.txt",
+                r"C:\workspace\sub\..\protected.txt",
+            ),
+        ] {
+            for action in [
+                PermissionAction::Deny,
+                PermissionAction::Ask,
+                PermissionAction::Allow,
+            ] {
+                let mut rule = ToolAskRule::file_path("write_file", rule_path);
+                rule.action = action;
+                rule.workspace = Some(cwd.to_string());
+                let engine = ExecPolicyEngine::with_rulesets(vec![
+                    Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+                ]);
+                let context = ExecPolicyContext {
+                    command: "",
+                    cwd,
+                    tool: Some("write_file"),
+                    path: Some(call_path),
+                    ask_for_approval: AskForApproval::OnFailure,
+                    sandbox_mode: None,
+                };
+                let decision = engine.check(context.clone()).unwrap();
+                match action {
+                    PermissionAction::Deny => assert!(!decision.allow, "{call_path}: {decision:?}"),
+                    PermissionAction::Ask => {
+                        assert!(decision.requires_approval, "{call_path}: {decision:?}")
+                    }
+                    PermissionAction::Allow => {
+                        assert_eq!(decision.matched_action, None, "{call_path}")
+                    }
+                }
+                let mut other_scope = context.clone();
+                other_scope.cwd = "/another-workspace";
+                assert_eq!(engine.check(other_scope).unwrap().matched_rule, None);
+                let mut other_tool = context;
+                other_tool.tool = Some("read_file");
+                assert_eq!(engine.check(other_tool).unwrap().matched_rule, None);
+            }
         }
     }
 
@@ -2477,10 +2546,8 @@ mod tests {
             .unwrap();
         assert_eq!(decision.matched_rule, None);
 
-        // The fallback is exact: a traversal spelling of the same file is a
-        // different token string and must stay unmatchable (the documented
-        // "traversal is never matchable" stance, pinned through the rooted
-        // fallback too).
+        // An ambiguous spelling must retain the denial even outside the
+        // workspace-relative matching channel.
         let decision = engine
             .check(ExecPolicyContext {
                 command: "",
@@ -2491,7 +2558,8 @@ mod tests {
                 sandbox_mode: Some("workspace-write"),
             })
             .unwrap();
-        assert_eq!(decision.matched_rule, None);
+        assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
+        assert!(!decision.allow);
     }
 
     #[test]
@@ -2520,8 +2588,7 @@ mod tests {
             .unwrap();
         assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
 
-        // The tilde-rooted channel is exact as well: a traversal spelling of
-        // the same file must not match (never-matchable-traversal stance).
+        // A parent component in the home-rooted spelling cannot drop Deny.
         let decision = engine
             .check(ExecPolicyContext {
                 command: "",
@@ -2532,7 +2599,8 @@ mod tests {
                 sandbox_mode: Some("workspace-write"),
             })
             .unwrap();
-        assert_eq!(decision.matched_rule, None);
+        assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
+        assert!(!decision.allow);
     }
 
     #[test]

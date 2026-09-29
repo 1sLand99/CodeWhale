@@ -151,6 +151,33 @@ const fn alias(alias: &'static str, canonical: &'static str) -> ParamAlias {
 pub(super) const PATH_ALIASES: &[ParamAlias] =
     &[alias("file_path", "path"), alias("filePath", "path")];
 
+/// `input` with [`PATH_ALIASES`] folded onto `path`, exactly as the file
+/// tools' `execute` does before touching disk.
+///
+/// Policy gates (typed file rules, the workspace-write carve-out, repo law,
+/// Auto-Review) must judge the path the tool will act on. Reading only the
+/// raw `path` key misses accepted `file_path`/`filePath` spellings. A
+/// conflicting pair, which `execute` refuses, is returned unchanged.
+pub(crate) fn with_canonical_path_argument(input: &Value) -> Cow<'_, Value> {
+    if !PATH_ALIASES
+        .iter()
+        .any(|ParamAlias { alias, .. }| input.get(*alias).is_some())
+    {
+        return Cow::Borrowed(input);
+    }
+    let mut folded = input.clone();
+    match apply_param_aliases(&mut folded, PATH_ALIASES, "path") {
+        Ok(()) => Cow::Owned(folded),
+        Err(_) => Cow::Borrowed(input),
+    }
+}
+
+/// `path` and every spelling [`PATH_ALIASES`] folds onto it, for gates that
+/// deliberately over-collect candidate targets.
+pub(crate) fn path_argument_keys() -> impl Iterator<Item = &'static str> {
+    std::iter::once("path").chain(PATH_ALIASES.iter().map(|ParamAlias { alias, .. }| *alias))
+}
+
 /// Edit-specific spellings. Ordered most- to least-common.
 const EDIT_ALIASES: &[ParamAlias] = &[
     alias("old_string", "search"),
