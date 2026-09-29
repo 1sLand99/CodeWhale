@@ -60,6 +60,9 @@ export function LocaleSwitcher({ current }: { current: string }) {
     </option>
   );
   const partial = ROUTED.filter((l) => l.status === "partial");
+  // The badge is written as an inline "(partial)"; as a group heading it reads
+  // better without its (ASCII or full-width) brackets.
+  const partialHeading = chrome.partialBadge.replace(/^[(（]\s*|\s*[)）]$/g, "");
   return (
     <span className="nav-icon-button nav-locale">
       <Icon name="globe" className="nav-icon" />
@@ -69,7 +72,7 @@ export function LocaleSwitcher({ current }: { current: string }) {
         aria-label={chrome.switcherLabel}
       >
         {ROUTED.filter((l) => l.status !== "partial").map(option)}
-        {partial.length > 0 && <optgroup label={chrome.partialBadge}>{partial.map(option)}</optgroup>}
+        {partial.length > 0 && <optgroup label={partialHeading}>{partial.map(option)}</optgroup>}
       </select>
     </span>
   );
