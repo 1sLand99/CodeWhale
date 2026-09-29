@@ -4752,14 +4752,6 @@ fn xiaomi_mimo_base_url_uses_token_plan(base_url: &str) -> bool {
         || normalized == XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL
 }
 
-fn xiaomi_mimo_env_var(candidates: &[&str]) -> Option<String> {
-    candidates.iter().find_map(|name| {
-        std::env::var(name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    })
-}
-
 fn xiaomi_mimo_env_api_key_for_runtime(
     mode: Option<&str>,
     base_url: Option<&str>,
@@ -4767,6 +4759,7 @@ fn xiaomi_mimo_env_api_key_for_runtime(
     const TOKEN_PLAN_ENV_VARS: &[&str] =
         &["XIAOMI_MIMO_TOKEN_PLAN_API_KEY", "MIMO_TOKEN_PLAN_API_KEY"];
     const STANDARD_ENV_VARS: &[&str] = &["XIAOMI_MIMO_API_KEY", "XIAOMI_API_KEY", "MIMO_API_KEY"];
+    let env_value = |vars: &[&str]| codewhale_secrets::env_first(vars).map(|(_, value)| value);
 
     let normalized_mode =
         mode.map(|value| value.trim().to_ascii_lowercase().replace(['_', ' '], "-"));
@@ -4775,7 +4768,7 @@ fn xiaomi_mimo_env_api_key_for_runtime(
         .is_some_and(xiaomi_mimo_mode_uses_standard_endpoint)
         || base_url.is_some_and(xiaomi_mimo_base_url_is_pay_as_you_go);
     if standard_selected {
-        return xiaomi_mimo_env_var(STANDARD_ENV_VARS);
+        return env_value(STANDARD_ENV_VARS);
     }
 
     let token_plan_selected = normalized_mode
@@ -4784,10 +4777,10 @@ fn xiaomi_mimo_env_api_key_for_runtime(
         .is_some()
         || base_url.is_some_and(xiaomi_mimo_base_url_uses_token_plan);
     if token_plan_selected {
-        return xiaomi_mimo_env_var(TOKEN_PLAN_ENV_VARS);
+        return env_value(TOKEN_PLAN_ENV_VARS);
     }
 
-    xiaomi_mimo_env_var(TOKEN_PLAN_ENV_VARS).or_else(|| xiaomi_mimo_env_var(STANDARD_ENV_VARS))
+    env_value(TOKEN_PLAN_ENV_VARS).or_else(|| env_value(STANDARD_ENV_VARS))
 }
 
 fn resolve_xiaomi_mimo_base_url(
@@ -5000,18 +4993,10 @@ fn stored_api_key_for_provider(
     })
 }
 
+/// The provider's API key from its own environment variables, the single
+/// list on its descriptor ([`provider::Provider::env_vars`]).
 fn env_api_key_for_provider(provider: ProviderKind) -> Option<String> {
-    if provider == ProviderKind::Huggingface {
-        let normalized = |value: String| {
-            Some(codewhale_secrets::normalize_api_key(&value)).filter(|value| !value.is_empty())
-        };
-        return std::env::var("HUGGINGFACE_API_KEY")
-            .ok()
-            .and_then(normalized)
-            .or_else(|| std::env::var("HF_TOKEN").ok().and_then(normalized));
-    }
-
-    codewhale_secrets::env_for(provider.as_str())
+    codewhale_secrets::env_first(provider.provider().env_vars()).map(|(_, value)| value)
 }
 
 /// Whether an authentication mode requires API-key material.

@@ -4215,6 +4215,45 @@ fn config_store_load_fails_on_malformed_config_without_touching_file() {
 }
 
 #[test]
+fn env_api_key_lookup_reads_exactly_each_providers_env_vars() {
+    // `auth print-api-key` and the dispatcher resolve through this lookup; it
+    // used to read a second hand-kept table in the secrets crate that had no
+    // entry for mistral, minimax, zai, orcarouter, google, stepfun, qianfan,
+    // or the Anthropic-dialect routes, so their exported keys were ignored.
+    let _lock = env_lock();
+    let all_vars: std::collections::BTreeSet<&str> = crate::provider::all_providers()
+        .iter()
+        .flat_map(|provider| provider.env_vars().iter().copied())
+        .collect();
+    let saved: Vec<_> = all_vars
+        .iter()
+        .map(|var| (*var, std::env::var_os(var)))
+        .collect();
+    for var in &all_vars {
+        unsafe { std::env::remove_var(var) };
+    }
+    for provider in crate::provider::all_providers() {
+        let kind = provider.kind();
+        let mut reads = Vec::new();
+        for var in &all_vars {
+            unsafe { std::env::set_var(var, "probe-key") };
+            if super::env_api_key_for_provider(kind).as_deref() == Some("probe-key") {
+                reads.push(*var);
+            }
+            unsafe { std::env::remove_var(var) };
+        }
+        let mut declared = provider.env_vars().to_vec();
+        declared.sort_unstable();
+        assert_eq!(reads, declared, "{}", kind.as_str());
+    }
+    for (var, value) in saved {
+        if let Some(value) = value {
+            unsafe { std::env::set_var(var, value) };
+        }
+    }
+}
+
+#[test]
 fn toml_errors_name_line_and_column_but_never_the_value() {
     // A type error's message quotes the string (`invalid type: string "…"`)
     // and a syntax error's snippet quotes the whole line; both can carry a
@@ -4614,11 +4653,11 @@ fn fireworks_and_together_base_url_and_auth_metadata() {
         std::env::set_var("TOGETHER_API_KEY", "tg-test-key");
     }
     assert_eq!(
-        codewhale_secrets::env_for("fireworks").as_deref(),
+        super::env_api_key_for_provider(ProviderKind::Fireworks).as_deref(),
         Some("fw-test-key")
     );
     assert_eq!(
-        codewhale_secrets::env_for("together").as_deref(),
+        super::env_api_key_for_provider(ProviderKind::Together).as_deref(),
         Some("tg-test-key")
     );
     unsafe {
@@ -5075,7 +5114,7 @@ model = "opencode-go/glm-5.2"
         std::env::set_var("OPENCODE_GO_MODEL", "opencode-go/mimo-v2.5-pro");
     }
     assert_eq!(
-        codewhale_secrets::env_for("opencode-go").as_deref(),
+        super::env_api_key_for_provider(ProviderKind::OpencodeGo).as_deref(),
         Some("go-env-key")
     );
     let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
@@ -5159,7 +5198,7 @@ model = "glm-5.2"
         std::env::set_var("TELECOMJS_MODEL", "kimi-k2.5");
     }
     assert_eq!(
-        codewhale_secrets::env_for("tokenhub").as_deref(),
+        super::env_api_key_for_provider(ProviderKind::Telecomjs).as_deref(),
         Some("telecom-env-key")
     );
 
