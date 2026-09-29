@@ -3960,17 +3960,12 @@ mod tests {
         let mut spec = task("task-a");
         spec.timeout_seconds = Some(1);
         let path = task_spec_file(&tmp, vec![spec]);
-        let stopped_marker = tmp.path().join("hung-worker-stopped");
         let fake = fake_codewhale(
             &tmp,
-            &format!(
-                r#"#!/bin/sh
-printf '{{"type":"content","content":"running"}}\n'
-trap 'touch "{}"; exit 0' INT TERM
+            r#"#!/bin/sh
+printf '{"type":"content","content":"running"}\n'
 sleep 30
 "#,
-                stopped_marker.display(),
-            ),
         );
         let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
         let mut executor = FleetExecutor::new(&manager.workspace);
@@ -4000,6 +3995,112 @@ sleep 30
         let key = task_key(&report.run_id.0, "task-a");
         assert_eq!(state.tasks[&key].status, FleetTaskLedgerStatus::Failed);
         assert_eq!(state.receipts[&key].result, FleetTaskResult::Timeout);
+    }
+
+    /// A worker that exits on its own keeps its real outcome even when the
+    /// tick that observes the exit runs after the wall-clock limit.
+    #[cfg(unix)]
+    #[test]
+    fn worker_exit_observed_after_the_deadline_keeps_its_real_outcome() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
+        let mut spec = task("task-a");
+        spec.timeout_seconds = Some(1);
+        spec.scorer = Some(FleetScorerSpec::ExitCode);
+        let path = task_spec_file(&tmp, vec![spec]);
+        let fake = fake_codewhale(
+            &tmp,
+            r#"#!/bin/sh
+sleep 0.2
+printf '{"type":"done"}\n'
+exit 0
+"#,
+        );
+        let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
+        let mut executor = FleetExecutor::new(&manager.workspace);
+        let binary = fake.display().to_string();
+
+        let started = manager
+            .drive_executor_tick(&report.run_id, &mut executor, &binary, None)
+            .unwrap();
+        assert_eq!(started.started, 1);
+        assert_eq!(started.terminals, 0, "the worker is still running");
+        // The worker exits well inside its limit; the next tick is late.
+        std::thread::sleep(Duration::from_millis(1_500));
+        let observed = manager
+            .drive_executor_tick(&report.run_id, &mut executor, &binary, None)
+            .unwrap();
+
+        assert_eq!(observed.terminals, 1);
+        assert!(executor.worker_ids().is_empty());
+        let state = manager.rebuild_state().unwrap();
+        let key = task_key(&report.run_id.0, "task-a");
+        assert_eq!(state.receipts[&key].result, FleetTaskResult::Pass);
+    }
+
+    /// An exit the executor already handed out (for example to a tick whose
+    /// ledger write then failed) is not "still running": a later tick past
+    /// the deadline must not stop it and record a Timeout over its outcome.
+    #[cfg(unix)]
+    #[test]
+    fn consumed_worker_exit_is_not_recorded_as_a_timeout() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let manager = test_manager(tmp.path()).unwrap();
+        let mut spec = task("task-a");
+        spec.timeout_seconds = Some(1);
+        let path = task_spec_file(&tmp, vec![spec]);
+        let fake = fake_codewhale(
+            &tmp,
+            r#"#!/bin/sh
+sleep 0.2
+printf '{"type":"done"}\n'
+exit 0
+"#,
+        );
+        let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
+        let mut executor = FleetExecutor::new(&manager.workspace);
+        let binary = fake.display().to_string();
+        let started = manager
+            .drive_executor_tick(&report.run_id, &mut executor, &binary, None)
+            .unwrap();
+        assert_eq!(started.started, 1);
+        let worker_id = report.worker_ids[0].clone();
+        assert!(
+            executor.is_tracking(&worker_id),
+            "the worker is still running"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let consumed = loop {
+            if let Some(terminal) = executor.poll_terminal_with_status(&worker_id) {
+                break terminal;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(matches!(
+            consumed.payload,
+            FleetWorkerEventPayload::Completed { .. }
+        ));
+        assert_eq!(executor.worker_running_for(&worker_id), None);
+        std::thread::sleep(Duration::from_millis(1_200));
+
+        let late = manager
+            .drive_executor_tick(&report.run_id, &mut executor, &binary, None)
+            .unwrap();
+
+        assert_eq!(late.terminals, 0);
+        let state = manager.rebuild_state().unwrap();
+        let key = task_key(&report.run_id.0, "task-a");
+        assert!(
+            !state.receipts.contains_key(&key),
+            "no Timeout receipt may replace the consumed exit"
+        );
     }
 
     #[cfg(unix)]
