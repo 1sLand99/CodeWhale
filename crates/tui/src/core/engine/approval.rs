@@ -1153,6 +1153,98 @@ mod tests {
         );
     }
 
+    /// Extension host acceptance 2 with code mode's gate (#6562 landed before
+    /// #6600): an `execute_tools` program calling an extension tool in a
+    /// main-session turn suspends for approval under a `<call>.<seq>` id,
+    /// attributed to `extension:<plugin>`, and no `tool/call` reaches the host
+    /// before a person allows it. Allow returns the host's result to the
+    /// program; deny fails only that nested call.
+    #[tokio::test]
+    async fn execute_tools_gates_an_extension_tool_before_any_host_call() {
+        let Some(node) = crate::extension_host::tests::node_for_tests(
+            "execute_tools_gates_an_extension_tool_before_any_host_call",
+        ) else {
+            return;
+        };
+        let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(true);
+        let fixture = crate::extension_host::tests::FixturePlugins::new(&["slow-tool"]).await;
+        let manager = fixture.manager(node);
+        let attachment = manager.attach(fixture.registry());
+        attachment.sync().await.expect("host activation");
+        let tool =
+            crate::extension_host::tests::host_tool(&attachment, fixture.workspace(), "slow_wait");
+        let sent_before = manager.host_requests_started().expect("host running");
+
+        let code = "const first = await tools.call('slow_wait', { ms: 20 }); \
+             let denied = null; \
+             try { await tools.call('slow_wait', { ms: 20 }); } \
+             catch (e) { denied = String(e.message || e); } \
+             return { first: first.content, denied };";
+        let mut turn = start_nested_program_turn_with(
+            code,
+            NestedTurnOptions {
+                tools: vec![tool],
+                ..NestedTurnOptions::default()
+            },
+        );
+        let events = turn.events.clone();
+        let handle = turn.handle.clone();
+
+        let mut seen = Vec::new();
+        let (id, tool_name, description) = next_approval(&events, &mut seen).await;
+        assert_eq!(id, "exec-1.1");
+        assert_eq!(tool_name, "slow_wait");
+        assert!(
+            description.contains("execute_tools program call")
+                && description.contains("extension:slow-tool"),
+            "{description}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut turn.task)
+                .await
+                .is_err(),
+            "the program is suspended on its nested call"
+        );
+        assert_eq!(
+            manager.host_requests_started(),
+            Some(sent_before),
+            "no tool/call before approval"
+        );
+        handle.approve_tool_call("exec-1.1").await.expect("allow");
+
+        let (id, _, _) = next_approval(&events, &mut seen).await;
+        assert_eq!(id, "exec-1.2");
+        assert_eq!(
+            manager.host_requests_started(),
+            Some(sent_before + 1),
+            "allow sent exactly one tool/call"
+        );
+        handle.deny_tool_call("exec-1.2").await.expect("deny");
+
+        let receipt = finish_nested_program_turn(&mut turn, &mut seen).await;
+        assert_eq!(receipt["success"], true, "{receipt}");
+        assert_eq!(
+            receipt["body"]["return"]["first"]["waited"], 20,
+            "the host's result reached the program: {receipt}"
+        );
+        assert!(
+            receipt["body"]["return"]["denied"]
+                .as_str()
+                .is_some_and(|message| message.contains("denied by user")),
+            "{receipt}"
+        );
+        assert_eq!(receipt["calls"][0]["decision"], "approved");
+        assert_eq!(receipt["calls"][0]["status"], "ok");
+        assert_eq!(receipt["calls"][1]["decision"], "denied");
+        assert_eq!(receipt["calls"][1]["status"], "refused");
+        assert_eq!(
+            manager.host_requests_started(),
+            Some(sent_before + 1),
+            "the denied call never reached the host"
+        );
+        manager.shutdown().await;
+    }
+
     /// #6562: a nested call never runs on a posture the user has since
     /// narrowed. Narrowing while a nested approval card is open fails that
     /// call even though it was approved (same rule as a direct call), and

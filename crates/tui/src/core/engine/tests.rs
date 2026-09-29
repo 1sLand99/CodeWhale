@@ -17283,9 +17283,9 @@ async fn same_turn_fork_carries_the_updated_todo() {
 }
 
 /// U1: hosts resend the compaction config on every model, route or session
-/// sync. A config whose switch did not move must not produce a status line,
-/// which used to overwrite a real error (the missing-key notice) and the
-/// "Resumed:" receipt in the footer.
+/// sync. Neither a session sync nor a config whose switch did not move should
+/// produce a status line: it would overwrite a real error (the missing-key
+/// notice) or the host's confirmed "Resumed:" receipt in the footer.
 #[tokio::test]
 async fn unchanged_compaction_config_is_acknowledged_silently() {
     let tmp = tempdir().expect("tempdir");
@@ -17297,7 +17297,26 @@ async fn unchanged_compaction_config_is_acknowledged_silently() {
         &Config::default(),
     );
     let current = engine.config.compaction.clone();
+    let restored_messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Restored conversation proof".to_string(),
+            cache_control: None,
+        }],
+    }];
     let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("resumed-session".to_string()),
+            messages: restored_messages.clone(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: current.model.clone(),
+            workspace: tmp.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync restored session");
     handle
         .send(Op::SetCompaction {
             config: current.clone(),
@@ -17328,18 +17347,37 @@ async fn unchanged_compaction_config_is_acknowledged_silently() {
         .expect("send changed config");
 
     let mut rx = handle.rx_event.write().await;
+    let mut session_updated = false;
     let first_status = loop {
         let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("status after a real change")
             .expect("event");
-        if let Event::Status { message } = event {
-            break message;
+        match event {
+            Event::SessionUpdated {
+                session_id,
+                messages,
+                model,
+                workspace,
+                ..
+            } => {
+                assert_eq!(session_id, "resumed-session");
+                assert_eq!(*messages, restored_messages);
+                assert_eq!(model, current.model);
+                assert_eq!(workspace, tmp.path());
+                session_updated = true;
+            }
+            Event::Status { message } => break message,
+            _ => {}
         }
     };
+    assert!(
+        session_updated,
+        "session sync still publishes its authoritative update"
+    );
     assert_eq!(
         first_status, expected,
-        "unchanged and resynced configs produced no status; only the switch did"
+        "session sync and unchanged/resynced configs produced no status; only the switch did"
     );
     drop(rx);
     run.abort();
@@ -27494,10 +27532,8 @@ async fn extension_tool_is_deferred_gated_and_attributed_on_the_model_path() {
     let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(true);
     let fixture = crate::extension_host::tests::FixturePlugins::new(&["dsh-workspace-deps"]).await;
     let manager = fixture.manager(node);
-    manager
-        .sync(fixture.registry())
-        .await
-        .expect("host activation");
+    let warm = manager.attach(fixture.registry());
+    warm.sync().await.expect("host activation");
     let _manager = crate::extension_host::TestManagerGuard::install(Arc::clone(&manager));
 
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
@@ -27515,6 +27551,9 @@ async fn extension_tool_is_deferred_gated_and_attributed_on_the_model_path() {
     engine_config.features.enable(Feature::ExtensionHost);
     engine_config.plugin_registry = Some(fixture.registry());
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
+    // The engine attached its own snapshot; let a reconcile publish what it
+    // desires before its first turn build installs tools.
+    manager.reconcile().await.expect("reconcile");
     let task = tokio::spawn(engine.run());
     handle
         .send(external_user_message_op(
@@ -27595,6 +27634,99 @@ async fn extension_tool_is_deferred_gated_and_attributed_on_the_model_path() {
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
     assert_eq!(manager.spawn_attempts(), 1, "one host for the process");
+    manager.shutdown().await;
+}
+
+/// Engines in one process share the extension host, but an engine with no
+/// plugin snapshot of its own (an isolated chat falls back to an empty
+/// registry) must not revoke the plugins another engine is using, neither when
+/// it starts nor at its turn builds.
+#[tokio::test]
+async fn an_isolated_chat_engine_never_revokes_another_engines_extension() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let Some(node) = crate::extension_host::tests::node_for_tests(
+        "an_isolated_chat_engine_never_revokes_another_engines_extension",
+    ) else {
+        return;
+    };
+    let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(true);
+    let fixture = crate::extension_host::tests::FixturePlugins::new(&["slow-tool"]).await;
+    let plugin_id = fixture
+        .registry()
+        .get("slow-tool")
+        .expect("fixture plugin")
+        .id
+        .as_str()
+        .to_string();
+    let manager = fixture.manager(node);
+    let _manager = crate::extension_host::TestManagerGuard::install(Arc::clone(&manager));
+    let config = Config::default();
+
+    // The workspace engine activates the plugin in the background.
+    let mut workspace_config = deterministic_engine_config(fixture.workspace());
+    workspace_config.features.enable(Feature::ExtensionHost);
+    workspace_config.plugin_registry = Some(fixture.registry());
+    let idle_client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+    let (workspace_engine, _workspace_handle) =
+        Engine::new_with_model_client(workspace_config, &config, idle_client);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while manager.owner_state(&plugin_id)
+        != Some(crate::extension_host::registry::OwnerState::Active)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the workspace engine never activated its plugin: {:?}",
+            manager.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // An isolated chat starts and runs a turn in the same process.
+    let chat_dir = tempdir().expect("chat dir");
+    let mut chat_config = deterministic_engine_config(chat_dir.path());
+    chat_config.features.enable(Feature::ExtensionHost);
+    chat_config.plugin_registry = None;
+    let chat_client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("hello")]));
+    let (chat_engine, chat_handle) =
+        Engine::new_with_model_client(chat_config, &config, chat_client);
+    let task = tokio::spawn(chat_engine.run());
+    chat_handle
+        .send(external_user_message_op("hi", AppMode::Agent, &config))
+        .await
+        .expect("send turn");
+    {
+        let mut rx = chat_handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the chat turn")
+                .expect("engine event stream closed");
+            if let Event::TurnComplete { .. } = event {
+                break;
+            }
+        }
+    }
+    // Give any reconcile the chat engine kicked time to finish.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    assert_eq!(
+        manager.owner_state(&plugin_id),
+        Some(crate::extension_host::registry::OwnerState::Active),
+        "the isolated chat revoked the workspace engine's plugin: {:?}",
+        manager.diagnostics()
+    );
+    assert!(
+        !manager.diagnostics().iter().any(|d| d.contains("revoked")),
+        "{:?}",
+        manager.diagnostics()
+    );
+    assert_eq!(manager.spawn_attempts(), 1);
+    chat_handle.send(Op::Shutdown).await.expect("shutdown chat");
+    task.await.expect("chat engine task");
+    drop(workspace_engine);
     manager.shutdown().await;
 }
 
