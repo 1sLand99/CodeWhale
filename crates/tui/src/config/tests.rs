@@ -15521,3 +15521,51 @@ fn no_parse_leaves_a_top_level_key_behind() -> Result<()> {
     assert!(!codewhale_config::legacy_root::has_legacy_root_keys(&table));
     Ok(())
 }
+
+#[test]
+fn config_set_provider_typo_reuses_the_invalid_provider_wording() {
+    let config = Config::default();
+    let error = config
+        .resolve_provider_selection_identity("deepsek")
+        .expect_err("a typo is not a provider");
+    assert!(
+        error.starts_with("Invalid provider 'deepsek': expected deepseek"),
+        "{error}"
+    );
+    assert!(!error.contains("saved session"), "{error}");
+    // The resume path keeps its own saved-session wording.
+    let resume = config
+        .resolve_provider_pin_identity("deepsek")
+        .expect_err("missing custom route");
+    assert!(resume.starts_with("saved session requires"), "{resume}");
+    assert_eq!(
+        config
+            .resolve_provider_selection_identity("deepseek")
+            .expect("built-in provider")
+            .provider,
+        ApiProvider::Deepseek
+    );
+}
+
+#[test]
+fn deepseek_missing_key_message_keeps_indentation_and_gates_the_harness_bullet() {
+    let plain = deepseek_missing_key_message(false);
+    assert!(
+        plain.contains("\n     codewhale auth set --provider deepseek\n"),
+        "{plain}"
+    );
+    assert!(
+        plain.contains(
+            "\n    zsh: exports in ~/.zshrc reach only interactive shells; use ~/.zshenv.\n"
+        ),
+        "{plain}"
+    );
+    assert!(!plain.contains("DeepSeek Harness"), "{plain}");
+    let with_dsh = deepseek_missing_key_message(true);
+    assert!(
+        with_dsh.ends_with(
+            "\n      codewhale auth external-consent --provider deepseek --mode read-only"
+        ),
+        "{with_dsh}"
+    );
+}

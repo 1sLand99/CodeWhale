@@ -229,6 +229,12 @@ pub(crate) fn resolve_dsh_home(env: &DetectEnv) -> (PathBuf, bool) {
     (home.join(".dsh"), false)
 }
 
+/// Whether a DeepSeek Harness launcher is on this process's `PATH`. A cheap
+/// `PATH` scan only: nothing is run and `$DSH_HOME` is not touched.
+pub(crate) fn dsh_on_path() -> bool {
+    find_on_path(std::env::var_os("PATH").as_ref()).is_some()
+}
+
 fn find_on_path(path: Option<&OsString>) -> Option<PathBuf> {
     let path = path?;
     for dir in std::env::split_paths(path) {

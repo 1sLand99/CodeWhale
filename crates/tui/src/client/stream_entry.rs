@@ -229,11 +229,55 @@ fn h1_fallback_error(err: anyhow::Error) -> anyhow::Error {
         return err;
     }
 
-    anyhow::Error::new(LlmError::NetworkError(format!(
-        "SSE stream request failed after HTTP/1.1 fallback: {err}. \
-         `codewhale doctor` can still pass when non-streaming requests work; \
-         on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`."
-    )))
+    let detail = format!("{err:#}");
+    if let Some(unreachable) = connect_failure_summary(&err, &detail) {
+        return anyhow::Error::new(LlmError::NetworkError(format!("{unreachable}: {detail}")));
+    }
+    let mut message = format!("SSE stream request failed after HTTP/1.1 fallback: {detail}.");
+    // The HTTP/1.1 hint only helps when the protocol or TLS layer failed; it
+    // is noise for a refused connection or an unknown host.
+    if is_protocol_or_tls_failure(&detail) {
+        message.push_str(
+            " `codewhale doctor` can still pass when non-streaming requests work; \
+             on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`.",
+        );
+    }
+    anyhow::Error::new(LlmError::NetworkError(message))
+}
+
+/// `Cannot reach host:port (<why>)` for a failure to open the connection.
+fn connect_failure_summary(err: &anyhow::Error, detail: &str) -> Option<String> {
+    let reqwest_error = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .filter(|error| error.is_connect())?;
+    let target = reqwest_error
+        .url()
+        .and_then(|url| {
+            Some(format!(
+                "{}:{}",
+                url.host_str()?,
+                url.port_or_known_default()?
+            ))
+        })
+        .unwrap_or_else(|| "the provider host".to_string());
+    let lower = detail.to_ascii_lowercase();
+    let why = if lower.contains("refused") {
+        "connection refused"
+    } else if lower.contains("dns") || lower.contains("lookup") {
+        "DNS lookup failed"
+    } else {
+        "connection failed"
+    };
+    Some(format!("Cannot reach {target} ({why})"))
+}
+
+fn is_protocol_or_tls_failure(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    should_retry_with_h1(StreamHttpPolicy::DualWithH1Fallback, &lower)
+        || ["tls", "ssl", "certificate", "handshake", "alpn"]
+            .iter()
+            .any(|needle| lower.contains(needle))
 }
 
 /// Open an SSE response through the shared transport policy.
@@ -503,6 +547,58 @@ mod tests {
         .expect_err("an H1-pinned transport error must not retry");
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry when pinned");
         assert!(err.to_string().contains("connection reset"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn refused_connection_names_the_host_and_skips_the_http1_hint() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let client = crate::tls::reqwest_client();
+        let url = format!("http://127.0.0.1:{port}/v1/chat");
+        let err = open_sse_response(
+            &open_req(StreamHttpPolicy::DualWithH1Fallback, Duration::from_secs(5)),
+            |_| {
+                let request = client.post(&url);
+                async move { Ok::<_, anyhow::Error>(request.send().await?) }
+            },
+        )
+        .await
+        .expect_err("nothing listens on the port");
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!(
+                "Cannot reach 127.0.0.1:{port} (connection refused)"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("CODEWHALE_FORCE_HTTP1"), "{text}");
+        assert!(
+            err.downcast_ref::<LlmError>()
+                .is_some_and(LlmError::is_retryable),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn h1_fallback_hint_follows_protocol_errors_with_the_full_chain() {
+        let protocol = h1_fallback_error(
+            anyhow::Error::new(LlmError::NetworkError("http2 protocol error".to_string()))
+                .context("sending stream request"),
+        );
+        let text = protocol.to_string();
+        assert!(text.contains("sending stream request: "), "{text}");
+        assert!(text.contains("http2 protocol error"), "{text}");
+        assert!(text.contains("CODEWHALE_FORCE_HTTP1=1"), "{text}");
+
+        let other = h1_fallback_error(anyhow::Error::new(LlmError::NetworkError(
+            "unexpected end of body".to_string(),
+        )));
+        assert!(
+            !other.to_string().contains("CODEWHALE_FORCE_HTTP1"),
+            "{other}"
+        );
     }
 
     #[tokio::test]

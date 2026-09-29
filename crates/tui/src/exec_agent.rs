@@ -388,7 +388,7 @@ pub(crate) async fn run_exec_agent(
         Some(&effective_model),
     )
     .map_err(anyhow::Error::msg)?
-    .validate()
+    .validate_for(crate::route_runtime::RouteErrorSurface::Headless)
     .map_err(anyhow::Error::msg)?;
     let effective_provider_name = validated_route.identity.key.clone();
     let effective_provider_id = validated_route.identity.exact_id.clone();
@@ -796,6 +796,9 @@ pub(crate) async fn run_exec_agent(
     let mut approval_required = false;
     let mut tool_error_seen = false;
     let mut last_error_category = None;
+    // The error text already printed to stderr in text mode, so the final
+    // failure line does not print the same message twice.
+    let mut printed_error: Option<String> = None;
     let mut reported_sandbox_contract = false;
 
     let mut should_persist_session =
@@ -1107,6 +1110,7 @@ pub(crate) async fn run_exec_agent(
                     })?;
                 } else if !json_output {
                     eprintln!("error: {}", envelope.message);
+                    printed_error = Some(envelope.message);
                 }
             }
             Event::TurnUsage {
@@ -1487,12 +1491,13 @@ pub(crate) async fn run_exec_agent(
         // the process level without parsing the stream. Genuine failures
         // keep the historical `bail!` → exit 1 path.
         let exit_code = exec_failure_exit_code(summary.error_category.as_deref());
+        let failure = exec_failure_line(error, printed_error.as_deref());
         if exit_code != 1 {
-            eprintln!("Error: exec turn failed: {error}");
+            eprintln!("Error: {failure}");
             let _ = io::stdout().flush();
             std::process::exit(exit_code);
         }
-        bail!("exec turn failed: {error}");
+        bail!("{failure}");
     }
 
     if matches!(
@@ -1506,9 +1511,36 @@ pub(crate) async fn run_exec_agent(
     Ok(())
 }
 
+/// The final exec failure line. When the stream already printed this exact
+/// error, repeat only the verdict, not the message.
+fn exec_failure_line(error: &str, already_printed: Option<&str>) -> String {
+    if already_printed.is_some_and(|printed| printed.trim() == error.trim()) {
+        "exec turn failed (error above)".to_string()
+    } else {
+        format!("exec turn failed: {error}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ExecAgentEvents, exec_automation_services, exec_disallowed_tools};
+
+    #[test]
+    fn exec_failure_line_does_not_repeat_a_streamed_error() {
+        let error = "Provider returned 401: invalid api key";
+        assert_eq!(
+            super::exec_failure_line(error, Some(error)),
+            "exec turn failed (error above)"
+        );
+        assert_eq!(
+            super::exec_failure_line(error, None),
+            format!("exec turn failed: {error}")
+        );
+        assert_eq!(
+            super::exec_failure_line(error, Some("a different warning")),
+            format!("exec turn failed: {error}")
+        );
+    }
     use crate::core::engine::mock_engine_handle;
     use crate::core::engine::tool_catalog::REQUEST_USER_INPUT_NAME;
     use crate::core::events::{Event, TurnOutcomeStatus};

@@ -497,11 +497,7 @@ impl LlmError {
                         status,
                         message: body.to_string(),
                     }
-                } else if body_lower.contains("context_length")
-                    || body_lower.contains("token")
-                    || body_lower.contains("too long")
-                    || body_lower.contains("maximum")
-                {
+                } else if is_context_length_message(&body_lower) {
                     LlmError::ContextLengthError(body.to_string())
                 } else if body_lower.contains("content_policy")
                     || body_lower.contains("safety")
@@ -730,6 +726,24 @@ fn looks_like_authentication_failure(body: &str) -> bool {
 /// Quota exhaustion is a durable account state, not a generic rate-limit
 /// synonym. Accept only explicit provider evidence at the HTTP/parser boundary;
 /// callers holding a stringified error must never promote it to this type.
+/// A 400 is a context overflow only when it says so. Bare "token",
+/// "too long" or "maximum" also appear in ordinary invalid-request errors
+/// (`max_tokens must be ...`, a field value too long), which compaction or a
+/// bigger window cannot fix. `lower` must already be lowercase.
+fn is_context_length_message(lower: &str) -> bool {
+    [
+        "context_length",
+        "context length",
+        "context window",
+        "prompt is too long",
+        "maximum context",
+        "tokens exceed",
+        "exceeds the maximum number of tokens",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+}
+
 fn has_explicit_quota_evidence(body: &str) -> bool {
     explicit_quota_code(body).is_some()
         || has_explicit_quota_code_marker(body)
