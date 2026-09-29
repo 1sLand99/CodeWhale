@@ -208,6 +208,11 @@ pub(crate) const OPENCODE_ZEN_CHAT_MODELS: &[&str] = &[
     "deepseek-v4-flash-free",
 ];
 
+/// Endpoint key for a Zen catalog row Models.dev marks `deprecated`. It names
+/// no protocol, so the resolver refuses the model locally with this reason
+/// instead of sending a request Zen no longer serves.
+pub const OPENCODE_ZEN_DEPRECATED_ENDPOINT_KEY: &str = "deprecated";
+
 /// Endpoint key OpenCode Zen serves a model on, from the AI SDK package
 /// OpenCode's own catalog names for it.
 ///

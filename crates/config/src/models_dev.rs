@@ -315,6 +315,11 @@ pub struct ModelsDevProviderModel {
     /// provider-level `npm` default (OpenCode Zen, #6705).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ModelsDevModelTransport>,
+    /// Lifecycle marker such as `deprecated` or `beta`; absent for current
+    /// rows. A model-aware gateway's deprecated row is not a routable wire
+    /// fact (#6705).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// A Models.dev model row's `provider` override: the AI SDK package that
@@ -331,6 +336,14 @@ impl ModelsDevProviderModel {
     #[must_use]
     pub fn supports_text_chat(&self) -> bool {
         supports_text_chat(self.modalities.as_ref())
+    }
+
+    /// True when the catalog marks this offering `deprecated`.
+    #[must_use]
+    pub fn is_deprecated(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_some_and(|status| status.trim().eq_ignore_ascii_case("deprecated"))
     }
 }
 

@@ -707,7 +707,7 @@ overlay and lets DSH resolve its own keys.
 | `sakana` | `[providers.sakana]` | `FUGU_API_KEY`, `SAKANA_API_KEY` | `SAKANA_BASE_URL`; default `https://api.sakana.ai/v1` | `fugu` (default), `fugu-ultra-20260615` | Sakana AI Fugu OpenAI-compatible route. Standard Chat Completions wire protocol; streaming supported. `fugu-ultra-20260615` is the heavy/reasoning variant. Env var aliases: `FUGU_API_KEY` (primary), `SAKANA_API_KEY`; provider aliases: `sakana-ai`, `sakana_ai`, `fugu`. |
 | `longcat` | `[providers.longcat]` | `LONGCAT_API_KEY` | `LONGCAT_BASE_URL`; default `https://api.longcat.chat/openai/v1` | `LongCat-2.0` (default) | Meituan LongCat curated model gateway. OpenAI-compatible Chat Completions wire protocol. Sign up at https://longcat.chat/platform for an API key. Provider aliases: `long-cat`, `meituan-longcat`, `meituan`. |
 | `opencode-go` | `[providers.opencode_go]` | `OPENCODE_GO_API_KEY` | `OPENCODE_GO_BASE_URL`; default `https://opencode.ai/zen/go/v1` | `deepseek-v4-pro` (default), `grok-4.5`, `glm-5.2`, `glm-5.1`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro` | [OpenCode Go](https://opencode.ai/docs/go/) subscription route using OpenAI-compatible Chat Completions. `OPENCODE_GO_MODEL` is accepted. Codewhale uses bare wire IDs; familiar `opencode-go/<model-id>` input aliases normalize to the bare ID. Go models documented only on the Anthropic `/messages` endpoint are deliberately not advertised by this route until Codewhale supports per-model wire selection. Billing surfaces show the Go allowance instead of token-price estimates. |
-| `opencode-zen` | `[providers.opencode_zen]` | `OPENCODE_ZEN_API_KEY`, fallback `OPENCODE_API_KEY` | `OPENCODE_ZEN_BASE_URL`; default `https://opencode.ai/zen/v1` | `gpt-5.5` (default); current documented GPT, Claude, Qwen, DeepSeek, MiniMax, GLM, Kimi, Grok, and free-model IDs | [OpenCode Zen](https://opencode.ai/docs/zen/) model-aware gateway. `OPENCODE_ZEN_MODEL` is accepted, and official `opencode/<model-id>` selectors normalize to bare wire IDs. GPT rows use `/responses`; Claude and Qwen rows use `/messages`; DeepSeek, MiniMax, GLM, Kimi, Grok, and the listed free rows use `/chat/completions`. Responses and Chat Completions authenticate with Bearer `Authorization`, while Anthropic Messages uses `x-api-key`; none of these routes use ChatGPT/Codex OAuth guidance or headers. Gemini currently fails closed because its model-specific Google wire protocol is not implemented. Unknown models also fail closed until their protocol is present in the curated catalog. |
+| `opencode-zen` | `[providers.opencode_zen]` | `OPENCODE_ZEN_API_KEY`, fallback `OPENCODE_API_KEY` | `OPENCODE_ZEN_BASE_URL`; default `https://opencode.ai/zen/v1` | `gpt-5.6` (default); current GPT, Claude, Qwen, DeepSeek, MiniMax, GLM, Kimi, Grok, Muse Spark, and free-model IDs | [OpenCode Zen](https://opencode.ai/docs/zen/) model-aware gateway. `OPENCODE_ZEN_MODEL` is accepted, and official `opencode/<model-id>` selectors normalize to bare wire IDs. Each model's wire comes from the curated snapshot, then from the AI SDK package its [Models.dev](https://models.dev) row names: GPT, Grok, and Muse Spark rows use `/responses`; Claude and most Qwen rows use `/messages`; DeepSeek, MiniMax, GLM, Kimi, `qwen3.8-max`, and the free rows use `/chat/completions`. Responses and Chat Completions authenticate with Bearer `Authorization`, while Anthropic Messages uses `x-api-key`; none of these routes use ChatGPT/Codex OAuth guidance or headers. Gemini fails closed because its model-specific Google wire protocol is not implemented; Models.dev rows marked `deprecated` and models no loaded catalog lists also fail closed. See [OpenCode Zen protocol catalog](#opencode-zen-protocol-catalog). |
 | `meta` | `[providers.meta]` | `META_MODEL_API_KEY`, `MODEL_API_KEY` | `META_MODEL_API_BASE_URL`, `MODEL_API_BASE_URL`; default `https://api.meta.ai/v1` | `muse-spark-1.2` (default) | [Meta Model API](https://developer.meta.com/ai/resources/blog/build-with-muse-spark/) public-preview route using OpenAI-compatible Chat Completions. Muse Spark 1.2 keeps its wire ID, tool support, 1M context, 32K output metadata, and `none` through `xhigh` reasoning effort. `META_MODEL_API_MODEL` and `MODEL_API_MODEL` are accepted. Provider aliases: `meta-ai`, `meta_model_api`, `muse`, `muse-spark`. |
 | `telecomjs` | `[providers.telecomjs]` | `TELECOMJS_API_KEY` | `TELECOMJS_BASE_URL`; default `https://aigw.telecomjs.com/v1` | `deepseek-v4-pro` conservative fallback; authenticated `/models` rows when a key is configured | TelecomJS TokenHub OpenAI-compatible Chat Completions route. Live catalogs are isolated by provider and key fingerprint, stale rows survive transient refresh failures, and unsupported reasoning request fields are omitted. `TELECOMJS_MODEL` is accepted. Provider aliases: `telecom-js`, `telecom_js`, `telecomjs-cn`, `tokenhub`. |
 | `mistral` | `[providers.mistral]` | `MISTRAL_API_KEY` | `MISTRAL_BASE_URL`; default `https://api.mistral.ai/v1` | `mistral-code-latest` (default; `codestral-latest` accepted as alias), `mistral-medium-latest` (aliases: `mistral-medium-3-5`), `mistral-small-latest` (aliases: `mistral-small-2603`), `mistral-large-latest` | Mistral AI (la Plateforme) OpenAI-compatible Chat route. On the documented first-party HTTPS `/v1` hosts, Medium and Small send adjustable `reasoning_effort` (`none` or `high` only), parse Mistral's polymorphic thinking/text blocks, and replay stored thinking in that same wire shape. Deprecated native Magistral IDs remain explicit-configuration compatibility routes: they are always-reasoning and never receive the adjustable effort field. Code and Large are non-reasoning. A custom `MISTRAL_BASE_URL` keeps generic Chat semantics unless it is one of the documented first-party hosts. `MISTRAL_MODEL` is accepted. Provider aliases: `mistral-ai`, `mistralai`, `la-plateforme`. |
@@ -741,29 +741,54 @@ Zen Responses and Chat Completions requests authenticate with Bearer
 `Authorization`; Zen Anthropic Messages requests use `x-api-key`. None of these
 routes add ChatGPT/Codex OAuth headers.
 
-The bundled Zen transport snapshot follows the [official endpoint
-table](https://opencode.ai/docs/zen/) and is intentionally explicit:
+Each Zen model's wire comes from two sources, and neither is guessed from a
+model-id family (`qwen3.8-flash` is Messages while `qwen3.8-max` is Chat):
 
-- Responses: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
-  `gpt-5.5-pro`, `gpt-5.4`, `gpt-5.4-pro`, `gpt-5.4-mini`, `gpt-5.4-nano`,
-  `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5.2-codex`,
-  `gpt-5.1`, `gpt-5.1-codex`, `gpt-5.1-codex-max`,
-  `gpt-5.1-codex-mini`, `gpt-5`, `gpt-5-codex`, `gpt-5-nano`.
-- Anthropic Messages: `claude-fable-5`, `claude-opus-4-8`,
-  `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5`,
+1. **The curated snapshot** compiled into Codewhale, verified against the
+   [official endpoint table](https://opencode.ai/docs/zen/) and the `opencode`
+   provider in [Models.dev](https://models.dev). It is the offline floor, and
+   it wins when a catalog row names a different wire for the same id.
+2. **The Models.dev catalog.** Its `opencode` provider is Zen's published
+   catalog: each model row names the AI SDK package OpenCode itself uses, which
+   Codewhale maps exactly — `@ai-sdk/openai` to Responses, `@ai-sdk/anthropic`
+   to Anthropic Messages, and `@ai-sdk/openai-compatible` (the provider
+   default) to Chat Completions. A Zen model released after this build routes
+   once the catalog lists it, without a Codewhale release. The interactive TUI
+   and `codewhale exec` both load the persisted catalog; refresh it with
+   `codewhale models --update`.
+
+The curated snapshot:
+
+- Responses: `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
+  `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4`,
+  `gpt-5.4-pro`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.3-codex`,
+  `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5.2-codex`, `gpt-5.1`,
+  `gpt-5.1-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `gpt-5`,
+  `gpt-5-codex`, `gpt-5-nano`, `grok-4.7`, `grok-4.6`, `grok-4.5`,
+  `grok-build-0.1`, `muse-spark-1.3`, `muse-spark-1.3-contributor-free`,
+  `muse-spark-1.2`, `muse-spark-1.2-contributor`,
+  `muse-spark-1.2-contributor-free`.
+- Anthropic Messages: `claude-fable-5-1`, `claude-fable-5`,
+  `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`,
+  `claude-opus-4-6`, `claude-opus-4-5`, `claude-sonnet-5-5`,
   `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5`,
-  `claude-haiku-4-5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`,
-  `qwen3.5-plus`.
-- Chat Completions: `deepseek-v4-pro`, `deepseek-v4-flash`, `minimax-m3`,
-  `minimax-m2.7`, `minimax-m2.5`, `glm-5.2`, `glm-5.1`, `glm-5`,
-  `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code`, `grok-4.5`,
-  `grok-build-0.1`, `big-pickle`, `mimo-v2.5-free`,
-  `north-mini-code-free`, `nemotron-3-ultra-free`,
+  `claude-sonnet-4`, `claude-haiku-4-5`, `qwen3.8-flash`, `qwen3.7-max`,
+  `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus`.
+- Chat Completions: `deepseek-v4.1-flash`, `deepseek-v4-pro`,
+  `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `minimax-m3`,
+  `minimax-m2.7`, `minimax-m2.5`, `glm-5.3-flash`, `glm-5.3`, `glm-5.2`,
+  `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`,
+  `qwen3.8-max`, `big-pickle`, `space-bunny-free`,
+  `longcat-2.5-preview-free`, `mimo-v2.6-flash-free`, `mimo-v2.5-free`,
+  `ling-3.0-flash-fin-free`, `north-mini-code-free`,
+  `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`,
   `deepseek-v4-flash-free`.
 
-Gemini entries are excluded because the official table assigns them Google's
-model-specific protocol. A catalog miss never falls back to another Zen wire
-shape, including when a custom Zen base URL is configured.
+These fail closed locally, with the reason in the error, instead of reaching
+Zen: Gemini (`@ai-sdk/google`, Google's model-specific protocol, which Codewhale
+does not speak); a catalog row naming any other package; a catalog row Models.dev
+marks `deprecated`; and a model neither source lists. A miss never falls back to
+another Zen wire shape, including when a custom Zen base URL is configured.
 
 ### Concentrate Notes
 

@@ -2554,9 +2554,21 @@ async fn run_async_main_dispatch(
                 // #6705: OpenCode Zen's per-model wire comes from its
                 // Models.dev catalog. Seed the persisted snapshot (disk only,
                 // no network) so exec routes the models the picker offers
-                // instead of only the ones compiled into this build.
-                if config.api_provider() == crate::config::ApiProvider::OpencodeZen {
-                    crate::models_dev_live::maybe_load_persisted_cache();
+                // instead of only the ones compiled into this build. This runs
+                // unconditionally, as in the interactive path: the final route
+                // is not known yet (a selected Fleet operator or `--resume` can
+                // still move it onto Zen, and both resolve through the lake).
+                // The read and JSON parse are blocking, so they leave the
+                // runtime's worker threads.
+                if let Err(error) =
+                    tokio::task::spawn_blocking(crate::models_dev_live::maybe_load_persisted_cache)
+                        .await
+                {
+                    tracing::warn!(
+                        target: "models_dev_live",
+                        %error,
+                        "persisted Models.dev cache load did not complete; keeping bundled"
+                    );
                 }
                 let prompt = resolve_exec_prompt(&args)?;
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;

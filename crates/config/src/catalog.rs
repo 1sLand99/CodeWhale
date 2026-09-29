@@ -401,7 +401,14 @@ fn offerings_from_models_dev(
             // OpenCode Zen is model-aware: its catalog names each model's AI
             // SDK package, which is the wire (#6705). Every other provider's
             // endpoint key stays the Chat placeholder its fixed policy ignores.
-            let endpoint_key = if route_id == crate::ProviderKind::OpencodeZen.as_str() {
+            // A deprecated Zen row stays visible but is not a route: Zen no
+            // longer serves it, so sending it would be a guaranteed upstream
+            // failure instead of a local refusal that names the reason.
+            let endpoint_key = if route_id != crate::ProviderKind::OpencodeZen.as_str() {
+                "chat"
+            } else if model.is_deprecated() {
+                crate::route::OPENCODE_ZEN_DEPRECATED_ENDPOINT_KEY
+            } else {
                 crate::route::opencode_zen_endpoint_key_for_npm(
                     model
                         .provider
@@ -409,8 +416,6 @@ fn offerings_from_models_dev(
                         .and_then(|transport| transport.npm.as_deref())
                         .or(provider.npm.as_deref()),
                 )
-            } else {
-                "chat"
             };
             out.push(CatalogOffering {
                 provider: provider_id.clone(),

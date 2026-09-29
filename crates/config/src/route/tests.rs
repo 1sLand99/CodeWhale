@@ -1551,8 +1551,8 @@ fn opencode_zen_resolver_fails_closed_for_unproven_protocols() {
 }
 
 /// #6705: a Zen model newer than this build routes on the wire its Models.dev
-/// catalog row names; the catalog's Google rows and ids it never lists still
-/// fail closed, with the endpoint named.
+/// catalog row names; the catalog's Google and deprecated rows and ids it
+/// never lists still fail closed, with the endpoint named.
 #[test]
 fn opencode_zen_routes_models_dev_rows_on_their_declared_wire() {
     let raw = r#"{
@@ -1565,7 +1565,12 @@ fn opencode_zen_routes_models_dev_rows_on_their_declared_wire() {
             "claude-opus-9": { "id": "claude-opus-9", "provider": { "npm": "@ai-sdk/anthropic" } },
             "moon-rabbit-free": { "id": "moon-rabbit-free" },
             "gemini-9-flash": { "id": "gemini-9-flash", "provider": { "npm": "@ai-sdk/google" } },
-            "odd-sdk-model": { "id": "odd-sdk-model", "provider": { "npm": "@ai-sdk/unknown" } }
+            "odd-sdk-model": { "id": "odd-sdk-model", "provider": { "npm": "@ai-sdk/unknown" } },
+            "claude-2-retired": {
+              "id": "claude-2-retired",
+              "status": "deprecated",
+              "provider": { "npm": "@ai-sdk/anthropic" }
+            }
           }
         }
       }
@@ -1582,7 +1587,7 @@ fn opencode_zen_routes_models_dev_rows_on_their_declared_wire() {
         ("gpt-9-nova", RequestProtocol::Responses),
         ("opencode/claude-opus-9", RequestProtocol::AnthropicMessages),
         ("moon-rabbit-free", RequestProtocol::ChatCompletions),
-        // A curated row still wins over the catalog's row for the same id.
+        // A curated-only row still routes beside the catalog's rows.
         ("gpt-5.6-sol", RequestProtocol::Responses),
     ] {
         let route = resolver
@@ -1595,6 +1600,8 @@ fn opencode_zen_routes_models_dev_rows_on_their_declared_wire() {
         ("gemini-9-flash", "google"),
         ("odd-sdk-model", "unproven"),
         ("never-listed", "unproven"),
+        // Deprecated rows stay in the catalog but are not routes.
+        ("claude-2-retired", "deprecated"),
     ] {
         match resolver.resolve(&req(Some(ProviderKind::OpencodeZen), Some(model))) {
             Err(RouteError::UnsupportedModelProtocol { endpoint_key, .. }) => {
