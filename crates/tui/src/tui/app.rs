@@ -5171,8 +5171,8 @@ impl App {
         })
     }
 
-    /// Pick the detail target for the current viewport. This is used by the
-    /// transcript highlight and footer hint so they agree with `v`.
+    /// Pick the detail target for the current viewport. The footer hint and
+    /// Alt+V both resolve through this so they agree on the target.
     #[must_use]
     pub fn detail_cell_index_for_viewport(
         &self,
