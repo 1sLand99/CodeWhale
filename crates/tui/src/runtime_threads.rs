@@ -2215,6 +2215,15 @@ impl RuntimeThreadStore {
     /// Offline readers (`codewhale receipts`) use this so reading a thread
     /// never mutates a store a live `codewhale serve` may own. Event reads
     /// still take the shared event lock, so they see only committed records.
+    ///
+    /// The item index this store builds (see [`Self::ensure_item_index`]) is
+    /// a snapshot of one open: a store another process owns keeps writing
+    /// items, and those are invisible here until the next open reads the
+    /// directory again. That is the contract every caller already lives
+    /// under — `codewhale receipts` opens the store once per invocation and
+    /// exits — so holding an instance across foreign writes serves no
+    /// caller today. If one ever does, invalidate or reopen rather than
+    /// serving a stale map silently.
     pub(crate) fn open_read_only(root: PathBuf) -> Result<Option<Self>> {
         let root = checked_runtime_store_root(root)?;
         let threads_dir = root.join("threads");
@@ -3182,7 +3191,27 @@ impl RuntimeThreadStore {
     /// 3,537 message items, 2026-09-26): non-message items never win and an
     /// empty message is skipped rather than reported. The comparison that call
     /// makes is on `started_at`, and append order is timestamp order because
-    /// the runtime writes each item as its turn produces it.
+    /// the runtime writes each item as its turn produces it — for every source
+    /// of `item_ids`, not only the live one: a fork rebuilds the cloned turn's
+    /// list from items already ordered by [`sort_turn_items_by_start`], and an
+    /// imported conversation pushes its seed items in the order the importer
+    /// stamped them. Where the two orders could disagree is a hand-edited or
+    /// externally written store; there this walk agrees with what
+    /// `RuntimeThreadManager::reconstruct_messages_from_turns_with` would
+    /// replay for the model — `item_ids` order — rather than with `started_at`,
+    /// which is the agreement that matters for a preview.
+    ///
+    /// Reading only `turn.item_ids` is complete for messages, not just fast:
+    /// every writer of an `AgentMessage`/`UserMessage` item registers the id on
+    /// its turn at the same time. Streaming turns attach as they go (the turn
+    /// is active, so [`Self::attach_item_to_turn`] appends); `start_turn` and
+    /// `steer_turn` push the user item onto a turn they have just loaded or
+    /// verified in progress; an imported conversation writes the whole list
+    /// before its turn exists. [`Self::attach_item_to_turn`] does leave a
+    /// settled turn's `item_ids` untouched, but the only items that reach a
+    /// settled turn that way are status, tool and error records — kinds this
+    /// walk skips — never messages, so a settled turn cannot hold a late
+    /// message its preview missed.
     fn newest_message_text_in_turn(&self, turn: &TurnRecord) -> Result<Option<String>> {
         for item_id in turn.item_ids.iter().rev() {
             // A turn can name an item whose file was since removed; the
