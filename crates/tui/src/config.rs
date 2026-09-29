@@ -5132,10 +5132,7 @@ impl Config {
                 .and_then(|providers| providers.custom_provider_config(provider))
                 .is_none()
         {
-            anyhow::bail!(
-                "Invalid provider '{provider}': expected {}.",
-                ApiProvider::names_hint()
-            );
+            return Err(invalid_provider_diagnostic(provider).into());
         }
         let active_provider = self.api_provider();
         match validate_kimi_code_api_model_id(
@@ -5191,10 +5188,16 @@ impl Config {
             } else {
                 format!(" (for example: {})", known.join(", "))
             };
-            anyhow::bail!(
-                "Invalid configured model '{model}' for provider '{}': expected auto or a model ID this provider serves{hint}.",
-                provider.as_str()
-            );
+            return Err(SafeConfigDiagnostic::invalid_value(
+                "model",
+                model,
+                &format!(
+                    "auto or a model ID provider '{}' serves{hint}",
+                    provider.as_str()
+                ),
+                user_config_fix("model", "auto", Some("a *_MODEL environment variable")),
+            )
+            .into());
         }
         if let Some(policy) = self.approval_policy.as_deref() {
             let normalized = policy.trim().to_ascii_lowercase();
@@ -5202,15 +5205,29 @@ impl Config {
                 normalized.as_str(),
                 "on-request" | "untrusted" | "never" | "auto" | "suggest"
             ) {
-                anyhow::bail!(
-                    "Invalid approval_policy '{policy}': expected on-request, untrusted, never, auto, or suggest."
-                );
+                return Err(SafeConfigDiagnostic::invalid_value(
+                    "approval_policy",
+                    policy,
+                    "on-request, untrusted, never, auto, or suggest",
+                    user_config_fix(
+                        "approval_policy",
+                        "on-request",
+                        Some("CODEWHALE_APPROVAL_POLICY"),
+                    ),
+                )
+                .into());
             }
         }
         if let Some(v) = self.verbosity.as_deref() {
             let normalized = v.trim().to_ascii_lowercase();
             if !matches!(normalized.as_str(), "normal" | "concise") {
-                anyhow::bail!("Invalid verbosity '{v}': expected normal or concise.");
+                return Err(SafeConfigDiagnostic::invalid_value(
+                    "verbosity",
+                    v,
+                    "normal or concise",
+                    user_config_fix("verbosity", "normal", None),
+                )
+                .into());
             }
         }
         if let Some(mode) = self.sandbox_mode.as_deref() {
@@ -5219,9 +5236,17 @@ impl Config {
                 normalized.as_str(),
                 "read-only" | "workspace-write" | "danger-full-access" | "external-sandbox"
             ) {
-                anyhow::bail!(
-                    "Invalid sandbox_mode '{mode}': expected read-only, workspace-write, danger-full-access, or external-sandbox."
-                );
+                return Err(SafeConfigDiagnostic::invalid_value(
+                    "sandbox_mode",
+                    mode,
+                    "read-only, workspace-write, danger-full-access, or external-sandbox",
+                    user_config_fix(
+                        "sandbox_mode",
+                        "workspace-write",
+                        Some("CODEWHALE_SANDBOX_MODE"),
+                    ),
+                )
+                .into());
             }
         }
         if let Some(tui) = &self.tui
@@ -5229,9 +5254,13 @@ impl Config {
         {
             let mode = mode.to_ascii_lowercase();
             if !matches!(mode.as_str(), "auto" | "always" | "never") {
-                anyhow::bail!(
-                    "Invalid tui.alternate_screen '{mode}': expected auto, always, or never."
-                );
+                return Err(SafeConfigDiagnostic::invalid_value(
+                    "tui.alternate_screen",
+                    &mode,
+                    "auto, always, or never",
+                    user_config_fix("tui.alternate_screen", "auto", None),
+                )
+                .into());
             }
         }
         if let Some(transcript) = &self.transcript
@@ -5544,6 +5573,29 @@ impl Config {
             identity.migrated_legacy_ollama_cloud_route = false;
         }
         Ok(identity)
+    }
+
+    /// Resolve a provider a user is selecting now (`codewhale config set
+    /// provider <name>`). A name that is neither a built-in provider nor a
+    /// configured table is a typo, not a saved session missing its route, so
+    /// it gets config validation's wording instead of the resume wording.
+    pub(crate) fn resolve_provider_selection_identity(
+        &self,
+        provider_id: &str,
+    ) -> std::result::Result<ProviderIdentity, String> {
+        let requested = provider_id.trim();
+        if !requested.is_empty()
+            && ApiProvider::parse(requested).is_none()
+            && !requested.eq_ignore_ascii_case(ApiProvider::Custom.as_str())
+            && self
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.custom_provider_config(requested))
+                .is_none()
+        {
+            return Err(invalid_provider_message(requested));
+        }
+        self.resolve_provider_pin_identity(provider_id)
     }
 
     /// Resolve an additive exact provider id. Unlike raw selector resolution,
@@ -7264,21 +7316,9 @@ impl Config {
                     .credential_url()
                     .unwrap_or("https://app.codewhale.net/settings?section=api")
             ),
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => anyhow::bail!(
-                "DeepSeek API key not found.\n\
-                 \n\
-                 1. Get a key:  https://platform.deepseek.com/api_keys\n\
-                 2. Save it (works in every folder, no OS prompts):\n\
-                        codewhale auth set --provider deepseek\n\
-                 \n\
-                 Alternatives:\n\
-                   • export DEEPSEEK_API_KEY=<your-key>      (current shell only;\n\
-                     also note: zsh users — exports in ~/.zshrc only reach interactive\n\
-                     shells, prefer ~/.zshenv for everything)\n\
-                   • api_key = \"<your-key>\"  in ~/.codewhale/config.toml\n\
-                   • already configured DeepSeek Harness? grant read-only access:\n\
-                        codewhale auth external-consent --provider deepseek --mode read-only"
-            ),
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
+                anyhow::bail!(deepseek_missing_key_message())
+            }
             ApiProvider::SiliconflowCn => anyhow::bail!(
                 "SiliconFlow China API key not found. Get a key: {}. Run 'codewhale auth set --provider siliconflow-CN', \
                  set {}, or add [{}] api_key in ~/.codewhale/config.toml. \
@@ -10682,6 +10722,23 @@ pub(crate) fn is_kimi_code_membership_model(model: &str) -> bool {
         .any(|id| model.eq_ignore_ascii_case(id))
 }
 
+/// Keep the recovery command visible in small terminals. The optional DSH
+/// advice is conditional prose: producing an error must not inspect PATH or
+/// another application's credential file on the runtime thread.
+fn deepseek_missing_key_message() -> &'static str {
+    concat!(
+        "DeepSeek API key not found.\n",
+        "Save a key for every folder:\n",
+        "  codewhale auth set --provider deepseek\n",
+        "Get a key: https://platform.deepseek.com/api_keys\n",
+        "Or export DEEPSEEK_API_KEY=<your-key> (this shell only).\n",
+        "zsh: ~/.zshrc is interactive only; use ~/.zshenv.\n",
+        "Or set api_key in ~/.codewhale/config.toml.\n",
+        "If you already use DeepSeek Harness, grant read-only access:\n",
+        "  codewhale auth external-consent --provider deepseek --mode read-only"
+    )
+}
+
 /// The Moonshot direct-platform roster, as one fact. Mirror of
 /// [`KIMI_CODE_MEMBERSHIP_MODELS`] for the pay-as-you-go product.
 pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 3] = [
@@ -10692,10 +10749,93 @@ pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 3] = [
 
 pub(crate) const KIMI_CODE_CLAUDE_ALIAS_GUIDANCE: &str = "Kimi Code model `k3[1m]` is a Claude Code environment convention, not an API model id. Use model = \"k3\". If your Kimi Code plan includes 1M context, also set context_window = 1048576; otherwise keep the 262144 safe default.";
 
+/// Configuration errors whose text is safe to show in diagnostics such as
+/// `codewhale doctor`. Everything else stays suppressed there because parse
+/// errors and credential fields can echo secret material.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SafeConfigDiagnostic {
     #[error("{}", KIMI_CODE_CLAUDE_ALIAS_GUIDANCE)]
     KimiCodeClaudeAlias,
+    /// A plain enum/value validation failure on a non-credential key.
+    /// `message` quotes the rejected value for the local error; `shareable`
+    /// omits it, because a mistyped value can still be a pasted secret.
+    #[error("{message}")]
+    InvalidValue {
+        message: String,
+        shareable: String,
+        /// A `codewhale config set <key> <valid>` command, when one fixes it.
+        fix: Option<String>,
+    },
+}
+
+impl SafeConfigDiagnostic {
+    fn invalid_value(key: &str, value: &str, expected: &str, fix: String) -> Self {
+        Self::InvalidValue {
+            message: format!("Invalid {key} '{value}': expected {expected}."),
+            shareable: format!("Invalid {key} (value not shown): expected {expected}."),
+            fix: Some(fix),
+        }
+    }
+
+    /// The diagnostic text for reports such as `codewhale doctor`, without
+    /// the rejected value and redacted defensively.
+    pub(crate) fn display_message(&self) -> String {
+        let text = match self {
+            Self::KimiCodeClaudeAlias => self.to_string(),
+            Self::InvalidValue { shareable, .. } => shareable.clone(),
+        };
+        codewhale_secrets::redact::redact_secrets(&text)
+    }
+
+    pub(crate) fn fix(&self) -> Option<&str> {
+        match self {
+            Self::KimiCodeClaudeAlias => None,
+            Self::InvalidValue { fix, .. } => fix.as_deref(),
+        }
+    }
+
+    /// Find a safe diagnostic anywhere in an error chain (loaders wrap
+    /// validation errors in file-path context).
+    pub(crate) fn find_in(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
+/// How to correct a rejected value in the user config. `config set` does not
+/// take dotted keys, so a table field names the table to edit. Validation runs
+/// after the environment, profile and managed layers are applied, and any of
+/// them outranks the user config, so the fix names those layers too.
+fn user_config_fix(key: &str, valid: &str, env_var: Option<&str>) -> String {
+    let edit = match key.split_once('.') {
+        Some((table, field)) => {
+            format!("set {field} = \"{valid}\" in the [{table}] table of config.toml")
+        }
+        None => format!("codewhale config set {key} {valid}"),
+    };
+    let layers = match env_var {
+        Some(env_var) => format!("{env_var}, a profile, or managed config"),
+        None => "a profile or managed config".to_string(),
+    };
+    format!("{edit} (if {layers} sets it, correct it there)")
+}
+
+fn invalid_provider_diagnostic(provider: &str) -> SafeConfigDiagnostic {
+    SafeConfigDiagnostic::invalid_value(
+        "provider",
+        provider,
+        &ApiProvider::names_hint(),
+        user_config_fix(
+            "provider",
+            ApiProvider::Deepseek.as_str(),
+            Some("CODEWHALE_PROVIDER"),
+        ),
+    )
+}
+
+/// The one wording for an unknown provider name, shared by config validation
+/// and `config set provider`.
+pub(crate) fn invalid_provider_message(provider: &str) -> String {
+    invalid_provider_diagnostic(provider).to_string()
 }
 
 /// Fail closed on known-bad model/endpoint pairings (#4687).
@@ -11072,7 +11212,19 @@ fn apply_profile(config: ConfigFile, profile: Option<&str>) -> Result<Config> {
                         }
                     })
                     .unwrap_or_else(|| "none".to_string());
-                anyhow::bail!("Profile '{profile_name}' not found. Available profiles: {available}")
+                // Profile names are user-typed (`--profile`), so the shareable
+                // text omits the requested one like every other InvalidValue;
+                // the available names are config table keys, not values.
+                Err(SafeConfigDiagnostic::InvalidValue {
+                    message: format!(
+                        "Profile '{profile_name}' not found. Available profiles: {available}"
+                    ),
+                    shareable: format!(
+                        "Profile not found (name not shown). Available profiles: {available}"
+                    ),
+                    fix: None,
+                }
+                .into())
             }
         }
     } else {

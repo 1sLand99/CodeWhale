@@ -388,7 +388,7 @@ pub(crate) async fn run_exec_agent(
         Some(&effective_model),
     )
     .map_err(anyhow::Error::msg)?
-    .validate()
+    .validate_for(crate::route_runtime::RouteErrorSurface::Headless)
     .map_err(anyhow::Error::msg)?;
     let effective_provider_name = validated_route.identity.key.clone();
     let effective_provider_id = validated_route.identity.exact_id.clone();
@@ -1487,6 +1487,9 @@ pub(crate) async fn run_exec_agent(
         // the process level without parsing the stream. Genuine failures
         // keep the historical `bail!` → exit 1 path.
         let exit_code = exec_failure_exit_code(summary.error_category.as_deref());
+        // The final line always carries the message: automation greps it and
+        // a caller may keep only the last stderr line, even when the stream
+        // already printed the same error above.
         if exit_code != 1 {
             eprintln!("Error: exec turn failed: {error}");
             let _ = io::stdout().flush();
@@ -1509,6 +1512,7 @@ pub(crate) async fn run_exec_agent(
 #[cfg(test)]
 mod tests {
     use super::{ExecAgentEvents, exec_automation_services, exec_disallowed_tools};
+
     use crate::core::engine::mock_engine_handle;
     use crate::core::engine::tool_catalog::REQUEST_USER_INPUT_NAME;
     use crate::core::events::{Event, TurnOutcomeStatus};

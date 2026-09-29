@@ -97,6 +97,20 @@ pub(crate) enum McpLoginProgress {
     Finished(Result<(), String>),
 }
 
+/// One `/mcp retry <name>` in flight. The retry runs as an engine op from a
+/// background task, so a running turn queues it in the engine mailbox instead
+/// of parking the UI loop (#6159) or asking the person to press it again; the
+/// outcome lands in `result` and `poll_mcp_retries` reports it.
+pub(crate) struct PendingMcpRetry {
+    pub server: String,
+    /// A turn owned the engine when the retry was requested, so it waits for
+    /// that turn to finish before it connects.
+    pub queued: bool,
+    pub result: std::sync::Arc<
+        std::sync::Mutex<Option<Result<crate::core::ops::McpManagerUpdate, String>>>,
+    >,
+}
+
 impl Drop for PendingMcpLogin {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -2384,6 +2398,8 @@ pub struct App {
     /// Discovery, registration and the browser callback all run in the
     /// background. Esc or dropping the app cancels the entire operation.
     pub(crate) mcp_login: Option<PendingMcpLogin>,
+    /// `/mcp retry` requests still waiting on the engine, one per server.
+    pub(crate) mcp_retries: Vec<PendingMcpRetry>,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -5171,8 +5187,8 @@ impl App {
         })
     }
 
-    /// Pick the detail target for the current viewport. This is used by the
-    /// transcript highlight and footer hint so they agree with `v`.
+    /// Pick the detail target for the current viewport. The footer hint and
+    /// Alt+V both resolve through this so they agree on the target.
     #[must_use]
     pub fn detail_cell_index_for_viewport(
         &self,
@@ -5609,6 +5625,12 @@ impl App {
     /// line is a `workflow` card marked `transcript_line: finished`, so it
     /// reuses the card renderer and expands in Transcript mode.
     ///
+    /// One row per run: when the call that started the run is already in
+    /// history (its call returned, its record still says running), that card
+    /// becomes the finish — the final state replaces `started` rather than
+    /// stacking a second row under it. The card's tool-detail record is keyed
+    /// separately and still holds what the model saw.
+    ///
     /// While a `workflow` card is still in the active group (a foreground
     /// `run`, or a `start` whose turn has not flushed) the line waits: pushed
     /// now it would land above the card that started it. `flush_active_cell`
@@ -5631,6 +5653,11 @@ impl App {
         if card_in_flight {
             return;
         }
+        let record_of = |tool: &GenericToolCell| {
+            tool.output
+                .as_deref()
+                .and_then(|out| serde_json::from_str::<serde_json::Value>(out).ok())
+        };
         // A foreground `run` card that returned its settled record already
         // shows the finish (history.rs); writing another would say it twice.
         let card_owns_finish = |history: &[HistoryCell], run_id: &str| {
@@ -5641,11 +5668,7 @@ impl App {
                 if tool.name != "workflow" || tool.status == ToolStatus::Running {
                     return false;
                 }
-                let Some(value) = tool
-                    .output
-                    .as_deref()
-                    .and_then(|out| serde_json::from_str::<serde_json::Value>(out).ok())
-                else {
+                let Some(value) = record_of(tool) else {
                     return false;
                 };
                 value.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id)
@@ -5656,13 +5679,36 @@ impl App {
                     )
             })
         };
+        // The returned `start` card for this run, still showing `started`. A
+        // card whose call is still running is left alone: its result would
+        // overwrite the finish.
+        let start_card = |history: &[HistoryCell], run_id: &str| {
+            history.iter().rposition(|cell| {
+                let HistoryCell::Tool(ToolCell::Generic(tool)) = cell else {
+                    return false;
+                };
+                if tool.name != "workflow" || tool.status == ToolStatus::Running {
+                    return false;
+                }
+                record_of(tool).is_some_and(|value| {
+                    value.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id)
+                        && value.get("transcript_line").is_none()
+                        && matches!(
+                            value.get("status").and_then(serde_json::Value::as_str),
+                            None | Some("running" | "pending" | "started")
+                        )
+                })
+            })
+        };
+        let mut replaced = Vec::new();
         let mut lines = Vec::new();
         for run in &mut self.workflow_runs {
             if !run.lifecycle.is_terminal() || run.finish_announced {
                 continue;
             }
             run.finish_announced = true;
-            if card_owns_finish(&self.history, &run.run_id) {
+            let start = start_card(&self.history, &run.run_id);
+            if start.is_none() && card_owns_finish(&self.history, &run.run_id) {
                 continue;
             }
             let mut output = run.to_run_json();
@@ -5672,6 +5718,15 @@ impl App {
                 WorkflowPanelLifecycle::Degraded => ToolStatus::Warning,
                 _ => ToolStatus::Failed,
             };
+            if let Some(index) = start
+                && let Some(HistoryCell::Tool(ToolCell::Generic(card))) =
+                    self.history.get_mut(index)
+            {
+                card.status = status;
+                card.output = Some(output.to_string());
+                replaced.push(index);
+                continue;
+            }
             lines.push(HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
                 name: "workflow".to_string(),
                 status,
@@ -5682,6 +5737,9 @@ impl App {
                 output_summary: None,
                 is_diff: false,
             })));
+        }
+        for index in replaced {
+            self.bump_history_cell(index);
         }
         for line in lines {
             self.add_message(line);

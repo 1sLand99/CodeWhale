@@ -229,11 +229,97 @@ fn h1_fallback_error(err: anyhow::Error) -> anyhow::Error {
         return err;
     }
 
-    anyhow::Error::new(LlmError::NetworkError(format!(
-        "SSE stream request failed after HTTP/1.1 fallback: {err}. \
-         `codewhale doctor` can still pass when non-streaming requests work; \
-         on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`."
-    )))
+    let detail = format!("{err:#}");
+    if let Some(unreachable) = connect_failure_summary(&err) {
+        return anyhow::Error::new(LlmError::NetworkError(format!("{unreachable}: {detail}")));
+    }
+    let mut message = format!("SSE stream request failed after HTTP/1.1 fallback: {detail}.");
+    // The HTTP/1.1 hint only helps when the protocol or TLS layer failed; it
+    // is noise for a refused connection or an unknown host.
+    if has_tls_cause(&err) || is_protocol_or_tls_failure(&detail) {
+        message.push_str(
+            " `codewhale doctor` can still pass when non-streaming requests work; \
+             on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`.",
+        );
+    }
+    anyhow::Error::new(LlmError::NetworkError(message))
+}
+
+/// `Cannot reach host:port (<why>)` for a failure to open the connection.
+/// reqwest also reports TLS handshake and certificate failures as connect
+/// errors; those return `None` so they keep the HTTP/1.1 and proxy hint.
+fn connect_failure_summary(err: &anyhow::Error) -> Option<String> {
+    let reqwest_error = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .filter(|error| error.is_connect())?;
+    // Classify on the underlying causes only: reqwest's own message embeds
+    // the request URL, whose host or path could contain "dns" or "tls".
+    let mut causes = String::new();
+    let mut source = std::error::Error::source(reqwest_error);
+    while let Some(cause) = source {
+        causes.push_str(&cause.to_string().to_ascii_lowercase());
+        causes.push('\n');
+        source = cause.source();
+    }
+    if has_tls_cause(err) || is_protocol_or_tls_failure(&causes) {
+        return None;
+    }
+    let target = reqwest_error
+        .url()
+        .and_then(|url| {
+            Some(format!(
+                "{}:{}",
+                url.host_str()?,
+                url.port_or_known_default()?
+            ))
+        })
+        .unwrap_or_else(|| "the provider host".to_string());
+    let why = if causes.contains("refused") {
+        "connection refused"
+    } else if causes.contains("dns") || causes.contains("lookup") {
+        "DNS lookup failed"
+    } else {
+        "connection failed"
+    };
+    // With a proxy configured, the host that refused may be the proxy.
+    let via_proxy = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    Some(if via_proxy {
+        format!("Cannot reach {target} or the configured proxy ({why})")
+    } else {
+        format!("Cannot reach {target} ({why})")
+    })
+}
+
+fn has_tls_cause(err: &anyhow::Error) -> bool {
+    err.chain().any(|mut cause| {
+        // hyper-rustls wraps tokio-rustls's IO error in another IO error;
+        // Error::source skips those inners, so inspect get_ref explicitly.
+        while let Some(inner) = cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+        {
+            cause = inner;
+        }
+        cause.is::<rustls::Error>()
+    })
+}
+
+fn is_protocol_or_tls_failure(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    should_retry_with_h1(StreamHttpPolicy::DualWithH1Fallback, &lower)
+        || ["tls", "ssl", "certificate", "handshake", "alpn"]
+            .iter()
+            .any(|needle| lower.contains(needle))
 }
 
 /// Open an SSE response through the shared transport policy.
@@ -503,6 +589,94 @@ mod tests {
         .expect_err("an H1-pinned transport error must not retry");
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry when pinned");
         assert!(err.to_string().contains("connection reset"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn refused_connection_names_the_host_and_skips_the_http1_hint() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let client = crate::tls::reqwest_client();
+        let url = format!("http://127.0.0.1:{port}/v1/chat");
+        let err = open_sse_response(
+            &open_req(StreamHttpPolicy::DualWithH1Fallback, Duration::from_secs(5)),
+            |_| {
+                let request = client.post(&url);
+                async move { Ok::<_, anyhow::Error>(request.send().await?) }
+            },
+        )
+        .await
+        .expect_err("nothing listens on the port");
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("Cannot reach 127.0.0.1:{port}"))
+                && text.contains("(connection refused)"),
+            "{text}"
+        );
+        assert!(!text.contains("CODEWHALE_FORCE_HTTP1"), "{text}");
+        assert!(
+            err.downcast_ref::<LlmError>()
+                .is_some_and(LlmError::is_retryable),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_failure_during_connect_keeps_the_http1_hint() {
+        // A plain-TCP peer on an https URL fails the TLS handshake, which
+        // reqwest reports as a connect error; it must not read as
+        // "Cannot reach" and must keep the FORCE_HTTP1/proxy hint.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let _ = socket.write_all(b"HTTP/1.1 400 Not TLS\r\n\r\n").await;
+                // Keep reading until the client closes. Dropping a socket with
+                // unread ClientHello bytes can send a TCP reset on Windows,
+                // hiding the TLS protocol error this fixture is meant to test.
+                let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+            }
+        });
+        crate::tls::ensure_rustls_crypto_provider();
+        let client = crate::tls::reqwest_client();
+        let url = format!("https://127.0.0.1:{port}/v1/chat");
+        let err = open_sse_response(
+            &open_req(StreamHttpPolicy::DualWithH1Fallback, Duration::from_secs(5)),
+            |_| {
+                let request = client.post(&url);
+                async move { Ok::<_, anyhow::Error>(request.send().await?) }
+            },
+        )
+        .await
+        .expect_err("the peer does not speak TLS");
+        server.abort();
+        let text = err.to_string();
+        assert!(!text.contains("Cannot reach"), "{text}");
+        assert!(text.contains("CODEWHALE_FORCE_HTTP1=1"), "{text}");
+    }
+
+    #[test]
+    fn h1_fallback_hint_follows_protocol_errors_with_the_full_chain() {
+        let protocol = h1_fallback_error(
+            anyhow::Error::new(LlmError::NetworkError("http2 protocol error".to_string()))
+                .context("sending stream request"),
+        );
+        let text = protocol.to_string();
+        assert!(text.contains("sending stream request: "), "{text}");
+        assert!(text.contains("http2 protocol error"), "{text}");
+        assert!(text.contains("CODEWHALE_FORCE_HTTP1=1"), "{text}");
+
+        let other = h1_fallback_error(anyhow::Error::new(LlmError::NetworkError(
+            "unexpected end of body".to_string(),
+        )));
+        assert!(
+            !other.to_string().contains("CODEWHALE_FORCE_HTTP1"),
+            "{other}"
+        );
     }
 
     #[tokio::test]

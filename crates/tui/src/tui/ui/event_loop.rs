@@ -1987,6 +1987,7 @@ pub(crate) async fn run_event_loop(
 
         // Discovery and callback delivery never park terminal input.
         poll_mcp_login(app);
+        poll_mcp_retries(app);
 
         // #1830/#2317: service any already-arrived terminal keys before a
         // potentially long engine batch so composer/modal input stays live.
