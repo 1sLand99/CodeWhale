@@ -1,5 +1,52 @@
 use tempfile::TempDir;
 
+#[test]
+fn frontmatter_handles_bom_exact_fences_and_plain_continuations() {
+    let content = "\u{feff}---\r\nname: demo\r\ndescription: Deploy apps --- safely\r\n  for X or Y: really\r\ninvocation: user\r\n---\r\n# Body\r\n";
+    let (metadata, body) = super::parse_frontmatter(content).unwrap().unwrap();
+    assert_eq!(metadata["name"], "demo");
+    assert_eq!(
+        metadata["description"],
+        "Deploy apps --- safely for X or Y: really"
+    );
+    assert_eq!(metadata.len(), 3, "continuation text is not a new key");
+    assert_eq!(body.trim(), "# Body");
+    assert!(
+        super::parse_frontmatter("---not a fence\n# Body")
+            .unwrap()
+            .is_none()
+    );
+    assert!(super::parse_frontmatter("---\nname: demo\ndescription: inline --- only").is_err());
+}
+
+#[test]
+fn frontmatter_block_indentation_is_character_safe_and_keeps_nested_fences() {
+    for indicator in ["|", ">"] {
+        let content = format!(
+            "---\nname: demo\ndescription: {indicator}\n  first\n\u{3000}wide\n \u{a0}mixed\n  ---\n    nested\n---\nbody"
+        );
+        let (metadata, body) = super::parse_frontmatter(&content).unwrap().unwrap();
+        let expected = if indicator == "|" {
+            "first\nwide\nmixed\n---\n  nested"
+        } else {
+            "first wide mixed ---   nested"
+        };
+        assert_eq!(metadata["description"], expected);
+        assert_eq!(body.trim(), "body");
+    }
+}
+
+#[test]
+fn unavailable_home_fallbacks_are_fresh_nonexistent_paths() {
+    let first = super::unavailable_home_root();
+    let second = super::unavailable_home_root();
+    assert_ne!(first, second);
+    assert!(!first.exists());
+    assert!(!second.exists());
+    assert!(first.starts_with(std::env::temp_dir()));
+    assert_ne!(first, std::path::Path::new("/tmp/codewhale"));
+}
+
 fn create_skill_dir(tmpdir: &TempDir, skill_name: &str, skill_content: &str) {
     let skill_dir = tmpdir.path().join("skills").join(skill_name);
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -2016,4 +2063,64 @@ fn project_skills_require_workspace_trust() {
         "{:?}",
         registry.warnings()
     );
+}
+
+#[test]
+fn hidden_and_backup_payload_changes_stale_the_trust_receipt() {
+    use super::audit::{self, SkillAuditMode, TrustState};
+    use super::install::{INSTALLED_FROM_MARKER, TRUSTED_MARKER, write_trust_v2};
+    use super::package_digest::compute_package_digest;
+    use std::fs;
+    let tmp = tempfile::tempdir().unwrap();
+    let package = tmp.path().join(".codewhale/skills/demo");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("SKILL.md"),
+        "---\nname: demo\ndescription: test\n---\nbody",
+    )
+    .unwrap();
+    let payloads = [
+        ".hidden",
+        ".hidden-dir/run.sh",
+        "script.bak",
+        "script.tmp",
+        "nested/.trusted",
+    ];
+    for relative in payloads {
+        let path = package.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "safe").unwrap();
+    }
+    let digest = compute_package_digest(&package).unwrap();
+    write_trust_v2(&package, &digest).unwrap();
+    let initial = audit::scan(tmp.path(), None, SkillAuditMode::OwnedOnly, None);
+    assert_eq!(initial.skills.len(), 1);
+    assert_eq!(
+        initial.skills[0].trust,
+        TrustState::TrustedForDigest(digest.clone())
+    );
+    for relative in payloads {
+        fs::write(package.join(relative), "evil").unwrap();
+        assert_ne!(
+            compute_package_digest(&package).unwrap(),
+            digest,
+            "{relative}"
+        );
+        let changed = audit::scan(tmp.path(), None, SkillAuditMode::OwnedOnly, None);
+        assert_eq!(
+            changed.skills[0].trust,
+            TrustState::TrustStale,
+            "{relative}"
+        );
+        fs::write(package.join(relative), "safe").unwrap();
+    }
+    // These root files are local bookkeeping, not executable payload.
+    for marker in [
+        INSTALLED_FROM_MARKER,
+        TRUSTED_MARKER,
+        ".system-installed-version",
+    ] {
+        fs::write(package.join(marker), "local metadata").unwrap();
+        assert_eq!(compute_package_digest(&package).unwrap(), digest);
+    }
 }

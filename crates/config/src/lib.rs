@@ -134,7 +134,7 @@ pub fn is_upstream_auth_header(name: &str) -> bool {
     // contract, so suppress every credential-shaped request header instead of
     // allowing the same secret through Proxy-Authorization, X-Auth-Token,
     // X-Access-Token, X-Goog-Api-Key, or another *-token/*-api-key spelling.
-    is_sensitive_config_key(name) || name.eq_ignore_ascii_case("cookie")
+    is_sensitive_config_key(name)
 }
 
 /// Preserve OpenRouter endpoint slugs verbatim; an empty value clears a pin.
@@ -738,10 +738,14 @@ impl PermissionsToml {
 impl ProvidersToml {
     #[must_use]
     pub fn is_empty(&self) -> bool {
+        // The full registry, not the selectable catalog: legacy dialect and
+        // plan tables (`deepseek_anthropic`, `modelstudio_coding_plan`, ...)
+        // are still fields here, and skipping the whole `[providers]` section
+        // when only one of them is set would erase it on the next typed save.
         self.extras.is_empty()
-            && ProviderKind::all()
+            && provider::all_providers()
                 .iter()
-                .all(|provider| self.for_provider(*provider).is_empty())
+                .all(|provider| self.for_provider(provider.kind()).is_empty())
             && self.antigravity.is_empty()
     }
 
@@ -1184,12 +1188,12 @@ fn set_provider_config_value(
         ProviderConfigField::BaseUrl => {
             config.providers.for_provider_mut(provider).base_url = Some(value.to_string());
         }
+        // Provider-scoped values stay in their `[providers.<name>]` table.
+        // The root `http_headers` / `default_text_model` apply to every
+        // provider, so mirroring DeepSeek's values there sent them to other
+        // providers after a switch.
         ProviderConfigField::Model => {
-            let value = value.to_string();
-            config.providers.for_provider_mut(provider).model = Some(value.clone());
-            if provider == ProviderKind::Deepseek {
-                config.default_text_model = Some(value);
-            }
+            config.providers.for_provider_mut(provider).model = Some(value.to_string());
         }
         ProviderConfigField::ContextWindow => {
             config.providers.for_provider_mut(provider).context_window =
@@ -1217,11 +1221,7 @@ fn set_provider_config_value(
                 .allow_insecure_http = Some(parse_bool(value)?);
         }
         ProviderConfigField::HttpHeaders => {
-            let headers = parse_http_headers(value)?;
-            config.providers.for_provider_mut(provider).http_headers = headers.clone();
-            if provider == ProviderKind::Deepseek {
-                config.http_headers = headers;
-            }
+            config.providers.for_provider_mut(provider).http_headers = parse_http_headers(value)?;
         }
         ProviderConfigField::PathSuffix => {
             config.providers.for_provider_mut(provider).path_suffix = Some(value.to_string());
@@ -1246,8 +1246,13 @@ fn unset_provider_config_value(
             config.providers.for_provider_mut(provider).base_url = None;
         }
         ProviderConfigField::Model => {
-            config.providers.for_provider_mut(provider).model = None;
-            if provider == ProviderKind::Deepseek {
+            let removed = config.providers.for_provider_mut(provider).model.take();
+            // Earlier releases mirrored DeepSeek's model into the root key;
+            // clear that copy too, but never a root value the user set apart.
+            if provider == ProviderKind::Deepseek
+                && removed.is_some()
+                && config.default_text_model == removed
+            {
                 config.default_text_model = None;
             }
         }
@@ -1276,12 +1281,14 @@ fn unset_provider_config_value(
                 .allow_insecure_http = None;
         }
         ProviderConfigField::HttpHeaders => {
-            config
-                .providers
-                .for_provider_mut(provider)
-                .http_headers
-                .clear();
-            if provider == ProviderKind::Deepseek {
+            let removed =
+                std::mem::take(&mut config.providers.for_provider_mut(provider).http_headers);
+            // Earlier releases mirrored DeepSeek's headers into the root table;
+            // clear that copy too, but never root headers the user set apart.
+            if provider == ProviderKind::Deepseek
+                && !removed.is_empty()
+                && config.http_headers == removed
+            {
                 config.http_headers.clear();
             }
         }
@@ -1688,6 +1695,10 @@ pub struct SkillsToml {
     /// uses 5 MiB.
     #[serde(default)]
     pub max_install_size_bytes: Option<u64>,
+    /// Keys owned by the TUI runtime (for example `scan_codewhale_only`) or
+    /// added by newer releases must survive dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 /// On-disk schema for the `[tools]` table (#2076).
@@ -1710,6 +1721,10 @@ pub struct SnapshotsToml {
     pub enabled: bool,
     #[serde(default = "default_snapshot_max_age_days")]
     pub max_age_days: u64,
+    /// Keys owned by the TUI runtime (for example `max_workspace_gb`) or
+    /// added by newer releases must survive dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 fn default_snapshots_enabled() -> bool {
@@ -1725,6 +1740,7 @@ impl Default for SnapshotsToml {
         Self {
             enabled: default_snapshots_enabled(),
             max_age_days: default_snapshot_max_age_days(),
+            extras: BTreeMap::new(),
         }
     }
 }
@@ -2403,6 +2419,10 @@ pub struct NetworkPolicyToml {
     /// Whether to record one audit-log line per outbound network call.
     #[serde(default = "default_network_audit")]
     pub audit: bool,
+    /// Keys owned by the TUI runtime or added by newer releases must survive
+    /// dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 fn default_network_decision() -> String {
@@ -2422,6 +2442,7 @@ impl Default for NetworkPolicyToml {
             proxy: Vec::new(),
             proxy_fake_ip_cidrs: Vec::new(),
             audit: default_network_audit(),
+            extras: BTreeMap::new(),
         }
     }
 }
@@ -2457,6 +2478,10 @@ pub struct LspConfigToml {
     /// User-defined LSP servers for file extensions not in the built-in
     /// registry. Keyed by extension (e.g. `"php"`, `"rb"`).
     pub custom: Option<BTreeMap<String, CustomLspDef>>,
+    /// Keys owned by the TUI runtime or added by newer releases must survive
+    /// dispatcher reads and typed saves.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 impl ConfigToml {
@@ -2537,15 +2562,17 @@ impl ConfigToml {
         Ok(table)
     }
 
-    fn named_custom_provider_config(&self) -> Option<ProviderConfigToml> {
-        let provider_id = self.named_custom_provider_id()?;
-        self.named_custom_provider_table(provider_id).ok()?;
-        self.providers
-            .extras
-            .get(provider_id)
-            .cloned()?
-            .try_into()
-            .ok()
+    /// The typed `[providers.<id>]` table of a named custom provider. A table
+    /// that fails validation is an error, never a reason to read another one.
+    fn named_custom_provider_config_for(&self, provider_id: &str) -> Result<ProviderConfigToml> {
+        let table = self.named_custom_provider_table(provider_id)?;
+        // The deserializer error can quote the offending value, which may be a
+        // credential, so report only which table is wrong.
+        toml::Value::Table(table.clone()).try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "custom provider '{provider_id}' has an invalid [providers.{provider_id}] table: a field has the wrong type"
+            )
+        })
     }
 
     /// Mutable access to a custom provider's `[providers.<id>]` table,
@@ -2742,6 +2769,17 @@ impl ConfigToml {
     /// survive later typed saves. This does not apply environment overrides.
     pub fn bind_persisted_provider_id(&mut self, provider_id: &str) -> Result<()> {
         let provider_id = provider_id.trim();
+        // Earlier typed saves wrote the serde kebab-case spelling
+        // `siliconflow-c-n` instead of the canonical `siliconflow-CN`. Read it
+        // back as the built-in so those files load and the next save repairs
+        // them, unless the user really declared a table by that name.
+        let provider_id = if provider_id.eq_ignore_ascii_case("siliconflow-c-n")
+            && !self.providers.extras.contains_key(provider_id)
+        {
+            ProviderKind::SiliconflowCN.as_str()
+        } else {
+            provider_id
+        };
         let parsed = ProviderKind::parse_config_identity(provider_id);
         // Kindless tables mirroring a built-in alias remain inert. An explicit
         // custom declaration must validate; never fall back to a different
@@ -2755,12 +2793,12 @@ impl ConfigToml {
             && custom_table.is_some()
             && !kindless_alias
         {
-            self.named_custom_provider_table(provider_id)?;
+            self.named_custom_provider_config_for(provider_id)?;
             ProviderKind::Custom
         } else if let Some(provider) = parsed {
             provider
         } else {
-            self.named_custom_provider_table(provider_id)?;
+            self.named_custom_provider_config_for(provider_id)?;
             ProviderKind::Custom
         };
         self.provider = provider;
@@ -3192,11 +3230,19 @@ impl ConfigToml {
             (self.provider, ProviderSource::Config)
         };
 
-        let mut provider_cfg = if provider == ProviderKind::Custom
-            && matches!(provider_source, ProviderSource::Config)
-        {
-            self.named_custom_provider_config()
-                .unwrap_or_else(|| self.providers.for_provider(provider).clone())
+        let named_custom_provider = (provider == ProviderKind::Custom
+            && matches!(provider_source, ProviderSource::Config))
+        .then(|| self.named_custom_provider_id())
+        .flatten();
+        let mut provider_cfg = if let Some(provider_id) = named_custom_provider {
+            // A named route whose table became invalid after binding resolves
+            // to the fail-closed loopback placeholder, never to the legacy
+            // `[providers.custom]` endpoint, model and key.
+            self.named_custom_provider_config_for(provider_id)
+                .unwrap_or_else(|err| {
+                    tracing::warn!("{err:#}");
+                    ProviderConfigToml::default()
+                })
         } else {
             self.providers.for_provider(provider).clone()
         };
@@ -5520,12 +5566,17 @@ fn checked_config_backup_path(path: &Path) -> Result<PathBuf> {
 /// while ensuring that moving a key into the durable secret store does not
 /// leave the same credential behind in an older backup.
 pub fn scrub_plaintext_api_keys_from_config_backup(path: &Path) -> Result<()> {
-    let backup = checked_config_backup_path(path)?;
+    scrub_credentials_from_backup_file(&checked_config_backup_path(path)?)
+}
+
+/// Rewrite an existing backup without credential-named keys; see
+/// [`config_toml_without_plaintext_api_keys`].
+fn scrub_credentials_from_backup_file(backup: &Path) -> Result<()> {
     if !backup.exists() {
         return Ok(());
     }
 
-    let raw = read_checked_toml_file(&backup, "config backup")?;
+    let raw = read_checked_toml_file(backup, "config backup")?;
     let scrubbed = config_toml_without_plaintext_api_keys(&raw).with_context(|| {
         format!(
             "failed to scrub plaintext API keys from config backup {}",
@@ -5533,7 +5584,7 @@ pub fn scrub_plaintext_api_keys_from_config_backup(path: &Path) -> Result<()> {
         )
     })?;
     if scrubbed != raw {
-        persistence::atomic_write(&backup, scrubbed.as_bytes()).with_context(|| {
+        persistence::atomic_write(backup, scrubbed.as_bytes()).with_context(|| {
             format!(
                 "failed to write credential-free config backup {}",
                 backup.display()
@@ -5630,7 +5681,14 @@ pub(crate) fn note_legacy_root_file_migration(path: &Path, original_raw: &str) -
 /// top-level keys first moved. Later migrations never overwrite it.
 pub(crate) fn write_legacy_root_backup(path: &Path, original_raw: &str) -> Result<PathBuf> {
     let backup = checked_config_sibling_path(path, &pre_migrate_backup_file_name(path))?;
-    if !backup.exists() {
+    if backup.exists() {
+        // Written once and kept; still repair one left by a release that
+        // scrubbed only `api_key`. Best effort: an unreadable old backup must
+        // not block the save that is moving keys now.
+        if let Err(err) = scrub_credentials_from_backup_file(&backup) {
+            tracing::warn!("{err:#}");
+        }
+    } else {
         let scrubbed = config_toml_without_plaintext_api_keys(original_raw)?;
         persistence::atomic_write(&backup, scrubbed.as_bytes()).with_context(|| {
             format!(
@@ -5691,16 +5749,45 @@ fn config_toml_without_plaintext_api_keys(raw: &str) -> Result<String> {
     Ok(document.to_string())
 }
 
+/// Drop every credential-named key ([`is_sensitive_config_key`]: `api_key`,
+/// `webhook_token`, `Authorization` under `http_headers`, ...) at any depth,
+/// including tables inside arrays. The backups are kept indefinitely and are
+/// described as credential-free, so a rotated secret must not live on there.
 fn remove_plaintext_api_keys_recursive(table: &mut dyn toml_edit::TableLike) {
-    // Keep a comment written above the key (often the file header).
-    config_document::remove_key_preserving_leading_decor(table, "api_key");
+    let sensitive: Vec<String> = table
+        .iter()
+        .filter(|(key, _)| is_sensitive_config_key(key))
+        .map(|(key, _)| key.to_owned())
+        .collect();
+    for key in sensitive {
+        // Keep a comment written above the key (often the file header).
+        config_document::remove_key_preserving_leading_decor(table, &key);
+    }
     for (_, item) in table.iter_mut() {
-        if let toml_edit::Item::ArrayOfTables(tables) = item {
-            for nested in tables.iter_mut() {
-                remove_plaintext_api_keys_recursive(nested);
+        match item {
+            toml_edit::Item::ArrayOfTables(tables) => {
+                for nested in tables.iter_mut() {
+                    remove_plaintext_api_keys_recursive(nested);
+                }
             }
-        } else if let Some(nested) = item.as_table_like_mut() {
-            remove_plaintext_api_keys_recursive(nested);
+            toml_edit::Item::Value(toml_edit::Value::Array(array)) => {
+                remove_plaintext_api_keys_in_array(array);
+            }
+            _ => {
+                if let Some(nested) = item.as_table_like_mut() {
+                    remove_plaintext_api_keys_recursive(nested);
+                }
+            }
+        }
+    }
+}
+
+fn remove_plaintext_api_keys_in_array(array: &mut toml_edit::Array) {
+    for value in array.iter_mut() {
+        match value {
+            toml_edit::Value::InlineTable(table) => remove_plaintext_api_keys_recursive(table),
+            toml_edit::Value::Array(nested) => remove_plaintext_api_keys_in_array(nested),
+            _ => {}
         }
     }
 }
@@ -5944,30 +6031,47 @@ pub fn ensure_state_dir_with_migration(subdir: &str) -> Result<(PathBuf, Option<
     ensure_safe_state_subdir(subdir)?;
     let explicit_codewhale_home = codewhale_home_is_explicit();
     let dir = codewhale_home()?.join(subdir);
-    let migration = if !explicit_codewhale_home {
-        migrate_legacy_state_dir(&dir, subdir)?
-    } else {
+    let migration = if explicit_codewhale_home {
         None
+    } else {
+        match migrate_legacy_state_dir(&dir, subdir)? {
+            LegacyStateMigration::NotNeeded => None,
+            LegacyStateMigration::Migrated(migration) => Some(migration),
+            // Creating an empty primary here would make it authoritative and
+            // hide the legacy data for good. Keep using the legacy directory
+            // (the read resolver does the same) and retry on the next call.
+            LegacyStateMigration::Failed { legacy } => return Ok((legacy, None)),
+        }
     };
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create {}/", dir.display()))?;
     Ok((dir, migration))
 }
 
+enum LegacyStateMigration {
+    NotNeeded,
+    Migrated(StateMigration),
+    /// Neither the move nor the copy completed. The primary was left absent,
+    /// so the legacy directory stays authoritative and migration retries.
+    Failed {
+        legacy: PathBuf,
+    },
+}
+
 /// One-time relocation of a legacy `~/.deepseek/<subdir>` state directory into
 /// the primary `~/.codewhale/<subdir>` location (#3240). No-op once the primary
 /// exists, for the root sentinel `"."` (a whole-tree move is owned by the
 /// config-file migration), or when no legacy directory is present.
-fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<StateMigration>> {
+fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<LegacyStateMigration> {
     if primary.exists() || subdir == "." || subdir.is_empty() {
-        return Ok(None);
+        return Ok(LegacyStateMigration::NotNeeded);
     }
     let legacy = match legacy_deepseek_home() {
         Ok(home) => home.join(subdir),
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(LegacyStateMigration::NotNeeded),
     };
     if !legacy.exists() {
-        return Ok(None);
+        return Ok(LegacyStateMigration::NotNeeded);
     }
     // The primary's parent (the ~/.codewhale root) must exist for the rename.
     if let Some(parent) = primary.parent()
@@ -5988,7 +6092,7 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
                 legacy.display(),
                 primary.display()
             );
-            return Ok(Some(StateMigration {
+            return Ok(LegacyStateMigration::Migrated(StateMigration {
                 subdir: subdir.to_string(),
                 legacy_path: legacy,
                 primary_path: primary.to_path_buf(),
@@ -6000,7 +6104,7 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
             // recursive copy so the user keeps their data. The legacy tree is
             // left in place; it stops growing because writes now target the
             // primary path.
-            match copy_dir_recursive(&legacy, primary) {
+            match copy_dir_into_place(&legacy, primary) {
                 Ok(()) => {
                     tracing::info!(
                         target: "config::migration",
@@ -6009,7 +6113,7 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
                         legacy.display(),
                         primary.display()
                     );
-                    return Ok(Some(StateMigration {
+                    return Ok(LegacyStateMigration::Migrated(StateMigration {
                         subdir: subdir.to_string(),
                         legacy_path: legacy,
                         primary_path: primary.to_path_buf(),
@@ -6017,10 +6121,16 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
                     }));
                 }
                 Err(copy_err) => {
+                    // A concurrent process may have completed the move/copy
+                    // after our initial check. Use that completed primary,
+                    // rather than resuming writes to the legacy tree.
+                    if primary.is_dir() {
+                        return Ok(LegacyStateMigration::NotNeeded);
+                    }
                     tracing::warn!(
                         target: "config::migration",
-                        "Could not migrate legacy state {} -> {} (rename: {err}; copy: {copy_err}). \
-                         New data is written to the primary path; the legacy tree remains untouched.",
+                        "Could not migrate legacy state {} -> {} (rename: {err}; copy: {copy_err:#}). \
+                         The legacy path stays in use and migration retries next time.",
                         legacy.display(),
                         primary.display()
                     );
@@ -6028,7 +6138,30 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
             }
         }
     }
-    Ok(None)
+    Ok(LegacyStateMigration::Failed { legacy })
+}
+
+/// Copy `src` to a staging sibling of `dst` and rename it into place, so a
+/// copy that fails midway never leaves a partial `dst` that later runs would
+/// treat as a completed migration.
+fn copy_dir_into_place(src: &Path, dst: &Path) -> Result<()> {
+    let mut staging_name = OsString::from(".");
+    staging_name.push(dst.file_name().unwrap_or_default());
+    staging_name.push(".migrating-");
+    // Each attempt owns only its unique private directory. A fixed sibling
+    // could be another process's active copy and must never be cleared.
+    let staging = tempfile::Builder::new().prefix(&staging_name).tempdir_in(
+        dst.parent()
+            .context("migration destination has no parent")?,
+    )?;
+    copy_dir_recursive(src, staging.path())?;
+    std::fs::rename(staging.path(), dst).with_context(|| {
+        format!(
+            "failed to move {} into place at {}",
+            staging.path().display(),
+            dst.display()
+        )
+    })
 }
 
 /// Recursively copy a directory tree from `src` to `dst`, creating `dst`.
@@ -6823,11 +6956,20 @@ pub fn is_sensitive_config_key(key: &str) -> bool {
             | "secrets"
             | "token"
             | "tokens"
-    ) || normalized.ends_with("_api_key")
-        || normalized.ends_with("_authorization")
+            | "cookie"
+            | "set_cookie"
+            | "sas"
+    ) || normalized.ends_with("_authorization")
+        || normalized.ends_with("_cookie")
         || normalized.ends_with("_password")
         || normalized.ends_with("_secret")
         || normalized.ends_with("_token")
+        // `*_key` covers `api_key`, `secret_key`, `access_key`,
+        // `private_key` and header spellings such as
+        // `Ocp-Apim-Subscription-Key`. Only names known to hold no secret
+        // are exempt.
+        || (normalized.ends_with("_key")
+            && !matches!(normalized.as_str(), "public_key" | "endpoint_key"))
 }
 
 /// Resolve dotted paths without treating a dotted key as a top-level literal.
@@ -7181,6 +7323,17 @@ struct EnvRuntimeOverrides {
     modelstudio_coding_plan_model: Option<String>,
 }
 
+/// The first of `names` that is set to a non-blank value. A variable exported
+/// empty (compose `${VAR:-}`, CI templates) must not shadow the legacy
+/// variable or the config file.
+fn env_non_blank(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
 impl EnvRuntimeOverrides {
     fn load() -> Self {
         let (provider, provider_source) = Self::load_provider();
@@ -7231,15 +7384,9 @@ impl EnvRuntimeOverrides {
             arcee_model: std::env::var("ARCEE_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            verbosity: std::env::var("CODEWHALE_VERBOSITY")
-                .or_else(|_| std::env::var("DEEPSEEK_VERBOSITY"))
-                .ok(),
-            auth_mode: std::env::var("CODEWHALE_AUTH_MODE")
-                .or_else(|_| std::env::var("DEEPSEEK_AUTH_MODE"))
-                .ok(),
-            log_level: std::env::var("CODEWHALE_LOG_LEVEL")
-                .or_else(|_| std::env::var("DEEPSEEK_LOG_LEVEL"))
-                .ok(),
+            verbosity: env_non_blank(&["CODEWHALE_VERBOSITY", "DEEPSEEK_VERBOSITY"]),
+            auth_mode: env_non_blank(&["CODEWHALE_AUTH_MODE", "DEEPSEEK_AUTH_MODE"]),
+            log_level: env_non_blank(&["CODEWHALE_LOG_LEVEL", "DEEPSEEK_LOG_LEVEL"]),
             telemetry,
             telemetry_env_invalid,
             telemetry_floor,
@@ -7252,12 +7399,11 @@ impl EnvRuntimeOverrides {
             telemetry_endpoint: std::env::var("CODEWHALE_TELEMETRY_ENDPOINT")
                 .or_else(|_| std::env::var("DEEPSEEK_TELEMETRY_ENDPOINT"))
                 .ok(),
-            approval_policy: std::env::var("CODEWHALE_APPROVAL_POLICY")
-                .or_else(|_| std::env::var("DEEPSEEK_APPROVAL_POLICY"))
-                .ok(),
-            sandbox_mode: std::env::var("CODEWHALE_SANDBOX_MODE")
-                .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_MODE"))
-                .ok(),
+            approval_policy: env_non_blank(&[
+                "CODEWHALE_APPROVAL_POLICY",
+                "DEEPSEEK_APPROVAL_POLICY",
+            ]),
+            sandbox_mode: env_non_blank(&["CODEWHALE_SANDBOX_MODE", "DEEPSEEK_SANDBOX_MODE"]),
             // `DEEPSEEK_YOLO` is a read-only deprecated alias of
             // `CODEWHALE_YOLO` so existing scripts keep working; when both are
             // set `CODEWHALE_YOLO` wins. The alias is removed in 0.10 per
@@ -7571,16 +7717,21 @@ impl EnvRuntimeOverrides {
     }
 
     fn load_provider() -> (Option<ProviderKind>, Option<&'static str>) {
-        if let Ok(value) = std::env::var("CODEWHALE_PROVIDER") {
-            let parsed = ProviderKind::parse_config_identity(&value);
-            return (parsed, parsed.map(|_| "CODEWHALE_PROVIDER"));
+        for name in ["CODEWHALE_PROVIDER", "DEEPSEEK_PROVIDER"] {
+            let Some(value) = env_non_blank(&[name]) else {
+                continue;
+            };
+            if let Some(parsed) = ProviderKind::parse_config_identity(&value) {
+                return (Some(parsed), Some(name));
+            }
+            // An unrecognized value used to be dropped silently, leaving the
+            // config provider in charge while the user believed the env var
+            // had switched it. Say so, then let the legacy variable apply.
+            tracing::warn!(
+                "{name} does not name a built-in provider and is ignored; \
+                 select a named custom provider with `provider` in config.toml"
+            );
         }
-
-        if let Ok(value) = std::env::var("DEEPSEEK_PROVIDER") {
-            let parsed = ProviderKind::parse_config_identity(&value);
-            return (parsed, parsed.map(|_| "DEEPSEEK_PROVIDER"));
-        }
-
         (None, None)
     }
 
