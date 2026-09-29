@@ -31,8 +31,9 @@ describe("/api/product-telemetry", () => {
     expect(EDGE_RUNTIME.test('export const runtime = "nodejs";')).toBe(false);
   });
 
-  // @opennextjs/cloudflare does not support the edge runtime; the deployed
-  // telemetry route answered every request with a 500 while it declared it.
+  // @opennextjs/cloudflare does not support the edge runtime (its migrate
+  // command says to remove the declaration). This is a source guard; it does
+  // not exercise the adapter or the deployed worker.
   it("no app route or page opts into the edge runtime", () => {
     const edge = sourceFiles(APP_DIR).filter((file) =>
       EDGE_RUNTIME.test(readFileSync(file, "utf8")),
