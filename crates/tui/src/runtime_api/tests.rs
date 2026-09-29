@@ -11168,6 +11168,142 @@ async fn skills_endpoint_includes_enabled_field() -> Result<()> {
 }
 
 #[tokio::test]
+async fn unicode_skill_activation_matches_api_load_and_owned_lifecycle() -> Result<()> {
+    use crate::tools::spec::{ToolContext, ToolSpec as _};
+
+    let _env = lock_test_env();
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("runtime");
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let _state_home = EnvVarGuard::set("CODEWHALE_HOME", &root);
+    let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", tmp.path().join("config.toml"));
+    crate::test_support::trust_workspace(&workspace);
+    let (original_dir, _) = create_managed_skill(&workspace, "技能")?;
+    create_managed_skill(&workspace, "分析")?;
+    create_managed_skill(&workspace, "skill")?;
+    let a = crate::skills::normalize_skill_name_for_lookup("技能");
+    let b = crate::skills::normalize_skill_name_for_lookup("分析");
+    assert_ne!(a, b);
+    let state_path = root.join("skills_state.toml");
+    let initial = b"disabled = [\"skill\"]\n";
+    fs::write(&state_path, initial)?;
+    let (addr, _threads, handle) = spawn_test_server_with_root_token_mobile_workspace(
+        root.clone(),
+        root.join("sessions"),
+        None,
+        false,
+        workspace.clone(),
+    )
+    .await?
+    .context("isolated skill API fixture requires loopback")?;
+    let client = crate::tls::reqwest_client();
+    let context =
+        ToolContext::new(&workspace).with_skills_config(workspace.join(".codewhale/skills"), false);
+    let tool = crate::tools::skill::LoadSkillTool;
+
+    let before: serde_json::Value = client
+        .get(format!("http://{addr}/v1/skills"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for name in [a.as_str(), b.as_str(), "skill"] {
+        let entry = before["skills"]
+            .as_array()
+            .context("skills")?
+            .iter()
+            .find(|skill| skill["name"] == name)
+            .context("discovered identity")?;
+        assert_eq!(entry["enabled"], false);
+    }
+    assert!(
+        tool.execute(json!({"name":"技能"}), &context)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(&state_path)?,
+        initial,
+        "listing/loading must not migrate state"
+    );
+
+    let raw_toggle = client
+        .post(format!("http://{addr}/v1/skills/技能"))
+        .json(&json!({"enabled":true}))
+        .send()
+        .await?;
+    assert_eq!(
+        raw_toggle.status(),
+        StatusCode::NOT_FOUND,
+        "toggle accepts exact catalog IDs only"
+    );
+    for name in [a.as_str(), "skill"] {
+        client
+            .post(format!("http://{addr}/v1/skills/{name}"))
+            .json(&json!({"enabled":true}))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+    let after: serde_json::Value = client
+        .get(format!("http://{addr}/v1/skills"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for (name, enabled) in [(a.as_str(), true), (b.as_str(), false), ("skill", true)] {
+        let entry = after["skills"]
+            .as_array()
+            .context("skills")?
+            .iter()
+            .find(|skill| skill["name"] == name)
+            .context("discovered identity")?;
+        assert_eq!(entry["enabled"], enabled);
+    }
+    for name in [a.as_str(), "技能", "skill"] {
+        let loaded = tool.execute(json!({"name":name}), &context).await?;
+        assert!(loaded.success);
+    }
+    assert!(
+        tool.execute(json!({"name":"分析"}), &context)
+            .await
+            .is_err()
+    );
+    let audit: serde_json::Value = client
+        .get(format!("http://{addr}/v1/skills/{a}/audit"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(audit["skills"][0]["name"], a);
+    assert!(original_dir.join("SKILL.md").is_file());
+    assert!(
+        !workspace.join(".codewhale/skills").join(&a).exists(),
+        "no directory rename"
+    );
+    client
+        .delete(format!("http://{addr}/v1/skills/{a}?scope=project"))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(
+        !original_dir.exists(),
+        "owned resolver must use the shared canonical identity"
+    );
+    assert!(workspace.join(".codewhale/skills/分析/SKILL.md").is_file());
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn skills_endpoint_exposes_safe_plugin_provenance_and_shared_toggle() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let root = tmp.path().join("runtime");
@@ -11405,6 +11541,7 @@ fn skill_entry_is_bundled_requires_configured_bundle_path() {
     .expect("write override skill");
 
     let bundled_skill = crate::skills::Skill {
+        legacy_activation_name: None,
         name: "delegate".to_string(),
         description: String::new(),
         localized_descriptions: std::collections::HashMap::new(),
@@ -11415,6 +11552,7 @@ fn skill_entry_is_bundled_requires_configured_bundle_path() {
         source: crate::skills::SkillSource::Native,
     };
     let override_skill = crate::skills::Skill {
+        legacy_activation_name: None,
         name: "delegate".to_string(),
         description: String::new(),
         localized_descriptions: std::collections::HashMap::new(),

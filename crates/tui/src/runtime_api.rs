@@ -3823,7 +3823,8 @@ async fn list_skills(
                 plugin_id,
                 plugin_generation,
                 plugin_content_hash,
-                enabled: skill_state.is_enabled(&skill.name),
+                enabled: skill_state
+                    .is_enabled_with_legacy(&skill.name, skill.legacy_activation_name.as_deref()),
                 is_bundled: skill_entry_is_bundled(skill, &skills_dir),
             }
         })
