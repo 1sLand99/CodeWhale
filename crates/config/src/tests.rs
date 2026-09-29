@@ -10474,11 +10474,10 @@ fn failed_legacy_state_copy_leaves_no_partial_primary() {
         !primary.exists(),
         "a failed copy must not create the primary"
     );
-    assert!(
-        !dir.path()
-            .join("primary")
-            .join(".sessions.migrating")
-            .exists()
+    assert_eq!(
+        fs::read_dir(primary.parent().unwrap()).unwrap().count(),
+        0,
+        "a failed copy removes only its owned staging directory"
     );
 
     copy_dir_into_place(&legacy, &primary).expect("retry succeeds");
@@ -10487,6 +10486,47 @@ fn failed_legacy_state_copy_leaves_no_partial_primary() {
         fs::read(primary.join("nested").join("b.json")).expect("b"),
         b"b"
     );
+}
+
+#[test]
+fn legacy_state_copy_preserves_another_attempts_staging_directory() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let legacy = root.path().join("legacy");
+    let primary = root.path().join("sessions");
+    let other_staging = root.path().join(".sessions.migrating");
+    fs::create_dir_all(&legacy).expect("legacy");
+    fs::create_dir_all(&other_staging).expect("other attempt");
+    fs::write(legacy.join("session.json"), b"source").expect("source");
+    fs::write(other_staging.join("in-flight.json"), b"other attempt").expect("marker");
+
+    copy_dir_into_place(&legacy, &primary).expect("copy");
+    assert_eq!(fs::read(primary.join("session.json")).unwrap(), b"source");
+    assert_eq!(
+        fs::read(other_staging.join("in-flight.json")).unwrap(),
+        b"other attempt"
+    );
+    assert!(legacy.join("session.json").exists());
+    let siblings: Vec<_> = fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(siblings.len(), 3, "only this attempt's staging is removed");
+}
+
+#[test]
+fn legacy_state_copy_preserves_a_completed_primary() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let legacy = root.path().join("legacy");
+    let primary = root.path().join("sessions");
+    fs::create_dir_all(&legacy).expect("legacy");
+    fs::create_dir_all(&primary).expect("completed primary");
+    fs::write(legacy.join("session.json"), b"legacy").expect("source");
+    fs::write(primary.join("session.json"), b"newer").expect("primary");
+
+    assert!(copy_dir_into_place(&legacy, &primary).is_err());
+    assert_eq!(fs::read(primary.join("session.json")).unwrap(), b"newer");
+    assert_eq!(fs::read(legacy.join("session.json")).unwrap(), b"legacy");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
 }
 
 #[cfg(unix)]

@@ -6121,6 +6121,12 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<LegacyStateM
                     }));
                 }
                 Err(copy_err) => {
+                    // A concurrent process may have completed the move/copy
+                    // after our initial check. Use that completed primary,
+                    // rather than resuming writes to the legacy tree.
+                    if primary.is_dir() {
+                        return Ok(LegacyStateMigration::NotNeeded);
+                    }
                     tracing::warn!(
                         target: "config::migration",
                         "Could not migrate legacy state {} -> {} (rename: {err}; copy: {copy_err:#}). \
@@ -6141,24 +6147,21 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<LegacyStateM
 fn copy_dir_into_place(src: &Path, dst: &Path) -> Result<()> {
     let mut staging_name = OsString::from(".");
     staging_name.push(dst.file_name().unwrap_or_default());
-    staging_name.push(".migrating");
-    let staging = dst.with_file_name(staging_name);
-    let clear_staging = || std::fs::remove_dir_all(&staging);
-    // A leftover from an interrupted earlier attempt; absent is the norm.
-    let _ = clear_staging();
-    let result = copy_dir_recursive(src, &staging).and_then(|()| {
-        std::fs::rename(&staging, dst).with_context(|| {
-            format!(
-                "failed to move {} into place at {}",
-                staging.display(),
-                dst.display()
-            )
-        })
-    });
-    if result.is_err() {
-        let _ = clear_staging();
-    }
-    result
+    staging_name.push(".migrating-");
+    // Each attempt owns only its unique private directory. A fixed sibling
+    // could be another process's active copy and must never be cleared.
+    let staging = tempfile::Builder::new().prefix(&staging_name).tempdir_in(
+        dst.parent()
+            .context("migration destination has no parent")?,
+    )?;
+    copy_dir_recursive(src, staging.path())?;
+    std::fs::rename(staging.path(), dst).with_context(|| {
+        format!(
+            "failed to move {} into place at {}",
+            staging.path().display(),
+            dst.display()
+        )
+    })
 }
 
 /// Recursively copy a directory tree from `src` to `dst`, creating `dst`.
