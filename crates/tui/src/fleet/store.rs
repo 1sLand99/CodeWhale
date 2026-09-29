@@ -714,15 +714,37 @@ pub fn save_fleet(
     fleet.validate()?;
     let dir = ensure_fleets_dir(scope, workspace)?;
     let path = dir.join(format!("{}.toml", fleet.file_slug()));
-    if path.is_file()
-        && let Ok(text) = fs::read_to_string(&path)
-        && let Ok(existing) = FleetFile::parse(&text)
-        && existing.name != fleet.name
-    {
-        return Err(FleetStoreError::NameTaken {
-            name: fleet.name.clone(),
+    if path.is_file() {
+        // Only a saved v2 Fleet of this same name may be replaced. A legacy
+        // or exact fleet file that shares the slug is migration input the
+        // user has not migrated yet; refuse instead of overwriting it.
+        let text = fs::read_to_string(&path).map_err(|e| FleetStoreError::Io {
             path: path.display().to_string(),
-        });
+            message: e.to_string(),
+        })?;
+        if !text.trim().is_empty() {
+            let existing = toml::from_str::<toml::Value>(&text).ok();
+            let field = |key: &str| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.get(key))
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string)
+            };
+            if field("schema").as_deref() != Some(FLEET_SCHEMA_KIND) {
+                return Err(FleetStoreError::Invalid(format!(
+                    "{} holds a fleet file that is not a saved Fleet (legacy or exact); it was left unchanged — migrate or rename it before saving `{}`",
+                    path.display(),
+                    fleet.name
+                )));
+            }
+            if field("name").as_deref() != Some(fleet.name.as_str()) {
+                return Err(FleetStoreError::NameTaken {
+                    name: fleet.name.clone(),
+                    path: path.display().to_string(),
+                });
+            }
+        }
     }
     let rendered = fleet.render_toml()?;
     atomic_write(&path, rendered.as_bytes())?;
@@ -1583,6 +1605,27 @@ members = []"#;
         other.members = fleet.members.clone();
         let err = save_fleet(&other, FleetScope::Workspace, ws.path()).unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");
+    }
+
+    #[test]
+    fn save_refuses_to_overwrite_a_legacy_fleet_file_of_the_same_slug() {
+        let _lock = crate::test_support::lock_test_env();
+        let ws = tempfile::TempDir::new().unwrap();
+        let dir = ws.path().join(".codewhale/fleets");
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy_path = dir.join("default.toml");
+        let legacy = "[roles.builder]\nmodel = \"deepseek-v4-flash\"\n";
+        std::fs::write(&legacy_path, legacy).unwrap();
+
+        let fleet = FleetFile::new("Default".to_string(), None).unwrap();
+        let err = save_fleet(&fleet, FleetScope::Workspace, ws.path()).unwrap_err();
+        assert!(err.to_string().contains("left unchanged"), "{err}");
+        assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), legacy);
+
+        // A saved v2 Fleet of the same name is still updated in place.
+        std::fs::remove_file(&legacy_path).unwrap();
+        save_fleet(&fleet, FleetScope::Workspace, ws.path()).expect("first save");
+        save_fleet(&fleet, FleetScope::Workspace, ws.path()).expect("re-save");
     }
 
     #[test]

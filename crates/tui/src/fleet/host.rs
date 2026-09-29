@@ -561,6 +561,13 @@ impl SshFleetHostConfig {
                 "SSH Fleet host requires an explicit host",
             ));
         }
+        // The destination is a single ssh argument. A leading '-' would be read
+        // as an ssh option, and whitespace/control characters would change what
+        // ssh or the remote shell receives.
+        validate_ssh_destination_part("host", &self.host)?;
+        if let Some(user) = self.user.as_ref().filter(|user| !user.trim().is_empty()) {
+            validate_ssh_destination_part("user", user)?;
+        }
         if self.codewhale_binary.trim().is_empty() {
             return Err(FleetHostError::configuration(
                 "SSH Fleet host requires an explicit codewhale binary path",
@@ -663,6 +670,8 @@ impl SshFleetHostAdapter {
             args.push("-i".to_string());
             args.push(identity.display().to_string());
         }
+        // End option parsing so the destination can never be read as an option.
+        args.push("--".to_string());
         args.push(self.config.target());
         args.push(self.remote_command(request));
         Ok(FleetWorkerCommand::new(
@@ -1405,6 +1414,19 @@ fn filtered_env(
         .collect())
 }
 
+fn validate_ssh_destination_part(label: &str, value: &str) -> FleetHostResult<()> {
+    if value.starts_with('-')
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return Err(FleetHostError::configuration(format!(
+            "SSH Fleet {label} must not start with '-' or contain whitespace or control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_env_allowlist(allowlist: &BTreeSet<String>) -> FleetHostResult<()> {
     for key in allowlist {
         if !is_safe_env_key(key) {
@@ -1442,17 +1464,45 @@ fn ssh_client_env() -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Non-secret process plumbing a worker needs to reach its provider and run
+/// at all: proxy routing, TLS trust roots, temp directories, the Windows
+/// profile roots, and locale. Everything else stays cleared.
+const WORKER_PASSTHROUGH_ENV: &[&str] = &[
+    "HOME",
+    "PATH",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "COMSPEC",
+    "ComSpec",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+];
+
 fn process_base_env() -> BTreeMap<String, String> {
+    base_env_from(|key| std::env::var(key).ok())
+}
+
+fn base_env_from(lookup: impl Fn(&str) -> Option<String>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
-    for key in [
-        "HOME",
-        "PATH",
-        "SYSTEMROOT",
-        "SystemRoot",
-        "COMSPEC",
-        "ComSpec",
-    ] {
-        if let Ok(value) = std::env::var(key) {
+    for &key in WORKER_PASSTHROUGH_ENV {
+        if let Some(value) = lookup(key) {
             env.insert(key.to_string(), value);
         }
     }
@@ -2103,6 +2153,81 @@ mod tests {
         assert!(argv.contains("/usr/local/bin/codewhale"));
         assert!(argv.contains("fleet-worker"));
         assert!(!argv.contains("super-secret-profile-value"));
+        // Option parsing ends right before the destination.
+        let target = command
+            .args
+            .iter()
+            .position(|arg| arg == "fleet@builder.example.test")
+            .expect("destination argument");
+        assert_eq!(command.args[target - 1], "--");
+    }
+
+    #[test]
+    fn fleet_host_ssh_refuses_option_like_or_malformed_destination() {
+        let tmp = TempDir::new().unwrap();
+        for host in [
+            "-oProxyCommand=true",
+            "builder example.test",
+            "builder\nexample.test",
+        ] {
+            let config = SshFleetHostConfig::new(host, "/srv/codewhale");
+            let err = SshFleetHostAdapter::new(tmp.path(), config)
+                .expect_err("malformed SSH host must be refused");
+            assert_eq!(err.kind, FleetHostErrorKind::Configuration, "{host:?}");
+            assert!(err.message.contains("SSH Fleet host"), "{}", err.message);
+        }
+        for user in ["-oProxyCommand=true", "fleet user", "fleet\tuser"] {
+            let mut config = SshFleetHostConfig::new("builder.example.test", "/srv/codewhale");
+            config.user = Some(user.to_string());
+            let err = SshFleetHostAdapter::new(tmp.path(), config)
+                .expect_err("malformed SSH user must be refused");
+            assert_eq!(err.kind, FleetHostErrorKind::Configuration, "{user:?}");
+            assert!(err.message.contains("SSH Fleet user"), "{}", err.message);
+        }
+        let spec = FleetHostSpec::Ssh {
+            host: "-oProxyCommand=true".to_string(),
+            port: None,
+            user: None,
+            identity: None,
+            known_hosts: None,
+            host_key_fingerprint: None,
+            working_directory: Some(PathBuf::from("/srv/codewhale")),
+            env_allowlist: Vec::new(),
+            codewhale_binary: Some("codewhale".to_string()),
+        };
+        assert!(SshFleetHostConfig::from_host_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn worker_base_env_keeps_network_and_temp_plumbing_but_not_secrets() {
+        let parent = BTreeMap::from([
+            ("HTTPS_PROXY", "http://proxy.example.test:8080"),
+            ("NO_PROXY", "localhost"),
+            ("SSL_CERT_FILE", "/etc/ssl/corp.pem"),
+            ("TEMP", "C:\\Temp"),
+            ("USERPROFILE", "C:\\Users\\fleet"),
+            ("DEEPSEEK_API_KEY", "secret"),
+            ("GITHUB_TOKEN", "secret"),
+        ]);
+        let env = base_env_from(|key| parent.get(key).map(|value| value.to_string()));
+        for key in [
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "SSL_CERT_FILE",
+            "TEMP",
+            "USERPROFILE",
+        ] {
+            assert_eq!(
+                env.get(key).map(String::as_str),
+                parent.get(key).copied(),
+                "{key} must reach the worker"
+            );
+        }
+        assert!(!env.contains_key("DEEPSEEK_API_KEY"));
+        assert!(!env.contains_key("GITHUB_TOKEN"));
+        for key in WORKER_PASSTHROUGH_ENV {
+            assert!(is_safe_env_key(key), "{key} must not look secret-bearing");
+        }
     }
 
     #[test]
