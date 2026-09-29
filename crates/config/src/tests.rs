@@ -10447,3 +10447,85 @@ fn blank_or_unrecognized_env_overrides_do_not_shadow_config_or_legacy_vars() {
         ProviderSource::Env("DEEPSEEK_PROVIDER")
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn failed_legacy_state_copy_leaves_no_partial_primary() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let legacy = dir.path().join("legacy-sessions");
+    let primary = dir.path().join("primary").join("sessions");
+    fs::create_dir_all(legacy.join("nested")).expect("legacy dir");
+    fs::create_dir_all(primary.parent().expect("parent")).expect("primary root");
+    fs::write(legacy.join("a.json"), b"a").expect("file a");
+    let unreadable = legacy.join("nested").join("b.json");
+    fs::write(&unreadable, b"b").expect("file b");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let readable_anyway = fs::read(&unreadable).is_ok();
+
+    let result = copy_dir_into_place(&legacy, &primary);
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).expect("chmod back");
+    if readable_anyway {
+        // Running as root: permissions cannot force the failure.
+        return;
+    }
+    assert!(result.is_err());
+    assert!(
+        !primary.exists(),
+        "a failed copy must not create the primary"
+    );
+    assert!(
+        !dir.path()
+            .join("primary")
+            .join(".sessions.migrating")
+            .exists()
+    );
+
+    copy_dir_into_place(&legacy, &primary).expect("retry succeeds");
+    assert_eq!(fs::read(primary.join("a.json")).expect("a"), b"a");
+    assert_eq!(
+        fs::read(primary.join("nested").join("b.json")).expect("b"),
+        b"b"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_state_dir_keeps_legacy_authoritative_until_migration_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = env_lock();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let state_env = StateDirEnv::install(unique);
+    fs::create_dir_all(state_env.legacy("sessions")).expect("legacy dir");
+    fs::write(state_env.legacy("sessions").join("old.json"), b"legacy").expect("legacy file");
+    let root = state_env.home.join(CODEWHALE_APP_DIR);
+    fs::create_dir_all(&root).expect("codewhale root");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).expect("chmod root");
+    let root_writable = fs::write(root.join("probe"), b"").is_ok();
+
+    let first = ensure_state_dir_with_migration("sessions");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("chmod back");
+    if !root_writable {
+        let (dir, migration) = first.expect("ensure_state_dir falls back to legacy");
+        assert_eq!(dir, state_env.legacy("sessions"));
+        assert!(migration.is_none());
+        assert!(!state_env.primary("sessions").exists());
+        assert_eq!(
+            resolve_state_dir("sessions").expect("resolve"),
+            state_env.legacy("sessions")
+        );
+
+        // Once the primary root is writable again the migration retries.
+        let (dir, migration) = ensure_state_dir_with_migration("sessions").expect("retry");
+        assert_eq!(dir, state_env.primary("sessions"));
+        assert!(migration.is_some());
+        assert_eq!(
+            fs::read(state_env.primary("sessions").join("old.json")).expect("migrated"),
+            b"legacy"
+        );
+    }
+    let _ = fs::remove_dir_all(&state_env.home);
+}

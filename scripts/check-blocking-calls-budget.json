@@ -35,7 +35,7 @@
   },
   "crates/config/src/lib.rs": {
     "path_canonicalize": 3,
-    "std_fs": 9
+    "std_fs": 11
   },
   "crates/config/src/redaction.rs": {
     "path_canonicalize": 2,

@@ -6031,30 +6031,47 @@ pub fn ensure_state_dir_with_migration(subdir: &str) -> Result<(PathBuf, Option<
     ensure_safe_state_subdir(subdir)?;
     let explicit_codewhale_home = codewhale_home_is_explicit();
     let dir = codewhale_home()?.join(subdir);
-    let migration = if !explicit_codewhale_home {
-        migrate_legacy_state_dir(&dir, subdir)?
-    } else {
+    let migration = if explicit_codewhale_home {
         None
+    } else {
+        match migrate_legacy_state_dir(&dir, subdir)? {
+            LegacyStateMigration::NotNeeded => None,
+            LegacyStateMigration::Migrated(migration) => Some(migration),
+            // Creating an empty primary here would make it authoritative and
+            // hide the legacy data for good. Keep using the legacy directory
+            // (the read resolver does the same) and retry on the next call.
+            LegacyStateMigration::Failed { legacy } => return Ok((legacy, None)),
+        }
     };
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create {}/", dir.display()))?;
     Ok((dir, migration))
 }
 
+enum LegacyStateMigration {
+    NotNeeded,
+    Migrated(StateMigration),
+    /// Neither the move nor the copy completed. The primary was left absent,
+    /// so the legacy directory stays authoritative and migration retries.
+    Failed {
+        legacy: PathBuf,
+    },
+}
+
 /// One-time relocation of a legacy `~/.deepseek/<subdir>` state directory into
 /// the primary `~/.codewhale/<subdir>` location (#3240). No-op once the primary
 /// exists, for the root sentinel `"."` (a whole-tree move is owned by the
 /// config-file migration), or when no legacy directory is present.
-fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<StateMigration>> {
+fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<LegacyStateMigration> {
     if primary.exists() || subdir == "." || subdir.is_empty() {
-        return Ok(None);
+        return Ok(LegacyStateMigration::NotNeeded);
     }
     let legacy = match legacy_deepseek_home() {
         Ok(home) => home.join(subdir),
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(LegacyStateMigration::NotNeeded),
     };
     if !legacy.exists() {
-        return Ok(None);
+        return Ok(LegacyStateMigration::NotNeeded);
     }
     // The primary's parent (the ~/.codewhale root) must exist for the rename.
     if let Some(parent) = primary.parent()
@@ -6075,7 +6092,7 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
                 legacy.display(),
                 primary.display()
             );
-            return Ok(Some(StateMigration {
+            return Ok(LegacyStateMigration::Migrated(StateMigration {
                 subdir: subdir.to_string(),
                 legacy_path: legacy,
                 primary_path: primary.to_path_buf(),
@@ -6087,7 +6104,7 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
             // recursive copy so the user keeps their data. The legacy tree is
             // left in place; it stops growing because writes now target the
             // primary path.
-            match copy_dir_recursive(&legacy, primary) {
+            match copy_dir_into_place(&legacy, primary) {
                 Ok(()) => {
                     tracing::info!(
                         target: "config::migration",
@@ -6096,7 +6113,7 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
                         legacy.display(),
                         primary.display()
                     );
-                    return Ok(Some(StateMigration {
+                    return Ok(LegacyStateMigration::Migrated(StateMigration {
                         subdir: subdir.to_string(),
                         legacy_path: legacy,
                         primary_path: primary.to_path_buf(),
@@ -6106,8 +6123,8 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
                 Err(copy_err) => {
                     tracing::warn!(
                         target: "config::migration",
-                        "Could not migrate legacy state {} -> {} (rename: {err}; copy: {copy_err}). \
-                         New data is written to the primary path; the legacy tree remains untouched.",
+                        "Could not migrate legacy state {} -> {} (rename: {err}; copy: {copy_err:#}). \
+                         The legacy path stays in use and migration retries next time.",
                         legacy.display(),
                         primary.display()
                     );
@@ -6115,7 +6132,33 @@ fn migrate_legacy_state_dir(primary: &Path, subdir: &str) -> Result<Option<State
             }
         }
     }
-    Ok(None)
+    Ok(LegacyStateMigration::Failed { legacy })
+}
+
+/// Copy `src` to a staging sibling of `dst` and rename it into place, so a
+/// copy that fails midway never leaves a partial `dst` that later runs would
+/// treat as a completed migration.
+fn copy_dir_into_place(src: &Path, dst: &Path) -> Result<()> {
+    let mut staging_name = OsString::from(".");
+    staging_name.push(dst.file_name().unwrap_or_default());
+    staging_name.push(".migrating");
+    let staging = dst.with_file_name(staging_name);
+    let clear_staging = || std::fs::remove_dir_all(&staging);
+    // A leftover from an interrupted earlier attempt; absent is the norm.
+    let _ = clear_staging();
+    let result = copy_dir_recursive(src, &staging).and_then(|()| {
+        std::fs::rename(&staging, dst).with_context(|| {
+            format!(
+                "failed to move {} into place at {}",
+                staging.display(),
+                dst.display()
+            )
+        })
+    });
+    if result.is_err() {
+        let _ = clear_staging();
+    }
+    result
 }
 
 /// Recursively copy a directory tree from `src` to `dst`, creating `dst`.
