@@ -23046,6 +23046,119 @@ async fn continuing_a_child_whose_worktree_was_removed_fails_with_the_reason() {
     );
 }
 
+/// A finished worker's unchanged worktree is removed on the blocking pool, and
+/// an interrupt can win while that runs. A continuation started then passed
+/// the existence check and could lose its directory to the removal. It now
+/// waits until the claimed removal has settled.
+#[tokio::test]
+async fn continuation_is_refused_while_its_worktree_removal_is_claimed() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("worktree");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let (agent_id, claim) = {
+        let mut guard = manager.write().await;
+        let (id, _) = guard.insert_test_interrupted_continuable_agent(
+            "claimed",
+            &workspace,
+            vec![text_message("user", "prior work")],
+        );
+        let claim = guard
+            .claim_worktree_cleanup(&id, &workspace)
+            .expect("the removal is claimed");
+        assert!(
+            guard.claim_worktree_cleanup(&id, &workspace).is_none(),
+            "one removal per path at a time"
+        );
+        (id, claim)
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+
+    let refused = {
+        let mut guard = manager.write().await;
+        guard.continue_child_from_user(
+            Arc::clone(&manager),
+            Some(runtime.clone()),
+            &agent_id,
+            "more",
+        )
+    };
+    let err = refused.expect_err("no successor starts while the removal is claimed");
+    assert!(err.to_string().contains("checked for removal"), "{err}");
+    assert_eq!(manager.read().await.agents.len(), 1);
+
+    drop(claim);
+    let resumed = {
+        let mut guard = manager.write().await;
+        guard.continue_child_from_user(Arc::clone(&manager), Some(runtime), &agent_id, "more")
+    };
+    resumed.expect("continues once the removal settled and kept the workspace");
+    assert!(workspace.is_dir());
+    assert_eq!(manager.read().await.agents.len(), 2);
+}
+
+/// The removal decides when it runs, not when its inputs were read before
+/// the terminal commit: a worker an interrupt made continuable in between
+/// keeps its worktree, and a completed one's is removed.
+#[tokio::test]
+async fn finished_worktree_removal_keeps_a_worker_that_became_continuable() {
+    let (_harness, repo) = git_repo_in_harness();
+    let make = |name: &str| {
+        create_isolated_worktree(
+            &repo,
+            &SubAgentWorktreeRequest {
+                branch: Some(format!("codex/agent-{name}")),
+                path: Some(PathBuf::from(name)),
+                base_ref: None,
+            },
+            Some(name),
+            &FleetRole::Builder,
+        )
+        .expect("worktree should be created")
+    };
+    let kept = make("interrupted");
+    let removed = make("completed");
+    let manager = new_shared_subagent_manager(repo.clone(), 4);
+    let (interrupted_id, completed_id, claims) = {
+        let mut guard = manager.write().await;
+        let (interrupted_id, _) = guard.insert_test_interrupted_continuable_agent(
+            "interrupted",
+            &kept,
+            vec![text_message("user", "prior work")],
+        );
+        let completed_id = guard.insert_test_running_agent("completed", &removed);
+        guard.agents.get_mut(&completed_id).expect("agent").status = SubAgentStatus::Completed;
+        let claims = (
+            guard
+                .claim_worktree_cleanup(&interrupted_id, &kept)
+                .expect("claim"),
+            guard
+                .claim_worktree_cleanup(&completed_id, &removed)
+                .expect("claim"),
+        );
+        (interrupted_id, completed_id, claims)
+    };
+    let shared = Arc::clone(&manager);
+    let outcome = tokio::task::spawn_blocking(move || {
+        let empty = std::collections::BTreeSet::new();
+        (
+            remove_finished_worktree(&shared, &interrupted_id, claims.0, Some(&empty)),
+            remove_finished_worktree(&shared, &completed_id, claims.1, Some(&empty)),
+        )
+    })
+    .await
+    .expect("blocking removal");
+    assert_eq!(outcome, (false, true));
+    assert!(kept.is_dir(), "the continuable worker keeps its worktree");
+    assert!(!removed.exists(), "the completed worker's is removed");
+    let guard = manager.read().await;
+    assert!(
+        !guard.worktree_cleanup_pending(&kept) && !guard.worktree_cleanup_pending(&removed),
+        "both claims are released"
+    );
+}
+
 /// A spawn refused after its isolated worktree was created used to leave the
 /// checkout and its branch behind, one more per failed attempt.
 #[tokio::test]

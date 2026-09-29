@@ -3737,6 +3737,12 @@ pub struct SubAgentManager {
     /// the same interrupted id returns the existing resumed target instead of
     /// spawning a duplicate agent loop (duplicate-resume guard).
     resume_targets: HashMap<String, String>,
+    /// Isolated worktrees whose finished-worker removal is claimed and may be
+    /// running on the blocking pool. Continuation refuses these paths until
+    /// the removal settles, so a successor never starts in a directory that
+    /// is about to be deleted. Shared so the blocking task releases its claim
+    /// without the manager lock, even when the awaiting task was aborted.
+    worktree_cleanups: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
     /// Approval prompts raised on a child's behalf under Ask: the approval id
     /// the host sees (`agent:<agent_id>:approval:<boot_id>:<n>`) → the
     /// waiting child. The engine
@@ -4228,6 +4234,7 @@ impl SubAgentManager {
             woken_agents: HashMap::new(),
             pending_handle_evictions: Vec::new(),
             resume_targets: HashMap::new(),
+            worktree_cleanups: Arc::default(),
             child_approvals: HashMap::new(),
             child_approval_seq: 0,
             reported_pending: HashSet::new(),
@@ -6159,6 +6166,43 @@ impl SubAgentManager {
         false
     }
 
+    /// Claim `workspace` for removing `worker_id`'s unchanged isolated
+    /// worktree. Taken under the manager lock, so it is ordered against
+    /// continuation, which checks [`Self::worktree_cleanup_pending`] under the
+    /// write lock. `None` when another running agent works in that directory
+    /// or a removal of it is already claimed.
+    fn claim_worktree_cleanup(
+        &self,
+        worker_id: &str,
+        workspace: &Path,
+    ) -> Option<WorktreeCleanupClaim> {
+        let shared = self.agents.iter().any(|(id, agent)| {
+            id != worker_id
+                && agent.status == SubAgentStatus::Running
+                && agent.workspace == workspace
+        });
+        if shared {
+            return None;
+        }
+        let mut cleanups = self
+            .worktree_cleanups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cleanups
+            .insert(workspace.to_path_buf())
+            .then(|| WorktreeCleanupClaim {
+                cleanups: Arc::clone(&self.worktree_cleanups),
+                workspace: workspace.to_path_buf(),
+            })
+    }
+
+    fn worktree_cleanup_pending(&self, workspace: &Path) -> bool {
+        self.worktree_cleanups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(workspace)
+    }
+
     /// Snapshot everything delivery verification needs. `None` when there is
     /// no record, verification already ran, or the result is not terminal.
     /// Pure reads for the read lock in `ensure_worker_delivery_verified`
@@ -6919,6 +6963,15 @@ impl SubAgentManager {
                 "Cannot resume agent {agent_id}: sub-agent depth limit reached (current {}, max {})",
                 runtime.spawn_depth,
                 runtime.max_spawn_depth
+            ));
+        }
+        // A finished worker's unchanged worktree may be mid-removal on the
+        // blocking pool (an interrupt can win after that removal started).
+        // A successor started now could lose its directory underneath it.
+        if self.worktree_cleanup_pending(&workspace) {
+            return Err(anyhow!(
+                "Cannot resume agent {agent_id}: its workspace {} is being checked for removal as an unchanged isolated worktree; retry the follow-up in a moment.",
+                workspace.display()
             ));
         }
         // A checkpoint outlives its workspace (a finished worker's unchanged
@@ -12334,18 +12387,24 @@ async fn ensure_worker_delivery_verified(
     worker_id: &str,
     result: &SubAgentResult,
 ) {
-    let inputs = {
+    let (inputs, cleanup) = {
         let manager = manager.read().await;
         let Some(inputs) = manager.delivery_verification_inputs(worker_id, result) else {
             return;
         };
-        inputs
+        let cleanup = inputs
+            .remove_worktree_if_unchanged
+            .then(|| manager.claim_worktree_cleanup(worker_id, &inputs.workspace))
+            .flatten();
+        (inputs, cleanup)
     };
+    let shared = Arc::clone(manager);
+    let worker = worker_id.to_string();
     let verification = tokio::task::spawn_blocking(move || {
         let mut verification = delivery::compute_delivery_verification(&inputs);
-        if inputs.remove_worktree_if_unchanged {
+        if let Some(claim) = cleanup {
             let changed = inputs.evidence.changed_paths(&inputs.workspace);
-            if worktree::remove_unchanged_worktree(&inputs.workspace, changed.as_ref()) {
+            if remove_finished_worktree(&shared, &worker, claim, changed.as_ref()) {
                 verification
                     .summary
                     .push_str(" The worker's isolated worktree changed nothing and was removed.");
@@ -12362,6 +12421,44 @@ async fn ensure_worker_delivery_verified(
         .write()
         .await
         .store_delivery_verification(worker_id, verification);
+}
+
+/// A claimed removal of a finished worker's isolated worktree; dropping it
+/// releases the claim, also when the removal panics.
+struct WorktreeCleanupClaim {
+    cleanups: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
+    workspace: PathBuf,
+}
+
+impl Drop for WorktreeCleanupClaim {
+    fn drop(&mut self) {
+        self.cleanups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.workspace);
+    }
+}
+
+/// Remove `worker_id`'s unchanged isolated worktree under `claim`. Runs on
+/// the blocking pool. The inputs were read before the terminal commit, and an
+/// interrupt can win after that: the worker is then continuable again, so its
+/// workspace is kept. The claim keeps a continuation from starting until this
+/// decision and the removal are done. The manager lock is released before git
+/// runs.
+fn remove_finished_worktree(
+    manager: &SharedSubAgentManager,
+    worker_id: &str,
+    claim: WorktreeCleanupClaim,
+    changed: Option<&BTreeSet<String>>,
+) -> bool {
+    let continuable = manager
+        .blocking_read()
+        .agents
+        .get(worker_id)
+        .is_some_and(|agent| matches!(agent.status, SubAgentStatus::Interrupted(_)));
+    let removed = !continuable && worktree::remove_unchanged_worktree(&claim.workspace, changed);
+    drop(claim);
+    removed
 }
 
 fn budget_partial_result_with_note(

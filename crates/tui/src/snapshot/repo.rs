@@ -692,33 +692,35 @@ impl SnapshotRepo {
         if self.is_commit(&missing)? {
             return Ok(false);
         }
+        self.reset_missing_head(&missing)
+    }
+
+    /// Move HEAD off `missing`, a commit id it named when this repair looked.
+    /// Both moves are compare-and-swap against `missing`: a writer that does
+    /// not take the snapshot lock (an older build) may have published a valid
+    /// snapshot since, and neither the reflog reset nor the delete may then
+    /// overwrite it. A refused reset is reported, never followed by a delete.
+    fn reset_missing_head(&self, missing: &str) -> io::Result<bool> {
         // The newest reflog entry that still names a commit keeps the
         // restore points before the break.
-        if let Some(recovered) = self.newest_reflog_commit(&missing)? {
-            let reset = run_git(
-                &self.git_dir,
-                &self.work_tree,
-                &["update-ref", "HEAD", &recovered],
-            )?;
-            if reset.status.success() {
-                tracing::warn!(
-                    target: "snapshot",
-                    "snapshot history HEAD pointed at missing commit {missing}; reset to {recovered} from the reflog"
-                );
-                return Ok(false);
-            }
+        if let Some(recovered) = self.newest_reflog_commit(missing)? {
+            self.move_head(Some(&recovered), Some(missing))
+                .map_err(|error| {
+                    io_other(format!(
+                        "snapshot history HEAD pointed at missing commit {missing} and was not reset to {recovered}: {error}"
+                    ))
+                })?;
+            tracing::warn!(
+                target: "snapshot",
+                "snapshot history HEAD pointed at missing commit {missing}; reset to {recovered} from the reflog"
+            );
+            return Ok(false);
         }
-        let delete = run_git(
-            &self.git_dir,
-            &self.work_tree,
-            &["update-ref", "-d", "HEAD"],
-        )?;
-        if !delete.status.success() {
-            return Err(io_other(format!(
-                "snapshot history HEAD points at missing commit {missing} and could not be reset: {}",
-                String::from_utf8_lossy(&delete.stderr).trim()
-            )));
-        }
+        self.move_head(None, Some(missing)).map_err(|error| {
+            io_other(format!(
+                "snapshot history HEAD points at missing commit {missing} and could not be reset: {error}"
+            ))
+        })?;
         tracing::warn!(
             target: "snapshot",
             "snapshot history HEAD pointed at missing commit {missing}; started a fresh history"
@@ -1470,8 +1472,21 @@ impl SnapshotRepo {
         current_paths: &HashSet<PathBuf>,
         target_paths: &HashSet<PathBuf>,
     ) -> io::Result<()> {
-        for rel in current_paths.difference(target_paths) {
-            if !is_safe_relative_path(rel) {
+        let removals: Vec<&PathBuf> = current_paths
+            .difference(target_paths)
+            .filter(|rel| is_safe_relative_path(rel))
+            .collect();
+        // The removal list comes from the side repo, not the live tree. When
+        // the pre-restore safety snapshot failed it is the previous HEAD's, so
+        // a directory it names can have been replaced by a symlink since, and
+        // `remove_file` would follow it and delete outside the workspace.
+        // Refuse the whole removal before deleting anything.
+        for rel in &removals {
+            self.removal_parent_is_real(rel)?;
+        }
+        for rel in removals {
+            // Checked again next to the delete: the tree is live.
+            if !self.removal_parent_is_real(rel)? {
                 continue;
             }
             let path = self.work_tree.join(rel);
@@ -1486,6 +1501,32 @@ impl SnapshotRepo {
             self.prune_empty_parent_dirs(path.parent());
         }
         Ok(())
+    }
+
+    /// Whether every directory between the work tree and `rel` is a real
+    /// directory. `Ok(false)`: one is missing, so `rel` is gone too. An
+    /// ancestor that is a symlink or a file is an `InvalidInput` refusal.
+    fn removal_parent_is_real(&self, rel: &Path) -> io::Result<bool> {
+        let mut dir = self.work_tree.clone();
+        for part in rel.parent().into_iter().flat_map(Path::components) {
+            dir.push(part);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.file_type().is_dir() => {}
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "restore refuses to remove '{}': '{}' is no longer a directory (a symlink could lead outside the workspace)",
+                            rel.display(),
+                            dir.strip_prefix(&self.work_tree).unwrap_or(&dir).display()
+                        ),
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
     }
 
     fn prune_empty_parent_dirs(&self, mut dir: Option<&Path>) {
@@ -2463,6 +2504,48 @@ mod tests {
         );
     }
 
+    /// When the pre-restore safety snapshot fails, the removal list is the
+    /// previous HEAD's. A directory it names that was replaced by a symlink
+    /// since used to be followed, deleting the same-named file outside the
+    /// workspace (reachable once restore to an empty tree skipped checkout).
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_to_remove_through_a_symlinked_parent() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let empty = repo.snapshot("pre-turn:1").expect("empty snapshot");
+        let src = repo.work_tree().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("victim"), b"inside").unwrap();
+        repo.snapshot("post-turn:1")
+            .expect("snapshot holding src/victim");
+
+        let outside = tempdir().unwrap();
+        let sentinel = outside.path().join("victim");
+        std::fs::write(&sentinel, b"outside").unwrap();
+        std::fs::remove_dir_all(&src).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &src).unwrap();
+        // A stale index lock makes the pre-restore safety snapshot fail, so
+        // restore works from the previous HEAD's path list.
+        std::fs::write(repo.git_dir().join("index.lock"), b"").unwrap();
+
+        let err = repo
+            .restore(&empty)
+            .expect_err("a removal through a symlinked parent is refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"outside",
+            "the file outside the workspace survives"
+        );
+        assert!(
+            std::fs::symlink_metadata(&src)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     /// Every session, turn and sub-agent in a workspace shares its side repo.
     /// A snapshot must wait while another writer holds the repo's write lock
     /// instead of racing its index, HEAD and gc.
@@ -2665,6 +2748,34 @@ mod tests {
         repo.move_head(Some(first.as_str()), Some(second.as_str()))
             .expect("the expected commit moves");
         assert_eq!(repo.list(1).unwrap()[0].id, first);
+    }
+
+    /// HEAD repair looks up a missing commit, then moves HEAD off it. A peer
+    /// that published a snapshot in between used to be overwritten by the
+    /// reflog reset or deleted by the fresh-history fallback; both moves now
+    /// require HEAD to still name the missing commit.
+    #[test]
+    fn head_repair_leaves_a_peers_new_snapshot_alone() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        std::fs::write(repo.work_tree().join("f.txt"), b"v1").unwrap();
+        repo.snapshot("pre-turn:1").expect("snapshot 1");
+        std::fs::write(repo.work_tree().join("f.txt"), b"v2").unwrap();
+        let peer = repo.snapshot("post-turn:peer").expect("peer snapshot");
+        let missing = "1111111111111111111111111111111111111111";
+
+        repo.reset_missing_head(missing)
+            .expect_err("the reflog reset checks HEAD still names the missing commit");
+        assert_eq!(repo.list(1).unwrap()[0].id, peer, "HEAD is unchanged");
+
+        std::fs::remove_dir_all(repo.git_dir().join("logs")).unwrap();
+        repo.reset_missing_head(missing)
+            .expect_err("the fresh-history delete checks it too");
+        assert_eq!(
+            repo.list(1).unwrap()[0].id,
+            peer,
+            "the peer's snapshot stays"
+        );
     }
 
     /// A prune rebuilds the survivors it listed. If another writer committed
