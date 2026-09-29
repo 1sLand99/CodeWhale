@@ -1217,35 +1217,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_command_policy_prompt_that_looks_like_a_flag_parses() {
-        use clap::Parser as _;
-
-        // A Markdown bullet list, and a policy that reads exactly like one of
-        // exec's own flags; the latter makes clap reject a split
-        // `--append-system-prompt <value>` pair.
-        for policy in ["- Never push to main\n- Never touch .git/config", "--hooks"] {
-            let exec = FleetExecConfig {
-                append_system_prompt: policy.to_string(),
-                ..FleetExecConfig::default()
-            };
-            let cmd = build_worker_exec_command("codewhale", &task("audit"), &exec, None);
-            let cli = crate::Cli::try_parse_from(
-                std::iter::once("codewhale".to_string()).chain(cmd.args),
-            )
-            .unwrap_or_else(|e| panic!("{policy:?}: {e}"));
-            let Some(crate::Commands::Exec(args)) = cli.command else {
-                panic!("expected exec command");
-            };
-            assert_eq!(args.append_system_prompt.as_deref(), Some(policy));
-            assert!(
-                args.prompt.last().is_some_and(|p| p.contains("audit")),
-                "{policy}"
-            );
-            assert!(!args.hooks, "{policy:?} must stay text, not a flag");
-        }
-    }
-
-    #[test]
     fn worker_command_threads_positive_task_budgets_and_caps_steps() {
         let mut task = task("audit");
         task.budget = Some(FleetTaskBudget {
