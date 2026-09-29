@@ -3902,9 +3902,9 @@ pub fn load_project_config_outcome(workspace: &Path) -> ProjectConfigOutcome {
                 );
                 return ProjectConfigOutcome::Invalid {
                     path,
-                    // `toml`'s message names the offending key and span
-                    // without echoing the file, so it is safe to surface.
-                    reason: err.message().to_string(),
+                    // Position only: `toml`'s message and snippet can quote
+                    // the offending value, which may be a credential.
+                    reason: format!("invalid TOML at {}", config_toml_error_location(&raw, &err)),
                 };
             }
         }
@@ -5270,6 +5270,55 @@ fn parse_config_toml_canonical(
     Ok((config, receipt))
 }
 
+/// Where a TOML error sits: `line L, column C` in `source` (the exact text
+/// that was parsed), plus the key path when the deserializer recorded one.
+///
+/// Never the error's message or source snippet: both can quote the offending
+/// value (`invalid type: string "sk-…", expected a boolean`), and config and
+/// permissions files hold credentials. Pass `None` for `source` when the
+/// span refers to text the user did not write.
+#[must_use]
+pub fn toml_error_location(source: Option<&str>, err: &toml::de::Error) -> String {
+    let position = source.zip(err.span()).map(|(source, span)| {
+        let mut start = span.start.min(source.len());
+        while !source.is_char_boundary(start) {
+            start -= 1;
+        }
+        let before = &source[..start];
+        let line = before.matches('\n').count() + 1;
+        let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        format!("line {line}, column {column}")
+    });
+    // Without its input, `toml` renders exactly `{message}\n` followed by
+    // ``in `{keys}`\n`` when it recorded a key path; take only the latter.
+    let mut detached = err.clone();
+    detached.set_input(None);
+    let rendered = detached.to_string();
+    let key_path = rendered
+        .strip_prefix(err.message())
+        .and_then(|rest| rest.strip_prefix("\nin `"))
+        .and_then(|rest| rest.strip_suffix("`\n"))
+        .filter(|keys| !keys.is_empty())
+        .map(|keys| format!("in `{}`", codewhale_secrets::redact::redact_secrets(keys)));
+    match (position, key_path) {
+        (Some(position), Some(keys)) => format!("{position}, {keys}"),
+        (Some(position), None) => position,
+        (None, Some(keys)) => keys,
+        (None, None) => "position unknown".to_string(),
+    }
+}
+
+/// [`toml_error_location`] for an error from [`parse_config_toml_with_receipt`].
+/// A file with legacy top-level keys is parsed from a rewritten copy whose
+/// offsets name nothing the user wrote, so only the key path is reported.
+fn config_toml_error_location(raw: &str, err: &toml::de::Error) -> String {
+    let rewritten = matches!(
+        legacy_root::canonicalize_text(raw),
+        Ok((std::borrow::Cow::Owned(_), _))
+    );
+    toml_error_location((!rewritten).then_some(raw), err)
+}
+
 /// Parse any `config.toml`-shaped document into [`ConfigToml`], moving legacy
 /// top-level `base_url` / `api_key` into their provider tables first. Every
 /// caller outside this crate (bundle import, tests) parses through here so a
@@ -5291,16 +5340,18 @@ impl ConfigStore {
         let path = resolve_config_path(path)?;
         let (config, original_raw, legacy_root) = if checked_path_exists(&path)? {
             let raw = read_checked_config_file(&path)?;
-            let (mut parsed, receipt) = parse_config_toml_with_receipt(&raw).map_err(|_| {
+            let (mut parsed, receipt) = parse_config_toml_with_receipt(&raw).map_err(|err| {
                 anyhow::anyhow!(
-                    "failed to parse config at {}; file contents were omitted",
-                    quote_os_path(&path)
+                    "failed to parse config at {} ({}); file contents were omitted",
+                    quote_os_path(&path),
+                    config_toml_error_location(&raw, &err)
                 )
             })?;
-            let raw_document: toml::Value = toml::from_str(&raw).map_err(|_| {
+            let raw_document: toml::Value = toml::from_str(&raw).map_err(|err| {
                 anyhow::anyhow!(
-                    "failed to parse config at {}; file contents were omitted",
-                    quote_os_path(&path)
+                    "failed to parse config at {} ({}); file contents were omitted",
+                    quote_os_path(&path),
+                    toml_error_location(Some(&raw), &err)
                 )
             })?;
             if let Some(provider_id) = raw_document.get("provider").and_then(toml::Value::as_str) {
@@ -6448,10 +6499,11 @@ fn read_permissions_state(path: &Path) -> Result<(bool, String, PermissionsToml)
     let permissions = if raw.trim().is_empty() {
         PermissionsToml::default()
     } else {
-        toml::from_str(&raw).map_err(|_| {
+        toml::from_str(&raw).map_err(|err| {
             anyhow::anyhow!(
-                "failed to parse permissions at {}; file contents were omitted",
-                quote_os_path(path)
+                "failed to parse permissions at {} ({}); file contents were omitted",
+                quote_os_path(path),
+                toml_error_location(Some(&raw), &err)
             )
         })?
     };

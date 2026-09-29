@@ -4215,6 +4215,60 @@ fn config_store_load_fails_on_malformed_config_without_touching_file() {
 }
 
 #[test]
+fn toml_errors_name_line_and_column_but_never_the_value() {
+    // A type error's message quotes the string (`invalid type: string "…"`)
+    // and a syntax error's snippet quotes the whole line; both can carry a
+    // credential, so every layer reports only where the error is.
+    let canary = "LEAKCANARY0123456789";
+    let secret = format!("sk-live-{canary}");
+    let cases = [
+        (
+            format!("model = \"x\"\ntelemetry = \"{secret}\"\n"),
+            "line 2, column 13, in `telemetry`",
+        ),
+        (
+            format!("model = \"x\"\n\n[providers.xai]\napi_key = \"{secret}\" junk\n"),
+            "line 4, column",
+        ),
+    ];
+    for (body, location) in &cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(&config_path, body).expect("write config");
+        let error = format!(
+            "{:#}",
+            ConfigStore::load(Some(config_path)).expect_err("invalid config")
+        );
+        assert!(!error.contains(canary), "{error}");
+        assert!(error.contains(location), "{error}");
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let project_dir = workspace.path().join(CODEWHALE_APP_DIR);
+        fs::create_dir_all(&project_dir).expect("project dir");
+        fs::write(project_dir.join(CONFIG_FILE_NAME), body).expect("write project config");
+        let outcome = load_project_config_outcome(workspace.path());
+        let (_, reason) = outcome.invalid().expect("invalid project config");
+        assert!(!reason.contains(canary), "{reason}");
+        assert!(reason.contains(location), "{reason}");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(&config_path, "model = \"x\"\n").expect("write config");
+    fs::write(
+        dir.path().join(PERMISSIONS_FILE_NAME),
+        format!("[[rules]]\ntool = \"{secret}\" junk\n"),
+    )
+    .expect("write permissions");
+    let error = format!(
+        "{:#}",
+        load_permissions_snapshot(Some(config_path)).expect_err("invalid permissions")
+    );
+    assert!(!error.contains(canary), "{error}");
+    assert!(error.contains("line 2, column"), "{error}");
+}
+
+#[test]
 fn config_store_rendered_body_preserves_comments_at_legacy_deepseek_path() {
     // #3410 legacy case: a config still living under `.deepseek/` keeps its
     // comments when written back through a transaction at the same path.
