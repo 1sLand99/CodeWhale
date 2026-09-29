@@ -132,7 +132,23 @@ impl App {
         }
         let selected = startup_config.apply_saved_selection(&settings);
         let config = &startup_config;
-        let model = if selected {
+        // First launch writes `default_text_model = DEFAULT_TEXT_MODEL` into
+        // the generated config.toml; that line is the template, not a choice,
+        // so it must not turn off local discovery on a later launch.
+        let generated_default_model = config.provider.is_none()
+            && config.default_text_model.as_deref() == Some(DEFAULT_TEXT_MODEL);
+        let startup_route_configured = config.provider.is_some()
+            || (config.default_text_model.is_some() && !generated_default_model)
+            || config.legacy_model.is_some()
+            || crate::config::explicit_launch_provider_override().is_some()
+            || crate::config::explicit_launch_model_override().is_some()
+            || config
+                .provider_config_for(config.api_provider())
+                .is_some_and(|entry| entry.model.is_some())
+            || config.active_route_endpoint_configured();
+        // Provider and model come from the same resolved config, even on the
+        // first run. An options default must not replace a configured model.
+        let model = if selected || startup_route_configured {
             config.default_model()
         } else {
             model
@@ -165,9 +181,7 @@ impl App {
                 .active_provider_identity(provider)
                 .unwrap_or_else(|_| {
                     let key = config.provider_identity_for(provider);
-                    let exact_id = (!(provider == ApiProvider::Custom
-                        && config.uses_legacy_literal_custom_route()))
-                    .then(|| key.clone());
+                    let exact_id = Some(key.clone());
                     crate::config::ProviderIdentity {
                         provider,
                         key,
@@ -949,6 +963,11 @@ impl App {
             agent_activity_started_at: None,
             agent_counter: 0,
             agent_label_map: HashMap::new(),
+            background_finished: Vec::new(),
+            finished_shell_ids: HashMap::new(),
+            notified_shell_ids: HashSet::new(),
+            notified_task_ids: HashSet::new(),
+            subagent_cache_received_at: None,
             agent_focus: None,
             agent_queued_follow_ups: HashMap::new(),
             last_agent_progress_redraw: None,
@@ -962,6 +981,7 @@ impl App {
             redaction_gate_confirming: false,
             redaction_gate_scroll: std::cell::Cell::new(0),
             onboarding_needs_api_key: needs_api_key,
+            startup_route_configured,
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
             onboarding_missing_key_recovery,
@@ -1109,6 +1129,7 @@ impl App {
             workspace_context_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
             workspace_context_refreshed_at: None,
             memory_size_hint: None,
+            workspace_notes: Vec::new(),
             task_panel: Vec::new(),
             task_panel_session_id: None,
             task_panel_unavailable: false,

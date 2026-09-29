@@ -421,13 +421,29 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
     candidate == config_path || candidate == backup_path
 }
 
-/// Return whether `read_file` must refuse a CodeWhale-owned credential file.
+/// Resolve a model-supplied path for an in-process read, applying every read
+/// guard in the one safe order: the deny-list on the caller's raw spelling
+/// (so a denial never names a symlink target), then `resolve_path`, then the
+/// credential-store check and the deny-list again on the resolved path.
 ///
-/// This is deliberately scoped to the active config, the two conventional
-/// config locations (including one-time backups), and CodeWhale's file-backed
-/// secret-store directories. Other dotfiles remain readable. Model-bound
-/// redaction is still required because shell tools can read these files and
-/// arbitrary commands can print credentials without reading a file at all.
+/// Every tool that reads a file's content in-process and hands it (or a
+/// derivative) to the model goes through this.
+pub(crate) fn resolve_guarded_read_path(
+    context: &ToolContext,
+    raw: &str,
+    tool: &str,
+) -> Result<PathBuf, ToolError> {
+    enforce_read_denylist(Path::new(raw), tool)?;
+    let path = context.resolve_path(raw)?;
+    if is_codewhale_credential_path(&path) {
+        return Err(ToolError::permission_denied(format!(
+            "{tool} cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection"
+        )));
+    }
+    enforce_read_denylist(&path, tool)?;
+    Ok(path)
+}
+
 /// Refuse a read the sandbox read deny-list blocks (S1).
 ///
 /// `read_file`, `read`, and `read_media` all run *in-process*: they call
@@ -470,6 +486,13 @@ pub(crate) fn enforce_read_denylist(path: &Path, tool: &str) -> Result<(), ToolE
     }
 }
 
+/// Return whether `read_file` must refuse a CodeWhale-owned credential file.
+///
+/// This is deliberately scoped to the active config, the two conventional
+/// config locations (including one-time backups), and CodeWhale's file-backed
+/// secret-store directories. Other dotfiles remain readable. Model-bound
+/// redaction is still required because shell tools can read these files and
+/// arbitrary commands can print credentials without reading a file at all.
 pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
     let candidate = canonical_path_for_credential_guard(path);
 
@@ -612,12 +635,28 @@ fn check_file_operation_cancelled(context: &ToolContext) -> Result<(), ToolError
     Ok(())
 }
 
+/// One `mutation.files[]` receipt entry. `size` and `sha256` describe the
+/// exact bytes this call wrote, recorded where they were written so a turn's
+/// artifact reference never has to re-read (and race) the disk. `sha256` is
+/// plain lowercase hex: the same value `GET /v1/workspace/files/read` reports
+/// as `revision`.
+pub(crate) fn mutation_file_entry(path: &str, outcome: &str, written: Option<&[u8]>) -> Value {
+    let mut entry = json!({ "path": path, "outcome": outcome });
+    if let Some(bytes) = written {
+        entry["size"] = json!(bytes.len());
+        entry["sha256"] = json!(crate::hashing::sha256_hex(bytes));
+    }
+    entry
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn contract_mutation_result(
     context: &ToolContext,
     file_path: &Path,
     requested_path: &str,
     before: &str,
     after: &str,
+    written: &[u8],
     outcome: &str,
     summary: String,
 ) -> ToolResult {
@@ -628,7 +667,7 @@ async fn contract_mutation_result(
         "lsp_diagnostics": diagnostics,
         "mutation": {
             "diff": make_unified_diff(requested_path, before, after),
-            "files": [{ "path": requested_path, "outcome": outcome }],
+            "files": [mutation_file_entry(requested_path, outcome, Some(written))],
             "renames": []
         }
     }))
@@ -763,14 +802,7 @@ impl ReadFileTool {
         // raw spelling still matches by its target; the resolved check after
         // `resolve_path` stays as defense in depth for callers whose process
         // cwd is not the workspace.
-        enforce_read_denylist(Path::new(path_str), "read")?;
-        let file_path = context.resolve_path(path_str)?;
-        if is_codewhale_credential_path(&file_path) {
-            return Err(ToolError::permission_denied(
-                "read cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
-            ));
-        }
-        enforce_read_denylist(&file_path, "read")?;
+        let file_path = resolve_guarded_read_path(context, path_str, "read")?;
         check_file_operation_cancelled(context)?;
         let bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Failed to read {}: {error}", file_path.display()))
@@ -941,14 +973,7 @@ impl ToolSpec for ReadFileTool {
         // S1/F2: raw spelling first, resolved path after — see the matching
         // comment in `execute_contract_read`. Only the raw-spelling denial can
         // promise an error that never names the symlink target's location.
-        enforce_read_denylist(Path::new(path_str), "read_file")?;
-        let file_path = context.resolve_path(path_str)?;
-        if is_codewhale_credential_path(&file_path) {
-            return Err(ToolError::permission_denied(
-                "File `read` cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
-            ));
-        }
-        enforce_read_denylist(&file_path, "read_file")?;
+        let file_path = resolve_guarded_read_path(context, path_str, "read_file")?;
         let pages = optional_str(&input, "pages")?;
 
         if let Some(result) = read_pdf_if_detected(
@@ -1496,7 +1521,12 @@ impl WriteFileTool {
 
         let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_bytes = if existed_before {
-            tokio::fs::read(&file_path).await.unwrap_or_default()
+            tokio::fs::read(&file_path).await.map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "Failed to read {}: {error}",
+                    file_path.display()
+                ))
+            })?
         } else {
             Vec::new()
         };
@@ -1539,6 +1569,7 @@ impl WriteFileTool {
             path_str,
             prior_contents.as_ref(),
             &written,
+            written.as_bytes(),
             outcome,
             format!("Successfully wrote {utf16_units} bytes to {path_str}"),
         )
@@ -1610,7 +1641,12 @@ impl ToolSpec for WriteFileTool {
         let prior_contents = if existed_before {
             tokio::fs::read_to_string(&file_path)
                 .await
-                .unwrap_or_default()
+                .map_err(|error| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {error}",
+                        file_path.display()
+                    ))
+                })?
         } else {
             String::new()
         };
@@ -1689,7 +1725,7 @@ impl ToolSpec for WriteFileTool {
             "event": "file.mutation",
             "mutation": {
                 "diff": receipt_diff,
-                "files": [{ "path": path_str, "outcome": outcome }],
+                "files": [mutation_file_entry(path_str, outcome, Some(written.as_bytes()))],
                 "renames": []
             }
         })))
@@ -2247,7 +2283,7 @@ impl EditFileTool {
         } else {
             final_content.clone().into_bytes()
         };
-        run_blocking_write_atomic(&file_path, bytes).await?;
+        run_blocking_write_atomic(&file_path, bytes.clone()).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
@@ -2258,6 +2294,7 @@ impl EditFileTool {
             path_str,
             &raw,
             &final_content,
+            &bytes,
             "updated",
             format!(
                 "Successfully replaced {} block(s) in {path_str}.",
@@ -2557,7 +2594,7 @@ impl ToolSpec for EditFileTool {
             "event": "file.mutation",
             "mutation": {
                 "diff": receipt_diff,
-                "files": [{ "path": path_str, "outcome": "updated" }],
+                "files": [mutation_file_entry(path_str, "updated", Some(updated.as_bytes()))],
                 "renames": []
             }
         })))

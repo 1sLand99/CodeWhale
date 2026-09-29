@@ -107,9 +107,9 @@
           "tools": 13
         },
         "full": {
-          "bytes": 84021,
+          "bytes": 83988,
           "identity_sha256": "45e989bbe5ac0bb1f2d9084361c021009f30a06539f132ebd4fd2331a1bb1954",
-          "tokens_est": 21006,
+          "tokens_est": 20997,
           "tool_names": [
             "Git",
             "Run",
@@ -191,9 +191,9 @@
           "tools": 13
         },
         "full": {
-          "bytes": 84021,
+          "bytes": 83988,
           "identity_sha256": "45e989bbe5ac0bb1f2d9084361c021009f30a06539f132ebd4fd2331a1bb1954",
-          "tokens_est": 21006,
+          "tokens_est": 20997,
           "tool_names": [
             "Git",
             "Run",
@@ -274,9 +274,9 @@
           "tools": 12
         },
         "full": {
-          "bytes": 53785,
+          "bytes": 53772,
           "identity_sha256": "ac8af1f4988199825be7b00b054c258724a44074b1d4e6de6c92ade7c1cffe63",
-          "tokens_est": 13447,
+          "tokens_est": 13443,
           "tool_names": [
             "Git",
             "Web",

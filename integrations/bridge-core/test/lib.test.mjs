@@ -134,6 +134,23 @@ test("ThreadStore supports chat state, message dedupe, and action tokens", async
   }
 });
 
+test("action tokens remain distinct when clock and legacy randomness repeat", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "codewhale-action-tokens-"));
+  try {
+    const store = await ThreadStore.open(path.join(dir, "state.json"), { actions: true });
+    t.mock.method(Date, "now", () => 1);
+    t.mock.method(Math, "random", () => 0.5);
+    const first = await store.putAction({ threadId: "thread-a" });
+    const second = await store.putAction({ threadId: "thread-b" });
+    assert.notEqual(first, second);
+    assert.match(first, /^[a-f0-9]{32}$/);
+    assert.equal((await store.getAction(first)).threadId, "thread-a");
+    assert.equal((await store.getAction(second)).threadId, "thread-b");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("readJsonSafe tolerates empty and non-JSON bodies", async () => {
   assert.deepEqual(await readJsonSafe({ text: async () => "" }), {});
   assert.deepEqual(await readJsonSafe({ text: async () => '{"ok":true}' }), { ok: true });

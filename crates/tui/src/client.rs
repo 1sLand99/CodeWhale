@@ -20,9 +20,11 @@ use tokio::sync::{
 };
 
 use codewhale_config::catalog::{
-    CatalogOffering, CatalogRefreshError, CatalogSnapshot, CatalogSource, CatalogStatus,
-    ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
+    CatalogOffering, CatalogRefreshError, CatalogSource, ProviderCatalogDelta,
+    base_url_fingerprint, now_unix,
 };
+#[cfg(test)]
+use codewhale_config::catalog::{CatalogSnapshot, CatalogStatus, ProviderCatalogCache};
 use codewhale_config::provider::WireFormat;
 use codewhale_config::route::{
     LogicalModelRef, ReadyRouteCandidate, RouteLimits, RouteRequest, RouteResolver,
@@ -706,10 +708,12 @@ fn push_file_backed_model_bound_secrets(values: &mut Vec<String>) {
     }
 }
 
-fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -> Vec<String> {
+pub(crate) fn configured_model_bound_secret_values(
+    config: &Config,
+    active_api_key: &str,
+) -> Vec<String> {
     let mut values = Vec::new();
     push_model_bound_secret(&mut values, Some(active_api_key));
-    push_model_bound_secret(&mut values, config.api_key.as_deref());
     push_model_bound_secret(&mut values, config.sandbox_api_key.as_deref());
     push_model_bound_secret(
         &mut values,
@@ -847,7 +851,7 @@ fn request_query_secret_values(url: &reqwest::Url) -> Vec<String> {
     values
 }
 
-fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
+pub(crate) fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
     let mut redacted = text.to_string();
     for secret in exact_secret_values {
         redacted = redacted.replace(secret, codewhale_config::persistence::REDACTED);
@@ -856,6 +860,32 @@ fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String
     // are masked here; key-only hits (`password: credentials?.password`) stay
     // byte-exact. Logs and previews keep the broad key-based scrubber.
     codewhale_config::persistence::redact_model_bound_secrets(&redacted)
+}
+
+pub(crate) fn redact_json_model_bound_text(
+    value: &serde_json::Value,
+    secrets: &[String],
+) -> serde_json::Value {
+    fn mask_exact_values(value: &mut serde_json::Value, secrets: &[String]) {
+        match value {
+            serde_json::Value::String(text) => *text = redact_model_bound_text(text, secrets),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    mask_exact_values(value, secrets);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values_mut() {
+                    mask_exact_values(value, secrets);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Preserve sensitive-key masking and the existing recursion-depth bound.
+    let mut redacted = codewhale_config::persistence::redact_json_model_bound_secrets(value);
+    mask_exact_values(&mut redacted, secrets);
+    redacted
 }
 
 // === Helpers ===
@@ -1799,6 +1829,18 @@ impl CodewhaleClient {
         redact_model_bound_text(text, &self.model_bound_secret_values)
     }
 
+    /// Redact tool output as it enters the transcript. Same masking as the
+    /// request boundary, including the confirmed `[redaction] model_bound`
+    /// opt-out: a user who chose to let the model see file bytes verbatim
+    /// keeps that, and everyone else never stores a live credential.
+    pub(crate) fn redact_tool_output_for_transcript(&self, text: &str) -> String {
+        if self.model_bound_masking {
+            redact_model_bound_text(text, &self.model_bound_secret_values)
+        } else {
+            text.to_string()
+        }
+    }
+
     /// Alternate models share this client's frozen endpoint and declarations.
     /// Resolution still owns protocol admission, including closed rosters.
     pub(crate) fn resolve_model_route(&self, model: &str) -> Result<ReadyRouteCandidate> {
@@ -2571,6 +2613,7 @@ impl CodewhaleClient {
                     chat_shape_provider,
                     &self.base_url,
                     stream,
+                    request_route_limits,
                 )?;
                 if let Some(model) = &declared_wire_model {
                     wire.model.clone_from(model);
@@ -2752,6 +2795,29 @@ impl CodewhaleClient {
         .with_openrouter_vendor(self.openrouter_vendor.as_deref())
     }
 
+    /// The operator-declared `[[custom_models]]` rate for `model` on this
+    /// client's exact endpoint, frozen at `dispatched_at`. Every dispatch
+    /// boundary (background envelopes and main interactive turns alike) asks
+    /// this before the provider lake, so a declared rate is honored the same
+    /// way on each (#6690).
+    #[must_use]
+    pub(crate) fn configured_pricing_quote_at(
+        &self,
+        provider: ApiProvider,
+        provider_identity: &str,
+        model: &str,
+        dispatched_at: u64,
+    ) -> Option<crate::provider_catalog_live::ProviderLivePricingQuote> {
+        crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
+            &self.configured_models,
+            provider,
+            provider_identity,
+            model,
+            &self.base_url,
+            dispatched_at,
+        )
+    }
+
     /// Capture the immutable, redacted route envelope at the caller's
     /// application-dispatch/admission time. This is not proof of network
     /// delivery or provider invoice-time pricing. The wire model is normalized
@@ -2768,23 +2834,23 @@ impl CodewhaleClient {
         let provider_live_pricing = u64::try_from(dispatched_at.timestamp())
             .ok()
             .and_then(|at| {
-                crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
-                    &self.configured_models,
-                    self.api_provider,
-                    &self.provider_identity,
-                    &model,
-                    &self.base_url,
-                    at,
-                )
-                .or_else(|| {
-                    crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                crate::provider_catalog_live::declared_or_catalog_quote(
+                    self.configured_pricing_quote_at(
                         self.api_provider,
                         &self.provider_identity,
                         &model,
-                        &self.base_url,
                         at,
-                    )
-                })
+                    ),
+                    || {
+                        crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                            self.api_provider,
+                            &self.provider_identity,
+                            &model,
+                            &self.base_url,
+                            at,
+                        )
+                    },
+                )
             });
         crate::cost_status::EffectiveRouteEnvelope {
             openrouter_vendor: self.openrouter_vendor.clone(),
@@ -3149,12 +3215,26 @@ impl CodewhaleClient {
             if or_models.is_empty() {
                 return Err(CatalogRefreshError::EmptyList);
             }
-            or_models
+            // A row with an unreadable or implausible price is skipped and
+            // counted, not allowed to fail every other row (#6690).
+            let offerings: Vec<_> = or_models
                 .iter()
-                .map(|item| {
-                    openrouter_to_catalog_offering(item, &provider, &fingerprint, fetched_at)
+                .filter_map(|item| {
+                    openrouter_to_catalog_offering(item, &provider, &fingerprint, fetched_at).ok()
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect();
+            let skipped = or_models.len() - offerings.len();
+            if skipped > 0 {
+                tracing::warn!(
+                    skipped,
+                    listed = or_models.len(),
+                    "skipped OpenRouter model rows with invalid pricing"
+                );
+            }
+            if offerings.is_empty() {
+                return Err(CatalogRefreshError::InvalidResponse);
+            }
+            offerings
         } else if self.catalog_endpoint_is_baseten() {
             let baseten_models = parse_baseten_models_response(&body)?;
             if baseten_models.is_empty() {
@@ -3272,6 +3352,7 @@ impl CodewhaleClient {
     /// success or a typed failure (#3385). Returns the resulting status so the UI
     /// can surface a visible "fresh / failed(reason)" chip without inspecting the
     /// cache internals. A failed refresh preserves any previously cached rows.
+    #[cfg(test)]
     pub async fn refresh_catalog_cache(
         &self,
         cache: &mut ProviderCatalogCache,
@@ -3977,9 +4058,14 @@ struct ModelsListResponse {
     data: Vec<ModelListItem>,
 }
 
+/// The list envelope is validated as a whole; each row is decoded on its own
+/// so one malformed row cannot fail the entire roster (#6690). Rows stay raw
+/// text rather than `serde_json::Value`: a `Value` map keeps the last of a
+/// duplicated key, which would silently accept an ambiguous row (two `id`s,
+/// two `pricing.prompt`s) instead of skipping it as malformed.
 #[derive(Debug, Deserialize)]
 struct OpenRouterModelsResponse {
-    data: Vec<OpenRouterModelItem>,
+    data: Vec<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4381,12 +4467,43 @@ fn parse_openrouter_models_response(
 ) -> Result<Vec<OpenRouterModelItem>, CatalogRefreshError> {
     let parsed: OpenRouterModelsResponse =
         serde_json::from_str(payload).map_err(|_| CatalogRefreshError::InvalidResponse)?;
+    let listed = parsed.data.len();
     let mut seen = std::collections::HashSet::new();
-    let models: Vec<_> = parsed
-        .data
-        .into_iter()
-        .filter(|item| seen.insert(item.id.clone()))
-        .collect();
+    let mut malformed = 0usize;
+    let mut models = Vec::with_capacity(listed);
+    for row in parsed.data {
+        // `~`-prefixed ids (`~deepseek/deepseek-pro-latest`) are OpenRouter's
+        // moving "latest" aliases, not billing identities, so they are dropped
+        // silently. Any other row that does not decode or carries an id the
+        // catalog cannot hold is skipped and counted: one such row used to
+        // fail the whole roster closed, so no OpenRouter route could ever be
+        // priced from the lake (#6690).
+        let Ok(item) = serde_json::from_str::<OpenRouterModelItem>(row.get()) else {
+            malformed += 1;
+            continue;
+        };
+        if item.id.starts_with('~') {
+            continue;
+        }
+        if !crate::provider_lake::valid_catalog_model_id(&item.id) {
+            malformed += 1;
+            continue;
+        }
+        if seen.insert(item.id.clone()) {
+            models.push(item);
+        }
+    }
+    if malformed > 0 {
+        tracing::warn!(
+            malformed,
+            listed,
+            "skipped malformed OpenRouter model rows in the catalog refresh"
+        );
+    }
+    // Rows were listed but not one survived: the response is not a roster.
+    if models.is_empty() && malformed > 0 {
+        return Err(CatalogRefreshError::InvalidResponse);
+    }
     Ok(models)
 }
 
@@ -4626,6 +4743,7 @@ fn baseten_to_catalog_offering(
     })
 }
 
+#[cfg(test)]
 fn publish_provider_lake_scope(cache: &ProviderCatalogCache, provider: &str, fingerprint: &str) {
     // Publish fresh *and* stale/prior rows so pickers keep live catalog coverage
     // after TTL expiry or a failed refresh (#4139). Exact replacement is
@@ -4671,30 +4789,45 @@ fn openrouter_to_catalog_offering(
 
     let cost = if let Some(p) = item.pricing.as_ref() {
         // OpenRouter quotes per-token USD strings; ModelsDevCost is per million.
+        // Its routers (`openrouter/auto`, `openrouter/fusion`, ...) publish
+        // `"-1"`: the price depends on the model the router picks. A negative
+        // price therefore means "no fixed rate" for the whole row, never a
+        // partial one.
         let parse_price = |value: &Option<String>| -> Result<Option<f64>, CatalogRefreshError> {
             value
                 .as_ref()
                 .map(|value| {
-                    let parsed = value
+                    value
                         .trim()
                         .parse::<f64>()
                         .ok()
-                        .filter(|value| value.is_finite() && *value >= 0.0)
-                        .ok_or(CatalogRefreshError::InvalidResponse)?;
-                    checked_per_token_to_per_million(parsed)
+                        .filter(|value| value.is_finite())
+                        .ok_or(CatalogRefreshError::InvalidResponse)
                 })
                 .transpose()
         };
-        let cost = ModelsDevCost {
-            input: parse_price(&p.prompt)?,
-            output: parse_price(&p.completion)?,
-            cache_read: parse_price(&p.input_cache_read)?,
-            cache_write: parse_price(&p.input_cache_write)?,
-        };
-        if !codewhale_config::pricing::catalog_cost_is_valid(&cost) {
-            return Err(CatalogRefreshError::InvalidResponse);
+        let raw = [
+            parse_price(&p.prompt)?,
+            parse_price(&p.completion)?,
+            parse_price(&p.input_cache_read)?,
+            parse_price(&p.input_cache_write)?,
+        ];
+        if raw.iter().flatten().any(|price| *price < 0.0) {
+            None
+        } else {
+            let per_million =
+                |price: Option<f64>| price.map(checked_per_token_to_per_million).transpose();
+            let cost = ModelsDevCost {
+                input: per_million(raw[0])?,
+                output: per_million(raw[1])?,
+                cache_read: per_million(raw[2])?,
+                cache_write: per_million(raw[3])?,
+            };
+            if !codewhale_config::pricing::catalog_cost_is_valid(&cost) {
+                return Err(CatalogRefreshError::InvalidResponse);
+            }
+            Some(cost)
         }
-        Some(cost)
     } else {
         None
     };
@@ -4759,6 +4892,38 @@ fn openrouter_to_catalog_offering(
             base_url_fingerprint: base_url_fingerprint.to_string(),
             fetched_at,
         },
+    })
+}
+
+/// The rate a main interactive turn freezes at its dispatch boundary (#6690).
+/// An operator-declared `[[custom_models]]` rate wins, exactly as on the
+/// background envelope path; `client` must be installed on the endpoint this
+/// turn dispatches to, so a declaration never leaks onto another endpoint. A
+/// declaration with no rates yields to the catalog price for that endpoint.
+pub(crate) fn main_turn_pricing_quote_at(
+    client: Option<&CodewhaleClient>,
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: &str,
+    endpoint_fingerprint: &str,
+    dispatched_at: u64,
+) -> Option<crate::provider_catalog_live::ProviderLivePricingQuote> {
+    let declared = client
+        .filter(|client| {
+            crate::cost_status::endpoint_fingerprint(client.base_url()).as_deref()
+                == Some(endpoint_fingerprint)
+        })
+        .and_then(|client| {
+            client.configured_pricing_quote_at(provider, provider_identity, model, dispatched_at)
+        });
+    crate::provider_catalog_live::declared_or_catalog_quote(declared, || {
+        crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
+            provider,
+            provider_identity,
+            model,
+            endpoint_fingerprint,
+            dispatched_at,
+        )
     })
 }
 
@@ -5576,11 +5741,17 @@ mod tests {
             })
             .to_string();
             let items = parse_openrouter_models_response(&openrouter).expect("OpenRouter shape");
-            assert_eq!(
-                openrouter_to_catalog_offering(&items[0], "openrouter", "fp", 1).unwrap_err(),
-                CatalogRefreshError::InvalidResponse,
-                "OpenRouter must reject {invalid:?}"
-            );
+            let offering = openrouter_to_catalog_offering(&items[0], "openrouter", "fp", 1);
+            if invalid.starts_with('-') {
+                // OpenRouter's negative sentinel means "no fixed rate" (#6690).
+                assert_eq!(offering.expect("variable-price row").cost, None);
+            } else {
+                assert_eq!(
+                    offering.unwrap_err(),
+                    CatalogRefreshError::InvalidResponse,
+                    "OpenRouter must reject {invalid:?}"
+                );
+            }
 
             let baseten = json!({
                 "data": [{
@@ -5800,13 +5971,17 @@ mod tests {
         route_base_url: &str,
         transport_base_url: String,
     ) -> CodewhaleClient {
-        let mut client = CodewhaleClient::new(&Config {
-            provider: Some("deepseek".to_string()),
-            api_key: Some("deepseek-request-boundary-key".to_string()),
-            base_url: Some(route_base_url.to_string()),
-            default_text_model: Some("deepseek-v4-pro".to_string()),
-            ..Config::default()
-        })
+        let mut client = CodewhaleClient::new(
+            &Config {
+                provider: Some("deepseek".to_string()),
+                default_text_model: Some("deepseek-v4-pro".to_string()),
+                ..Config::default()
+            }
+            .with_legacy_root(
+                Some("deepseek-request-boundary-key".to_string()),
+                Some(route_base_url.to_string()),
+            ),
+        )
         .expect("DeepSeek request-boundary client");
         client.test_chat_transport_base_url = Some(transport_base_url);
         client
@@ -8593,42 +8768,44 @@ mod tests {
 
     fn client_with_config_secret_sentinels() -> CodewhaleClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        CodewhaleClient::new(&Config {
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                arcee: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[1].to_string()),
-                    ..ProviderConfig::default()
-                },
-                moonshot: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[2].to_string()),
-                    ..ProviderConfig::default()
-                },
-                openrouter: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[3].to_string()),
-                    ..ProviderConfig::default()
-                },
-                together: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[4].to_string()),
-                    ..ProviderConfig::default()
-                },
-                xiaomi_mimo: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[5].to_string()),
-                    ..ProviderConfig::default()
-                },
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                sakana: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[7].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        })
+        CodewhaleClient::new(
+            &Config {
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    arcee: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[1].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    moonshot: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[2].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    openrouter: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[3].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    together: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[4].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    xiaomi_mimo: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[5].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    sakana: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[7].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with secret sentinels")
     }
 
@@ -8814,22 +8991,24 @@ mod tests {
         )
         .expect("record opt-out confirmation");
 
-        let client = CodewhaleClient::new(&Config {
-            loaded_config_path: Some(codewhale_home.join("config.toml")),
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            redaction: Some(codewhale_config::redaction::RedactionToml {
-                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                loaded_config_path: Some(codewhale_home.join("config.toml")),
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                redaction: Some(codewhale_config::redaction::RedactionToml {
+                    model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with confirmed opt-out");
 
         let tool_output = format!(
@@ -8910,21 +9089,23 @@ mod tests {
         let _codewhale_home =
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
 
-        let client = CodewhaleClient::new(&Config {
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            redaction: Some(codewhale_config::redaction::RedactionToml {
-                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                redaction: Some(codewhale_config::redaction::RedactionToml {
+                    model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with unconfirmed opt-out request");
 
         let secret = CONFIG_SECRET_SENTINELS[0];
@@ -9773,18 +9954,20 @@ mod tests {
 
     #[test]
     fn client_stream_idle_timeout_uses_tui_config() {
-        let client = CodewhaleClient::new(&Config {
-            api_key: Some("sk-test".to_string()),
-            tui: Some(crate::config::TuiConfig {
-                stream_chunk_timeout_secs: Some(777),
-                max_model_steps: None,
-                turn_wall_clock_secs: None,
-                stream_max_content_mb: None,
-                stream_max_duration_secs: None,
-                ..crate::config::TuiConfig::default()
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                tui: Some(crate::config::TuiConfig {
+                    stream_chunk_timeout_secs: Some(777),
+                    max_model_steps: None,
+                    turn_wall_clock_secs: None,
+                    stream_max_content_mb: None,
+                    stream_max_duration_secs: None,
+                    ..crate::config::TuiConfig::default()
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some("sk-test".to_string()), None),
+        )
         .expect("client");
 
         assert_eq!(client.stream_idle_timeout, Duration::from_secs(777));
@@ -12694,6 +12877,75 @@ mod tests {
         }
     }
 
+    /// #6690: rows shaped like the live OpenRouter roster. A `~` "latest"
+    /// alias, a router's `"-1"` variable price, an undecodable row and an id
+    /// the catalog cannot hold each used to fail the whole refresh closed
+    /// (`invalid_response`), so the lake never went fresh and no OpenRouter
+    /// turn could be priced. Each now costs only its own row.
+    #[tokio::test]
+    async fn fetch_catalog_delta_skips_openrouter_latest_aliases_and_keeps_prices() {
+        let server = MockServer::start().await;
+        mount_models_json(
+            &server,
+            200,
+            json!({"data": [
+                {"id": "~deepseek/deepseek-pro-latest",
+                 "pricing": {"prompt": "0.0000002523", "completion": "0.0000035",
+                             "input_cache_read": "0.0000002518"}},
+                {"id": "openrouter/auto", "context_length": 2000000,
+                 "pricing": {"prompt": "-1", "completion": "-1"},
+                 "top_provider": {"context_length": null, "max_completion_tokens": null}},
+                {"id": "synthetic/malformed-row", "context_length": "very long",
+                 "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+                {"id": "synthetic/unreadable-price",
+                 "pricing": {"prompt": "not-a-number", "completion": "0.000002"}},
+                {"id": "synthetic/bad id"},
+                {"id": "deepseek/deepseek-v4-pro", "context_length": 1048576,
+                 "pricing": {"prompt": "0.00000095526", "completion": "0.00000191052",
+                             "input_cache_read": "0.000000079605"},
+                 "top_provider": {"context_length": 1024000, "max_completion_tokens": 384000}}
+            ]}),
+        )
+        .await;
+        let client = openrouter_client_for(&server);
+
+        let delta = client
+            .fetch_catalog_delta()
+            .await
+            .expect("a bad row must not fail the whole roster");
+        let ids: Vec<&str> = delta
+            .offerings
+            .iter()
+            .map(|offering| offering.wire_model_id.as_str())
+            .collect();
+        assert_eq!(ids, ["openrouter/auto", "deepseek/deepseek-v4-pro"]);
+        assert_eq!(delta.offerings[0].cost, None, "router price is variable");
+        let cost = delta.offerings[1].cost.as_ref().expect("served price");
+        let close = |got: Option<f64>, want: f64| got.is_some_and(|got| (got - want).abs() < 1e-9);
+        assert!(close(cost.input, 0.95526), "{cost:?}");
+        assert!(close(cost.output, 1.91052), "{cost:?}");
+        assert!(close(cost.cache_read, 0.079605), "{cost:?}");
+        assert_eq!(cost.cache_write, None);
+
+        // Only structurally invalid responses still fail the refresh.
+        for body in [
+            json!({"data": {"id": "deepseek/deepseek-v4-pro"}}),
+            json!({"models": []}),
+            json!({"data": [{"name": "no id"}, {"id": "synthetic/bad id"}]}),
+        ] {
+            let server = MockServer::start().await;
+            mount_models_json(&server, 200, body.clone()).await;
+            assert_eq!(
+                openrouter_client_for(&server)
+                    .fetch_catalog_delta()
+                    .await
+                    .expect_err("structurally invalid roster"),
+                CatalogRefreshError::InvalidResponse,
+                "{body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn fetch_catalog_scenario() {
         // Scenario consolidation of: fetch_catalog_delta_maps_http_statuses_to_typed_errors, fetch_catalog_delta_maps_invalid_json_and_empty_list
@@ -13518,11 +13770,10 @@ mod tests {
     ) -> (Config, crate::route_runtime::ResolvedRuntimeRoute) {
         let config = Config {
             provider: Some("deepseek".to_string()),
-            api_key: Some("ds-test".to_string()),
-            base_url: Some(base_url.to_string()),
             default_text_model: Some(model.to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("ds-test".to_string()), Some(base_url.to_string()));
         let route = crate::route_runtime::resolve_runtime_route(
             &config,
             ApiProvider::Deepseek,
@@ -13572,11 +13823,13 @@ mod tests {
     fn route_cap_test_client(wire_format: WireFormat, limits: RouteLimits) -> CodewhaleClient {
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("route-cap-test".to_string()),
-            base_url: Some("https://route-cap.example/v1".to_string()),
             default_text_model: Some("DeepSeek-V4-Flash".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("route-cap-test".to_string()),
+            Some("https://route-cap.example/v1".to_string()),
+        );
         CodewhaleClient::from_parts(
             "https://route-cap.example/v1".to_string(),
             "DeepSeek-V4-Flash".to_string(),
@@ -13867,11 +14120,10 @@ mod tests {
         let base_url = format!("{}/v1", server.uri());
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("fim-cap-test".to_string()),
-            base_url: Some(base_url.clone()),
             default_text_model: Some("local-fim".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("fim-cap-test".to_string()), Some(base_url.clone()));
         let client = CodewhaleClient::from_parts(
             base_url,
             "local-fim".to_string(),
@@ -14026,11 +14278,13 @@ mod tests {
 
         let config = Config {
             provider: Some("deepseek".to_string()),
-            api_key: Some("ds-test".to_string()),
-            base_url: Some("https://api.deepseek.com".to_string()),
             default_text_model: Some(model.to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            Some("ds-test".to_string()),
+            Some("https://api.deepseek.com".to_string()),
+        );
         let client = CodewhaleClient::from_candidate(&config, &candidate)
             .expect("client binds exact synthetic catalog offering");
         assert!(

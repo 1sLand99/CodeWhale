@@ -319,8 +319,8 @@ fn launch_onboarding_decision(
         )
     };
     // Both a new user and a returning one reach the picker directly, and Esc
-    // returns to the composer; `was_onboarded` only decides whether the
-    // picker focuses the saved route (see `onboarding_had_provider_step`).
+    // returns to the composer. An explicitly configured route is focused even
+    // on first run (see `onboarding_recovers_configured_route`).
     let missing_key_recovery = !skip_onboarding && needs_api_key && !xai_oauth_needs_reauth;
     (onboarding, missing_key_recovery)
 }
@@ -553,6 +553,11 @@ pub struct AgentProgressMeta {
     /// The engine's name for this agent from its spawn or completion event
     /// (`subagent_display_name`), used until a manager snapshot arrives.
     pub display_name: Option<String>,
+    /// When the TUI last received any mailbox envelope from this child. The
+    /// manager's `idle_ms` is only as fresh as the last `AgentList` snapshot,
+    /// and ordinary progress does not refresh that snapshot, so the quiet
+    /// readout caps the engine's clock with this one.
+    pub last_progress_at: Option<Instant>,
 }
 
 /// Per-turn LSP repair-loop summary for the Turn Inspector (#4107).
@@ -1099,6 +1104,13 @@ pub struct SessionState {
     /// the ordinary input rate, so folding it into misses understated spend.
     pub total_cache_write_tokens: u32,
     pub total_output_tokens: u32,
+    /// Prompt-cache classes the session's sub-agents and other background
+    /// routes reported, from their drained cost batches (#6565). The same
+    /// per-runtime-session scope as the parent's totals above. `None` until a
+    /// background route reports cache telemetry: absent, never 0%.
+    pub subagent_cache_hit_tokens: Option<u64>,
+    pub subagent_cache_miss_tokens: Option<u64>,
+    pub subagent_cache_write_tokens: Option<u64>,
     /// Turns whose route was money-metered and produced an authoritative
     /// price. These are exactly the turns inside `session_cost`.
     pub cost_priced_turns: u32,
@@ -1264,6 +1276,9 @@ impl Default for SessionState {
             total_cache_miss_tokens: 0,
             total_cache_write_tokens: 0,
             total_output_tokens: 0,
+            subagent_cache_hit_tokens: None,
+            subagent_cache_miss_tokens: None,
+            subagent_cache_write_tokens: None,
             cost_priced_turns: 0,
             cost_unpriced_turns: 0,
             cost_cny_priced_turns: 0,
@@ -1294,6 +1309,9 @@ impl SessionState {
         self.total_cache_miss_tokens = 0;
         self.total_cache_write_tokens = 0;
         self.total_output_tokens = 0;
+        self.subagent_cache_hit_tokens = None;
+        self.subagent_cache_miss_tokens = None;
+        self.subagent_cache_write_tokens = None;
         self.clear_pending_turn_usage();
     }
 
@@ -1616,12 +1634,16 @@ pub struct App {
     /// Updated by `/provider` switches so the UI/commands can read the
     /// active backend without re-deriving it from the live config.
     pub api_provider: ApiProvider,
+    /// The resolved startup config named a provider or model. Capture this
+    /// before runtime synchronization writes even the built-in route to Config;
+    /// missing credentials must not make that choice eligible for discovery.
+    pub(crate) startup_route_configured: bool,
     /// Exact configured provider key for persistence and route restoration.
     /// Built-ins use their canonical slug; named custom providers retain the
     /// user-owned key instead of collapsing to `custom`.
     pub(crate) provider_identity: String,
-    /// Additive exact configured id for persistence. `None` preserves the
-    /// legacy root-level custom route even when a same-key table appears.
+    /// Additive exact configured id for persistence. An id-less `custom`
+    /// record resolves to the literal `[providers.custom]` table (#6394).
     pub(crate) provider_exact_id: Option<String>,
     /// Primary provider plus configured fallback providers for this session.
     pub provider_chain: Option<ProviderChain>,
@@ -1939,6 +1961,21 @@ pub struct App {
     /// Maps raw agent_id to a stable user-facing label (#3030).
     /// Populated when `AgentSpawned` fires; read by sidebar rendering.
     pub agent_label_map: HashMap<String, String>,
+    /// Background work (agents, shells, durable tasks) that finished since
+    /// the last notice, named the way every surface names it. Drained by one
+    /// batched notice (#6565).
+    pub background_finished: Vec<crate::tui::background_finished::FinishedWork>,
+    /// Background shells by owning session, oldest first, capped per session
+    /// at [`crate::tui::background_finished::MAX_FINISHED_SHELLS`]. They stay listed, muted, so
+    /// a person can see what ran and how it ended (#6565).
+    pub finished_shell_ids: HashMap<String, VecDeque<String>>,
+    /// Completion deduplication is independent of visible rows and their cap.
+    /// IDs are manager-unique; these sets live only for this TUI process.
+    pub notified_shell_ids: HashSet<String>,
+    pub notified_task_ids: HashSet<String>,
+    /// When the latest `AgentList` snapshot arrived, so a running agent's
+    /// engine idle clock keeps counting between snapshots.
+    pub subagent_cache_received_at: Option<Instant>,
     /// The child whose full transcript currently owns the main conversation
     /// area and whose fork the composer addresses (`None` = main session).
     pub agent_focus: Option<crate::tui::agent_focus::AgentFocus>,
@@ -2380,6 +2417,9 @@ pub struct App {
     /// instead of inside the draw closure (#3908) — tens of ms per frame on
     /// NFS/SSHFS/cloud-synced homes otherwise.
     pub memory_size_hint: Option<String>,
+    /// The workspace notes (`/note`), refreshed with the workspace context
+    /// off the render path; the dock's NOTES view lists them (#6565).
+    pub workspace_notes: Vec<String>,
     /// Cached background tasks for sidebar rendering.
     pub task_panel: Vec<TaskPanelEntry>,
     pub task_panel_session_id: Option<String>,
@@ -2987,11 +3027,11 @@ impl App {
     }
 
     /// Whether the onboarding provider picker should focus the saved route.
-    /// Only a returning user recovering a missing key has one; a new user's
-    /// "route" is the built-in default, and focusing it would open the picker
-    /// on that provider's missing key instead of the provider list (#6566).
+    /// A fresh home can already name a route in config. Only an unconfigured
+    /// new user has the built-in default rather than a route to recover.
     pub(crate) fn onboarding_recovers_configured_route(&self) -> bool {
-        self.onboarding_missing_key_recovery && !self.onboarding_had_provider_step
+        self.onboarding_missing_key_recovery
+            && (self.startup_route_configured || !self.onboarding_had_provider_step)
     }
 
     pub fn finish_onboarding_without_feature_intro(&mut self) {
@@ -3406,9 +3446,8 @@ impl App {
 
     /// Advance reasoning effort to the next tier for the active route and
     /// surface the change: set a status message and refresh the compaction
-    /// budget. Auto routing retains the full provider-neutral vocabulary until
-    /// dispatch; a concrete model walks the same ladder as `/model` and
-    /// `/effort`. Shared by the Ctrl+T shortcut (`cycle_effort`) and the
+    /// budget. Auto routing and concrete models alike walk the same ladder as
+    /// `/model` and `/effort`. Shared by the Ctrl+T shortcut (`cycle_effort`) and the
     /// hotbar `reasoning.cycle` action so the two paths cannot drift.
     pub(crate) fn apply_reasoning_effort_cycle(&mut self) {
         let requested = self.next_reasoning_effort_for_active_route();
@@ -3416,9 +3455,6 @@ impl App {
     }
 
     fn next_reasoning_effort_for_active_route(&self) -> ReasoningEffort {
-        if self.auto_model {
-            return self.reasoning_effort.cycle_next_for_auto_model();
-        }
         let (provider, base_url, model) = match self.active_reasoning_route_truth() {
             Some((provider, _, endpoint, model)) => (provider, endpoint, model),
             None => (
@@ -3427,9 +3463,33 @@ impl App {
                 self.model.as_str(),
             ),
         };
-        let efforts =
-            crate::tui::model_picker::picker_efforts_for_route(provider, base_url, model, false);
-        self.reasoning_effort.cycle_next_in(&efforts)
+        // The exact ladder the `/model` picker shows for this route, Auto
+        // routing included (#6650). On a concrete route every rung is a
+        // distinct effective tier; under Auto routing the tier is decided at
+        // dispatch, so neighbouring preferences may still resolve to one tier.
+        let efforts = crate::tui::model_picker::picker_efforts_for_route(
+            provider,
+            base_url,
+            model,
+            self.auto_model,
+        );
+        // A persisted value the ladder dropped as an alias (DeepSeek `medium`)
+        // enters at the rung it already resolves to, so the first press moves
+        // past it instead of re-selecting the same effective tier.
+        let current = self.reasoning_effort;
+        let anchor = if self.auto_model || efforts.contains(&current) {
+            current
+        } else {
+            let tier = crate::tui::model_picker::effective_tier_for_route(
+                current, provider, base_url, model,
+            );
+            if efforts.contains(&tier) {
+                tier
+            } else {
+                current
+            }
+        };
+        anchor.cycle_next_in(&efforts)
     }
 
     pub(crate) fn commit_reasoning_effort(&mut self, requested: ReasoningEffort) {
@@ -4037,6 +4097,23 @@ impl App {
         if pool.estimate.is_positive() {
             self.accrue_subagent_cost_estimate(pool.estimate);
         }
+        let add = |slot: &mut Option<u64>, tokens: Option<u64>| {
+            if let Some(tokens) = tokens {
+                *slot = Some(slot.unwrap_or(0).saturating_add(tokens));
+            }
+        };
+        add(
+            &mut self.session.subagent_cache_hit_tokens,
+            pool.cache_hit_tokens,
+        );
+        add(
+            &mut self.session.subagent_cache_miss_tokens,
+            pool.cache_miss_tokens,
+        );
+        add(
+            &mut self.session.subagent_cache_write_tokens,
+            pool.cache_write_tokens,
+        );
         self.absorb_background_cost_coverage(pool);
         runtime_usage_arrived
     }

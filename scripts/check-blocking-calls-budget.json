@@ -332,8 +332,14 @@
   "crates/tui/src/rlm/turn.rs": {
     "std_fs": 2
   },
+  "crates/tui/src/runtime_api.rs": {
+    "path_canonicalize": 2
+  },
   "crates/tui/src/runtime_api/diagnostics.rs": {
     "std_fs": 5
+  },
+  "crates/tui/src/runtime_api/git.rs": {
+    "std_fs": 6
   },
   "crates/tui/src/runtime_api/lsp.rs": {
     "path_canonicalize": 1
@@ -374,6 +380,12 @@
   },
   "crates/tui/src/session_manager.rs": {
     "path_canonicalize": 2
+  },
+  "crates/tui/src/session_reconcile.rs": {
+    "path_canonicalize": 3
+  },
+  "crates/tui/src/session_secret_scrub.rs": {
+    "std_fs": 4
   },
   "crates/tui/src/settings.rs": {
     "std_fs": 4

@@ -12,6 +12,11 @@ use codewhale_models::{ContentBlock, Message};
 use ignore::WalkBuilder;
 use std::io;
 
+// Split out so the integration harness can `#[path]`-include it with
+// `skills/install.rs`, which reads registry downloads through it.
+mod response_body;
+pub use response_body::read_response_body_capped;
+
 /// A writer that counts bytes written without storing them.
 pub(crate) struct CountingWriter {
     count: usize,
@@ -692,7 +697,7 @@ pub fn flush_and_sync(writer: &mut std::io::BufWriter<std::fs::File>) -> std::io
 /// Dispatches to the platform-appropriate opener:
 /// - macOS: `open`
 /// - Linux / BSD: `xdg-open`
-/// - Windows: `cmd /C start ""`
+/// - Windows: `rundll32 url.dll,FileProtocolHandler`
 /// - Other: returns an error.
 ///
 /// This is the single entry point for URL opening — every call site in
@@ -733,10 +738,12 @@ fn browser_open_command(url: &str) -> Result<Command> {
         Ok(command)
     }
 
+    // Not `cmd /C start`: cmd.exe would parse `&`, `|`, `^` and `%` inside
+    // the URL. The protocol handler receives it as data.
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", url]);
+        let mut cmd = Command::new("rundll32");
+        cmd.args(["url.dll,FileProtocolHandler", url]);
         Ok(cmd)
     }
 
@@ -1908,13 +1915,24 @@ mod project_mapping_tests {
 
         #[cfg(target_os = "windows")]
         {
-            assert_eq!(command.get_program(), "cmd");
+            assert_eq!(command.get_program(), "rundll32");
             assert_eq!(
                 command
                     .get_args()
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect::<Vec<_>>(),
-                vec!["/C", "start", "", "https://example.com"]
+                vec!["url.dll,FileProtocolHandler", "https://example.com"]
+            );
+            // Shell metacharacters stay inside the single URL argument.
+            let url = "https://example.com/?a=1&b=2|x^y%PATH%";
+            let command = super::browser_open_command(url).expect("command");
+            assert_eq!(command.get_program(), "rundll32");
+            assert_eq!(
+                command
+                    .get_args()
+                    .last()
+                    .map(|arg| arg.to_string_lossy().into_owned()),
+                Some(url.to_string())
             );
         }
     }

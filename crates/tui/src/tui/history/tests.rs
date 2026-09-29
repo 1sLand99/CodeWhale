@@ -2862,3 +2862,19 @@ fn first_file_line_reference_skips_unresolvable_and_malformed_rows() {
         "a cell with nothing to open must report nothing, not a default"
     );
 }
+
+/// #6601: the project-trust warning is a runtime-owned internal message; the
+/// model reads it, the transcript never shows it as the user's words.
+#[test]
+fn workspace_trust_warning_renders_no_transcript_cell() {
+    for warning in [Some("untrusted project skills were skipped"), None] {
+        let message = crate::runtime_handoff::workspace_trust_runtime_message(warning);
+        assert!(crate::runtime_handoff::is_internal_runtime_handoff(
+            &message
+        ));
+        assert!(
+            super::history_cells_from_message(&message).is_empty(),
+            "{warning:?}"
+        );
+    }
+}

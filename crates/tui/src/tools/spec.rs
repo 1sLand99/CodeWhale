@@ -1049,6 +1049,24 @@ impl ToolContext {
         Ok(())
     }
 
+    /// Cap the authority a tool call asks for on work it hands off (a durable
+    /// task or a scheduled automation) at what this session holds. Requested
+    /// `allow_shell`, `trust_mode` and `auto_approve` bits are declarations
+    /// from the model; each survives only when this session already has that
+    /// authority, so delegated work never runs with more than its creator.
+    pub(crate) fn cap_delegated_authority(
+        &self,
+        allow_shell: Option<bool>,
+        trust_mode: Option<bool>,
+        auto_approve: Option<bool>,
+    ) -> (Option<bool>, Option<bool>, Option<bool>) {
+        (
+            allow_shell.map(|requested| requested && self.shell_policy == ShellPolicy::Full),
+            trust_mode.map(|requested| requested && self.trust_mode),
+            auto_approve.map(|requested| requested && self.approval_mode == ApprovalMode::Bypass),
+        )
+    }
+
     /// Resolve a path relative to workspace, validating it doesn't escape.
     ///
     /// This handles both existing files (using canonicalize) and non-existent files

@@ -99,6 +99,7 @@ const COMPUTER_USE_FILES: &[(&str, &[u8])] = &[
     bundle_file!("src/exec.mjs"),
     bundle_file!("src/lease.mjs"),
     bundle_file!("src/png-size.mjs"),
+    bundle_file!("src/recordings.mjs"),
     bundle_file!("src/registry.mjs"),
     bundle_file!("src/remote-runtime.mjs"),
     bundle_file!("src/sprite-task.mjs"),

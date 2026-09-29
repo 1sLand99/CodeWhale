@@ -51,6 +51,7 @@ mod extension_host;
 mod external_credentials;
 mod features;
 mod fleet;
+mod fs_confined;
 mod hooks;
 mod image_attach;
 mod import_claude;
@@ -83,6 +84,7 @@ mod provider_lake;
 mod provider_readiness;
 mod purge;
 pub mod reasoning_preference;
+mod receipts;
 mod remote_control;
 mod remote_setup;
 pub mod repl;
@@ -117,7 +119,9 @@ mod session_export;
 mod session_manager;
 mod session_peek;
 mod session_projection;
+mod session_reconcile;
 mod session_resume;
+mod session_secret_scrub;
 mod settings;
 mod shell_dispatcher;
 mod skills;
@@ -298,6 +302,24 @@ enum Commands {
         #[command(subcommand)]
         command: Option<SessionsCommand>,
     },
+    /// Show what a session did: files changed, commands run, web and MCP
+    /// calls, agents, approvals, and failures, read from its saved record
+    #[command(visible_alias = "receipt")]
+    Receipts {
+        /// Session id or unique prefix, or a Runtime thread id (thr_...).
+        /// Omit it (or pass --last) for the most recently updated one.
+        #[arg(value_name = "SESSION_ID")]
+        id: Option<String>,
+        /// Use the most recently updated session or thread
+        #[arg(long, conflicts_with = "id")]
+        last: bool,
+        /// Limit to one turn: a thread's turn id, or a session's turn number
+        #[arg(long, value_name = "TURN")]
+        turn: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "md")]
+        format: receipts::ReceiptFormat,
+    },
     /// Create default AGENTS.md in current directory
     Init,
     /// Sign in to your Codewhale account (use the `codewhale` CLI).
@@ -394,6 +416,14 @@ enum SessionsCommand {
         /// Search sessions by title
         #[arg(short, long)]
         search: Option<String>,
+    },
+    /// Mask credentials that older builds stored in saved sessions' tool
+    /// output. Reports what it would change unless `--apply` is given. Run it
+    /// while no Codewhale session is open.
+    ScrubSecrets {
+        /// Rewrite the affected session files (default: report only)
+        #[arg(long, default_value_t = false)]
+        apply: bool,
     },
     /// Export a session as a full-fidelity tar.xz archive (complete context:
     /// system prompt, messages, tool calls and results, plus artifacts)
@@ -504,10 +534,15 @@ struct ExecArgs {
     /// operator hooks.
     #[arg(long, default_value_t = false)]
     hooks: bool,
-    /// Prompt to send to the model
+    /// Read the prompt from a file (`-` reads stdin) instead of argv, for
+    /// prompts past the OS per-argument limit (~128 KiB on Linux).
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+    prompt_file: Option<PathBuf>,
+    /// Prompt to send to the model. Taken literally, including a lone `-`;
+    /// use `--prompt-file -` to read stdin.
     #[arg(
         value_name = "PROMPT",
-        required = true,
+        required_unless_present = "prompt_file",
         trailing_var_arg = true,
         allow_hyphen_values = true
     )]
@@ -805,9 +840,16 @@ enum FleetAlertAdapterArg {
 /// terminated-by-signal exit (no code, no terminal restore, no `session_end`).
 /// After this function returns, the signals are armed.
 fn spawn_signal_cleanup_task() {
-    let signals = TerminatingSignals::register();
+    let mut signals = TerminatingSignals::register();
     tokio::spawn(async move {
         let exit_code = signals.wait().await;
+        // A serving Runtime API gets a bounded window to end its open event
+        // streams with a typed `stream.end`, so clients can tell a Runtime
+        // that stopped from a dropped connection. A second signal skips it.
+        tokio::select! {
+            () = runtime_api::drain_for_signal_exit() => {}
+            _ = signals.wait() => {}
+        }
         // If we get here a fatal signal arrived. Restore the terminal
         // and exit. A second signal during cleanup re-enters this
         // path and aborts via `std::process::exit` directly.
@@ -901,7 +943,7 @@ impl TerminatingSignals {
     /// Resolve with 128 + signal number for whichever arrives first. The
     /// fallback never-resolving future keeps `select!` well-typed when a
     /// stream failed to register.
-    async fn wait(mut self) -> i32 {
+    async fn wait(&mut self) -> i32 {
         tokio::select! {
             _ = async { match self.sigint.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 130,
             _ = async { match self.sigterm.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 143,
@@ -926,7 +968,7 @@ impl TerminatingSignals {
         }
     }
 
-    async fn wait(mut self) -> i32 {
+    async fn wait(&mut self) -> i32 {
         match self.ctrl_c.as_mut() {
             Some(s) => {
                 s.recv().await;
@@ -939,6 +981,45 @@ impl TerminatingSignals {
 
 fn join_prompt_parts(parts: &[String]) -> String {
     parts.join(" ")
+}
+
+/// Maximum bytes accepted for an exec prompt read from `--prompt-file` or
+/// stdin. Far past argv's per-argument ceiling; the model's context window
+/// stays the real limit (#6688).
+const MAX_EXEC_PROMPT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The effective exec prompt: argv words, or the body of `--prompt-file`
+/// (`-` = stdin). A positional `-` stays literal text: raw-prompt callers
+/// such as cloud dispatch pass a job prompt verbatim as argv. Runs before
+/// any model call so a missing or empty source fails loudly (#6688).
+fn resolve_exec_prompt(args: &ExecArgs) -> Result<String> {
+    let Some(path) = &args.prompt_file else {
+        return Ok(join_prompt_parts(&args.prompt));
+    };
+    let prompt = if path.as_os_str() == "-" {
+        if args.parent_death_watch {
+            bail!("--parent-death-watch owns stdin; pass the prompt with --prompt-file <PATH>");
+        }
+        let stdin = io::stdin();
+        if stdin.is_terminal() {
+            bail!("--prompt-file - reads stdin, but stdin is a terminal; pipe the prompt in.");
+        }
+        read_capped_text(stdin.lock(), MAX_EXEC_PROMPT_BYTES, "exec prompt on stdin")?
+    } else {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("failed to open --prompt-file {}", path.display()))?;
+        read_capped_text(file, MAX_EXEC_PROMPT_BYTES, "--prompt-file")
+            .with_context(|| format!("failed to read --prompt-file {}", path.display()))?
+    };
+    if prompt.trim().is_empty() {
+        let source = if path.as_os_str() == "-" {
+            "stdin".to_string()
+        } else {
+            path.display().to_string()
+        };
+        bail!("exec prompt from {source} is empty");
+    }
+    Ok(prompt)
 }
 
 fn resolve_exec_model(config: &Config, explicit_model: Option<&str>) -> String {
@@ -1180,6 +1261,17 @@ struct DoctorArgs {
     /// Apply the planned repairs without prompting (requires --fix)
     #[arg(long, default_value_t = false, requires = "fix")]
     yes: bool,
+    /// Repair the saved-session store now: re-index recoverable sessions,
+    /// unbind dead thread links, set aside (never delete) what nothing uses
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json"]
+    )]
+    repair_sessions: bool,
+    /// With --repair-sessions: report what would be repaired, change nothing
+    #[arg(long, default_value_t = false, requires = "repair_sessions")]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2015,7 +2107,8 @@ fn diagnostic_worker_count(command: Option<&Commands>) -> Option<usize> {
             Commands::Doctor(_)
             | Commands::Eval(_)
             | Commands::SessionDiagnostics(_)
-            | Commands::Sessions { .. },
+            | Commands::Sessions { .. }
+            | Commands::Receipts { .. },
         ) => true,
         // Only the read-only status report; mutating setup keeps defaults.
         Some(Commands::Setup(args)) => args.status,
@@ -2073,7 +2166,12 @@ fn telemetry_session_source(command: Option<&Commands>) -> codewhale_telemetry::
 fn telemetry_command_is_read_only(command: Option<&Commands>) -> bool {
     matches!(
         command,
-        Some(Commands::Doctor(_) | Commands::SessionDiagnostics(_) | Commands::Sessions { .. })
+        Some(
+            Commands::Doctor(_)
+                | Commands::SessionDiagnostics(_)
+                | Commands::Sessions { .. }
+                | Commands::Receipts { .. }
+        )
     ) || matches!(command, Some(Commands::Setup(args)) if args.status)
 }
 
@@ -2290,6 +2388,9 @@ async fn run_async_main_dispatch(
                     }
                 };
                 let workspace = resolve_workspace(&cli);
+                if args.repair_sessions {
+                    return run_doctor_repair_sessions(args.dry_run);
+                }
                 if args.context_json {
                     run_doctor_context_json(&config, &workspace)
                 } else if args.json {
@@ -2311,6 +2412,7 @@ async fn run_async_main_dispatch(
                         &config,
                         &workspace,
                         cli.config.as_deref(),
+                        effective_config_profile(&cli).as_deref(),
                         probes,
                         plugin_registry.as_ref(),
                     )
@@ -2348,6 +2450,14 @@ async fn run_async_main_dispatch(
             } => match command {
                 None => list_sessions(limit, search),
                 Some(SessionsCommand::List { limit, search }) => list_sessions(limit, search),
+                Some(SessionsCommand::ScrubSecrets { apply }) => {
+                    run_sessions_scrub_secrets(
+                        apply,
+                        cli.config.clone(),
+                        effective_config_profile(&cli),
+                    )
+                    .await
+                }
                 Some(SessionsCommand::Export {
                     id,
                     output,
@@ -2358,6 +2468,16 @@ async fn run_async_main_dispatch(
                     run_sessions_export(&id, output.as_deref(), skip_artifacts, compression, force)
                 }
             },
+            Commands::Receipts {
+                id,
+                last,
+                turn,
+                format,
+            } => receipts::run_receipts_command(
+                if last { None } else { id.as_deref() },
+                turn.as_deref(),
+                format,
+            ),
             Commands::Init => init_project(),
             Commands::Login { api_key } => run_login(api_key),
             Commands::Logout => run_logout(),
@@ -2399,16 +2519,18 @@ async fn run_async_main_dispatch(
                 {
                     let trimmed = env_url.trim();
                     if !trimmed.is_empty() {
-                        config.base_url = Some(trimmed.to_string());
+                        let provider = config.api_provider();
+                        config.set_provider_base_url_override(provider, Some(trimmed.to_string()));
                     }
                 }
                 // Honour `--provider` (#4093): a Fleet worker whose profile pins
                 // a provider launches on that provider even when the parent
                 // session is on another one. This sets ONLY the non-secret
                 // provider identity (`config.provider`); credentials/base URL
-                // still resolve from the worker's own env/config, and for a
-                // non-DeepSeek provider the legacy root `base_url` above is
-                // ignored by `active_route_base_url()`. Must precede model
+                // still resolve from the worker's own env/config, and the
+                // endpoint above stays in the previously active provider's
+                // own table, so a different pinned provider never reads it.
+                // Must precede model
                 // resolution so an `auto`/default model resolves to the
                 // overridden provider's default.
                 let explicit_provider = args
@@ -2429,7 +2551,7 @@ async fn run_async_main_dispatch(
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
                 initialize_cloud_facts(&config);
-                let prompt = join_prompt_parts(&args.prompt);
+                let prompt = resolve_exec_prompt(&args)?;
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
                 validate_exec_tool_authority_resume(
                     args.tool_authority_json.as_deref(),
@@ -4163,14 +4285,12 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
     let provider_config_key_kind = provider_config
         .and_then(|entry| entry.api_key.as_deref())
         .map(crate::config::classify_config_api_key_value);
-    let root_key_applies = matches!(
-        provider,
-        crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
-    ) || (provider == crate::config::ApiProvider::Custom
-        && config.uses_legacy_literal_custom_route());
-    let root_key_kind = root_key_applies
-        .then_some(config.api_key.as_deref())
+    // DeepSeek-CN shares `[providers.deepseek]`'s key (the two identities
+    // used to share the top-level `api_key`, #6394).
+    let root_key_kind = (provider == crate::config::ApiProvider::DeepseekCN)
+        .then(|| config.provider_config_for(crate::config::ApiProvider::Deepseek))
         .flatten()
+        .and_then(|entry| entry.api_key.as_deref())
         .map(crate::config::classify_config_api_key_value);
 
     if matches!(
@@ -4538,6 +4658,7 @@ async fn run_doctor(
     config: &Config,
     workspace: &Path,
     config_path_override: Option<&Path>,
+    profile: Option<&str>,
     probes: crate::doctor::DoctorProbeRequest,
     plugins: &crate::plugins::PluginRegistry,
 ) {
@@ -4607,6 +4728,24 @@ async fn run_doctor(
                 );
             }
         }
+        // Legacy top-level `base_url` / `api_key` (#6394): which moves the
+        // file still has pending, which pair disagrees and which side is in
+        // use. Sources only, never values.
+        for note in &config.legacy_root.notes {
+            let pending = !matches!(
+                note,
+                codewhale_config::legacy_root::LegacyRootNote::Conflict { .. }
+            );
+            println!(
+                "  {} {note}{}",
+                "!".truecolor(sky_r, sky_g, sky_b),
+                if pending {
+                    " (read that way already; `codewhale config migrate` updates the file)"
+                } else {
+                    ""
+                }
+            );
+        }
     } else {
         println!(
             "  {} config.toml not found at {} (using defaults/env)",
@@ -4629,6 +4768,16 @@ async fn run_doctor(
     for line in crate::doctor::secret_backend_human_lines(&secret_backend) {
         println!("  · {line}");
     }
+
+    println!();
+    println!("{}", "Sessions:".bold());
+    println!(
+        "  · {}",
+        crate::session_reconcile::last_run(&doctor_paths.sessions).map_or_else(
+            || "no session repair has run yet (it runs at launch; `codewhale doctor --repair-sessions` runs it now)".to_string(),
+            |summary| summary.doctor_detail()
+        )
+    );
 
     // State root (v0.8.44)
     println!();
@@ -4667,6 +4816,11 @@ async fn run_doctor(
         (aqua_r, aqua_g, aqua_b),
         (sky_r, sky_g, sky_b),
     );
+    print_doctor_stored_secrets_report(
+        config_path_override.map(Path::to_path_buf),
+        profile.map(str::to_owned),
+    )
+    .await;
 
     let (setup_state, setup_source) = doctor_setup_state(config, workspace);
     print_doctor_setup_report(
@@ -4694,11 +4848,7 @@ async fn run_doctor(
                 crate::config::classify_config_api_key_value(key)
                     == crate::config::ConfigApiKeyValueKind::Literal
             })
-        }) || (matches!(provider, crate::config::ApiProvider::Deepseek)
-            && config.api_key.as_deref().is_some_and(|key| {
-                crate::config::classify_config_api_key_value(key)
-                    == crate::config::ConfigApiKeyValueKind::Literal
-            }));
+        });
         let env_source_declared = provider_config
             .and_then(|entry| entry.api_key_env.as_deref())
             .is_some_and(|name| !name.trim().is_empty());
@@ -5360,12 +5510,12 @@ async fn run_doctor(
         None => {
             println!("  {} pandoc: not found (optional)", "·".dimmed(),);
             println!(
-                "    pandoc_convert tool is NOT advertised to the model. Install pandoc to enable:"
+                "    pandoc_convert tool is NOT advertised to the model. Install pandoc 2.15+ to enable:"
             );
             match std::env::consts::OS {
                 "macos" => println!("      brew install pandoc"),
                 "linux" => println!(
-                    "      sudo apt install pandoc    (Debian/Ubuntu) — or your distro's equivalent"
+                    "      release package from pandoc.org/installing.html (distro packages may predate 2.15)"
                 ),
                 "windows" => {
                     println!("      winget install JohnMacFarlane.Pandoc")
@@ -5522,14 +5672,16 @@ async fn run_doctor(
 /// is the setup lane's own verdict; doctor never probes credential values to
 /// decide it.
 fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
-    // NeedsAction means a route is named but no credential is confirmed for
-    // it, which is still "no provider set up" from where the user sits.
+    // NeedsAction means a named route needs repair (missing credentials or a
+    // failed check). Configured routes can be used without a prior probe.
     // `first_run_ready` accepts NeedsAction (a failed key still reaches the
     // wizard's ready screen), so check the provider first: finished setup
-    // with an unconfirmed key is not "Ready".
-    let provider_verified = state.status(codewhale_config::SetupStep::ProviderModel)
-        == codewhale_config::StepStatus::Verified;
-    if !provider_verified {
+    // with a route needing repair is not "Ready".
+    let provider_configured = matches!(
+        state.status(codewhale_config::SetupStep::ProviderModel),
+        codewhale_config::StepStatus::Configured | codewhale_config::StepStatus::Verified
+    );
+    if !provider_configured {
         "Not ready: no model provider set up → run /provider in Codewhale, or `codewhale setup`."
     } else if state.first_run_ready() {
         "Ready: setup is complete."
@@ -7073,6 +7225,7 @@ fn setup_status_id(status: codewhale_config::StepStatus) -> &'static str {
         codewhale_config::StepStatus::Optional => "optional",
         codewhale_config::StepStatus::Deferred => "deferred",
         codewhale_config::StepStatus::InProgress => "in_progress",
+        codewhale_config::StepStatus::Configured => "configured",
         codewhale_config::StepStatus::Verified => "verified",
         codewhale_config::StepStatus::NeedsAction => "needs_action",
         codewhale_config::StepStatus::Failed => "failed",
@@ -7119,6 +7272,28 @@ fn runtime_posture_source_id(source: codewhale_config::RuntimePostureSource) -> 
 /// Emit a bounded, secret-redacted JSON failure when configuration cannot be
 /// loaded or validated. Invalid configuration must not be forced through the
 /// normal doctor report because its route/capability facts would be misleading.
+/// `codewhale doctor --repair-sessions [--dry-run]` (#6144).
+fn run_doctor_repair_sessions(dry_run: bool) -> Result<()> {
+    let manager = session_manager::SessionManager::default_location()?;
+    let summary = crate::session_reconcile::reconcile(
+        &manager,
+        &crate::session_reconcile::ReconcileOptions {
+            dry_run,
+            ..Default::default()
+        },
+    )?;
+    let report = serde_json::to_string_pretty(&summary)?;
+    if summary.skipped_concurrent {
+        println!("Another Codewhale process is repairing the session store; try again shortly.");
+    } else if dry_run {
+        println!("Session repair (dry run — nothing changed):");
+    } else {
+        println!("Session repair:");
+    }
+    println!("{report}");
+    Ok(())
+}
+
 fn run_doctor_json_config_error(error: &anyhow::Error) -> Result<()> {
     let safe_message = error
         .downcast_ref::<crate::config::SafeConfigDiagnostic>()
@@ -7274,6 +7449,9 @@ fn run_doctor_json(
         "version": env!("CARGO_PKG_VERSION"),
         "config_path": config_path.display().to_string(),
         "config_present": config_path.exists(),
+        "sessions": {
+            "last_repair": crate::session_reconcile::last_run(&doctor_paths.sessions),
+        },
         "paths": doctor_paths,
         "secret_backend": secret_backend,
         "workspace": workspace.display().to_string(),
@@ -7543,11 +7721,7 @@ fn doctor_provider_config_table(config: &Config, provider: crate::config::ApiPro
     if provider != crate::config::ApiProvider::Custom {
         return provider_config_table_key(provider).to_string();
     }
-    if config.uses_legacy_literal_custom_route() {
-        "root (legacy literal custom)".to_string()
-    } else {
-        format!("providers.{}", config.provider_identity_for(provider))
-    }
+    format!("providers.{}", config.provider_identity_for(provider))
 }
 
 fn doctor_provider_source(config: &Config) -> &'static str {
@@ -8173,6 +8347,161 @@ fn rustc_version() -> String {
 /// List saved sessions
 fn sessions_resume_command() -> &'static str {
     "codewhale resume"
+}
+
+/// Newest files per category (sessions/checkpoints and Runtime receipts) inspected;
+/// `codewhale sessions scrub-secrets` covers every file.
+const DOCTOR_SECRET_SCAN_FILES: usize = 50;
+
+/// B1 finding: sessions written before tool output was redacted at the
+/// transcript boundary can still hold live credentials. Report, never
+/// rewrite — scrubbing is the explicit `scrub-secrets` command. Doctor is a
+/// read-only diagnostic, so this resolves the sessions directory with the
+/// read-path resolver: it never creates the home or migrates a legacy tree.
+async fn print_doctor_stored_secrets_report(config_path: Option<PathBuf>, profile: Option<String>) {
+    use colored::Colorize;
+
+    let scan = tokio::task::spawn_blocking(move || -> Result<_> {
+        let sessions_dir = codewhale_config::resolve_state_dir("sessions")?;
+        let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+            task_manager::default_tasks_dir(),
+        );
+        let mut unreadable = Vec::new();
+        let files =
+            session_secret_scrub::session_files(&sessions_dir, &runtime.data_dir, &mut unreadable);
+        let total = files.len();
+        let checked = session_secret_scrub::doctor_files(files, DOCTOR_SECRET_SCAN_FILES);
+        let secrets = session_secret_scrub::configured_secrets(config_path, profile.as_deref())?;
+        let mut report = session_secret_scrub::scrub_files(&checked, None, &secrets)?;
+        report.unreadable.extend(unreadable);
+        Ok((report, total))
+    })
+    .await;
+    println!();
+    println!("{}", "Stored Sessions:".bold());
+    match scan {
+        Ok(Ok((report, total))) => println!("{}", doctor_stored_secrets_summary(&report, total)),
+        _ => println!("  ! stored credential scan could not be completed"),
+    }
+}
+
+fn doctor_stored_secrets_summary(
+    report: &session_secret_scrub::ScrubReport,
+    total: usize,
+) -> String {
+    let scope = if total > report.files_scanned {
+        format!(
+            "{} of {total}; newest up to {DOCTOR_SECRET_SCAN_FILES} per category: sessions/checkpoints and Runtime receipts",
+            report.files_scanned
+        )
+    } else {
+        format!("{total}")
+    };
+    let mut lines = Vec::new();
+    if report.flagged_files.is_empty() && report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ✓ no credentials found in stored tool output ({scope} files)"
+        ));
+    }
+    if !report.flagged_files.is_empty() {
+        lines.push(format!(
+            "  ✗ {} files hold credentials in stored tool output ({scope} checked)",
+            report.flagged_files.len()
+        ));
+        lines.push(format!(
+            "    fix: `{}` to review, then `--apply` to mask them; rotate any exposed credential",
+            session_secret_scrub::SCRUB_COMMAND
+        ));
+    }
+    if !report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ! scan incomplete: {} files or directories could not be read or parsed ({scope} checked)",
+            report.unreadable.len()
+        ));
+        for path in &report.unreadable {
+            lines.push(format!("    {}", path.display()));
+        }
+    }
+    lines.join("\n")
+}
+
+async fn run_sessions_scrub_secrets(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<String>,
+) -> Result<()> {
+    #[cfg(test)]
+    let ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(ticket);
+        run_sessions_scrub_secrets_blocking(apply, config_path, profile.as_deref())
+    })
+    .await?
+}
+
+fn run_sessions_scrub_secrets_blocking(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let manager = session_manager::SessionManager::default_location()?;
+    let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+        task_manager::default_tasks_dir(),
+    );
+    let mut unreadable = Vec::new();
+    let files = session_secret_scrub::session_files(
+        manager.sessions_dir(),
+        &runtime.data_dir,
+        &mut unreadable,
+    );
+    let secrets = session_secret_scrub::configured_secrets(config_path, profile)?;
+    let mut report =
+        session_secret_scrub::scrub_files(&files, apply.then_some(&manager), &secrets)?;
+    report.unreadable.extend(unreadable);
+    let affected = report.flagged_files.len();
+    if affected == 0 && report.unreadable.is_empty() && report.busy.is_empty() {
+        println!(
+            "No stored credentials found in tool output across {} files.",
+            report.files_scanned
+        );
+    } else if affected > 0 {
+        let verb = if apply { "Scrubbed" } else { "Found" };
+        println!(
+            "{verb} {} credential-bearing tool results in {affected} of {} session files:",
+            report.flagged_tool_results, report.files_scanned
+        );
+        for path in &report.flagged_files {
+            println!("  {}", path.display());
+        }
+        if !apply {
+            println!(
+                "Re-run with `{} --apply` to mask them (close open Codewhale sessions first). \
+                 Rotate any credential that was exposed: redaction cannot un-leak it.",
+                session_secret_scrub::SCRUB_COMMAND
+            );
+        }
+    }
+    if !report.unreadable.is_empty() {
+        println!(
+            "{} files or directories could not be read or parsed and were left untouched.",
+            report.unreadable.len()
+        );
+        for path in &report.unreadable {
+            println!("  {}", path.display());
+        }
+    }
+    if !report.busy.is_empty() {
+        println!(
+            "{} credential-bearing Runtime files were skipped because their stores are active. Close the session or Runtime server and re-run `{} --apply`:",
+            report.busy.len(),
+            session_secret_scrub::SCRUB_COMMAND
+        );
+        for path in &report.busy {
+            println!("  {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 fn list_sessions(limit: usize, search: Option<String>) -> Result<()> {
@@ -10020,7 +10349,8 @@ fn collect_diff(
         let mut cmd = crate::dependencies::Git::review_command(workspace)?;
         // Review repository content without executing its diff drivers.
         cmd.current_dir(workspace)
-            .args(["diff", "--no-ext-diff", "--no-textconv"]);
+            .arg("diff")
+            .args(crate::dependencies::Git::REVIEW_DIFF_ARGS);
         if args.staged {
             cmd.arg("--cached");
         }
@@ -10118,12 +10448,16 @@ fn read_patch_from_stdin() -> Result<String> {
     if stdin.is_terminal() {
         bail!("No patch file provided and stdin is empty.");
     }
+    read_capped_text(stdin.lock(), MAX_STDIN_PATCH_BYTES, "patch on stdin")
+}
+
+/// Read UTF-8 text, refusing more than `limit` bytes with a message that
+/// names the limit in bytes.
+fn read_capped_text(reader: impl Read, limit: u64, what: &str) -> Result<String> {
     let mut buffer = String::new();
-    stdin
-        .take(MAX_STDIN_PATCH_BYTES + 1)
-        .read_to_string(&mut buffer)?;
-    if buffer.len() as u64 > MAX_STDIN_PATCH_BYTES {
-        bail!("patch on stdin exceeds the 16 MiB limit");
+    reader.take(limit + 1).read_to_string(&mut buffer)?;
+    if buffer.len() as u64 > limit {
+        bail!("{what} exceeds the {limit}-byte limit");
     }
     Ok(buffer)
 }
@@ -11236,6 +11570,9 @@ fn merge_project_config_with_approval_baseline(
         "mcp_config_path",
         "mcp_oauth_callback_port",
         "mcp_oauth_callback_url",
+        // The auto-approved `note` tool appends to `notes_path`, so a
+        // project value would be a write target the user never reviewed.
+        "notes_path",
     ];
     for key in DENY_AT_PROJECT_SCOPE {
         if table.contains_key(*key) {
@@ -11248,7 +11585,7 @@ fn merge_project_config_with_approval_baseline(
     }
 
     // String fields a project may legitimately override (model,
-    // approval/sandbox tightening, notes path, reasoning effort).
+    // approval/sandbox tightening, reasoning effort).
     if !config.environment_model_applied
         && let Some(model) = table.get("model").and_then(toml::Value::as_str)
         && !model.is_empty()
@@ -11257,15 +11594,10 @@ fn merge_project_config_with_approval_baseline(
         config.set_provider_model_override(config.api_provider(), Some(model.to_string()));
         config.remembered_selection_scope = Some(false);
     }
-    for (key, field) in [
-        ("reasoning_effort", &mut config.reasoning_effort),
-        ("notes_path", &mut config.notes_path),
-    ] {
-        if let Some(v) = table.get(key).and_then(toml::Value::as_str)
-            && !v.is_empty()
-        {
-            *field = Some(v.to_string());
-        }
+    if let Some(v) = table.get("reasoning_effort").and_then(toml::Value::as_str)
+        && !v.is_empty()
+    {
+        config.reasoning_effort = Some(v.to_string());
     }
 
     if let Some(v) = table.get("approval_policy").and_then(toml::Value::as_str)
@@ -12320,7 +12652,8 @@ async fn run_workflow_tool_command_inner(
     {
         let trimmed = env_url.trim();
         if !trimmed.is_empty() {
-            config.base_url = Some(trimmed.to_string());
+            let provider = config.api_provider();
+            config.set_provider_base_url_override(provider, Some(trimmed.to_string()));
         }
     }
 
@@ -13224,6 +13557,61 @@ mod doctor_legacy_state_tests {
     use std::ffi::OsString;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn doctor_reports_unreadable_files_without_clean_marker() {
+        let tmp = TempDir::new().unwrap();
+        let broken = tmp.path().join("broken.json");
+        fs::write(&broken, "{\"access_token\": unfinished").unwrap();
+        let mut report =
+            session_secret_scrub::scrub_files(std::slice::from_ref(&broken), None, &[]).unwrap();
+        let summary = doctor_stored_secrets_summary(&report, 1);
+        assert!(summary.contains("scan incomplete") && summary.contains("broken.json"));
+        assert!(!summary.contains('✓') && !summary.contains("no credentials found"));
+        report.flagged_files.push(tmp.path().join("dirty.json"));
+        let summary = doctor_stored_secrets_summary(&report, 2);
+        assert!(summary.contains("hold credentials") && summary.contains("scan incomplete"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scrub_does_not_block_tokio_worker() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let _env = lock_test_env();
+        let tmp = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let _runtime = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", tmp.path().join("runtime"));
+        let manager = session_manager::SessionManager::default_location().unwrap();
+        fs::write(manager.sessions_dir().join("dirty.json"), serde_json::json!({"type":"tool_result", "content":"sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij"}).to_string()).unwrap();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let progressed = Arc::new(AtomicBool::new(false));
+        let progress_for_lock = progressed.clone();
+        let holder = std::thread::spawn(move || {
+            manager
+                .with_session_file_lock("dirty", || {
+                    locked_tx.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    Ok(progress_for_lock.load(Ordering::SeqCst))
+                })
+                .unwrap()
+                .unwrap()
+        });
+        locked_rx.recv().unwrap();
+        let tick = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            progressed.store(true, Ordering::SeqCst);
+        });
+        run_sessions_scrub_secrets(true, None, None).await.unwrap();
+        assert!(
+            holder.join().unwrap(),
+            "the timer must run while the scrub waits on the file lock"
+        );
+        tick.await.unwrap();
+    }
 
     struct EnvVarRestore {
         key: &'static str,
@@ -14158,7 +14546,6 @@ mod doctor_setup_state_tests {
         .save()
         .expect("persist user constitution");
         let config = Config {
-            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
             approval_policy: Some("never".to_string()),
             allow_shell: Some(false),
             sandbox_mode: Some("read-only".to_string()),
@@ -14167,7 +14554,8 @@ mod doctor_setup_state_tests {
                 ..Default::default()
             }),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("TEST-STRUCTURAL-LITERAL".to_string()), None);
 
         let report = doctor_setup_report_json(&config, &workspace);
 
@@ -14211,10 +14599,8 @@ mod doctor_setup_state_tests {
         );
         assert_eq!(provider_step(&report)["result"], "deepseek/deepseek-chat");
 
-        let unprobed_config = Config {
-            api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
-            ..config.clone()
-        };
+        let unprobed_config = Config { ..config.clone() }
+            .with_legacy_root(Some(crate::config::API_KEYRING_SENTINEL.to_string()), None);
         let unprobed_report = doctor_setup_report_json(&unprobed_config, &workspace);
         assert_eq!(unprobed_report["credential"]["ready"], false);
         assert_eq!(unprobed_report["credential"]["availability"], "not_probed");
@@ -14369,9 +14755,9 @@ mod doctor_setup_state_tests {
         state.save().expect("persist setup state");
 
         let config = Config {
-            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("TEST-STRUCTURAL-LITERAL".to_string()), None);
         let report = doctor_setup_report_json(&config, &workspace);
 
         assert_eq!(report["first_run_ready"], true);
@@ -14495,9 +14881,9 @@ mod doctor_endpoint_tests {
     fn strict_tool_mode_doctor_warns_for_non_beta_deepseek_endpoint() {
         let config = Config {
             strict_tool_mode: Some(true),
-            base_url: Some("https://api.deepseek.com".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://api.deepseek.com".to_string()));
 
         let status = doctor_strict_tool_mode_status(&config);
 
@@ -14600,10 +14986,10 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_preserves_custom_deepseek_alias_namespace() {
         let mut config = Config {
-            base_url: Some("https://models.example/v1".to_string()),
             default_text_model: Some("deepseek-chat".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://models.example/v1".to_string()));
         crate::config::normalize_model_config_for_test(&mut config);
 
         let report = provider_capability_report(&config);
@@ -14629,10 +15015,13 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_preserves_v4_pro_without_retirement() {
         let mut config = Config {
-            base_url: Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
             default_text_model: Some("deepseek-v4-pro".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            None,
+            Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
+        );
         crate::config::normalize_model_config_for_test(&mut config);
         let report = provider_capability_report(&config);
         assert_eq!(report["resolved_model"], "deepseek-v4-pro");
@@ -14652,10 +15041,10 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_leaves_custom_v4_pro_namespace_untouched() {
         let mut config = Config {
-            base_url: Some("https://models.example/v1".to_string()),
             default_text_model: Some("deepseek-v4-pro".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://models.example/v1".to_string()));
         crate::config::normalize_model_config_for_test(&mut config);
 
         let report = provider_capability_report(&config);
@@ -15339,9 +15728,12 @@ mod terminal_mode_tests {
             provider: Some("deepseek".to_string()),
             // A fresh one-row roster must not replace the normal DeepSeek
             // endpoint's process-wide catalog for unrelated route tests.
-            base_url: Some("https://api.deepseek.com/v1/doctor-roster-fixture".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            None,
+            Some("https://api.deepseek.com/v1/doctor-roster-fixture".to_string()),
+        );
         let kind = crate::config::ApiProvider::Deepseek;
         let base_url = config.base_url_for_route_identity(kind, "deepseek");
         let fetched_at = std::time::SystemTime::now()
@@ -15707,11 +16099,11 @@ reasoning = "high"
         .expect("fleet file");
 
         let base = Config {
-            api_key: Some("test-key".to_string()),
             provider: Some("openrouter".to_string()),
             reasoning_effort: Some("off".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(Some("test-key".to_string()), None);
         let mut explicit = base.clone();
         assert!(
             !apply_selected_fleet_operator_for_launch(
@@ -15747,10 +16139,10 @@ reasoning = "high"
         assert!(selected.fleet_operator_reasoning_applied);
 
         let mut reasoning_override = Config {
-            api_key: Some("test-key".to_string()),
             reasoning_effort: Some("off".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(Some("test-key".to_string()), None);
         apply_selected_fleet_operator_for_launch(
             &mut reasoning_override,
             workspace.path(),
@@ -15900,17 +16292,19 @@ reasoning = "high"
     }
 
     #[test]
-    fn cli_route_execution_config_preserves_legacy_literal_custom_root_route() {
+    fn cli_route_execution_config_preserves_the_legacy_literal_custom_route() {
         let _lock = crate::test_support::lock_test_env();
         let _source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
         let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("legacy-root-key".to_string()),
-            base_url: Some("http://127.0.0.1:18183/v1".to_string()),
             default_text_model: Some("legacy-model".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            Some("legacy-root-key".to_string()),
+            Some("http://127.0.0.1:18183/v1".to_string()),
+        );
         let route = CliAutoRoute {
             provider: crate::config::ApiProvider::Custom,
             model: "routed-legacy-model".to_string(),
@@ -15921,13 +16315,9 @@ reasoning = "high"
 
         let execution = config_for_cli_route(&config, &route);
 
-        assert!(execution.uses_legacy_literal_custom_route());
-        assert!(
-            execution
-                .providers
-                .as_ref()
-                .is_none_or(|providers| !providers.custom.contains_key("custom"))
-        );
+        // The literal route's top-level fields live in `[providers.custom]`
+        // (#6394), and the routed model lands there too.
+        assert!(execution.selects_literal_custom_provider());
         assert_eq!(execution.provider.as_deref(), Some("custom"));
         assert_eq!(execution.default_model(), "routed-legacy-model");
         assert_eq!(
@@ -16028,6 +16418,87 @@ reasoning = "high"
 
         assert!(args.json);
         assert_eq!(args.prompt, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn exec_prompt_file_carries_prompts_past_the_argv_ceiling() {
+        // #6688: argv caps one argument at 128 KiB; the file transport does not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big-prompt.txt");
+        let body = "стих ".repeat(60_000);
+        assert!(body.len() > 512 * 1024);
+        std::fs::write(&path, &body).expect("write prompt");
+        let path_arg = path.to_str().expect("utf-8 path");
+
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "--prompt-file", path_arg]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert!(args.auto);
+        assert!(args.prompt.is_empty());
+        assert_eq!(resolve_exec_prompt(&args).expect("prompt"), body);
+
+        let conflict =
+            Cli::try_parse_from(["codewhale", "exec", "--prompt-file", path_arg, "also argv"])
+                .expect_err("positional prompt and --prompt-file conflict");
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let missing = dir.path().join("missing.txt");
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--prompt-file",
+            missing.to_str().expect("utf-8 path"),
+        ]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        let err = resolve_exec_prompt(&args).expect_err("missing file fails");
+        assert!(err.to_string().contains("--prompt-file"), "{err:#}");
+
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--parent-death-watch",
+            "--prompt-file",
+            "-",
+        ]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        let err = resolve_exec_prompt(&args).expect_err("stdin is owned by the watcher");
+        assert!(err.to_string().contains("--parent-death-watch"), "{err:#}");
+
+        let cli = parse_cli(&["codewhale", "exec", "explain", "this"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(
+            resolve_exec_prompt(&args).expect("argv prompt"),
+            "explain this"
+        );
+
+        // A positional `-` is prompt text, never a stdin read: cloud dispatch
+        // passes job prompts verbatim as argv.
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "-"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(resolve_exec_prompt(&args).expect("literal dash"), "-");
+    }
+
+    #[test]
+    fn read_capped_text_names_the_limit_in_bytes() {
+        let err =
+            read_capped_text(&b"abcdef"[..], 4, "exec prompt on stdin").expect_err("over the cap");
+        assert_eq!(
+            err.to_string(),
+            "exec prompt on stdin exceeds the 4-byte limit"
+        );
+        assert_eq!(
+            read_capped_text(&b"abcd"[..], 4, "x").expect("at the cap"),
+            "abcd"
+        );
     }
 
     #[test]
@@ -19431,20 +19902,22 @@ mcp_oauth_callback_url = "http://evil.example.com/callback"
 "#,
         );
         let mut config = Config {
-            api_key: Some("USER_KEY".to_string()),
-            base_url: Some("https://api.deepseek.com".to_string()),
             mcp_oauth_callback_port: Some(1455),
             mcp_oauth_callback_url: Some("http://127.0.0.1:1455/callback".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("USER_KEY".to_string()),
+            Some("https://api.deepseek.com".to_string()),
+        );
         merge_project_config(&mut config, tmp.path());
         assert_eq!(
-            config.api_key.as_deref(),
+            config.deepseek_table_api_key(),
             Some("USER_KEY"),
             "user api_key must survive project-config attack"
         );
         assert_eq!(
-            config.base_url.as_deref(),
+            config.deepseek_table_base_url(),
             Some("https://api.deepseek.com"),
             "user base_url must survive project-config attack"
         );
@@ -19480,6 +19953,21 @@ sandbox_mode = "read-only"
         merge_project_config(&mut config, tmp.path());
         assert_eq!(config.approval_policy.as_deref(), Some("never"));
         assert_eq!(config.sandbox_mode.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn project_overlay_ignores_notes_path() {
+        // The auto-approved `note` tool appends to `notes_path`; a project
+        // config must not choose that write target.
+        for value in ["~/.zshrc", "/etc/profile", "../../.bashrc", "docs/notes.md"] {
+            let tmp = workspace_with_project_config(&format!("notes_path = {value:?}\n"));
+            let mut config = Config::default();
+            merge_project_config(&mut config, tmp.path());
+            assert_eq!(
+                config.notes_path, None,
+                "project notes_path {value:?} must be ignored"
+            );
+        }
     }
 
     #[test]
@@ -21045,9 +21533,9 @@ mod setup_helper_tests {
             std::env::remove_var("DEEPSEEK_API_KEY_SOURCE");
         }
         let cfg = Config {
-            api_key: Some("fresh-config-key".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("fresh-config-key".to_string()), None);
         let source = resolve_api_key_source(&cfg);
         match prev {
             Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY", value) },
@@ -21135,9 +21623,9 @@ mod setup_helper_tests {
         let _openrouter_key = crate::test_support::EnvVarGuard::remove("OPENROUTER_API_KEY");
         let cfg = Config {
             provider: Some("openrouter".to_string()),
-            api_key: Some("legacy-deepseek-root-key".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("legacy-deepseek-root-key".to_string()), None);
 
         let source = resolve_api_key_source(&cfg);
 

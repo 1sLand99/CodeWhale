@@ -1003,6 +1003,19 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         "gh issue list --limit 10",
         "gh issue view 5287 --json title,state",
         "sed -n '2,3p' src/evidence.txt",
+        // #6015: durable workers accept the same grammar as in-session
+        // agents — pipelines, chains, find, git -C and a leading cd.
+        "rg -n foo src | head -5",
+        "find . -name '*.rs'",
+        "git -C . log --oneline -3",
+        "cd src && git diff",
+        "git diff HEAD && echo '=== FILES ===' && ls -la",
+        "rg -n foo src 2>/dev/null",
+        "sed -n '2p' src/evidence.txt | head -n 1",
+        "sed -n '2p' src/evidence.txt | gh issue list",
+        "gh issue list | sed -n '2p'",
+        "npm view codewhale",
+        "find src -name '*.rs'",
     ] {
         enforce_tool_authority(
             "Bash",
@@ -1057,20 +1070,21 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         "sed -n '2p' $(touch src/no.txt)",
         "sed -n '2p' src/evidence.txt > src/no.txt",
         "sed -n '2p' src/evidence.txt && touch src/no.txt",
-        "sed -n '2p' src/evidence.txt | head -n 1",
-        "sed -n '2p' src/evidence.txt | gh issue list",
-        "gh issue list | sed -n '2p'",
-        "npm view codewhale",
-        "find src -name '*.rs'",
         "find src -delete",
         "awk '1' src/evidence.txt",
+        "git commit -m x",
+        "sort -o src/no.txt src/evidence.txt",
+        "cd /etc; cat passwd",
     ] {
         let error = registry
             .execute_full("Bash", json!({"action": "run", "command": command}))
             .await
             .expect_err("mutating Bash remains outside machine authority")
             .to_string();
-        assert!(error.contains("arbitrary command execution"), "{error}");
+        // The refusal names the rule, from the same classifier every
+        // read-only gate uses.
+        assert!(error.contains("[shell.readonly.command]"), "{error}");
+        assert!(error.contains("File tool"), "{error}");
     }
     assert!(!tmp.path().join("src/no.txt").exists());
 
@@ -1196,6 +1210,27 @@ fn fleet_authority_intersects_readonly_github_bash_with_network_ceiling() {
         .expect_err("network denial must win")
         .to_string();
     assert!(error.contains("does not grant network access"), "{error}");
+
+    // #6015: a network read cannot hide inside a pipeline or chain, and npm
+    // registry reads need the same grant.
+    for command in [
+        "gh pr view 1 | head",
+        "ls && gh issue list",
+        "npm view x",
+        "cd . && gh pr view 1",
+        "cd sub && npm view x",
+    ] {
+        let input = json!({"action": "run", "command": command});
+        enforce_tool_authority("Bash", &input, &shell, &networked)
+            .unwrap_or_else(|error| panic!("{command}: {error}"));
+        let error = enforce_tool_authority("Bash", &input, &shell, &offline)
+            .expect_err("network denial must win inside compositions")
+            .to_string();
+        assert!(
+            error.contains("does not grant network access"),
+            "{command}: {error}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1753,15 +1788,18 @@ fn machine_readonly_catalog_is_exactly_the_evidence_profile() {
     assert!(tools.iter().all(|tool| tool.name != "File"));
     assert!(tools.iter().all(|tool| tool.name != "Bash"));
     let shell = tools.iter().find(|tool| tool.name == "bash").unwrap();
-    assert!(shell.description.contains("cwd field"));
+    assert!(shell.description.contains("`cd <dir> &&`"));
     assert!(shell.description.contains("git log"));
     assert!(shell.description.contains("cannot change its own role"));
     let bash = registry.get("bash").unwrap();
-    for command in [
-        "git branch -a",
-        "cd src && git status",
-        "git rev-parse HEAD",
-    ] {
+    enforce_tool_authority(
+        "bash",
+        &json!({"command": "cd src && git status"}),
+        bash.as_ref(),
+        registry.context(),
+    )
+    .expect("a leading cd moves into the working directory (#6015)");
+    for command in ["git branch -a", "git rev-parse HEAD"] {
         let error = enforce_tool_authority(
             "bash",
             &json!({"command":command}),
@@ -1771,7 +1809,7 @@ fn machine_readonly_catalog_is_exactly_the_evidence_profile() {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("cwd field") && error.contains("git log"),
+            error.contains("subcommand:") && error.contains("git log"),
             "{error}"
         );
     }
@@ -2088,59 +2126,57 @@ fn capture_registration_warnings(action: impl FnOnce()) -> String {
 }
 
 #[test]
-fn registration_collisions_name_both_origins_and_preserve_replacement() {
-    use crate::safe_label::SafeLabel;
-    use crate::tools::file_tool::FileTool;
+fn runtime_surface_hardening_plugin_collisions_preserve_registered_tools() {
     let tmp = tempdir().unwrap();
     let mut registry = ToolRegistryBuilder::new()
         .with_file_tools()
         .build(ToolContext::new(tmp.path()));
-    let mut previous_origin = std::any::type_name::<FileTool>().to_string();
-    for source in ["first", "second"] {
-        // Same basename and registered name, different actual plugin origins.
-        let directory = tmp.path().join(source);
-        std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("tool.sh");
-        std::fs::write(&path, format!("# name: File\n# description: {source}\n")).unwrap();
-        let _before = registry.to_api_tools();
-        let warnings = capture_registration_warnings(|| registry.load_plugins(&directory));
-        let replacement_origin = format!(
-            "plugin script tool.sh ({})",
-            SafeLabel::identifier(&path.to_string_lossy())
-        );
-        assert_eq!(warnings.lines().count(), 1, "{warnings}");
-        assert!(
-            warnings.contains("Overwriting existing tool: File"),
-            "{warnings}"
-        );
-        assert!(
-            warnings.contains(&format!("previous_origin={previous_origin:?}")),
-            "{warnings}"
-        );
-        assert!(
-            warnings.contains(&format!("replacement_origin={replacement_origin:?}")),
-            "{warnings}"
-        );
-        assert!(!warnings.contains(&tmp.path().to_string_lossy().to_string()));
-        let installed = registry.get("File").unwrap();
-        assert_eq!(installed.description(), source);
-        assert!(
-            installed
-                .capabilities()
-                .contains(&ToolCapability::RequiresApproval)
-        );
-        assert_eq!(
-            registry
-                .to_api_tools()
-                .iter()
-                .find(|tool| tool.name == "File")
-                .unwrap()
-                .description,
-            source,
-            "replacement still invalidates the catalog cache"
-        );
-        previous_origin = replacement_origin;
-    }
+    let original = registry.get("File").unwrap();
+    let original_catalog = registry.to_api_tools();
+    std::fs::write(
+        tmp.path().join("tool.sh"),
+        "# name: File\n# description: custom file tool\n",
+    )
+    .unwrap();
+    let errors = capture_registration_warnings(|| registry.load_plugins(tmp.path()));
+    assert!(
+        errors.contains("Cannot load plugin tool 'File': name is already registered"),
+        "{errors}"
+    );
+    assert!(errors.contains(&format!(
+        "previous_origin={:?}",
+        original.registration_origin()
+    )));
+    let plugin_origin = format!(
+        "plugin script tool.sh ({})",
+        crate::safe_label::SafeLabel::identifier(&tmp.path().join("tool.sh").to_string_lossy())
+    );
+    assert!(errors.contains(&format!("plugin_origin={plugin_origin:?}")));
+    assert!(!errors.contains(tmp.path().to_string_lossy().as_ref()));
+    assert!(Arc::ptr_eq(&registry.get("File").unwrap(), &original));
+    assert_eq!(
+        serde_json::to_value(registry.to_api_tools()).unwrap(),
+        serde_json::to_value(original_catalog).unwrap()
+    );
+
+    std::fs::write(
+        tmp.path().join("other.sh"),
+        "# name: custom-reader\n# description: custom reader\n",
+    )
+    .unwrap();
+    registry.load_plugins(tmp.path());
+    assert!(registry.contains("custom-reader"));
+
+    let overrides = std::collections::HashMap::from([(
+        "File".to_string(),
+        crate::config::ToolOverride::Script {
+            path: "other.sh".to_string(),
+            args: None,
+        },
+    )]);
+    registry.apply_overrides(&overrides, tmp.path());
+    assert_eq!(registry.get("File").unwrap().description(), "custom reader");
+    assert!(!Arc::ptr_eq(&registry.get("File").unwrap(), &original));
 }
 
 #[test]

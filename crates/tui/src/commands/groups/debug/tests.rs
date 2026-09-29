@@ -723,63 +723,77 @@ fn cache_inspect_reports_divergence_from_previous_request() {
     assert!(second.contains("Message #1 assistant: history"));
 }
 
+fn push_repeated_shell_results(app: &mut App, output: &str) {
+    for id in ["tool-1", "tool-2"] {
+        app.api_messages_mut().push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "shell_command".to_string(),
+                input: serde_json::json!({"command": "cargo test"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        });
+        app.api_messages_mut().push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                content: output.to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        });
+    }
+}
+
 #[test]
 fn cache_inspect_displays_tool_result_budget_metadata() {
+    // Past the 100,000-char wire backstop (#6508), so each sighting is
+    // excerpted rather than sent whole or deduplicated.
     let mut app = create_test_app();
-    let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
-    app.api_messages_mut().push(Message {
-        role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: "tool-1".to_string(),
-            name: "shell_command".to_string(),
-            input: serde_json::json!({"command": "cargo test"}),
-            caller: None,
-            thought_signature: None,
-        }],
-    });
-    app.api_messages_mut().push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: "tool-1".to_string(),
-            content: long_output.clone(),
-            is_error: None,
-            content_blocks: None,
-        }],
-    });
-    app.api_messages_mut().push(Message {
-        role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: "tool-2".to_string(),
-            name: "shell_command".to_string(),
-            input: serde_json::json!({"command": "cargo test"}),
-            caller: None,
-            thought_signature: None,
-        }],
-    });
-    app.api_messages_mut().push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: "tool-2".to_string(),
-            content: long_output,
-            is_error: None,
-            content_blocks: None,
-        }],
-    });
+    let long_output = format!("{}{}", "A".repeat(60_000), "Z".repeat(60_000));
+    push_repeated_shell_results(&mut app, &long_output);
 
     let result = cache(&mut app, Some("inspect"));
     let msg = result.message.expect("inspect output");
 
     let tool_budget_lines: Vec<_> = msg
         .lines()
-        .filter(|line| line.contains("original_chars=14000"))
+        .filter(|line| line.contains("original_chars=120000"))
         .collect();
     assert_eq!(tool_budget_lines.len(), 2, "got: {msg}");
 
     for sighting in tool_budget_lines {
         assert!(sighting.contains("sent_chars="), "got: {msg}");
+        assert!(!sighting.contains("sent_chars=120000"), "got: {msg}");
         assert!(sighting.contains("truncated=true"), "got: {msg}");
         assert!(sighting.contains("deduplicated=false"), "got: {msg}");
     }
+}
+
+#[test]
+fn cache_inspect_shows_repeated_in_budget_tool_result_sent_whole_then_deduplicated() {
+    // Under the wire backstop (#6508), a repeated result is sent whole the
+    // first time and replaced by a reference to that copy the second time.
+    let mut app = create_test_app();
+    let output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
+    push_repeated_shell_results(&mut app, &output);
+
+    let result = cache(&mut app, Some("inspect"));
+    let msg = result.message.expect("inspect output");
+
+    let lines: Vec<_> = msg
+        .lines()
+        .filter(|line| line.contains("original_chars=14000"))
+        .collect();
+    assert_eq!(lines.len(), 2, "got: {msg}");
+    assert!(lines[0].contains("sent_chars=14000"), "got: {msg}");
+    assert!(lines[0].contains("truncated=false"), "got: {msg}");
+    assert!(lines[0].contains("deduplicated=false"), "got: {msg}");
+    assert!(lines[1].contains("truncated=false"), "got: {msg}");
+    assert!(lines[1].contains("deduplicated=true"), "got: {msg}");
+    assert!(!lines[1].contains("sent_chars=14000"), "got: {msg}");
 }
 
 #[test]
@@ -2169,4 +2183,427 @@ fn test_undo_reports_that_files_were_not_reverted_when_the_repo_is_unavailable()
         message.contains(super::undo::SNAPSHOT_REPO_UNAVAILABLE_PREFIX),
         "the reason must travel with the fallback: {message}"
     );
+}
+
+/// Isolated HOME + workspace for the `/undo` restore tests (#6644).
+// Fields drop in order: the env guards restore before the lock releases.
+struct UndoFixture {
+    workspace: PathBuf,
+    repo: crate::snapshot::SnapshotRepo,
+    _tmp: tempfile::TempDir,
+    _codewhale_home: crate::test_support::EnvVarGuard,
+    _profile: crate::test_support::EnvVarGuard,
+    _home: crate::test_support::EnvVarGuard,
+    _lock: crate::test_support::TestEnvLock,
+}
+
+impl UndoFixture {
+    fn new() -> Self {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = EnvVarGuard::set("HOME", tmp.path());
+        let profile = EnvVarGuard::set("USERPROFILE", tmp.path());
+        let codewhale_home = EnvVarGuard::remove("CODEWHALE_HOME");
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace).unwrap();
+        Self {
+            workspace,
+            repo,
+            _tmp: tmp,
+            _codewhale_home: codewhale_home,
+            _profile: profile,
+            _home: home,
+            _lock: lock,
+        }
+    }
+
+    fn write(&self, name: &str, body: &str) {
+        std::fs::write(self.workspace.join(name), body).unwrap();
+    }
+
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.workspace.join(name)).unwrap()
+    }
+
+    fn snapshot(&self, label: &str, session: &str) {
+        self.repo.take_snapshot(label, Some(session)).unwrap();
+    }
+
+    fn app(&self, session: &str) -> App {
+        let mut app = create_test_app();
+        app.workspace = self.workspace.clone();
+        app.yolo = true;
+        app.current_session_id = Some(session.to_string());
+        app
+    }
+}
+
+/// `/undo` restores only the paths the undone turn changed: an edit the user
+/// made to another file after the turn survives. The whole-tree restore
+/// reverted it too.
+#[test]
+fn patch_undo_restores_only_the_paths_the_undone_step_changed() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.write("b.txt", "b0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.write("new.txt", "created by the turn");
+    fx.snapshot("post-turn:1", "s1");
+    // The user's own edit after the turn, and a file they created.
+    fx.write("b.txt", "b-user");
+    fx.write("mine.txt", "user file");
+
+    let mut app = fx.app("s1");
+    let result = patch_undo(&mut app);
+
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0");
+    assert!(!fx.workspace.join("new.txt").exists());
+    assert_eq!(fx.read("b.txt"), "b-user");
+    assert_eq!(fx.read("mine.txt"), "user file");
+    let message = result.message.unwrap_or_default();
+    assert!(
+        message.contains("modified a.txt") && message.contains("removed new.txt"),
+        "{message}"
+    );
+}
+
+/// A path the undone step changed that changed again since is refused, not
+/// overwritten, and nothing else is touched.
+#[test]
+fn patch_undo_refuses_when_a_changed_path_changed_since() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.write("b.txt", "b0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.write("b.txt", "b1");
+    fx.snapshot("post-turn:1", "s1");
+    fx.write("a.txt", "a-user");
+
+    let mut app = fx.app("s1");
+    let result = super::dispatch(&mut app, "undo", None).expect("registered command");
+
+    let message = result.message.unwrap_or_default();
+    assert!(
+        message.contains("Refusing to undo snapshot") && message.contains("a.txt"),
+        "{message}"
+    );
+    assert_eq!(fx.read("a.txt"), "a-user");
+    assert_eq!(fx.read("b.txt"), "b1");
+}
+
+/// `/undo` keeps stepping back one tool call at a time (#384), each step
+/// restoring only what that call changed.
+#[test]
+fn patch_undo_steps_back_one_tool_call_at_a_time() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.snapshot("tool:call-1", "s1");
+    fx.write("a.txt", "a1");
+    fx.snapshot("tool:call-2", "s1");
+    fx.write("a.txt", "a2");
+    fx.write("b.txt", "b2");
+    fx.snapshot("post-turn:1", "s1");
+
+    let mut app = fx.app("s1");
+    let first = patch_undo(&mut app);
+    assert!(!first.is_error, "{:?}", first.message);
+    assert_eq!(fx.read("a.txt"), "a1");
+    assert!(!fx.workspace.join("b.txt").exists());
+
+    let second = patch_undo(&mut app);
+    assert!(!second.is_error, "{:?}", second.message);
+    assert_eq!(fx.read("a.txt"), "a0");
+
+    let third = patch_undo(&mut app);
+    assert!(
+        third
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("No undoable snapshot")),
+        "{:?}",
+        third.message
+    );
+}
+
+/// Restore points older than the newest 100 snapshots are still found.
+#[test]
+fn patch_undo_finds_restore_points_beyond_the_newest_hundred_snapshots() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.snapshot("post-turn:1", "s1");
+    for i in 0..101 {
+        fx.repo
+            .take_snapshot(&format!("tool:other-{i}"), Some("other-session"))
+            .unwrap();
+    }
+
+    let mut app = fx.app("s1");
+    let result = patch_undo(&mut app);
+
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", result.message);
+}
+
+/// A fork owns the restore points of the turns it inherited, up to the fork,
+/// and none its source took afterwards.
+#[test]
+fn patch_undo_restores_turns_a_fork_inherited() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "source");
+    fx.write("a.txt", "a1");
+    fx.snapshot("post-turn:1", "source");
+
+    let fork = |created_at: chrono::DateTime<chrono::Utc>| {
+        let mut app = fx.app("fork");
+        let mut metadata =
+            crate::session_manager::create_saved_session(&[], "model", &fx.workspace, 0, None)
+                .metadata;
+        metadata.id = "fork".to_string();
+        metadata.parent_session_id = Some("source".to_string());
+        metadata.created_at = created_at;
+        app.current_session_metadata = Some(metadata);
+        app
+    };
+
+    let owners = super::undo::snapshot_owners(&fork(chrono::Utc::now()));
+    assert_eq!(owners.len(), 2);
+    assert_eq!(owners[1].session_id, "source");
+
+    // Forked before the source took these snapshots: they are not the fork's.
+    let mut early = fork(chrono::Utc::now() - chrono::Duration::hours(1));
+    let refused = patch_undo(&mut early);
+    assert!(
+        refused
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("No undoable snapshot")),
+        "{:?}",
+        refused.message
+    );
+    assert_eq!(fx.read("a.txt"), "a1");
+
+    let mut app = fork(chrono::Utc::now() + chrono::Duration::seconds(5));
+    let result = patch_undo(&mut app);
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", result.message);
+}
+
+/// `/undo` typed while the post-turn snapshot is still being written waits
+/// for it (#6644). Before, the two raced on the side repo: the post-turn
+/// snapshot landed after the undo and recorded the reverted workspace as
+/// the turn's end, and the undone step ended at "now".
+#[test]
+fn patch_undo_waits_for_a_pending_post_turn_snapshot() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.snapshot("tool:call-1", "s1");
+    fx.write("a.txt", "a1");
+
+    // The turn has completed; its post-turn snapshot is still in flight.
+    let pending = crate::snapshot::PendingPostTurnSnapshot::reserve();
+    let writer = {
+        let repo = crate::snapshot::SnapshotRepo::open_or_init(&fx.workspace).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let taken = repo.take_snapshot("post-turn:1", Some("s1")).unwrap();
+            drop(pending);
+            taken
+        })
+    };
+
+    let mut app = fx.app("s1");
+    let result = patch_undo(&mut app);
+    let post_turn = writer.join().unwrap();
+
+    assert!(!result.is_error, "{:?}", result.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", result.message);
+    let tool = fx
+        .repo
+        .list(usize::MAX)
+        .unwrap()
+        .into_iter()
+        .find(|snapshot| snapshot.label == "tool:call-1")
+        .unwrap();
+    assert_eq!(
+        fx.repo
+            .changed_paths_between(&tool.tree, &post_turn.tree)
+            .unwrap(),
+        vec![PathBuf::from("a.txt")],
+        "the post-turn snapshot must record the turn's end, not the undone workspace"
+    );
+}
+
+/// A step that changed a symlink restores its regular files and reports the
+/// symlink, and it does not block older steps.
+#[cfg(unix)]
+#[test]
+fn patch_undo_skips_non_regular_paths_without_blocking_older_steps() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    fx.snapshot("pre-turn:2", "s1");
+    fx.write("a.txt", "a2");
+    std::os::unix::fs::symlink("a.txt", fx.workspace.join("current")).unwrap();
+    fx.snapshot("post-turn:2", "s1");
+
+    let mut app = fx.app("s1");
+    let first = patch_undo(&mut app);
+    assert!(!first.is_error, "{:?}", first.message);
+    assert_eq!(fx.read("a.txt"), "a1");
+    let message = first.message.unwrap_or_default();
+    assert!(
+        message.contains("Left in place") && message.contains("current"),
+        "{message}"
+    );
+    assert!(
+        std::fs::symlink_metadata(fx.workspace.join("current"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let second = patch_undo(&mut app);
+    assert!(!second.is_error, "{:?}", second.message);
+    assert_eq!(fx.read("a.txt"), "a0", "{:?}", second.message);
+}
+
+/// Outside trusted mode `/undo` refuses before writing anything: planning
+/// the newest step does not add a snapshot to the side repo.
+#[test]
+fn patch_undo_outside_trusted_mode_writes_no_snapshot() {
+    let fx = UndoFixture::new();
+    fx.write("a.txt", "a0");
+    fx.snapshot("pre-turn:1", "s1");
+    fx.write("a.txt", "a1");
+    let before = fx.repo.list(usize::MAX).unwrap().len();
+
+    let mut app = fx.app("s1");
+    app.yolo = false;
+    app.trust_mode = false;
+    let result = patch_undo(&mut app);
+
+    assert!(
+        result
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("Refusing to undo workspace files outside trusted mode")),
+        "{:?}",
+        result.message
+    );
+    assert_eq!(fx.repo.list(usize::MAX).unwrap().len(), before);
+    assert_eq!(fx.read("a.txt"), "a1");
+}
+
+#[test]
+fn receipts_command_is_registered_and_reads_the_transcript() {
+    assert_eq!(
+        crate::commands::get_command_info("receipts").map(|info| info.name),
+        Some("receipts")
+    );
+    assert_eq!(
+        crate::commands::get_command_info("receipt").map(|info| info.name),
+        Some("receipts")
+    );
+    let mut app = create_test_app();
+    app.current_session_id = None;
+    let empty = crate::commands::execute("/receipts", &mut app);
+    assert!(!empty.is_error, "{:?}", empty.message);
+    assert!(
+        empty
+            .message
+            .as_deref()
+            .is_some_and(|text| text.contains("No actions recorded.")),
+        "{:?}",
+        empty.message
+    );
+
+    app.api_messages_mut().push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "run the tests".to_string(),
+            cache_control: None,
+        }],
+    });
+    app.api_messages_mut().push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "cargo test"}),
+            caller: None,
+            thought_signature: None,
+        }],
+    });
+    app.api_messages_mut().push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call-1".to_string(),
+            content: "ok".to_string(),
+            is_error: None,
+            content_blocks: None,
+        }],
+    });
+    let listed = crate::commands::execute("/receipts", &mut app);
+    let text = listed.message.expect("receipt text");
+    assert!(text.contains("Ran 1 command"), "{text}");
+    assert!(text.contains("1. ran `cargo test`"), "{text}");
+
+    // `$`, `*`, and `_` in a command must reach the note cell as JSON, not
+    // as math or emphasis.
+    let shell = r#"echo "$HOME" && echo $PATH *_x_*"#;
+    app.api_messages_mut().push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "call-2".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({ "command": shell }),
+            caller: None,
+            thought_signature: None,
+        }],
+    });
+    app.api_messages_mut().push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call-2".to_string(),
+            content: "ok".to_string(),
+            is_error: None,
+            content_blocks: None,
+        }],
+    });
+    let json = crate::commands::execute("/receipts json", &mut app);
+    let fenced = json.message.expect("json");
+    let body = fenced
+        .strip_prefix("```json\n")
+        .and_then(|rest| rest.strip_suffix("\n```"))
+        .expect("the JSON is fenced");
+    let value: serde_json::Value = serde_json::from_str(body).expect("valid json");
+    assert_eq!(value["totals"]["commands"], 2);
+    let rendered: String = HistoryCell::System { content: fenced }
+        .lines(400)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains(r#""command": "echo \"$HOME\" && echo $PATH *_x_*""#),
+        "{rendered}"
+    );
+    let bad = crate::commands::execute("/receipts nope", &mut app);
+    assert!(bad.is_error);
 }

@@ -385,11 +385,15 @@ pub struct TaskPanelEntry {
     pub current_tool: Option<String>,
     pub role: Option<String>,
     pub files_touched: u32,
+    /// A finished shell's exit code. `None` while running, and for durable
+    /// tasks.
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskPanelEntryKind {
     Background,
+    Shell,
 }
 
 impl QueuedMessage {
@@ -519,6 +523,10 @@ impl ScreenMode {
 /// Actions emitted by the UI event loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
+    SetWorkspaceTrust {
+        trusted: bool,
+        save: bool,
+    },
     Quit,
     #[allow(dead_code)] // For explicit /load command
     LoadSession(PathBuf),
