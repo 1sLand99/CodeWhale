@@ -20,6 +20,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::{
     CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
@@ -2140,7 +2141,13 @@ impl ModalView for ExtensionsView {
             } else {
                 tab.label(self.locale)
             };
-            let width = (label.chars().count() as u16 + 2).min(available.saturating_sub(x));
+            // Display cells, not chars: a CJK label is two cells per char,
+            // and the painted tab and its hit rect share this one width.
+            let label_cells =
+                u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(u16::MAX);
+            let width = label_cells
+                .saturating_add(2)
+                .min(available.saturating_sub(x));
             if width == 0 {
                 break;
             }
@@ -2477,6 +2484,50 @@ mod tests {
             command, pager_title: Some(_)
         }) if command == "/mcp recommendations")
         );
+    }
+
+    /// Tab widths are display cells: a two-cell CJK label measured in chars
+    /// clipped its own text and let the next tab paint over it, and the hit
+    /// rect covered the wrong cells.
+    #[test]
+    fn wide_tab_labels_get_their_full_cell_width_and_matching_hit_rects() {
+        let view = ExtensionsView::from_snapshot_with_locale(
+            ExtensionsSnapshot::default(),
+            ExtensionsTab::Hooks,
+            Locale::ZhHans,
+        );
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let tabs = view.hits.borrow().tabs.clone();
+        assert_eq!(tabs.len(), ExtensionsTab::ALL.len());
+        let mut next_x = tabs[0].0.x;
+        for (rect, tab) in tabs {
+            let label = tab.label(Locale::ZhHans);
+            assert_eq!(
+                usize::from(rect.width),
+                UnicodeWidthStr::width(label.as_str()) + 2,
+                "{tab:?} hit rect must match its painted width"
+            );
+            assert_eq!(
+                rect.x, next_x,
+                "{tab:?} must start where the previous tab ended"
+            );
+            next_x = rect.right();
+            // Read the row as a terminal shows it: a wide glyph covers the
+            // cell after it.
+            let mut painted = String::new();
+            let mut x = rect.x;
+            while x < rect.right() {
+                let symbol = buf[(x, rect.y)].symbol();
+                painted.push_str(symbol);
+                x += u16::try_from(UnicodeWidthStr::width(symbol).max(1)).unwrap_or(1);
+            }
+            assert!(
+                painted.contains(label.as_str()),
+                "{tab:?} label {label:?} clipped: {painted:?}"
+            );
+        }
     }
 
     #[test]
