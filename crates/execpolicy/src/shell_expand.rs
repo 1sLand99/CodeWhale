@@ -542,8 +542,8 @@ struct Line {
 
 /// How a shell invocation receives its script.
 enum ShellInput {
-    /// `-c` / `--command`: the word at this offset is a command line.
-    Command(usize),
+    /// `-c` / `--command`: the word at each offset may be the command line.
+    Command(Vec<usize>),
     /// A script file operand at this offset.
     Script(usize),
     /// The script is read from stdin.
@@ -1004,12 +1004,14 @@ impl Expander {
                 "powershell" | "pwsh" => self.record_powershell(tokens, head, &dynamic, depth),
                 _ if SHELL_NAMES.contains(&name.as_str()) => {
                     match shell_input(&tokens[head..]) {
-                        ShellInput::Command(offset) => {
-                            self.code_payload(
-                                &tokens[head + offset],
-                                dynamic[head + offset],
-                                depth,
-                            );
+                        ShellInput::Command(offsets) => {
+                            for offset in offsets {
+                                self.code_payload(
+                                    &tokens[head + offset],
+                                    dynamic[head + offset],
+                                    depth,
+                                );
+                            }
                         }
                         ShellInput::Script(offset) => {
                             self.dynamic |= dynamic[head + offset];
@@ -1657,23 +1659,31 @@ fn command_heads(tokens: &[String]) -> Heads {
 /// really an argument to a script (`bash script.sh -c x`), but this
 /// expander's contract is explicit that over-emitting targets is safe and
 /// under-emitting is a bypass.
+///
+/// `-c` only switches the shell into command mode: options may still follow
+/// it, and the command string is the first *operand* after option parsing
+/// (`bash -c -e 'cmd'`, `sh -c -- 'cmd'`, `bash -c -o pipefail 'cmd'` all run
+/// `cmd`). Shells that read `-c`'s value as the very next word (fish) run
+/// that word instead, so both candidates are reported when they differ.
 fn shell_input(tokens: &[String]) -> ShellInput {
     let mut script = None;
     let mut from_stdin = false;
     let mut options_done = false;
+    let mut command = Vec::new();
     let mut index = 1usize;
     while index < tokens.len() {
         let token = tokens[index].as_str();
         if !options_done && token == "--" {
             options_done = true;
         } else if !options_done && token == "-" {
-            // `bash -` reads the script from stdin.
-            from_stdin = true;
+            // `bash -` reads the script from stdin; after `-c` it only ends
+            // the options.
+            from_stdin |= command.is_empty();
             options_done = true;
         } else if let Some(long) = token.strip_prefix("--").filter(|_| !options_done) {
             if long.eq_ignore_ascii_case("command") {
                 return match tokens.get(index + 1) {
-                    Some(_) => ShellInput::Command(index + 1),
+                    Some(_) => ShellInput::Command(vec![index + 1]),
                     None => ShellInput::Stdin,
                 };
             }
@@ -1685,22 +1695,26 @@ fn shell_input(tokens: &[String]) -> ShellInput {
             && (token.starts_with('-') || token.starts_with('+'))
         {
             let flags = &token[1..];
-            if token.starts_with('-') && flags.contains('c') {
-                return match tokens.get(index + 1) {
-                    Some(_) => ShellInput::Command(index + 1),
-                    None => ShellInput::Stdin,
-                };
+            if token.starts_with('-') && flags.contains('c') && command.is_empty() {
+                command.push(index + 1);
             }
             from_stdin |= token.starts_with('-') && flags.contains('s');
             if flags.contains(['o', 'O']) {
                 index += 1;
             }
+        } else if !command.is_empty() {
+            if command[0] != index {
+                command.push(index);
+            }
+            return ShellInput::Command(command);
         } else if script.is_none() {
             script = Some(index);
         }
         index += 1;
     }
+    command.retain(|&at| at < tokens.len());
     match script {
+        _ if !command.is_empty() => ShellInput::Command(command),
         Some(index) if !from_stdin => ShellInput::Script(index),
         _ => ShellInput::Stdin,
     }
@@ -1839,6 +1853,32 @@ mod tests {
                 expand(command)
             );
         }
+    }
+
+    #[test]
+    fn options_after_dash_c_do_not_hide_the_command_string() {
+        // The command string is the first operand once options end, so an
+        // option between `-c` and it does not change what runs.
+        for command in [
+            "bash -c -e 'rm -rf /'",
+            "bash -c -l 'rm -rf /'",
+            "sh -c -x 'rm -rf /'",
+            "bash -c -- 'rm -rf /'",
+            "sh -c - 'rm -rf /'",
+            "bash -c +e 'rm -rf /'",
+            "bash -lc -e 'rm -rf /'",
+            "bash -c -o pipefail 'rm -rf /'",
+            "bash -c -O extglob -e 'rm -rf /'",
+            "bash script.sh -c 'rm -rf /'",
+        ] {
+            assert!(
+                contains(command, "rm -rf /"),
+                "{command}: {:?}",
+                expand(command)
+            );
+        }
+        // Arguments after the command string are positional parameters.
+        assert!(!contains("bash -c 'echo $0' 'rm -rf /'", "rm -rf /"));
     }
 
     #[test]

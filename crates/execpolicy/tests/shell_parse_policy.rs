@@ -102,6 +102,10 @@ const HIDDEN_RM: &[&str] = &[
     "pwsh -NoProfile -Command rm x",
     "powershell -enc cgBtACAAeAA=",
     "wsl -e rm x",
+    // Options may follow `-c`; the command string is the first operand.
+    "bash -c -e 'rm -rf /'",
+    "sh -c -- 'rm -rf /'",
+    "bash -c -o pipefail 'rm x'",
 ];
 
 /// Literal spellings that were already denied and must stay denied.

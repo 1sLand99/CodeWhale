@@ -2062,12 +2062,9 @@ fn unwrap_to_effective_tokens(tokens: &[String]) -> Option<Vec<String>> {
 
         if SHELL_WRAPPERS.contains(&word.as_str()) {
             // `sh -c '<payload>'` — the payload is the real command line.
-            if let Some(flag_at) = current[start + 1..].iter().position(|t| t == "-c") {
-                let payload_idx = start + 1 + flag_at + 1;
-                if let Some(payload) = current.get(payload_idx) {
-                    current = shell_words(payload);
-                    continue;
-                }
+            if let Some(payload) = shell_command_payload(&current[start + 1..]) {
+                current = shell_words(payload);
+                continue;
             }
             return Some(current);
         }
@@ -2085,6 +2082,37 @@ fn unwrap_to_effective_tokens(tokens: &[String]) -> Option<Vec<String>> {
         let mut normalized = current.clone();
         normalized[start] = word;
         return Some(normalized);
+    }
+    None
+}
+
+/// The command string of a shell invocation (`args` follow the shell word).
+///
+/// `-c` may be clustered (`-lc`) and may be followed by more options before
+/// the command string: `bash -c -e 'rm -rf /'` and `sh -c -- 'rm -rf /'` run
+/// the first operand after option parsing, not the word right after `-c`.
+fn shell_command_payload(args: &[String]) -> Option<&String> {
+    let mut command_mode = false;
+    let mut options_done = false;
+    let mut index = 0;
+    while index < args.len() {
+        let token = args[index].as_str();
+        if !options_done && matches!(token, "--" | "-") {
+            options_done = true;
+        } else if !options_done
+            && token.len() > 1
+            && (token.starts_with('-') || token.starts_with('+'))
+        {
+            let flags = &token[1..];
+            command_mode |=
+                token.starts_with('-') && !token.starts_with("--") && flags.contains('c');
+            if !token.starts_with("--") && flags.contains(['o', 'O']) {
+                index += 1;
+            }
+        } else if command_mode {
+            return Some(&args[index]);
+        }
+        index += 1;
     }
     None
 }
@@ -2530,6 +2558,8 @@ mod destructive_composition_tests {
             r#"timeout --foreground 5s rm -rf ~"#,
             r#"nice -n 19 rm -rf /"#,
             r#"ionice -c 3 rm -rf $HOME"#,
+            r#"bash -c -e 'rm -rf "$HOME"'"#,
+            r#"sh -lc -- 'rm -rf "$HOME"'"#,
         ] {
             assert_eq!(
                 analyze_command(command).level,
