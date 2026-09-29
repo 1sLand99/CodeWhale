@@ -1719,7 +1719,6 @@ impl Engine {
             .filter(|_| config.features.enabled(Feature::ExtensionHost))
             .map(|registry| {
                 let manager = crate::extension_host::manager();
-                manager.begin_session();
                 let attachment = manager.attach(Arc::clone(registry));
                 attachment.sync_in_background();
                 attachment
