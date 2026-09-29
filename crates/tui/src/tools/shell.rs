@@ -1700,9 +1700,13 @@ impl BackgroundShell {
             .unwrap_or((0, String::new()));
         let elapsed_since_output_ms = (self.status == ShellStatus::Running)
             .then(|| u64::try_from(self.last_output_at.elapsed().as_millis()).unwrap_or(u64::MAX));
-        let stale = elapsed_since_output_ms.is_some_and(|elapsed| {
-            elapsed >= u64::try_from(STALE_NO_OUTPUT_AFTER.as_millis()).unwrap_or(u64::MAX)
-        });
+        // A live PTY can wait indefinitely for input. Silence does not mean it
+        // lost its process owner; marking it stale hides its transport from API
+        // clients and incorrectly prevents reconnect/resize after one minute.
+        let stale = self.terminal_size.is_none()
+            && elapsed_since_output_ms.is_some_and(|elapsed| {
+                elapsed >= u64::try_from(STALE_NO_OUTPUT_AFTER.as_millis()).unwrap_or(u64::MAX)
+            });
         ShellJobSnapshot {
             id: self.id.clone(),
             job_id: self.id.clone(),

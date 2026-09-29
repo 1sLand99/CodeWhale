@@ -7285,15 +7285,28 @@ impl Engine {
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let mut pool = pool.lock().await;
+        // The outcome is logged here, at the one manager every surface drives,
+        // so a panel retry, `/mcp retry`, and the runtime API all leave the
+        // same receipt in the session log.
         match pool.retry_connection(name).await {
-            Ok(_) => {
+            Ok(connection) => {
+                tracing::info!(
+                    target: "mcp",
+                    server = %name,
+                    tools = connection.tools().len(),
+                    "MCP server connected on retry"
+                );
                 self.mcp_connection_errors.remove(name);
             }
             Err(error) => {
-                self.mcp_connection_errors.insert(
-                    name.to_string(),
-                    crate::mcp::format_mcp_error_for_display(&error),
+                let reason = crate::mcp::format_mcp_error_for_display(&error);
+                tracing::warn!(
+                    target: "mcp",
+                    server = %name,
+                    error = %reason,
+                    "MCP server retry failed"
                 );
+                self.mcp_connection_errors.insert(name.to_string(), reason);
             }
         }
         let snapshot = pool.manager_snapshot(
