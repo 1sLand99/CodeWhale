@@ -182,8 +182,12 @@ Re-checked on macOS 26.1, Apple silicon (`macos-arm64`), with a fresh `HOME`:
 ### Put it on your PATH
 
 If the installer says `PATH selects no codewhale command`, `~/.local/bin` isn't
-on your PATH **in this shell**. It then prints the matching line from the block
-below for your `$SHELL`; it never edits a shell profile itself. On Ubuntu and Debian, `~/.profile` adds
+on your PATH **in this shell**. The `codewhale.net/install.sh` installer then
+prints the matching line from the block below for your `$SHELL` (zsh, bash,
+fish, or a POSIX `sh`; for any other shell, or a directory name with quotes,
+`$`, backticks or backslashes, it tells you to add the directory yourself). It
+never edits a shell profile itself. The `install.sh` inside a release archive
+prints only the current-shell `export` line. On Ubuntu and Debian, `~/.profile` adds
 `~/.local/bin`, but only if the directory existed when you *logged in*. So:
 
 * a new SSH or login shell picks it up automatically;
@@ -194,7 +198,7 @@ below for your `$SHELL`; it never edits a shell profile itself. On Ubuntu and De
 Fix it once:
 
 ```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # bash (macOS bash: ~/.bash_profile)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # bash (macOS login bash: ~/.bash_profile, or ~/.profile if only that exists)
 # echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc  # zsh
 # fish_add_path ~/.local/bin                               # fish (untested on this VM)
 export PATH="$HOME/.local/bin:$PATH"; hash -r

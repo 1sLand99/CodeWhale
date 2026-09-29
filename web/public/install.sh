@@ -346,29 +346,57 @@ if [ "$path_selected" -eq 0 ]; then
   shell_name="${SHELL:-}"
   shell_name="${shell_name##*/}"
   say ""
-  say "Put $install_dir first on PATH in future shells (run once; this installer does not edit shell profiles):"
+  case "$path_dir" in
+    *[\'\"\`\\\$]*|*"
+"*)
+      # Only the literal $HOME form may carry a shell-special character. Any
+      # other one would break the printed quoting, or run as a command on
+      # every shell start once the line is in a profile.
+      if [ "$path_dir" != "\$HOME/.local/bin" ]; then
+        shell_name="unsafe-path"
+      fi
+      ;;
+  esac
   case "$shell_name" in
     fish)
-      say "  fish_add_path \"$install_dir\""
-      say "It takes effect in this fish shell and in new ones."
+      say "Put $install_dir first on PATH in future shells (run once; this installer does not edit shell profiles):"
+      say "  fish_add_path \"$path_dir\""
+      say "It takes effect in this fish shell and in new ones (fish 3.2 or newer)."
       ;;
-    *)
+    zsh|bash|sh|dash|ksh|mksh|ash|"")
       case "$shell_name" in
         zsh) profile=".zshrc" ;;
         bash)
           case "$target" in
-            macos-*) profile=".bash_profile" ;;
+            # Login bash reads the first of these that exists; creating
+            # ~/.bash_profile would stop an existing ~/.profile from loading.
+            macos-*)
+              profile=".bash_profile"
+              for candidate in .bash_profile .bash_login .profile; do
+                if [ -n "${HOME:-}" ] && [ -e "$HOME/$candidate" ]; then
+                  profile="$candidate"
+                  break
+                fi
+              done
+              ;;
             *) profile=".bashrc" ;;
           esac
           ;;
         *) profile=".profile" ;;
       esac
+      say "Put $install_dir first on PATH in future shells (run once; this installer does not edit shell profiles):"
       say "  echo 'export PATH=\"$path_dir:\$PATH\"' >> ~/$profile"
       say "Then run: source ~/$profile   (or open a new terminal)"
+      say "Or for this shell only:"
+      say "  export PATH=\"$path_dir:\$PATH\"; hash -r"
+      ;;
+    unsafe-path)
+      say "Add $install_dir first to PATH in your shell's startup file; its name contains shell-special characters, so no command line is printed for it."
+      ;;
+    *)
+      say "Add $install_dir first to PATH in your shell's startup file; this installer has no PATH line for $shell_name."
       ;;
   esac
-  say "Or for this shell only:"
-  say "  export PATH=\"$install_dir:\$PATH\"; hash -r"
   say "Verify: command -v codewhale codew"
   say "PATH help: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md#put-it-on-your-path"
 fi

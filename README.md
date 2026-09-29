@@ -34,7 +34,7 @@ curl -fsSL https://codewhale.net/install.sh | sh
 ```
 
 If plain `codewhale` then says "command not found", `~/.local/bin` is not on
-your PATH yet: run the one line the installer prints for your shell, or see
+your PATH yet: run the one line that installer prints for your shell, or see
 [Put it on your PATH](docs/INSTALL.md#put-it-on-your-path).
 
 The installer selects the latest published release. The [changelog](CHANGELOG.md)
