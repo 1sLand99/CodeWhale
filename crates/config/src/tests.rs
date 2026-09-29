@@ -10138,3 +10138,26 @@ fn legacy_siliconflow_cn_spelling_loads_and_is_repaired_on_save() {
     let body = fs::read_to_string(&path).expect("read config");
     assert!(body.contains("provider = \"siliconflow-CN\""), "{body}");
 }
+
+#[test]
+fn typed_save_keeps_a_providers_section_holding_only_a_legacy_kind_table() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    for entry in provider::all_providers() {
+        let key = entry.provider_config_key();
+        fs::write(&path, format!("[providers.{key}]\nmodel = \"m-x\"\n")).expect("write config");
+        let Ok(mut store) = ConfigStore::load(Some(path.clone())) else {
+            continue;
+        };
+        store
+            .config
+            .set_value("verbosity", "quiet")
+            .expect("set verbosity");
+        store.save().expect("typed save");
+        let body = fs::read_to_string(&path).expect("read config");
+        assert!(
+            body.contains("m-x"),
+            "[providers.{key}] was dropped by a typed save:\n{body}"
+        );
+    }
+}

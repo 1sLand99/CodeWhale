@@ -738,10 +738,14 @@ impl PermissionsToml {
 impl ProvidersToml {
     #[must_use]
     pub fn is_empty(&self) -> bool {
+        // The full registry, not the selectable catalog: legacy dialect and
+        // plan tables (`deepseek_anthropic`, `modelstudio_coding_plan`, ...)
+        // are still fields here, and skipping the whole `[providers]` section
+        // when only one of them is set would erase it on the next typed save.
         self.extras.is_empty()
-            && ProviderKind::all()
+            && provider::all_providers()
                 .iter()
-                .all(|provider| self.for_provider(*provider).is_empty())
+                .all(|provider| self.for_provider(provider.kind()).is_empty())
             && self.antigravity.is_empty()
     }
 
