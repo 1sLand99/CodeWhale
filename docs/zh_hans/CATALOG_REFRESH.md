@@ -1,7 +1,7 @@
 # 目录刷新
 
 > 英文原文：[CATALOG_REFRESH.md](../CATALOG_REFRESH.md)。
-> 最后与英文同步日期（last synced with English revision）：2026-09-28。
+> 最后与英文同步日期（last synced with English revision）：2026-09-29。
 
 Codewhale 怎么让模型元数据保持最新：哪些部分已经自动更新，哪些要人工维护，
 以及定时目录任务该做什么、不该做什么。
@@ -181,8 +181,8 @@ CI 会运行 `seed render --check`，出现任何差异都会失败。
 | `crates/config/assets/models_dev.bundled.json` | 渲染出的种子 | 只由 `seed render` 写入 |
 
 spec 只负责选择和映射；它不能写出与上游不一致的值（未知的键会被拒绝）。
-如果某个上游值对某条 Codewhale 路由不对，就加一条修正：只存在于种子里的压制，
-在第一次实时刷新时就会消失。
+如果某个上游值对某条 Codewhale 路由不对，就加一条修正。修正对种子和实时行都生效；
+只有手动编辑种子才产生的压制，才会在第一次实时刷新时消失。
 
 1. `python3 scripts/catalog_models_dev.py seed lock --dry-run` 打印审阅报告：
    每一行的字段变化、上游现已认同的修正（删掉它们），以及未携带的上游模型。
@@ -194,7 +194,7 @@ spec 只负责选择和映射；它不能写出与上游不一致的值（未知
 5. 检查默认线协议 ID 仍与 `DEFAULT_*_MODEL` 一致，运行目录测试，
    然后提 PR，并把报告放进 PR 正文。
 
-可选：**在 PR 上**用一个便宜模型总结“新增 / 移除 / 默认风险”——
+可选：用一个便宜模型在 **PR 正文中**总结“新增 / 移除 / 默认风险”——
 但绝不让它当 JSON 的作者。
 
 ---
@@ -212,7 +212,7 @@ cron (daily or weekly)
      (and optionally report new ids vs provider defaults)
   → if material change: open PR
        title: chore(catalog): refresh Models.dev offline seed
-  → optional: agent comments a human-readable diff summary on the PR
+  → optional: include an agent-written, human-readable diff summary in the PR body
 ```
 
 这样的任务会运行 `seed lock` 和 `seed render` 并提 PR。用默认的

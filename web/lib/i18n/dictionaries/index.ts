@@ -15,6 +15,7 @@
 import type {
   ChangelogDict,
   ChromeDict,
+  ContributeDict,
   ComputerUseDict,
   DocsAuthDict,
   DocsComputersDict,
@@ -28,6 +29,7 @@ import type {
   DocsShellDict,
   DocsModesDict,
   DocsReviewDict,
+  DocsVocabularyDict,
   DocsSubagentsDict,
   DocsTroubleshootingDict,
   DocsTrustDict,
@@ -35,6 +37,7 @@ import type {
   DocsWorkDict,
   HomeDict,
   DigestDict,
+  FeedDict,
   FaqDict,
   LegalPrivacyDict,
   LegalTermsDict,
@@ -77,6 +80,8 @@ import { docsTrust as enDocsTrust } from "./en/docs-trust";
 import { docsTrust as zhDocsTrust } from "./zh/docs-trust";
 import { docsReview as enDocsReview } from "./en/docs-review";
 import { docsReview as zhDocsReview } from "./zh/docs-review";
+import { docsVocabulary as enDocsVocabulary } from "./en/docs-vocabulary";
+import { docsVocabulary as zhDocsVocabulary } from "./zh/docs-vocabulary";
 import { computerUse as enComputerUse } from "./en/computer-use";
 import { computerUse as zhComputerUse } from "./zh/computer-use";
 import { computerUse as jaComputerUse } from "./ja/computer-use";
@@ -105,10 +110,14 @@ import { legalPrivacy as enLegalPrivacy } from "./en/legal-privacy";
 import { legalPrivacy as zhLegalPrivacy } from "./zh/legal-privacy";
 import { digest as enDigest } from "./en/digest";
 import { digest as zhDigest } from "./zh/digest";
+import { feed as enFeed } from "./en/feed";
+import { feed as zhFeed } from "./zh/feed";
 import { faq as enFaq } from "./en/faq";
 import { faq as zhFaq } from "./zh/faq";
 import { roadmap as enRoadmap } from "./en/roadmap";
 import { roadmap as zhRoadmap } from "./zh/roadmap";
+import { contribute as enContribute } from "./en/contribute";
+import { contribute as zhContribute } from "./zh/contribute";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -298,11 +307,15 @@ const DOCS_REVIEW: Record<string, DocsReviewDict> = {
   zh: zhDocsReview,
 };
 
+const DOCS_VOCABULARY: Record<string, DocsVocabularyDict> = {
+  zh: zhDocsVocabulary,
+};
+
 /**
  * Shared surface states, the changelog page, the two legal pages, the digest
- * page, the FAQ and the roadmap follow the same optional per-locale rule as
- * the docs page dictionaries: English is the reference, every other locale
- * falls back to it at lookup time.
+ * and feed pages, the FAQ, the roadmap and the contribute page follow the same
+ * optional per-locale rule as the docs page dictionaries: English is the
+ * reference, every other locale falls back to it at lookup time.
  */
 const STATES: Record<string, StatesDict> = {
   zh: zhStates,
@@ -324,12 +337,20 @@ const DIGEST: Record<string, DigestDict> = {
   zh: zhDigest,
 };
 
+const FEED: Record<string, FeedDict> = {
+  zh: zhFeed,
+};
+
 const FAQ: Record<string, FaqDict> = {
   zh: zhFaq,
 };
 
 const ROADMAP: Record<string, RoadmapDict> = {
   zh: zhRoadmap,
+};
+
+const CONTRIBUTE: Record<string, ContributeDict> = {
+  zh: zhContribute,
 };
 
 export function getChrome(locale: string): ChromeDict {
@@ -408,6 +429,10 @@ export function getDocsReview(locale: string): DocsReviewDict {
   return DOCS_REVIEW[locale] ?? enDocsReview;
 }
 
+export function getDocsVocabulary(locale: string): DocsVocabularyDict {
+  return DOCS_VOCABULARY[locale] ?? enDocsVocabulary;
+}
+
 export function getComputerUse(locale: string): ComputerUseDict {
   return COMPUTER_USE[locale] ?? enComputerUse;
 }
@@ -432,12 +457,20 @@ export function getDigest(locale: string): DigestDict {
   return DIGEST[locale] ?? enDigest;
 }
 
+export function getFeed(locale: string): FeedDict {
+  return FEED[locale] ?? enFeed;
+}
+
 export function getFaq(locale: string): FaqDict {
   return FAQ[locale] ?? enFaq;
 }
 
 export function getRoadmap(locale: string): RoadmapDict {
   return ROADMAP[locale] ?? enRoadmap;
+}
+
+export function getContribute(locale: string): ContributeDict {
+  return CONTRIBUTE[locale] ?? enContribute;
 }
 
 /**
@@ -476,14 +509,17 @@ export const EN_DOCS_COMPUTERS = enDocsComputers;
 export const EN_DOCS_AUTH = enDocsAuth;
 export const EN_DOCS_TRUST = enDocsTrust;
 export const EN_DOCS_REVIEW = enDocsReview;
+export const EN_DOCS_VOCABULARY = enDocsVocabulary;
 export const EN_COMPUTER_USE = enComputerUse;
 export const EN_STATES = enStates;
 export const EN_CHANGELOG = enChangelog;
 export const EN_LEGAL_TERMS = enLegalTerms;
 export const EN_LEGAL_PRIVACY = enLegalPrivacy;
 export const EN_DIGEST = enDigest;
+export const EN_FEED = enFeed;
 export const EN_FAQ = enFaq;
 export const EN_ROADMAP = enRoadmap;
+export const EN_CONTRIBUTE = enContribute;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */

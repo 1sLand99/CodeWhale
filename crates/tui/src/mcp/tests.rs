@@ -8968,3 +8968,122 @@ fn computer_use_duplicate_warning_names_user_copies_of_the_enabled_bundle() {
         .enabled = false;
     assert!(duplicate_computer_use_servers(&config).is_empty());
 }
+
+/// Founder run: an `uvx mcp-proxy-for-aws` server answered `initialize` with
+/// JSON-RPC -32602 and the only thing surfaced was
+/// "MCP error in 'initialize': {...}". The proxy had explained itself on
+/// stderr (expired AWS login). The error now says the server rejected the
+/// handshake, names what was launched, and carries that last stderr line.
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_rejection_names_the_server_command_and_its_stderr_reason() {
+    let mut config = test_server_config();
+    config.command = Some("sh".to_string());
+    config.args = vec![
+        "-c".to_string(),
+        concat!(
+            "read line; ",
+            "echo 'LoginRefreshRequired: Please reauthenticate using aws login' 1>&2; ",
+            "echo '{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"error\":{\"code\":-32602,\"message\":\"Invalid request parameters\"}}'; ",
+            "sleep 5"
+        )
+        .to_string(),
+    ];
+    let error = McpConnection::connect_with_policy(
+        "aws".to_string(),
+        config,
+        &McpTimeouts::default(),
+        None,
+    )
+    .await
+    .err()
+    .expect("a JSON-RPC error on initialize ends the handshake");
+    let text = format_mcp_error_for_display(&error);
+    assert!(
+        text.contains("MCP server 'aws' rejected initialize"),
+        "{text}"
+    );
+    assert!(text.contains("command `sh`"), "{text}");
+    assert!(text.contains("-32602"), "{text}");
+    assert!(
+        text.contains("server stderr: LoginRefreshRequired: Please reauthenticate using aws login"),
+        "{text}"
+    );
+}
+
+/// The file the founder had carried both `"disabled": true` and
+/// `"enabled": false`; a hand edit can leave them disagreeing. Enabling (and
+/// disabling) must always write the pair so the two keys agree.
+#[test]
+fn set_server_enabled_makes_the_enabled_and_disabled_keys_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    fs::write(
+        &path,
+        r#"{"servers":{"linear":{"url":"https://mcp.linear.app/mcp","enabled":true,"disabled":true}}}"#,
+    )
+    .unwrap();
+    assert!(!load_config(&path).unwrap().servers["linear"].is_enabled());
+
+    set_server_enabled(&path, "linear", true).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(raw["servers"]["linear"]["enabled"], serde_json::json!(true));
+    assert_eq!(
+        raw["servers"]["linear"]["disabled"],
+        serde_json::json!(false)
+    );
+    assert!(load_config(&path).unwrap().servers["linear"].is_enabled());
+
+    set_server_enabled(&path, "linear", false).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        raw["servers"]["linear"]["enabled"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        raw["servers"]["linear"]["disabled"],
+        serde_json::json!(true)
+    );
+}
+
+/// Lazy boot (#6033) leaves an unselected server with no connection, no
+/// failure and no observed capabilities. That is "never started" — its
+/// recovery is `connect`, not `reconnect`, and an OAuth-capable one is not
+/// yet known to need a login.
+#[test]
+fn never_started_server_recovers_with_connect_not_reconnect() {
+    let snapshot = McpServerSnapshot {
+        name: "lazy".into(),
+        enabled: true,
+        required: false,
+        transport: "stdio".into(),
+        command_or_url: "lazy-mcp".into(),
+        connect_timeout: 5,
+        execute_timeout: 5,
+        read_timeout: 5,
+        connected: false,
+        error: None,
+        auth_required: false,
+        capability_metadata: McpServerCapabilityMetadata::NotObserved,
+        tools: Vec::new(),
+        resources: Vec::new(),
+        prompts: Vec::new(),
+    };
+    assert!(!snapshot.started());
+    assert_eq!(
+        snapshot.recovery_kind(false),
+        Some(McpRecoveryKind::Connect)
+    );
+    assert_eq!(snapshot.recovery_kind(true), Some(McpRecoveryKind::Connect));
+
+    // A server that had a live connection and lost it is a reconnect.
+    let dropped = McpServerSnapshot {
+        capability_metadata: McpServerCapabilityMetadata::LegacyFallback,
+        ..snapshot
+    };
+    assert!(dropped.started());
+    assert_eq!(
+        dropped.recovery_kind(false),
+        Some(McpRecoveryKind::Reconnect)
+    );
+}

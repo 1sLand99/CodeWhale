@@ -1524,6 +1524,13 @@ pub trait McpTransport: Send + Sync {
     /// the default is a no-op.
     fn set_protocol_version(&mut self, _version: &str) {}
 
+    /// The last non-empty line the server wrote to stderr, for naming why a
+    /// handshake was refused. Only stdio children have a stderr; a reviewed
+    /// plugin's is never retained.
+    async fn last_stderr_line(&self) -> Option<String> {
+        None
+    }
+
     /// Synchronous, best-effort liveness probe consulted by
     /// [`McpConnection::is_ready`] so a crashed stdio child stops reading
     /// as "ready" before the next call fails (#6187). Must never block and
@@ -1964,6 +1971,30 @@ impl McpConnection {
         .await?;
 
         let response = self.recv(init_id).await?;
+        if let Some(error) = response.get("error")
+            && self.config.reviewed_plugin.is_none()
+        {
+            // A JSON-RPC error on `initialize` is the server refusing the
+            // handshake, not a transport fault: name the server and what was
+            // launched, and carry the child's last stderr line, which is
+            // usually the real reason (an MCP proxy that cannot reach its
+            // upstream answers -32602 and explains itself only on stderr).
+            let launched = match (&self.config.command, &self.config.url) {
+                (Some(command), _) => format!("command `{}`", mcp_display_target("stdio", command)),
+                (None, Some(_)) => "HTTP endpoint".to_string(),
+                (None, None) => "server".to_string(),
+            };
+            let stderr = self
+                .transport
+                .last_stderr_line()
+                .await
+                .map(|line| format!("; server stderr: {line}"))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "MCP server '{}' rejected initialize ({launched}): {error}{stderr}",
+                self.name
+            );
+        }
         let result = response_result(
             &response,
             "initialize",
@@ -5333,11 +5364,27 @@ impl McpServerSnapshot {
         }
         mcp_recovery_kind(
             self.enabled,
-            true,
+            self.started(),
             self.connected,
             self.error.as_deref(),
             oauth_capable,
         )
+    }
+
+    /// Whether this session ever attempted the server. Boot is lazy (#6033):
+    /// a configured server nobody asked for has no connection, no recorded
+    /// failure, and no observed capabilities — it was never started, so its
+    /// recovery is `connect`, not `reconnect`, and an OAuth-capable one is
+    /// not yet known to need a login.
+    #[must_use]
+    pub fn started(&self) -> bool {
+        self.connected
+            || self.auth_required
+            || self.error.is_some()
+            || !matches!(
+                self.capability_metadata,
+                McpServerCapabilityMetadata::NotObserved
+            )
     }
 }
 
