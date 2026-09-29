@@ -421,7 +421,7 @@ const PARALLEL_READONLY_PREFIXES: &[&str] = &[
 #[must_use]
 pub fn readonly_command_help() -> String {
     format!(
-        "Read-only shell grammar: {}; find without -exec/-delete; sed -n <range>p; the text filters sort, uniq, cut, tr and comm; literal echo/printf; git {} (optionally after -C <dir> or --no-pager); and, when network access is granted, gh issue/pr/release/repo/run/workflow view or list and npm view. Join reads with |, &&, || or ;. A leading `cd <dir> &&` sets the working directory, and the only redirects are 2>/dev/null, >/dev/null and 2>&1. Not admitted: other redirects, $ or backtick expansion, subshells, backgrounding, inline environment assignments, and any other program (python, awk, jq, cargo and so on). Options and workspace path checks still apply. git branch and git rev-parse are outside this subset; use git status, git log or git show. If an essential probe remains blocked, return the findings and the blocked probe to the parent; this worker cannot change its own role.",
+        "Read-only shell grammar: {}; find without -exec/-delete; sed -n <range>p; the text filters sort, uniq, cut, tr and comm; literal echo/printf; git {} (optionally after -C <dir> or --no-pager); and, when network access is granted, gh issue/pr/release/repo/run/workflow view or list. Join reads with |, &&, || or ;. A leading `cd <dir> &&` sets the working directory, and the only redirects are 2>/dev/null, >/dev/null and 2>&1. Not admitted: other redirects, $ or backtick expansion, subshells, backgrounding, inline environment assignments, and any other program (python, awk, jq, cargo and so on). Options and workspace path checks still apply. git branch and git rev-parse are outside this subset; use git status, git log or git show. npm metadata reads require ordinary shell approval because configuration can change their network destination. If an essential probe remains blocked, return the findings and the blocked probe to the parent; this worker cannot change its own role.",
         PARALLEL_READONLY_PREFIXES
             .iter()
             .filter(|prefix| !prefix.starts_with("git "))
@@ -629,8 +629,6 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///   `-ok`, `-okdir`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
 /// - `sed -n '<range>p` — numeric line-range print only, no script verbs
 ///   (`w`/`r`/`e`/`s`) can appear in a two-token range script;
-/// - `npm view|show|info <pkg>` — registry reads, matching the scout role's
-///   network-capable read-only posture;
 /// - pure text filters `sort`, `uniq`, `cut`, `tr`, `comm` as pipeline
 ///   stages, and literal `echo`/`printf` separators.
 ///
@@ -951,17 +949,19 @@ pub fn split_leading_cd(command: &str) -> Option<(String, String)> {
     (!rest.is_empty()).then(|| (dir.clone(), rest.to_string()))
 }
 
-/// A network read inside an admitted read-only command.
+/// A recognized network read. Recognition alone never grants shell authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NetworkRead {
     /// A `gh` view/list read against github.com.
     GitHub,
-    /// An `npm view|show|info` registry read.
+    /// Potential npm metadata network use, retained for no-network denials.
+    /// npm configuration can change the host; this never grants admission.
     Npm,
 }
 
 impl NetworkRead {
-    /// The host the read contacts, as the network policy names it.
+    /// The known host label. For npm this is only its public-registry label,
+    /// not proof of the configured destination and never an authorization.
     #[must_use]
     pub const fn host(self) -> &'static str {
         match self {
@@ -971,12 +971,12 @@ impl NetworkRead {
     }
 }
 
-/// The network reads in a command the agent read-only grammar admits, one
-/// entry per host, judged segment by segment so a pipeline or chain cannot
-/// hide one. Leading `cd <dir> &&` prefixes are removed first, the same way
-/// the shell gates move them into the working directory, so the command is
-/// judged as it will run. A command the grammar still refuses reports none:
-/// it never runs as a classifier-approved read.
+/// Recognize network reads for policy checks and no-network denials, one
+/// entry per kind. npm metadata reads are recognized even though they are
+/// not admitted: otherwise disabling their automatic admission would weaken
+/// the independent no-network guard. Callers must judge shell admission
+/// separately; an npm host label is not evidence of its actual destination.
+/// Leading `cd <dir> &&` prefixes are moved into the working directory first.
 #[must_use]
 pub fn readonly_network_reads(command: &str) -> Vec<NetworkRead> {
     let mut command = command.to_string();
@@ -984,16 +984,25 @@ pub fn readonly_network_reads(command: &str) -> Vec<NetworkRead> {
     while let Some((_, rest)) = split_leading_cd(&command) {
         command = rest;
     }
-    let Ok(segments) = agent_readonly_verdict(&command) else {
+    let normalized = normalize_windows_command_paths(&command);
+    let Ok(segments) = lex_readonly_command(normalized.trim()) else {
         return Vec::new();
     };
     let mut reads = Vec::new();
     for segment in &segments {
         let tokens = shell_words(&normalize_windows_command_paths(&segment.command));
-        let read = match tokens.first().map(String::as_str) {
-            Some("gh") => NetworkRead::GitHub,
-            Some("npm") => NetworkRead::Npm,
-            _ => continue,
+        let read = if tokens.first().is_some_and(|program| program == "npm")
+            && is_npm_metadata_command(&tokens)
+        {
+            NetworkRead::Npm
+        } else {
+            if agent_segment_verdict(&segment.command).is_err() {
+                return Vec::new();
+            }
+            match tokens.first().map(String::as_str) {
+                Some("gh") => NetworkRead::GitHub,
+                _ => continue,
+            }
         };
         if !reads.contains(&read) {
             reads.push(read);
@@ -1103,9 +1112,13 @@ fn agent_segment_verdict(segment: &str) -> Result<(), ReadonlyRejection> {
                 )
             }
         }
-        "npm" if !is_agent_readonly_npm(&tokens) => ReadonlyRejection::new(
+        "npm" if !is_npm_metadata_command(&tokens) => ReadonlyRejection::new(
             "subcommand",
-            "only `npm view`, `npm show` and `npm info` are admitted",
+            "`npm` commands require ordinary shell approval",
+        ),
+        "npm" => ReadonlyRejection::new(
+            "program",
+            "`npm` metadata reads require ordinary shell approval: project/user configuration and environment can change the registry; read-only shell cannot establish the network destination",
         ),
         "echo" | "printf" => ReadonlyRejection::new(
             "option",
@@ -1156,7 +1169,9 @@ fn is_agent_readonly_segment(segment: &str) -> bool {
         "git" => is_agent_readonly_git(&tokens),
         "find" => is_agent_readonly_find(&tokens),
         "sed" => is_agent_readonly_sed(&tokens),
-        "npm" => is_agent_readonly_npm(&tokens),
+        // npm's project/user configuration and environment can redirect even
+        // a plain `npm view pkg`. argv alone cannot establish its authority.
+        "npm" => false,
         "echo" | "printf" => is_agent_readonly_literal_print(&tokens),
         "sort" => agent_text_filter_options_match(
             &tokens,
@@ -1410,7 +1425,7 @@ fn is_agent_readonly_literal_print(tokens: &[String]) -> bool {
     }
 }
 
-fn is_agent_readonly_npm(tokens: &[String]) -> bool {
+fn is_npm_metadata_command(tokens: &[String]) -> bool {
     matches!(
         tokens.get(1).map(String::as_str),
         Some("view" | "show" | "info")
@@ -1653,7 +1668,6 @@ const SAFE_COMMANDS: &[&str] = &[
     "uniq",
     "cut",
     "tr",
-    "awk",
     "sed",
     "diff",
     "file",
@@ -1672,7 +1686,6 @@ const SAFE_COMMANDS: &[&str] = &[
     "npm list",
     "npm ls",
     "npm outdated",
-    "npm view",
     "cargo check",
     "cargo test",
     "cargo build",
@@ -2062,12 +2075,9 @@ fn unwrap_to_effective_tokens(tokens: &[String]) -> Option<Vec<String>> {
 
         if SHELL_WRAPPERS.contains(&word.as_str()) {
             // `sh -c '<payload>'` — the payload is the real command line.
-            if let Some(flag_at) = current[start + 1..].iter().position(|t| t == "-c") {
-                let payload_idx = start + 1 + flag_at + 1;
-                if let Some(payload) = current.get(payload_idx) {
-                    current = shell_words(payload);
-                    continue;
-                }
+            if let Some(payload) = shell_command_payload(&current[start + 1..]) {
+                current = shell_words(payload);
+                continue;
             }
             return Some(current);
         }
@@ -2085,6 +2095,37 @@ fn unwrap_to_effective_tokens(tokens: &[String]) -> Option<Vec<String>> {
         let mut normalized = current.clone();
         normalized[start] = word;
         return Some(normalized);
+    }
+    None
+}
+
+/// The command string of a shell invocation (`args` follow the shell word).
+///
+/// `-c` may be clustered (`-lc`) and may be followed by more options before
+/// the command string: `bash -c -e 'rm -rf /'` and `sh -c -- 'rm -rf /'` run
+/// the first operand after option parsing, not the word right after `-c`.
+fn shell_command_payload(args: &[String]) -> Option<&String> {
+    let mut command_mode = false;
+    let mut options_done = false;
+    let mut index = 0;
+    while index < args.len() {
+        let token = args[index].as_str();
+        if !options_done && matches!(token, "--" | "-") {
+            options_done = true;
+        } else if !options_done
+            && token.len() > 1
+            && (token.starts_with('-') || token.starts_with('+'))
+        {
+            let flags = &token[1..];
+            command_mode |=
+                token.starts_with('-') && !token.starts_with("--") && flags.contains('c');
+            if !token.starts_with("--") && flags.contains(['o', 'O']) {
+                index += 1;
+            }
+        } else if command_mode {
+            return Some(&args[index]);
+        }
+        index += 1;
     }
     None
 }
@@ -2289,7 +2330,6 @@ fn target_contains_parent_escape(target: &str) -> bool {
 
 /// Check if a command is known to be safe
 fn is_safe_command(command: &str) -> bool {
-    let command_lower = command.to_lowercase();
     let tokens = shell_words(command);
     if let Some(start) = primary_token_index(&tokens) {
         let refs = tokens[start..]
@@ -2312,13 +2352,108 @@ fn is_safe_command(command: &str) -> bool {
         return false;
     }
 
-    for safe_cmd in SAFE_COMMANDS {
-        if command_lower.starts_with(safe_cmd) {
-            return true;
-        }
-    }
+    SAFE_COMMANDS.iter().any(|entry| {
+        leading_words_match(&tokens, entry).is_some_and(|words| {
+            safe_command_arguments_are_read_only(entry, &tokens, &tokens[words..])
+        })
+    })
+}
 
-    false
+/// How many words of a command-table `entry` (`"git status"`) open `tokens`,
+/// compared word for word. A raw string prefix made `cdk`, `psql`, `setsid`
+/// and `topgrade` look like `cd`, `ps`, `set` and `top`.
+fn leading_words_match(tokens: &[String], entry: &str) -> Option<usize> {
+    let words = entry.split_whitespace().collect::<Vec<_>>();
+    (tokens.len() >= words.len()
+        && tokens
+            .iter()
+            .zip(&words)
+            .all(|(token, word)| token.to_lowercase() == *word))
+    .then_some(words.len())
+}
+
+/// Arguments that turn an otherwise read-only [`SAFE_COMMANDS`] entry into a
+/// command that runs other programs or writes files. `tokens` is the whole
+/// command and `args` what follows the entry's words.
+fn safe_command_arguments_are_read_only(entry: &str, tokens: &[String], args: &[String]) -> bool {
+    let has = |names: &[&str]| args.iter().any(|arg| names.contains(&arg.as_str()));
+    let list_mode = has(&["-l", "--list"]);
+    let only_options = |allowed: &[&str], operands_ok: bool| {
+        args.iter().all(|arg| {
+            if arg.starts_with('-') {
+                allowed.contains(&arg.as_str())
+            } else {
+                operands_ok
+            }
+        })
+    };
+    match entry {
+        // `env CMD` runs CMD; only the bare listing is a read.
+        "env" => only_options(&["-0", "--null"], false),
+        // `-exec`, `-fprint`, `-delete`, … act on every match.
+        "find" => is_agent_readonly_find(tokens),
+        // Script verbs `e`, `w`, `r` and the `-i` option execute or write.
+        "sed" => is_agent_readonly_sed(tokens),
+        // A second operand is the output file.
+        "uniq" => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1,
+        // `hostname NAME` sets the host name.
+        "hostname" => args.iter().all(|arg| arg.starts_with('-')),
+        // `--pre CMD` runs a preprocessor on every file searched.
+        "rg" => !args.iter().any(|arg| arg.starts_with("--pre")),
+        // `-x` / `-X` / `--exec*` run a command per match.
+        "fd" => !args.iter().any(|arg| {
+            arg.starts_with("--exec")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['x', 'X']))
+        }),
+        // `+CMD` runs a pager command at startup, which can reach a shell.
+        "less" | "more" => !args.iter().any(|arg| arg.starts_with('+')),
+        // `-P`/`-H`/`-C` choose the pager, browser or config that man runs.
+        "man" => only_options(
+            &[
+                "-k",
+                "-f",
+                "-a",
+                "-w",
+                "-W",
+                "--apropos",
+                "--whatis",
+                "--all",
+                "--where",
+                "--path",
+            ],
+            true,
+        ),
+        // `--output` writes the diff or log to a file.
+        "git diff" | "git log" | "git show" => !args.iter().any(|arg| arg.starts_with("--output")),
+        // Listing forms only: other forms delete, rename or create refs.
+        "git branch" => only_options(
+            &[
+                "-a",
+                "--all",
+                "-r",
+                "--remotes",
+                "-v",
+                "-vv",
+                "--verbose",
+                "--show-current",
+                "--color",
+                "--no-color",
+                "-l",
+                "--list",
+            ],
+            list_mode,
+        ),
+        "git tag" => only_options(&["-l", "--list", "-n"], list_mode),
+        "git remote" => match args.first().map(String::as_str) {
+            None => true,
+            Some("-v" | "--verbose") => args.len() == 1,
+            Some("get-url") => args[1..]
+                .iter()
+                .all(|arg| !arg.starts_with('-') || matches!(arg.as_str(), "--push" | "--all")),
+            Some(_) => false,
+        },
+        _ => true,
+    }
 }
 
 /// Shell metacharacters that let a second stage hide behind a benign first
@@ -2384,10 +2519,14 @@ fn is_workspace_safe_command(command: &str) -> bool {
         return copy_or_move_operands_are_workspace_relative(&tokens[start + 1..]);
     }
 
-    let command_lower = command.to_lowercase();
-    WORKSPACE_SAFE_COMMANDS
-        .iter()
-        .any(|ws_cmd| command_lower.starts_with(ws_cmd))
+    let raw_tokens = shell_words(command);
+    WORKSPACE_SAFE_COMMANDS.iter().any(|entry| {
+        leading_words_match(&raw_tokens, entry).is_some_and(|words| {
+            // `touch ~/.zshrc` and `mkdir /etc/x` write outside the workspace.
+            !matches!(*entry, "touch" | "mkdir")
+                || copy_or_move_operands_are_workspace_relative(&raw_tokens[words..])
+        })
+    })
 }
 
 /// `cp`/`mv` are workspace-safe only when every path operand stays inside the
@@ -2530,6 +2669,8 @@ mod destructive_composition_tests {
             r#"timeout --foreground 5s rm -rf ~"#,
             r#"nice -n 19 rm -rf /"#,
             r#"ionice -c 3 rm -rf $HOME"#,
+            r#"bash -c -e 'rm -rf "$HOME"'"#,
+            r#"sh -lc -- 'rm -rf "$HOME"'"#,
         ] {
             assert_eq!(
                 analyze_command(command).level,
@@ -2613,7 +2754,6 @@ mod tests {
             "find crates -type f -name '*.toml' | head",
             "sed -n 10p Cargo.toml",
             "sed -n 1,5p README.md",
-            "npm view codewhale version",
             "sort deps.txt | uniq -c",
             "ls -la docs/*.md",
         ] {
@@ -2810,7 +2950,6 @@ mod tests {
             "find . -name '*.rs'",
             "git -C crates/tui log",
             "sed -n 10p Cargo.toml",
-            "npm view codewhale version",
         ] {
             assert!(
                 !is_parallel_readonly_command(command),
@@ -2834,6 +2973,82 @@ mod tests {
             analyze_command("grep pattern file").level,
             SafetyLevel::Safe
         );
+    }
+
+    #[test]
+    fn safe_classification_needs_whole_words_and_read_only_arguments() {
+        for command in [
+            // A safe word as a string prefix of another program.
+            "cdk deploy --all",
+            "psql -c 'drop database prod'",
+            "topgrade -y",
+            "hostnamectl set-hostname x",
+            "setsid curl https://example.com",
+            // Programs that run their arguments or write files.
+            "env node evil.js",
+            "awk 'BEGIN{system(\"id\")}'",
+            "sed 's/x/y/e' file",
+            "sed -i s/a/b/ f",
+            "find . -exec chmod 777 {} +",
+            "find . -fprint /tmp/out",
+            "rg --pre ./x.sh foo",
+            "fd -x ./x.sh",
+            "man -P 'sh -c id' ls",
+            "less '+!id' file",
+            "uniq in.txt out.txt",
+            // Git forms that change refs, remotes or write files.
+            "git branch -D main",
+            "git branch new-branch",
+            "git remote set-url origin https://example.com/x.git",
+            "git remote add x https://example.com/x.git",
+            "git tag v1",
+            "git diff --output=/tmp/x",
+            "git log --output=/tmp/x",
+        ] {
+            assert!(
+                !matches!(
+                    analyze_command(command).level,
+                    SafetyLevel::Safe | SafetyLevel::WorkspaceSafe
+                ),
+                "{command} must not be classified as routine"
+            );
+        }
+        for command in ["touch ~/.zshrc", "mkdir /etc/x", "touch ../x"] {
+            assert_ne!(
+                analyze_command(command).level,
+                SafetyLevel::WorkspaceSafe,
+                "{command} writes outside the workspace"
+            );
+        }
+        for command in [
+            "cd src",
+            "ps aux",
+            "env",
+            "find . -name '*.rs'",
+            "sed -n '1,5p' file",
+            "rg -n foo src",
+            "man ls",
+            "git diff --stat",
+            "git branch",
+            "git branch -a",
+            "git branch --show-current",
+            "git remote -v",
+            "git tag --list 'v0.*'",
+            "GIT STATUS",
+        ] {
+            assert_eq!(
+                analyze_command(command).level,
+                SafetyLevel::Safe,
+                "{command}"
+            );
+        }
+        for command in ["touch src/new.rs", "mkdir -p target/x"] {
+            assert_eq!(
+                analyze_command(command).level,
+                SafetyLevel::WorkspaceSafe,
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -2991,6 +3206,16 @@ mod tests {
             readonly_network_reads("cd a && cd b && npm view x"),
             vec![NetworkRead::Npm]
         );
+        assert_eq!(
+            readonly_network_reads("npm view @scope/pkg@^1 dist.tarball --json"),
+            vec![NetworkRead::Npm]
+        );
+        // Detection remains conservative for the independent no-network
+        // guard, even though npm metadata reads never grant admission.
+        assert_eq!(
+            readonly_network_reads("npm view x --registry=https://registry.example/"),
+            vec![NetworkRead::Npm]
+        );
         for command in [
             "git status",
             "rg gh",
@@ -3005,6 +3230,57 @@ mod tests {
             assert!(
                 readonly_network_reads(command).is_empty(),
                 "{command} must not be classified as an admitted network read"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_metadata_reads_require_ordinary_approval_but_keep_network_detection() {
+        for command in [
+            "npm view",
+            "npm view codewhale version",
+            "npm show lodash@1.0.0",
+            "npm info @scope/pkg@^1 dist.tarball --json",
+            "npm view --json lodash",
+            "npm view owner/repo",
+            "npm view name@owner/repo",
+            "npm view @scope/pkg@owner/repo",
+            "npm view some.tar.gz",
+            "npm view some.tar",
+            "npm view name@some.tgz",
+            "npm view @scope/pkg@some.tgz",
+            "npm view pkg/sub/dir",
+            "npm view pkg@.",
+            "npm view https://example.invalid/pkg.tgz",
+            "npm view name@file:../pkg",
+            "npm view alias@npm:lodash",
+            "npm view lodash --registry=https://registry.example/",
+            "npm view x --userconfig=/tmp/config",
+        ] {
+            let refusal = agent_readonly_verdict(command).expect_err(command);
+            assert_eq!(refusal.rule, "program", "{command}");
+            assert!(
+                refusal.detail.contains("configuration"),
+                "{command}: {refusal}"
+            );
+            assert!(!is_parallel_readonly_command(command), "{command}");
+            assert_eq!(
+                analyze_command(command).level,
+                SafetyLevel::RequiresApproval,
+                "{command}"
+            );
+            assert_eq!(
+                readonly_network_reads(command),
+                vec![NetworkRead::Npm],
+                "{command}"
+            );
+        }
+        for command in ["npm view x | head", "cd sub && npm view x"] {
+            assert!(agent_readonly_verdict(command).is_err(), "{command}");
+            assert_eq!(
+                readonly_network_reads(command),
+                vec![NetworkRead::Npm],
+                "{command}"
             );
         }
     }
@@ -3063,7 +3339,20 @@ mod tests {
             ("git branch -a", "subcommand", "git branch"),
             ("git -c core.pager=x log", "option", "-c"),
             ("gh pr create", "subcommand", "gh pr create"),
-            ("npm install x", "subcommand", "npm view"),
+            ("npm install x", "subcommand", "ordinary shell approval"),
+            (
+                "npm view lodash --registry=https://registry.example/",
+                "program",
+                "`npm`",
+            ),
+            ("npm view x --cache=/tmp/x", "program", "`npm`"),
+            ("npm view x --userconfig /tmp/e", "program", "`npm`"),
+            (
+                "npm view https://registry.example/x.tgz",
+                "program",
+                "`npm`",
+            ),
+            ("npm view ../pkg", "program", "`npm`"),
             ("sort -o out f", "option", "`sort`"),
             // #6675: a word-leading unquoted `*` is refused by the lexer
             // before the echo literal rule sees it.

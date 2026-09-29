@@ -8579,10 +8579,10 @@ fn seed_read_only_role_deny_list(runtime: &mut SubAgentRuntime) {
 }
 
 /// #5426 acceptance point 1, gate-level: a live scout must be able to run
-/// the three canonical read-only inspection commands DIRECTLY through
-/// canonical `bash` — `git -C ... log`, `find ... | head`, `npm view` — with
+/// the canonical read-only inspection commands DIRECTLY through
+/// canonical `bash` — `git -C ... log`, `find ... | head` — with
 /// no child spawn. The first live dogfood against a #5428 binary denied all
-/// three at `posture_permits_tool`: the Required branch demanded
+/// these at `posture_permits_tool`: the Required branch demanded
 /// `ShellPolicy::Full`, and #5428's relaxed agent classifier was unreachable
 /// from the gate (it only guards `BashTool::execute`, which the gate
 /// precedes). This test pins the gate↔classifier agreement the catalog
@@ -8608,7 +8608,6 @@ fn scout_posture_gate_admits_agent_readonly_bash_commands() {
     let admitted = [
         "git -C /Volumes/VIXinSSD/CW/worktrees/demo log --oneline -3",
         "find /Volumes/VIXinSSD/CW/worktrees/demo/crates -name offering.rs -maxdepth 4 | head -3",
-        "npm view @deepseek-ai/dsh version",
     ];
     for command in admitted {
         let input = serde_json::json!({ "command": command });
@@ -8616,6 +8615,20 @@ fn scout_posture_gate_admits_agent_readonly_bash_commands() {
             registry.posture_permits_tool("bash", Some(&input)),
             "scout posture gate must admit agent-read-only bash directly: {command}"
         );
+    }
+    // npm's project/user configuration can redirect its destination, so a
+    // network-enabled Scout still cannot grant it automatic shell authority.
+    for command in [
+        "npm view @deepseek-ai/dsh version",
+        "npm view x --json",
+        "npm view owner/repo",
+    ] {
+        let input = serde_json::json!({"command": command});
+        assert!(
+            !registry.posture_permits_tool("bash", Some(&input)),
+            "{command}"
+        );
+        assert!(!registry.envelope_permits("bash", &input), "{command}");
     }
 
     // Mutation still refused at the gate, legacy `Bash` stays raw-shell-denied
@@ -20658,6 +20671,11 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
         ("bash", json!({"command": "gh pr view 1 | head"})),
         ("bash", json!({"command": "ls && gh issue list"})),
         ("bash", json!({"command": "npm view x | head"})),
+        ("bash", json!({"command": "npm view owner/repo"})),
+        (
+            "bash",
+            json!({"command": "npm view @scope/pkg --registry=https://registry.example/"}),
+        ),
         // A leading `cd` is moved into `cwd` before the command runs, so the
         // read behind it is judged too.
         ("bash", json!({"command": "cd . && gh pr view 1"})),
