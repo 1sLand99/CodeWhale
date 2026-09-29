@@ -714,6 +714,7 @@ mod tests {
     async fn execute_respects_codewhale_only_skill_discovery() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().to_path_buf();
+        crate::test_support::trust_workspace(&workspace);
         write_skill(
             &workspace.join(".claude").join("skills"),
             "claude-only",

@@ -8170,6 +8170,10 @@ fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
             return config.skills_dir();
         }
         if let Some(codewhale_skills_dir) = crate::skills::codewhale_workspace_skills_dir(workspace)
+            && crate::skills::skills_dir_allowed_by_workspace_trust(
+                workspace,
+                &codewhale_skills_dir,
+            )
             && let Ok(canonical_skills) = fs::canonicalize(&codewhale_skills_dir)
         {
             return canonical_skills;
@@ -8196,6 +8200,7 @@ fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
         if let Ok(canon) = fs::canonicalize(&candidate)
             && canon.starts_with(&canonical_workspace)
             && canon.is_dir()
+            && crate::skills::skills_dir_allowed_by_workspace_trust(workspace, &canon)
         {
             return canon;
         }

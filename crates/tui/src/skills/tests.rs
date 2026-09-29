@@ -1424,6 +1424,7 @@ fn discover_finds_both_workspace_and_global_skills() {
         "body",
     );
 
+    crate::test_support::trust_workspace(&workspace);
     let skills_dir = workspace.join(".agents").join("skills");
     let registry =
         super::discover_for_workspace_and_dir_with_home(&workspace, &skills_dir, Some(&home));
@@ -1971,6 +1972,7 @@ fn default_workspace_skill_prompt_preserves_its_discoverable_path() {
     let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
     let _codewhale_home =
         crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+    crate::test_support::trust_workspace(&workspace);
 
     let rendered =
         super::render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
@@ -2016,6 +2018,110 @@ fn global_skill_roots_come_from_the_os_home_only() {
         dirs.iter()
             .all(|dir| dir.starts_with(&home) || dir.starts_with(&workspace)),
         "every runtime root is under the OS home or the workspace: {dirs:?}"
+    );
+}
+
+/// Passing a workspace skills dir as the session's `skills_dir` (as
+/// `resolve_skills_dir` and the runtime API did) must not re-admit what the
+/// root catalog's trust gate filtered out, and the warning must name the dir.
+fn assert_skills_dir_held_to_workspace_trust(
+    workspace: &std::path::Path,
+    skills_dir: &std::path::Path,
+    mode: super::SkillDiscoveryMode,
+) {
+    write_skill(
+        skills_dir,
+        "repo-skill",
+        "from the repository",
+        "do repo things",
+    );
+
+    let registry = super::discover_for_workspace_and_dir_with_mode_and_plugins(
+        workspace, skills_dir, mode, None,
+    );
+    assert!(
+        registry.get("repo-skill").is_none(),
+        "untrusted workspace skill loaded via skills_dir {}",
+        skills_dir.display()
+    );
+    assert!(
+        !super::skill_directories_for_workspace_and_dir(workspace, skills_dir, mode)
+            .iter()
+            .any(|dir| super::roots::paths_refer_to_same_dir(dir, skills_dir)),
+        "untrusted workspace skills_dir must not be searched"
+    );
+    let dir_name = skills_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        registry
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("not trusted") && warning.contains(&dir_name)),
+        "{:?}",
+        registry.warnings()
+    );
+
+    crate::test_support::trust_workspace(workspace);
+    let registry = super::discover_for_workspace_and_dir_with_mode_and_plugins(
+        workspace, skills_dir, mode, None,
+    );
+    assert!(registry.get("repo-skill").is_some());
+    assert!(
+        !registry
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("not trusted")),
+        "{:?}",
+        registry.warnings()
+    );
+}
+
+#[test]
+fn untrusted_workspace_agents_skills_via_skills_dir_not_loaded() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("ws");
+    assert_skills_dir_held_to_workspace_trust(
+        &workspace,
+        &workspace.join(".agents").join("skills"),
+        super::SkillDiscoveryMode::Compatible,
+    );
+}
+
+#[test]
+fn untrusted_workspace_flat_skills_via_skills_dir_not_loaded() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("ws");
+    assert_skills_dir_held_to_workspace_trust(
+        &workspace,
+        &workspace.join("skills"),
+        super::SkillDiscoveryMode::Compatible,
+    );
+}
+
+#[test]
+fn untrusted_workspace_codewhale_only_skills_dir_not_loaded() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("ws");
+    assert_skills_dir_held_to_workspace_trust(
+        &workspace,
+        &workspace.join(".codewhale").join("skills"),
+        super::SkillDiscoveryMode::CodeWhaleOnly,
+    );
+}
+
+/// An explicitly configured dir that lives inside the repository is still
+/// repository content: it waits for trust like the built-in project roots.
+#[test]
+fn untrusted_workspace_custom_configured_dir_inside_workspace_not_loaded() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("ws");
+    assert_skills_dir_held_to_workspace_trust(
+        &workspace,
+        &workspace.join("my-skills"),
+        super::SkillDiscoveryMode::Compatible,
     );
 }
 

@@ -830,7 +830,7 @@ fn normalize_skill_name_segment(name: &str) -> String {
 /// Precedence is defined once in [`roots::SkillRootCatalog`] (first
 /// match wins on name conflicts):
 ///
-/// 1. `<workspace>/.agents/skills` — deepseek-native convention.
+/// 1. `<workspace>/.agents/skills` — agentskills.io shared convention.
 /// 2. `<workspace>/skills` — flat, project-local.
 /// 3. `<workspace>/.opencode/skills` — OpenCode interop.
 /// 4. `<workspace>/.claude/skills` — Claude Code interop.
@@ -841,6 +841,7 @@ fn normalize_skill_name_segment(name: &str) -> String {
 /// 9. `~/.codewhale/skills` — CodeWhale global, primary install target.
 /// 10. `~/.deepseek/skills` — legacy DeepSeek global fallback.
 ///
+/// Workspace roots (1-6) load only once the workspace is trusted.
 /// Compatible audit may also observe `.codex/skills`, but that root is
 /// never activated for runtime discovery in this catalog.
 ///
@@ -898,7 +899,7 @@ pub fn discover_in_workspace_with_mode_and_plugins(
         skills_directories_for_mode(workspace, mode),
         plugins,
     );
-    with_untrusted_project_skills_warning(registry, workspace)
+    with_untrusted_project_skills_warning(registry, workspace, None)
 }
 
 /// Name the project skill directories an untrusted workspace kept out, so
@@ -906,16 +907,21 @@ pub fn discover_in_workspace_with_mode_and_plugins(
 fn with_untrusted_project_skills_warning(
     mut registry: SkillRegistry,
     workspace: &Path,
+    configured_skills_dir: Option<&Path>,
 ) -> SkillRegistry {
-    if let Some(warning) = untrusted_project_skills_warning(workspace) {
+    if let Some(warning) = untrusted_project_skills_warning(workspace, configured_skills_dir) {
         registry.warnings.push(warning);
     }
     registry
 }
 
-pub(crate) fn untrusted_project_skills_warning(workspace: &Path) -> Option<String> {
+pub(crate) fn untrusted_project_skills_warning(
+    workspace: &Path,
+    configured_skills_dir: Option<&Path>,
+) -> Option<String> {
     let home = crate::config::effective_home_dir();
-    let skipped = roots::untrusted_project_skill_dirs(workspace, home.as_deref());
+    let skipped =
+        roots::untrusted_project_skill_dirs(workspace, home.as_deref(), configured_skills_dir);
     if skipped.is_empty() {
         return None;
     }
@@ -943,7 +949,7 @@ pub fn discover_for_workspace_and_dir_with_mode_and_plugins(
 ) -> SkillRegistry {
     let dirs = skill_directories_for_workspace_and_dir(workspace, skills_dir, mode);
     let registry = discover_from_directories_with_plugins(dirs, plugins);
-    with_untrusted_project_skills_warning(registry, workspace)
+    with_untrusted_project_skills_warning(registry, workspace, Some(skills_dir))
 }
 
 #[must_use]
@@ -952,16 +958,30 @@ pub fn skill_directories_for_workspace_and_dir(
     skills_dir: &Path,
     mode: SkillDiscoveryMode,
 ) -> Vec<PathBuf> {
-    let mut dirs = skills_directories_for_mode(workspace, mode);
-    insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
+    let home = crate::config::effective_home_dir();
+    let mut dirs = skills_directories_with_home_and_mode(workspace, home.as_deref(), mode);
+    insert_configured_skills_dir(&mut dirs, workspace, home.as_deref(), skills_dir);
     dirs
 }
 
-fn insert_configured_skills_dir(dirs: &mut Vec<PathBuf>, workspace: &Path, skills_dir: &Path) {
+/// Whether a resolved or configured skills dir may load for `workspace`; see
+/// [`roots::skills_dir_allowed_by_workspace_trust`].
+pub(crate) fn skills_dir_allowed_by_workspace_trust(workspace: &Path, skills_dir: &Path) -> bool {
+    let home = crate::config::effective_home_dir();
+    roots::skills_dir_allowed_by_workspace_trust(workspace, home.as_deref(), skills_dir)
+}
+
+fn insert_configured_skills_dir(
+    dirs: &mut Vec<PathBuf>,
+    workspace: &Path,
+    home_dir: Option<&Path>,
+    skills_dir: &Path,
+) {
     if !skills_dir.is_dir()
         || dirs
             .iter()
             .any(|p| roots::paths_refer_to_same_dir(p, skills_dir))
+        || !roots::skills_dir_allowed_by_workspace_trust(workspace, home_dir, skills_dir)
     {
         return;
     }
@@ -1194,7 +1214,7 @@ pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
     plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> SkillRegistry {
     let mut dirs = skills_directories_with_home_and_mode(workspace, home_dir, mode);
-    insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
+    insert_configured_skills_dir(&mut dirs, workspace, home_dir, skills_dir);
     discover_from_directories_with_plugins(dirs, plugins)
 }
 
