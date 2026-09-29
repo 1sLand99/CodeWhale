@@ -1016,6 +1016,8 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         turn_wall_clock: config.turn_wall_clock(),
         stream_max_content_bytes: config.stream_max_content_bytes(),
         stream_max_duration: config.stream_max_duration(),
+        stream_retry_limits: config.stream_retry_limits(),
+        stream_open_timeout: config.stream_open_timeout(),
         subagent_heartbeat_timeout: Duration::from_secs(
             config.subagent_heartbeat_timeout_secs_for_provider(provider),
         ),
