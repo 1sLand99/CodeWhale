@@ -6,7 +6,9 @@
 //! submissions from previous sessions, not just the current one. One entry
 //! per line, oldest first,
 //! capped at [`MAX_HISTORY_ENTRIES`] entries (older entries are pruned
-//! at append time).
+//! at append time). A single-line entry is stored as-is; an entry with a
+//! line break, or one that starts with `"`, is stored as a JSON string so a
+//! multi-line prompt stays one entry (see [`encode_history_line`]).
 //!
 //! Slash commands are stored as well: recalling `/theme` or `/compact`
 //! with Up-arrow is ordinary recall (#6006), and filtering on the `/`
@@ -81,7 +83,27 @@ fn load_history_from(path: &Path) -> Vec<String> {
         .lines()
         .map_while(Result::ok)
         .filter(|line| !line.trim().is_empty())
+        .map(decode_history_line)
         .collect()
+}
+
+/// One file line for `entry`. Plain single-line entries stay plain, so files
+/// written before this encoding (and by older builds) read the same.
+fn encode_history_line(entry: &str) -> String {
+    if entry.contains(['\n', '\r']) || entry.starts_with('"') {
+        serde_json::to_string(entry).unwrap_or_else(|_| entry.replace(['\n', '\r'], " "))
+    } else {
+        entry.to_string()
+    }
+}
+
+fn decode_history_line(line: String) -> String {
+    if line.starts_with('"')
+        && let Ok(entry) = serde_json::from_str::<String>(&line)
+    {
+        return entry;
+    }
+    line
 }
 
 /// Append an entry to the persisted history, pruning old entries to
@@ -242,7 +264,12 @@ fn append_history_entries_to<'a>(
         entries.drain(0..excess);
     }
 
-    let payload = entries.join("\n") + "\n";
+    let payload = entries
+        .iter()
+        .map(|entry| encode_history_line(entry))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     if let Err(err) = write_history_atomic(path, payload.as_bytes()) {
         tracing::warn!(
             "Failed to persist composer history at {}: {err}",
@@ -371,6 +398,28 @@ mod tests {
             load_history_from(&path),
             vec!["/help", "real prompt", "/cost", "cat /etc/fstab"]
         );
+    }
+
+    #[test]
+    fn multi_line_entries_round_trip_as_one_entry() {
+        let (_tmp, path) = temp_history_path();
+        append_history_to(&path, "first");
+        append_history_to(&path, "fn main() {\n    run();\n}");
+        append_history_to(&path, "\"quoted\" start");
+        append_history_to(&path, "last");
+        assert_eq!(
+            load_history_from(&path),
+            vec![
+                "first",
+                "fn main() {\n    run();\n}",
+                "\"quoted\" start",
+                "last"
+            ]
+        );
+        // The same multi-line prompt twice is still one consecutive duplicate.
+        append_history_to(&path, "a\nb");
+        append_history_to(&path, "a\nb");
+        assert_eq!(load_history_from(&path).len(), 5);
     }
 
     #[test]

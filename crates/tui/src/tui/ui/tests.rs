@@ -21326,6 +21326,22 @@ fn apply_mention_menu_selection_splices_selected_entry() {
 }
 
 #[test]
+fn apply_mention_menu_selection_quotes_a_path_with_spaces() {
+    // A bare `@My Docs/notes.md` parses as a missing `@My` mention; the
+    // quoted form is the one the send-time parser reads back whole.
+    let mut app = create_test_app();
+    app.input = "open @My".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.mention_menu_selected = 0;
+    assert!(apply_mention_menu_selection(
+        &mut app,
+        &["My Docs/notes.md".to_string()]
+    ));
+    assert_eq!(app.input, "open @\"My Docs/notes.md\"");
+    assert_eq!(app.cursor_position, app.input.chars().count());
+}
+
+#[test]
 fn apply_mention_menu_selection_is_noop_outside_a_mention() {
     let mut app = create_test_app();
     app.input = "no @ here".to_string();
