@@ -2010,7 +2010,8 @@ fn is_safe_relative_path(path: &Path) -> bool {
 /// (macOS and Windows default to case-insensitive names) and, on Windows,
 /// with the trailing dots/spaces or `:stream` suffix it drops and the `GIT~N`
 /// short-name alias. The one `.git` rule for workspace file routes, file
-/// restore and displayed workspace paths.
+/// restore, displayed workspace paths, the write carve-out and sub-agent
+/// deliverables.
 pub fn is_git_metadata_name(name: &std::ffi::OsStr) -> bool {
     git_metadata_name(&name.to_string_lossy(), cfg!(windows))
 }

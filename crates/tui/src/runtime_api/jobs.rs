@@ -183,15 +183,19 @@ pub(super) struct CreateJobResponse {
 /// the route has no `workspace_follow_symlinks` or `/trust add` roots and no
 /// `~` expansion, so a symlink leading out of the workspace is refused.
 ///
-/// Containment is checked on the canonical path, but the manager receives the
-/// joined spelling, as it did before: Windows `canonicalize` returns a `\\?\`
-/// verbatim path that `cmd.exe` refuses as a current directory. Runs on
-/// `tokio::fs`, so no path resolution blocks a runtime worker.
+/// The manager receives the canonical directory that was checked, not the
+/// caller's spelling: a symlink retargeted between this check and the launch
+/// cannot move the job elsewhere. The manager takes a `&str`, so a directory
+/// whose name is not UTF-8 is refused rather than lossily renamed into a
+/// different one. On Windows the `\\?\` verbatim prefix `canonicalize` adds
+/// is dropped ([`plain_windows_path`]) because `cmd.exe` refuses it as a
+/// current directory. Runs on `tokio::fs`, so no path resolution blocks a
+/// runtime worker.
 async fn resolve_job_cwd(
     workspace: &std::path::Path,
     raw: &str,
     trust_mode: bool,
-) -> Result<std::path::PathBuf, ApiError> {
+) -> Result<String, ApiError> {
     let requested = std::path::Path::new(raw);
     let candidate = if requested.is_absolute() {
         requested.to_path_buf()
@@ -218,11 +222,32 @@ async fn resolve_job_cwd(
             ));
         }
     }
-    Ok(if candidate.is_absolute() {
-        candidate
+    let resolved = resolved
+        .into_os_string()
+        .into_string()
+        .map_err(|_| ApiError::bad_request("cwd must resolve to a UTF-8 path"))?;
+    Ok(if cfg!(windows) {
+        plain_windows_path(&resolved)
     } else {
         resolved
     })
+}
+
+/// `\\?\C:\dir` -> `C:\dir` and `\\?\UNC\host\share` -> `\\host\share`; any
+/// other spelling is returned unchanged. A string rule so every host tests it.
+fn plain_windows_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest)
+            if rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && rest.as_bytes().get(1) == Some(&b':') =>
+        {
+            rest.to_string()
+        }
+        _ => path.to_string(),
+    }
 }
 
 /// `POST /v1/threads/{id}/jobs` — launch a client-owned background job under
@@ -278,12 +303,7 @@ pub(super) async fn create_thread_job(
     // The manager resolves a relative `working_dir` against the server's own
     // cwd, so hand it the directory resolved against the thread workspace.
     let request_cwd = match request.cwd.as_deref() {
-        Some(cwd) => Some(
-            resolve_job_cwd(&thread.workspace, cwd, thread.trust_mode)
-                .await?
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        Some(cwd) => Some(resolve_job_cwd(&thread.workspace, cwd, thread.trust_mode).await?),
         None => None,
     };
     let policy = state
@@ -614,6 +634,15 @@ pub(super) async fn resize_thread_job(
 mod tests {
     use super::*;
 
+    fn canonical(path: &std::path::Path) -> String {
+        let canonical = path.canonicalize().unwrap().to_string_lossy().into_owned();
+        if cfg!(windows) {
+            plain_windows_path(&canonical)
+        } else {
+            canonical
+        }
+    }
+
     #[tokio::test]
     async fn job_cwd_resolves_against_the_thread_workspace() {
         let tmp = tempfile::tempdir().unwrap();
@@ -622,20 +651,19 @@ mod tests {
         let outside = tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
 
-        // Relative and absolute requests come back absolute, in the caller's
-        // spelling rather than the canonical one (no `\\?\` on Windows,
-        // no `/private` on macOS temp dirs).
+        // Relative and absolute requests both come back as the canonical
+        // directory that was checked, never the caller's spelling.
         let resolved = resolve_job_cwd(&workspace, "packages/app", false)
             .await
             .unwrap();
-        assert!(resolved.is_absolute(), "{resolved:?}");
-        assert_eq!(resolved, workspace.join("packages/app"));
+        assert!(std::path::Path::new(&resolved).is_absolute(), "{resolved}");
+        assert_eq!(resolved, canonical(&workspace.join("packages/app")));
         let absolute = workspace.join("packages");
         assert_eq!(
             resolve_job_cwd(&workspace, &absolute.to_string_lossy(), false)
                 .await
                 .unwrap(),
-            absolute
+            canonical(&absolute)
         );
 
         let missing = resolve_job_cwd(&workspace, "packages/none", false)
@@ -658,10 +686,72 @@ mod tests {
         assert_eq!(
             resolve_job_cwd(&workspace, "../outside", true)
                 .await
-                .unwrap()
-                .canonicalize()
                 .unwrap(),
-            outside.canonicalize().unwrap()
+            canonical(&outside)
         );
+    }
+
+    /// The cwd handed to the launcher is the directory whose containment was
+    /// checked: retargeting the requested symlink afterwards does not move
+    /// the child out of the workspace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn job_cwd_launches_in_the_checked_directory_after_a_retarget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let inside = workspace.join("inside");
+        std::fs::create_dir_all(&inside).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = workspace.join("link");
+        std::os::unix::fs::symlink(&inside, &link).unwrap();
+
+        let resolved = resolve_job_cwd(&workspace, "link", false).await.unwrap();
+        assert_eq!(resolved, canonical(&inside));
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let output = std::process::Command::new("pwd")
+            .arg("-P")
+            .current_dir(&resolved)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            canonical(&inside)
+        );
+    }
+
+    /// A directory whose name is not UTF-8 is refused before launch rather
+    /// than lossily renamed into a `U+FFFD` sibling. Linux only: macOS and
+    /// Windows filesystems do not store non-UTF-8 names.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn job_cwd_refuses_a_directory_name_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let raw_name = std::ffi::OsStr::from_bytes(b"dir-\xff");
+        std::fs::create_dir_all(workspace.join(raw_name)).unwrap();
+        std::fs::create_dir_all(workspace.join("dir-\u{fffd}")).unwrap();
+        std::os::unix::fs::symlink(workspace.join(raw_name), workspace.join("alias")).unwrap();
+
+        let error = resolve_job_cwd(&workspace, "alias", false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn plain_windows_path_drops_only_the_verbatim_prefix() {
+        assert_eq!(plain_windows_path(r"\\?\C:\ws\app"), r"C:\ws\app");
+        assert_eq!(
+            plain_windows_path(r"\\?\UNC\host\share\ws"),
+            r"\\host\share\ws"
+        );
+        for unchanged in [r"C:\ws", r"\\host\share", r"\\?\Volume{0}\ws", "/tmp/ws"] {
+            assert_eq!(plain_windows_path(unchanged), unchanged);
+        }
     }
 }

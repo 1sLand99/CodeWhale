@@ -1588,7 +1588,9 @@ routes are the contract for now.
   resolves against the thread workspace. Outside trust mode `cwd` must stay
   inside it after symlinks resolve (`403` otherwise): unlike the shell tool,
   this route does not follow `workspace_follow_symlinks` or `/trust add`
-  roots, so a symlink leading out of the workspace is refused
+  roots, so a symlink leading out of the workspace is refused. The job runs
+  in the resolved directory that was checked (a later symlink retarget does
+  not move it); a `cwd` that resolves to a non-UTF-8 path is a `400`
 - `GET /v1/threads/{id}/jobs/{job_id}` — one job's status + metadata
 - `GET /v1/threads/{id}/jobs/{job_id}/output?stream=<stdout|stderr>&cursor=
   <bytes>&max_bytes=<1-512KiB>&wait_ms=<0-30s>&format=<base64|text>` — the
