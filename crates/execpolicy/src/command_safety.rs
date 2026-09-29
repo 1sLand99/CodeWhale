@@ -421,7 +421,7 @@ const PARALLEL_READONLY_PREFIXES: &[&str] = &[
 #[must_use]
 pub fn readonly_command_help() -> String {
     format!(
-        "Read-only shell grammar: {}; find without -exec/-delete; sed -n <range>p; the text filters sort, uniq, cut, tr and comm; literal echo/printf; git {} (optionally after -C <dir> or --no-pager); and, when network access is granted, gh issue/pr/release/repo/run/workflow view or list and npm view. Join reads with |, &&, || or ;. A leading `cd <dir> &&` sets the working directory, and the only redirects are 2>/dev/null, >/dev/null and 2>&1. Not admitted: other redirects, $ or backtick expansion, subshells, backgrounding, inline environment assignments, and any other program (python, awk, jq, cargo and so on). Options and workspace path checks still apply. git branch and git rev-parse are outside this subset; use git status, git log or git show. If an essential probe remains blocked, return the findings and the blocked probe to the parent; this worker cannot change its own role.",
+        "Read-only shell grammar: {}; find without -exec/-delete; sed -n <range>p; the text filters sort, uniq, cut, tr and comm; literal echo/printf; git {} (optionally after -C <dir> or --no-pager); and, when network access is granted, gh issue/pr/release/repo/run/workflow view or list. Join reads with |, &&, || or ;. A leading `cd <dir> &&` sets the working directory, and the only redirects are 2>/dev/null, >/dev/null and 2>&1. Not admitted: other redirects, $ or backtick expansion, subshells, backgrounding, inline environment assignments, and any other program (python, awk, jq, cargo and so on). Options and workspace path checks still apply. git branch and git rev-parse are outside this subset; use git status, git log or git show. npm metadata reads require ordinary shell approval because configuration can change their network destination. If an essential probe remains blocked, return the findings and the blocked probe to the parent; this worker cannot change its own role.",
         PARALLEL_READONLY_PREFIXES
             .iter()
             .filter(|prefix| !prefix.starts_with("git "))
@@ -629,9 +629,6 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///   `-ok`, `-okdir`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
 /// - `sed -n '<range>p` — numeric line-range print only, no script verbs
 ///   (`w`/`r`/`e`/`s`) can appear in a two-token range script;
-/// - `npm view|show|info <pkg> [field…] [--json]` — default-registry reads,
-///   matching the scout role's network-capable read-only posture; no other
-///   npm option and no URL, git or path package spec;
 /// - pure text filters `sort`, `uniq`, `cut`, `tr`, `comm` as pipeline
 ///   stages, and literal `echo`/`printf` separators.
 ///
@@ -952,17 +949,19 @@ pub fn split_leading_cd(command: &str) -> Option<(String, String)> {
     (!rest.is_empty()).then(|| (dir.clone(), rest.to_string()))
 }
 
-/// A network read inside an admitted read-only command.
+/// A recognized network read. Recognition alone never grants shell authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NetworkRead {
     /// A `gh` view/list read against github.com.
     GitHub,
-    /// An `npm view|show|info` registry read.
+    /// Potential npm metadata network use, retained for no-network denials.
+    /// npm configuration can change the host; this never grants admission.
     Npm,
 }
 
 impl NetworkRead {
-    /// The host the read contacts, as the network policy names it.
+    /// The known host label. For npm this is only its public-registry label,
+    /// not proof of the configured destination and never an authorization.
     #[must_use]
     pub const fn host(self) -> &'static str {
         match self {
@@ -972,12 +971,12 @@ impl NetworkRead {
     }
 }
 
-/// The network reads in a command the agent read-only grammar admits, one
-/// entry per host, judged segment by segment so a pipeline or chain cannot
-/// hide one. Leading `cd <dir> &&` prefixes are removed first, the same way
-/// the shell gates move them into the working directory, so the command is
-/// judged as it will run. A command the grammar still refuses reports none:
-/// it never runs as a classifier-approved read.
+/// Recognize network reads for policy checks and no-network denials, one
+/// entry per kind. npm metadata reads are recognized even though they are
+/// not admitted: otherwise disabling their automatic admission would weaken
+/// the independent no-network guard. Callers must judge shell admission
+/// separately; an npm host label is not evidence of its actual destination.
+/// Leading `cd <dir> &&` prefixes are moved into the working directory first.
 #[must_use]
 pub fn readonly_network_reads(command: &str) -> Vec<NetworkRead> {
     let mut command = command.to_string();
@@ -985,16 +984,25 @@ pub fn readonly_network_reads(command: &str) -> Vec<NetworkRead> {
     while let Some((_, rest)) = split_leading_cd(&command) {
         command = rest;
     }
-    let Ok(segments) = agent_readonly_verdict(&command) else {
+    let normalized = normalize_windows_command_paths(&command);
+    let Ok(segments) = lex_readonly_command(normalized.trim()) else {
         return Vec::new();
     };
     let mut reads = Vec::new();
     for segment in &segments {
         let tokens = shell_words(&normalize_windows_command_paths(&segment.command));
-        let read = match tokens.first().map(String::as_str) {
-            Some("gh") => NetworkRead::GitHub,
-            Some("npm") => NetworkRead::Npm,
-            _ => continue,
+        let read = if tokens.first().is_some_and(|program| program == "npm")
+            && is_npm_metadata_command(&tokens)
+        {
+            NetworkRead::Npm
+        } else {
+            if agent_segment_verdict(&segment.command).is_err() {
+                return Vec::new();
+            }
+            match tokens.first().map(String::as_str) {
+                Some("gh") => NetworkRead::GitHub,
+                _ => continue,
+            }
         };
         if !reads.contains(&read) {
             reads.push(read);
@@ -1104,9 +1112,13 @@ fn agent_segment_verdict(segment: &str) -> Result<(), ReadonlyRejection> {
                 )
             }
         }
-        "npm" if !is_agent_npm_registry_read(&tokens) => ReadonlyRejection::new(
+        "npm" if !is_npm_metadata_command(&tokens) => ReadonlyRejection::new(
             "subcommand",
-            "only `npm view`, `npm show` and `npm info` are admitted",
+            "`npm` commands require ordinary shell approval",
+        ),
+        "npm" => ReadonlyRejection::new(
+            "program",
+            "`npm` metadata reads require ordinary shell approval: project/user configuration and environment can change the registry; read-only shell cannot establish the network destination",
         ),
         "echo" | "printf" => ReadonlyRejection::new(
             "option",
@@ -1157,7 +1169,9 @@ fn is_agent_readonly_segment(segment: &str) -> bool {
         "git" => is_agent_readonly_git(&tokens),
         "find" => is_agent_readonly_find(&tokens),
         "sed" => is_agent_readonly_sed(&tokens),
-        "npm" => is_agent_readonly_npm(&tokens),
+        // npm's project/user configuration and environment can redirect even
+        // a plain `npm view pkg`. argv alone cannot establish its authority.
+        "npm" => false,
         "echo" | "printf" => is_agent_readonly_literal_print(&tokens),
         "sort" => agent_text_filter_options_match(
             &tokens,
@@ -1411,28 +1425,11 @@ fn is_agent_readonly_literal_print(tokens: &[String]) -> bool {
     }
 }
 
-fn is_agent_npm_registry_read(tokens: &[String]) -> bool {
+fn is_npm_metadata_command(tokens: &[String]) -> bool {
     matches!(
         tokens.get(1).map(String::as_str),
         Some("view" | "show" | "info")
     )
-}
-
-/// `npm view|show|info <pkg> [field…] [--json]` against the default
-/// registry. The network policy checks `registry.npmjs.org`
-/// ([`NetworkRead::Npm`]), so every option that could move the request
-/// elsewhere or write a file (`--registry`, `--userconfig`, `--proxy`,
-/// `--cache`, …) is refused, as is a package spec that names a URL, a git
-/// or file source, or a local path.
-fn is_agent_readonly_npm(tokens: &[String]) -> bool {
-    is_agent_npm_registry_read(tokens)
-        && tokens[2..].iter().all(|token| {
-            if token.starts_with('-') {
-                token == "--json"
-            } else {
-                !token.contains(':') && !token.starts_with(['.', '/', '~', '\\'])
-            }
-        })
 }
 
 #[rustfmt::skip] // Keep one auditable policy row per command instead of vertically exploding strings.
@@ -1689,7 +1686,6 @@ const SAFE_COMMANDS: &[&str] = &[
     "npm list",
     "npm ls",
     "npm outdated",
-    "npm view",
     "cargo check",
     "cargo test",
     "cargo build",
@@ -2758,7 +2754,6 @@ mod tests {
             "find crates -type f -name '*.toml' | head",
             "sed -n 10p Cargo.toml",
             "sed -n 1,5p README.md",
-            "npm view codewhale version",
             "sort deps.txt | uniq -c",
             "ls -la docs/*.md",
         ] {
@@ -2955,7 +2950,6 @@ mod tests {
             "find . -name '*.rs'",
             "git -C crates/tui log",
             "sed -n 10p Cargo.toml",
-            "npm view codewhale version",
         ] {
             assert!(
                 !is_parallel_readonly_command(command),
@@ -3216,10 +3210,11 @@ mod tests {
             readonly_network_reads("npm view @scope/pkg@^1 dist.tarball --json"),
             vec![NetworkRead::Npm]
         );
-        // A read aimed at another registry is not a read of the host the
-        // network policy checks, so it is not admitted at all.
-        assert!(
-            readonly_network_reads("npm view x --registry=https://registry.example/").is_empty()
+        // Detection remains conservative for the independent no-network
+        // guard, even though npm metadata reads never grant admission.
+        assert_eq!(
+            readonly_network_reads("npm view x --registry=https://registry.example/"),
+            vec![NetworkRead::Npm]
         );
         for command in [
             "git status",
@@ -3235,6 +3230,57 @@ mod tests {
             assert!(
                 readonly_network_reads(command).is_empty(),
                 "{command} must not be classified as an admitted network read"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_metadata_reads_require_ordinary_approval_but_keep_network_detection() {
+        for command in [
+            "npm view",
+            "npm view codewhale version",
+            "npm show lodash@1.0.0",
+            "npm info @scope/pkg@^1 dist.tarball --json",
+            "npm view --json lodash",
+            "npm view owner/repo",
+            "npm view name@owner/repo",
+            "npm view @scope/pkg@owner/repo",
+            "npm view some.tar.gz",
+            "npm view some.tar",
+            "npm view name@some.tgz",
+            "npm view @scope/pkg@some.tgz",
+            "npm view pkg/sub/dir",
+            "npm view pkg@.",
+            "npm view https://example.invalid/pkg.tgz",
+            "npm view name@file:../pkg",
+            "npm view alias@npm:lodash",
+            "npm view lodash --registry=https://registry.example/",
+            "npm view x --userconfig=/tmp/config",
+        ] {
+            let refusal = agent_readonly_verdict(command).expect_err(command);
+            assert_eq!(refusal.rule, "program", "{command}");
+            assert!(
+                refusal.detail.contains("configuration"),
+                "{command}: {refusal}"
+            );
+            assert!(!is_parallel_readonly_command(command), "{command}");
+            assert_eq!(
+                analyze_command(command).level,
+                SafetyLevel::RequiresApproval,
+                "{command}"
+            );
+            assert_eq!(
+                readonly_network_reads(command),
+                vec![NetworkRead::Npm],
+                "{command}"
+            );
+        }
+        for command in ["npm view x | head", "cd sub && npm view x"] {
+            assert!(agent_readonly_verdict(command).is_err(), "{command}");
+            assert_eq!(
+                readonly_network_reads(command),
+                vec![NetworkRead::Npm],
+                "{command}"
             );
         }
     }
@@ -3293,16 +3339,20 @@ mod tests {
             ("git branch -a", "subcommand", "git branch"),
             ("git -c core.pager=x log", "option", "-c"),
             ("gh pr create", "subcommand", "gh pr create"),
-            ("npm install x", "subcommand", "npm view"),
+            ("npm install x", "subcommand", "ordinary shell approval"),
             (
                 "npm view lodash --registry=https://registry.example/",
-                "option",
+                "program",
                 "`npm`",
             ),
-            ("npm view x --cache=/tmp/x", "option", "`npm`"),
-            ("npm view x --userconfig /tmp/e", "option", "`npm`"),
-            ("npm view https://registry.example/x.tgz", "option", "`npm`"),
-            ("npm view ../pkg", "option", "`npm`"),
+            ("npm view x --cache=/tmp/x", "program", "`npm`"),
+            ("npm view x --userconfig /tmp/e", "program", "`npm`"),
+            (
+                "npm view https://registry.example/x.tgz",
+                "program",
+                "`npm`",
+            ),
+            ("npm view ../pkg", "program", "`npm`"),
             ("sort -o out f", "option", "`sort`"),
             // #6675: a word-leading unquoted `*` is refused by the lexer
             // before the echo literal rule sees it.
