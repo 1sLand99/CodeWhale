@@ -10394,3 +10394,56 @@ profiles = [{ secret_key = "inline-array-secret-value", label = "kept-label" }]
         );
     }
 }
+
+#[test]
+fn blank_or_unrecognized_env_overrides_do_not_shadow_config_or_legacy_vars() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let names = [
+        "CODEWHALE_AUTH_MODE",
+        "DEEPSEEK_AUTH_MODE",
+        "CODEWHALE_SANDBOX_MODE",
+        "DEEPSEEK_SANDBOX_MODE",
+    ];
+    let saved: Vec<(&str, Option<OsString>)> = names
+        .iter()
+        .map(|name| (*name, env::var_os(name)))
+        .collect();
+    // SAFETY: env mutation is serialized by `env_lock` and restored below.
+    unsafe {
+        env::set_var("CODEWHALE_AUTH_MODE", "");
+        env::remove_var("DEEPSEEK_AUTH_MODE");
+        env::set_var("CODEWHALE_SANDBOX_MODE", " ");
+        env::set_var("DEEPSEEK_SANDBOX_MODE", "workspace-write");
+        env::set_var("CODEWHALE_PROVIDER", "openroutr");
+        env::set_var("DEEPSEEK_PROVIDER", "openrouter");
+    }
+
+    let mut config = ConfigToml {
+        auth_mode: Some("api_key".to_string()),
+        ..ConfigToml::default()
+    };
+    config.provider = ProviderKind::Deepseek;
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    let env_overrides = EnvRuntimeOverrides::load();
+
+    unsafe {
+        for (name, value) in saved {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+    }
+
+    assert_eq!(resolved.auth_mode.as_deref(), Some("api_key"));
+    assert_eq!(
+        env_overrides.sandbox_mode.as_deref(),
+        Some("workspace-write")
+    );
+    assert_eq!(resolved.provider, ProviderKind::Openrouter);
+    assert!(matches!(
+        resolved.provider_source,
+        ProviderSource::Env("DEEPSEEK_PROVIDER")
+    ));
+}

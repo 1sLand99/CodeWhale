@@ -7277,6 +7277,17 @@ struct EnvRuntimeOverrides {
     modelstudio_coding_plan_model: Option<String>,
 }
 
+/// The first of `names` that is set to a non-blank value. A variable exported
+/// empty (compose `${VAR:-}`, CI templates) must not shadow the legacy
+/// variable or the config file.
+fn env_non_blank(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
 impl EnvRuntimeOverrides {
     fn load() -> Self {
         let (provider, provider_source) = Self::load_provider();
@@ -7327,15 +7338,9 @@ impl EnvRuntimeOverrides {
             arcee_model: std::env::var("ARCEE_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            verbosity: std::env::var("CODEWHALE_VERBOSITY")
-                .or_else(|_| std::env::var("DEEPSEEK_VERBOSITY"))
-                .ok(),
-            auth_mode: std::env::var("CODEWHALE_AUTH_MODE")
-                .or_else(|_| std::env::var("DEEPSEEK_AUTH_MODE"))
-                .ok(),
-            log_level: std::env::var("CODEWHALE_LOG_LEVEL")
-                .or_else(|_| std::env::var("DEEPSEEK_LOG_LEVEL"))
-                .ok(),
+            verbosity: env_non_blank(&["CODEWHALE_VERBOSITY", "DEEPSEEK_VERBOSITY"]),
+            auth_mode: env_non_blank(&["CODEWHALE_AUTH_MODE", "DEEPSEEK_AUTH_MODE"]),
+            log_level: env_non_blank(&["CODEWHALE_LOG_LEVEL", "DEEPSEEK_LOG_LEVEL"]),
             telemetry,
             telemetry_env_invalid,
             telemetry_floor,
@@ -7348,12 +7353,11 @@ impl EnvRuntimeOverrides {
             telemetry_endpoint: std::env::var("CODEWHALE_TELEMETRY_ENDPOINT")
                 .or_else(|_| std::env::var("DEEPSEEK_TELEMETRY_ENDPOINT"))
                 .ok(),
-            approval_policy: std::env::var("CODEWHALE_APPROVAL_POLICY")
-                .or_else(|_| std::env::var("DEEPSEEK_APPROVAL_POLICY"))
-                .ok(),
-            sandbox_mode: std::env::var("CODEWHALE_SANDBOX_MODE")
-                .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_MODE"))
-                .ok(),
+            approval_policy: env_non_blank(&[
+                "CODEWHALE_APPROVAL_POLICY",
+                "DEEPSEEK_APPROVAL_POLICY",
+            ]),
+            sandbox_mode: env_non_blank(&["CODEWHALE_SANDBOX_MODE", "DEEPSEEK_SANDBOX_MODE"]),
             // `DEEPSEEK_YOLO` is a read-only deprecated alias of
             // `CODEWHALE_YOLO` so existing scripts keep working; when both are
             // set `CODEWHALE_YOLO` wins. The alias is removed in 0.10 per
@@ -7667,16 +7671,21 @@ impl EnvRuntimeOverrides {
     }
 
     fn load_provider() -> (Option<ProviderKind>, Option<&'static str>) {
-        if let Ok(value) = std::env::var("CODEWHALE_PROVIDER") {
-            let parsed = ProviderKind::parse_config_identity(&value);
-            return (parsed, parsed.map(|_| "CODEWHALE_PROVIDER"));
+        for name in ["CODEWHALE_PROVIDER", "DEEPSEEK_PROVIDER"] {
+            let Some(value) = env_non_blank(&[name]) else {
+                continue;
+            };
+            if let Some(parsed) = ProviderKind::parse_config_identity(&value) {
+                return (Some(parsed), Some(name));
+            }
+            // An unrecognized value used to be dropped silently, leaving the
+            // config provider in charge while the user believed the env var
+            // had switched it. Say so, then let the legacy variable apply.
+            tracing::warn!(
+                "{name} does not name a built-in provider and is ignored; \
+                 select a named custom provider with `provider` in config.toml"
+            );
         }
-
-        if let Ok(value) = std::env::var("DEEPSEEK_PROVIDER") {
-            let parsed = ProviderKind::parse_config_identity(&value);
-            return (parsed, parsed.map(|_| "DEEPSEEK_PROVIDER"));
-        }
-
         (None, None)
     }
 
