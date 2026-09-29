@@ -5,7 +5,7 @@ import {
   isPublishedDigest,
   type WeeklyDigestRecord as WeeklyDigest,
 } from "@/lib/community-agent";
-import { getDigest, pickTextLocale } from "@/lib/i18n/dictionaries";
+import { getDigest } from "@/lib/i18n/dictionaries";
 import { getEnv } from "@/lib/kv";
 import { buildPageMetadata } from "@/lib/page-meta";
 
@@ -71,9 +71,9 @@ export default async function DigestArchivePage({ params }: { params: Promise<{ 
     }
   }
 
-  // The records are bilingual; show the reader's language (English for
-  // every locale without a Chinese record).
-  const zh = pickTextLocale(locale) === "zh";
+  // A maintainer reviews a digest in one language (the admin locale), and
+  // only that language is published, so each digest renders in the language
+  // it was reviewed in whatever the reader's locale.
 
   if (digests.length === 0) {
     return (
@@ -91,7 +91,9 @@ export default async function DigestArchivePage({ params }: { params: Promise<{ 
       <PageHeader title={t.title} lede={t.lead} pose="read" />
       <div className="page-body">
         <div className="page-body-narrow digest-list">
-          {digests.map((digest: WeeklyDigest) => (
+          {digests.map((digest: WeeklyDigest) => {
+            const zh = digest.approvedLang === "zh";
+            return (
             <article key={digest.weekId} className="changelog-release" lang={zh ? "zh" : "en"}>
               <header className="digest-head">
                 <span className="pill tabular">{digest.weekId}</span>
@@ -111,7 +113,8 @@ export default async function DigestArchivePage({ params }: { params: Promise<{ 
                 ))}
               </div>
             </article>
-          ))}
+            );
+          })}
         </div>
       </div>
     </>

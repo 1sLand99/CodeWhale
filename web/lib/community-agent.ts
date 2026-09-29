@@ -278,13 +278,30 @@ export async function getAgentEnv(): Promise<CommunityAgentEnv> {
  * Persist a generated draft for maintainer review. Returns false without
  * writing when the maintainer already posted or discarded this draft
  * identity, so a cron run can never resurrect a resolved draft as pending.
+ *
+ * `sourceUpdatedAt` is the GitHub item's `updated_at` for drafts about an
+ * issue or PR. Activity well after the maintainer's decision (new commits, a
+ * reply) reopens the identity; see `resolutionCovers`.
  */
-export async function saveDraft(kv: KVNamespace | undefined, draft: AgentDraft): Promise<boolean> {
+export async function saveDraft(
+  kv: KVNamespace | undefined,
+  draft: AgentDraft,
+  sourceUpdatedAt?: string
+): Promise<boolean> {
   if (!kv) return false;
   const key = draftKey(draft.type, draft.id);
-  if (await getDraftResolution(kv, draft.type, draft.id)) return false;
-  const existing = await getDraft(kv, key);
-  if (existing?.posted) return false;
+  const resolution = await getDraftResolution(kv, draft.type, draft.id);
+  if (resolution) {
+    if (resolutionCovers(resolution, sourceUpdatedAt)) return false;
+    // Reopened by new activity. Clear the marker first: if the put below
+    // then fails, the old posted draft still blocks a redraft, which is the
+    // safe side.
+    await clearDraftResolution(kv, draft.type, draft.id);
+  } else {
+    // A posted draft without a marker predates the markers; keep it.
+    const existing = await getDraft(kv, key);
+    if (existing?.posted) return false;
+  }
   await kv.put(key, JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 30 }); // 30 days
   return true;
 }
@@ -300,6 +317,8 @@ export type DraftResolutionState = "posting" | "posted" | "discarded";
 export interface DraftResolution {
   state: DraftResolutionState;
   at: string;
+  /** Random token of the request holding a "posting" claim. */
+  claim?: string;
 }
 
 const RESOLUTION_PREFIX = "draft-resolved:";
@@ -308,6 +327,25 @@ const RESOLUTION_TTL_SEC = 60 * 60 * 24 * 90; // 90 days
 // outcome (network error mid-request) blocks immediate retries without
 // locking the draft forever.
 const POSTING_CLAIM_TTL_SEC = 60 * 15;
+// Our own post bumps the GitHub item's updated_at moments before the marker
+// is written; only activity later than this after the decision reopens it.
+const RESOLUTION_REOPEN_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * True while a maintainer decision still applies to the item as it is now.
+ * A decision covers everything up to shortly after it was made; an item
+ * updated later (new commits, a reply) can be drafted again. An in-flight
+ * post, or an item without an update time (digests, dupes, content-watch
+ * findings, whose identity already encodes their content), stays covered
+ * for the marker's lifetime.
+ */
+export function resolutionCovers(resolution: DraftResolution, sourceUpdatedAt?: string): boolean {
+  if (resolution.state === "posting" || !sourceUpdatedAt) return true;
+  const decidedAt = Date.parse(resolution.at);
+  const updatedAt = Date.parse(sourceUpdatedAt);
+  if (!Number.isFinite(decidedAt) || !Number.isFinite(updatedAt)) return true;
+  return updatedAt <= decidedAt + RESOLUTION_REOPEN_GRACE_MS;
+}
 
 function resolutionKey(type: AgentDraftType, id: string): string {
   return RESOLUTION_PREFIX + draftKey(type, id).slice("draft:".length);
@@ -324,7 +362,11 @@ export async function getDraftResolution(
   try {
     const parsed = JSON.parse(raw) as Partial<DraftResolution>;
     if (parsed.state === "posting" || parsed.state === "posted" || parsed.state === "discarded") {
-      return { state: parsed.state, at: typeof parsed.at === "string" ? parsed.at : "" };
+      return {
+        state: parsed.state,
+        at: typeof parsed.at === "string" ? parsed.at : "",
+        ...(typeof parsed.claim === "string" ? { claim: parsed.claim } : {}),
+      };
     }
   } catch {
     /* fall through: treat an unreadable marker as present */
@@ -345,6 +387,29 @@ export async function markDraftResolved(
   });
 }
 
+/**
+ * Claim a draft before posting it to GitHub. Returns false when another
+ * request holds or wins the claim.
+ *
+ * KV has no compare-and-set, so this is best effort, not a lock: it writes a
+ * random token and reads it back, which stops concurrent posts that meet in
+ * one location (two tabs, a double submit) but cannot fully order writers in
+ * different edge locations, because KV is eventually consistent across them.
+ */
+export async function claimDraftForPosting(
+  kv: KVNamespace | undefined,
+  type: AgentDraftType,
+  id: string
+): Promise<boolean> {
+  if (!kv) return true;
+  const key = resolutionKey(type, id);
+  const claim = crypto.randomUUID();
+  const value: DraftResolution = { state: "posting", at: new Date().toISOString(), claim };
+  await kv.put(key, JSON.stringify(value), { expirationTtl: POSTING_CLAIM_TTL_SEC });
+  const current = await getDraftResolution(kv, type, id);
+  return current?.state === "posting" && current.claim === claim;
+}
+
 export async function clearDraftResolution(
   kv: KVNamespace | undefined,
   type: AgentDraftType,
@@ -358,7 +423,7 @@ export async function clearDraftResolution(
 //
 // The cron writes the structured digest unapproved; only the maintainer's
 // post action flips `approved`, and the public /digest page renders only
-// approved records.
+// approved records, in the one language the maintainer reviewed.
 
 export const DIGEST_RECORD_PREFIX = "digest:weekly-";
 const DIGEST_RECORD_TTL_SEC = 60 * 60 * 24 * 90;
@@ -373,6 +438,8 @@ export interface WeeklyDigestRecord {
   generatedAt: string;
   approved?: boolean;
   approvedAt?: string;
+  /** The language the maintainer reviewed; the only one /digest shows. */
+  approvedLang?: "en" | "zh";
 }
 
 export function digestRecordKey(weekId: string): string {
@@ -386,6 +453,7 @@ export function isPublishedDigest(value: unknown): value is WeeklyDigestRecord {
   const d = value as Record<string, unknown>;
   return (
     d.approved === true &&
+    (d.approvedLang === "en" || d.approvedLang === "zh") &&
     typeof d.weekId === "string" &&
     typeof d.titleEn === "string" &&
     typeof d.titleZh === "string" &&
@@ -403,14 +471,26 @@ export function isPublishedDigest(value: unknown): value is WeeklyDigestRecord {
   );
 }
 
-/** Mark the stored digest for `weekId` approved. Returns false if it is gone. */
-export async function approveDigestRecord(kv: KVNamespace | undefined, weekId: string): Promise<boolean> {
+/**
+ * Mark the stored digest for `weekId` approved in the language the maintainer
+ * reviewed. Returns false if it is gone.
+ */
+export async function approveDigestRecord(
+  kv: KVNamespace | undefined,
+  weekId: string,
+  lang: "en" | "zh"
+): Promise<boolean> {
   if (!kv) return false;
   const key = digestRecordKey(weekId);
   const raw = await kv.get(key);
   if (!raw) return false;
   const record = JSON.parse(raw) as WeeklyDigestRecord;
-  const approved: WeeklyDigestRecord = { ...record, approved: true, approvedAt: new Date().toISOString() };
+  const approved: WeeklyDigestRecord = {
+    ...record,
+    approved: true,
+    approvedAt: new Date().toISOString(),
+    approvedLang: lang,
+  };
   if (!isPublishedDigest(approved)) return false;
   await kv.put(key, JSON.stringify(approved), { expirationTtl: DIGEST_RECORD_TTL_SEC });
   return true;
@@ -446,20 +526,42 @@ export async function getDraft(kv: KVNamespace | undefined, key: string): Promis
   }
 }
 
+// One draft read is one KV operation, and a Worker invocation gets a bounded
+// number of them, so the admin queue reads at most this many drafts.
+export const MAX_LISTED_DRAFTS = 500;
+const DRAFT_READ_BATCH = 50;
+
+/**
+ * Read up to MAX_LISTED_DRAFTS drafts, following the KV list cursor and
+ * reading drafts in parallel batches. A failure after the first list call
+ * returns what was read so far instead of discarding it.
+ */
 export async function listDrafts(kv: KVNamespace | undefined, prefix = "draft:"): Promise<AgentDraft[]> {
   if (!kv) return [];
   const drafts: AgentDraft[] = [];
+  let seen = 0;
   let cursor: string | undefined;
-  // KV returns at most 1000 keys per call; follow the cursor so the admin
-  // queue is never silently truncated. The page cap only bounds a runaway.
-  for (let page = 0; page < 20; page++) {
-    const listed = await kv.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
-    for (const k of listed.keys) {
-      const draft = await getDraft(kv, k.name);
-      if (draft) drafts.push(draft);
+  try {
+    while (seen < MAX_LISTED_DRAFTS) {
+      const listed = await kv.list({
+        prefix,
+        limit: Math.min(1000, MAX_LISTED_DRAFTS - seen),
+        ...(cursor ? { cursor } : {}),
+      });
+      const names = listed.keys.map((k) => k.name).slice(0, MAX_LISTED_DRAFTS - seen);
+      seen += names.length;
+      for (let i = 0; i < names.length; i += DRAFT_READ_BATCH) {
+        const batch = await Promise.all(
+          names.slice(i, i + DRAFT_READ_BATCH).map((name) => getDraft(kv, name).catch(() => null))
+        );
+        for (const draft of batch) if (draft) drafts.push(draft);
+      }
+      if (names.length === 0 || listed.list_complete !== false || !listed.cursor) break;
+      cursor = listed.cursor;
     }
-    if (listed.list_complete !== false || !listed.cursor) break;
-    cursor = listed.cursor;
+  } catch (e) {
+    if (seen === 0) throw e;
+    console.error("listDrafts: returning a partial queue", e);
   }
   return drafts;
 }
@@ -533,8 +635,8 @@ export async function logUsage(
 
 /**
  * True when a generator should not spend a model call drafting this item:
- * the maintainer already posted or discarded it, or the stored draft is newer
- * than the item's last update.
+ * a maintainer decision still covers it (see `resolutionCovers`), or the
+ * stored draft is newer than the item's last update.
  */
 export async function hasFreshDraft(
   kv: KVNamespace | undefined,
@@ -544,9 +646,11 @@ export async function hasFreshDraft(
 ): Promise<boolean> {
   if (!kv) return false;
   if (!AGENT_DRAFT_TYPE_SET.has(type)) return false;
-  if (await getDraftResolution(kv, type as AgentDraftType, id)) return true;
+  const resolution = await getDraftResolution(kv, type as AgentDraftType, id);
+  if (resolution) return resolutionCovers(resolution, updatedAt);
   const existing = await getDraft(kv, draftKey(type as AgentDraftType, id));
   if (!existing) return false;
+  // A posted draft without a marker predates the markers.
   if (existing.posted) return true;
   return new Date(existing.generatedAt) > new Date(updatedAt);
 }

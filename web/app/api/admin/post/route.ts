@@ -1,7 +1,9 @@
+import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
 import { BodyReadError, readBoundedBody } from "@/lib/bounded-body";
 import {
   approveDigestRecord,
+  claimDraftForPosting,
   clearDraftResolution,
   deleteDigestRecord,
   deleteDraft,
@@ -40,6 +42,25 @@ async function checkAuth(req: Request, env: CommunityAgentEnv): Promise<{ ok: bo
 const ALLOWED_ACTIONS = new Set(["post", "discard"]);
 const ALLOWED_ORIGINS = new Set(["https://codewhale.net", "https://www.codewhale.net"]);
 const MAX_BODY_BYTES = 65_536;
+
+/** Refresh the ISR copy of /digest after its published set changes. */
+function revalidateDigestPage() {
+  try {
+    revalidatePath("/[locale]/digest", "page");
+  } catch (e) {
+    // The page still refreshes on its hourly revalidate.
+    console.error("digest revalidation failed", e);
+  }
+}
+
+/**
+ * A GitHub 4xx other than 408/429 means the post was not created, so the
+ * claim can be released. A 5xx, 408 or 429 can come back after GitHub already
+ * created the comment or issue, so its outcome is unknown.
+ */
+function githubDefinitelyRejected(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
 
 export async function POST(req: Request) {
   const env = await getAgentEnv();
@@ -105,6 +126,12 @@ export async function POST(req: Request) {
   }
 
   if (action === "discard") {
+    // A posted draft is already public on GitHub (and, for a digest, on
+    // /digest); discarding it would silently unpublish or relabel it.
+    const resolution = await getDraftResolution(env.CURATED_KV, parsedKey.type, parsedKey.id);
+    if (draft.posted || resolution?.state === "posted" || resolution?.state === "posting") {
+      return NextResponse.json({ error: "draft already posted" }, { status: 409 });
+    }
     try {
       // The marker stops the next cron run from regenerating this draft.
       await markDraftResolved(env.CURATED_KV, parsedKey.type, parsedKey.id, "discarded");
@@ -115,6 +142,7 @@ export async function POST(req: Request) {
     } catch (e) {
       return NextResponse.json({ error: `discard failed: ${String(e)}` }, { status: 500 });
     }
+    if (draft.type === "digest") revalidateDigestPage();
     return NextResponse.json({ ok: true, action: "discarded" });
   }
 
@@ -137,7 +165,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `draft already ${resolution.state}` }, { status: 409 });
     }
     try {
-      await markDraftResolved(env.CURATED_KV, parsedKey.type, parsedKey.id, "posting");
+      if (!(await claimDraftForPosting(env.CURATED_KV, parsedKey.type, parsedKey.id))) {
+        return NextResponse.json({ error: "draft already posting" }, { status: 409 });
+      }
     } catch (e) {
       return NextResponse.json({ error: `could not claim draft: ${String(e)}` }, { status: 500 });
     }
@@ -153,7 +183,7 @@ export async function POST(req: Request) {
         await env.CURATED_KV?.put(draftKey, JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 7 });
         return undefined;
       } catch (e) {
-        return `posted, but saving draft state failed: ${String(e)}`;
+        return `Posted to GitHub, but saving the draft state failed (${String(e)}). Do not post it again; it may reappear as pending.`;
       }
     };
 
@@ -175,17 +205,20 @@ export async function POST(req: Request) {
         return null;
       }
     };
-    const unknownOutcome = () =>
+    const unknownOutcome = (detail: string) =>
       NextResponse.json(
-        { error: "GitHub request failed; check GitHub before retrying (retry unlocks in 15 minutes)" },
+        { error: `${detail}; check GitHub before retrying (retry unlocks in 15 minutes)` },
         { status: 502 }
       );
     const githubFailed = async (res: Response) => {
-      // GitHub definitively rejected the post, so release the claim.
+      const text = await res.text().catch(() => "");
+      if (!githubDefinitelyRejected(res.status)) {
+        // Keep the claim: GitHub may have created the post anyway.
+        return unknownOutcome(`GitHub ${res.status}: ${text}`);
+      }
       try {
         await clearDraftResolution(env.CURATED_KV, parsedKey.type, parsedKey.id);
       } catch { /* the claim expires on its own */ }
-      const text = await res.text();
       return NextResponse.json({ error: `GitHub ${res.status}: ${text}` }, { status: 502 });
     };
 
@@ -198,7 +231,7 @@ export async function POST(req: Request) {
       const issuesUrl = `https://api.github.com/repos/${digestRepo}/issues`;
 
       const digestRes = await postToGitHub(issuesUrl, { title, body: digestBody, labels: ["digest"] }, "token");
-      if (!digestRes) return unknownOutcome();
+      if (!digestRes) return unknownOutcome("GitHub request failed");
       if (!digestRes.ok) return githubFailed(digestRes);
 
       const issue = await digestRes.json().catch(() => ({})) as { number?: number; html_url?: string };
@@ -208,16 +241,20 @@ export async function POST(req: Request) {
       if (typeof issue.html_url === "string") draft.targetUrl = issue.html_url;
       let warning = await recordPosted();
 
-      // Publishing to /digest is the approval. The structured record holds
-      // the unedited model text, so an edited digest is posted to GitHub but
-      // not published there.
+      // Publishing to /digest is the approval, for the language shown to the
+      // maintainer only. The structured record holds the unedited model
+      // text, so an edited digest is posted to GitHub but not published there.
       let published = false;
       if (editedBody === undefined || editedBody === originalBody) {
         try {
-          published = await approveDigestRecord(env.CURATED_KV, draft.id);
+          published = await approveDigestRecord(env.CURATED_KV, draft.id, lang === "zh" ? "zh" : "en");
+          if (published) revalidateDigestPage();
         } catch (e) {
-          warning ??= `posted, but publishing the digest page failed: ${String(e)}`;
+          warning ??= `Posted to GitHub, but publishing the digest page failed (${String(e)}).`;
         }
+        if (!published) warning ??= "Posted to GitHub, but the weekly record is gone, so /digest does not show it.";
+      } else {
+        warning ??= "Posted to GitHub. The text was edited, so /digest does not show this week.";
       }
 
       return NextResponse.json({
@@ -234,7 +271,7 @@ export async function POST(req: Request) {
     const commentUrl = `https://api.github.com/repos/${repo}/issues/${draft.targetNumber}/comments`;
 
     const ghRes = await postToGitHub(commentUrl, { body: commentBody }, "Bearer");
-    if (!ghRes) return unknownOutcome();
+    if (!ghRes) return unknownOutcome("GitHub request failed");
     if (!ghRes.ok) return githubFailed(ghRes);
 
     // Mark as posted

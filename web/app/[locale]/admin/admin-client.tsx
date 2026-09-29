@@ -37,6 +37,9 @@ export function AdminClient({ drafts, posted, isZh, typeLabels }: Props) {
           }
         }
         setEditing(null);
+        // The post went through but something after it did not (draft state
+        // not saved, or the digest was not published on /digest).
+        if (typeof data.warning === "string") alert(data.warning);
       } else {
         alert(`Error: ${data.error}`);
       }

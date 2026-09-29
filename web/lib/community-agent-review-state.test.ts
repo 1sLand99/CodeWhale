@@ -23,26 +23,43 @@ vi.mock("@/lib/github", async (importOriginal) => {
 });
 
 import { POST as adminPost } from "../app/api/admin/post/route";
-import { isPublishedDigest, listDrafts, saveDraft, type AgentDraft } from "./community-agent";
+import {
+  isPublishedDigest,
+  listDrafts,
+  MAX_LISTED_DRAFTS,
+  saveDraft,
+  type AgentDraft,
+} from "./community-agent";
 import { runDigest, runDupes, runTriage } from "./community-agent-tasks";
 
 /** In-memory KV that pages like Cloudflare KV (max 1000 keys per list call). */
 class FakeKv {
   readonly values = new Map<string, string>();
   failPutsMatching: RegExp | null = null;
+  /** Yield to the event loop inside every call, like a network round trip. */
+  yieldEachOp = false;
+  pageSize = 1000;
+  failListAtCursor: string | null = null;
+
+  private async tick() {
+    if (this.yieldEachOp) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 
   async get(key: string): Promise<string | null> {
+    await this.tick();
     return this.values.get(key) ?? null;
   }
 
   async put(key: string, value: string): Promise<void> {
+    await this.tick();
     if (this.failPutsMatching?.test(key)) throw new Error("kv put failed");
     this.values.set(key, value);
   }
 
   async list(options?: { prefix?: string; limit?: number; cursor?: string }) {
+    if (options?.cursor && options.cursor === this.failListAtCursor) throw new Error("kv list failed");
     const prefix = options?.prefix ?? "";
-    const limit = Math.min(options?.limit ?? 1000, 1000);
+    const limit = Math.min(options?.limit ?? 1000, this.pageSize);
     const start = options?.cursor ? Number(options.cursor) : 0;
     const all = [...this.values.keys()].filter((k) => k.startsWith(prefix)).sort();
     const page = all.slice(start, start + limit);
@@ -182,7 +199,40 @@ describe("weekly digest publication requires maintainer approval", () => {
     const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en" })));
     await expect(res.json()).resolves.toMatchObject({ ok: true, published: true, number: 900 });
     expect(posts).toHaveLength(1);
-    expect(isPublishedDigest(JSON.parse(kv.values.get(recordKey)!))).toBe(true);
+    const published = JSON.parse(kv.values.get(recordKey)!);
+    expect(isPublishedDigest(published)).toBe(true);
+    // Only the reviewed language is published.
+    expect(published).toMatchObject({ approvedLang: "en" });
+  });
+
+  it("records the Chinese review as the published language when posted from the zh admin", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
+    await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+
+    useAdminEnv(kv);
+    stubGitHub();
+    const draftKey = onlyKey(kv, "draft:digest:");
+    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "zh" })));
+    await expect(res.json()).resolves.toMatchObject({ ok: true, published: true });
+    expect(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!)).toMatchObject({ approvedLang: "zh" });
+  });
+
+  it("refuses to discard a posted digest, which would silently unpublish it", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
+    await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+
+    useAdminEnv(kv);
+    stubGitHub();
+    const draftKey = onlyKey(kv, "draft:digest:");
+    expect((await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en" })))).status).toBe(200);
+
+    const discard = await adminPost(adminRequest(postBody({ action: "discard", draftKey })));
+    expect(discard.status).toBe(409);
+    expect(isPublishedDigest(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!))).toBe(true);
   });
 
   it("does not publish an edited digest's unedited model text", async () => {
@@ -195,7 +245,12 @@ describe("weekly digest publication requires maintainer approval", () => {
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
     const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en", editedBody: "# Edited" })));
-    await expect(res.json()).resolves.toMatchObject({ ok: true, published: false });
+    // The maintainer is told why the digest is not on /digest.
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      published: false,
+      warning: expect.stringContaining("/digest"),
+    });
     expect(isPublishedDigest(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!))).toBe(false);
   });
 
@@ -237,8 +292,11 @@ describe("weekly digest publication requires maintainer approval", () => {
   it("hides legacy records that were never approved", () => {
     const legacy = { ...DIGEST_MODEL_OUTPUT, weekId: "2026-W01", generatedAt: "2026-01-05T00:00:00.000Z" };
     expect(isPublishedDigest(legacy)).toBe(false);
-    expect(isPublishedDigest({ ...legacy, approved: true })).toBe(true);
-    expect(isPublishedDigest({ ...legacy, approved: true, sections: [{ heading: "x", items: [1] }] })).toBe(false);
+    expect(isPublishedDigest({ ...legacy, approved: true })).toBe(false);
+    expect(isPublishedDigest({ ...legacy, approved: true, approvedLang: "en" })).toBe(true);
+    expect(
+      isPublishedDigest({ ...legacy, approved: true, approvedLang: "en", sections: [{ heading: "x", items: [1] }] })
+    ).toBe(false);
   });
 });
 
@@ -287,10 +345,28 @@ describe("resolved drafts are not resurrected by the cron", () => {
     expect(res.status).toBe(200);
 
     // Our own comment bumps updated_at past the draft's generatedAt.
-    stubIssues("2099-01-01T00:00:00.000Z");
+    stubIssues(new Date().toISOString());
     await runTriage({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
     expect(mocks.agentChat).not.toHaveBeenCalled();
     expect(JSON.parse(kv.values.get("draft:triage:42")!)).toMatchObject({ posted: true });
+  });
+
+  it("drafts again when the item has new activity well after the maintainer's decision", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    stubGitHub();
+    expect((await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })))).status).toBe(200);
+
+    // New commits or a reply a day later.
+    stubIssues(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
+    await expect(runTriage({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" })).resolves.toMatchObject({ processed: 1 });
+    expect(JSON.parse(kv.values.get("draft:triage:42")!)).toMatchObject({ posted: false, bodyEn: "review" });
+
+    // The fresh draft can be posted.
+    const posts = stubGitHub();
+    expect((await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })))).status).toBe(200);
+    expect(posts).toHaveLength(1);
   });
 
   it("does not let the dupes run overwrite a posted dupes draft", async () => {
@@ -341,7 +417,7 @@ describe("admin post action is idempotent and bounded", () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
     useAdminEnv(kv);
-    stubGitHub(500);
+    stubGitHub(422);
 
     const failed = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
     expect(failed.status).toBe(502);
@@ -349,6 +425,41 @@ describe("admin post action is idempotent and bounded", () => {
     const posts = stubGitHub();
     const retry = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
     expect(retry.status).toBe(200);
+    expect(posts).toHaveLength(1);
+  });
+
+  it.each([500, 502, 504, 429])(
+    "keeps the claim when GitHub answers %i, since the post may have been created",
+    async (status) => {
+      const kv = new FakeKv();
+      await saveDraft(kv, draft());
+      useAdminEnv(kv);
+      const posts = stubGitHub(status);
+
+      const failed = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+      expect(failed.status).toBe(502);
+      await expect(failed.json()).resolves.toMatchObject({ error: expect.stringContaining("check GitHub before retrying") });
+
+      stubGitHub();
+      const retry = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+      expect(retry.status).toBe(409);
+      expect(posts).toHaveLength(1);
+    }
+  );
+
+  it("posts once when two requests for the same draft race", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    kv.yieldEachOp = true;
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+
+    const results = await Promise.all([
+      adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" }))),
+      adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" }))),
+    ]);
+
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
     expect(posts).toHaveLength(1);
   });
 
@@ -379,13 +490,36 @@ describe("admin post action is idempotent and bounded", () => {
 });
 
 describe("admin draft queue", () => {
-  it("lists every draft across KV list pages", async () => {
-    const kv = new FakeKv();
-    for (let i = 1; i <= 1_500; i++) {
+  function fill(kv: FakeKv, count: number) {
+    for (let i = 1; i <= count; i++) {
       kv.values.set(`draft:triage:${i}`, JSON.stringify(draft({ id: String(i), targetNumber: i })));
     }
+  }
 
-    const drafts = await listDrafts(kv);
-    expect(drafts).toHaveLength(1_500);
+  it("follows the KV list cursor past the first page", async () => {
+    const kv = new FakeKv();
+    kv.pageSize = 100;
+    fill(kv, 250);
+
+    await expect(listDrafts(kv)).resolves.toHaveLength(250);
+  });
+
+  it("reads at most MAX_LISTED_DRAFTS drafts in one request", async () => {
+    const kv = new FakeKv();
+    fill(kv, MAX_LISTED_DRAFTS + 1_000);
+    const get = vi.spyOn(kv, "get");
+
+    await expect(listDrafts(kv)).resolves.toHaveLength(MAX_LISTED_DRAFTS);
+    expect(get).toHaveBeenCalledTimes(MAX_LISTED_DRAFTS);
+  });
+
+  it("keeps the drafts already read when a later list page fails", async () => {
+    const kv = new FakeKv();
+    kv.pageSize = 100;
+    kv.failListAtCursor = "200";
+    fill(kv, 250);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(listDrafts(kv)).resolves.toHaveLength(200);
   });
 });

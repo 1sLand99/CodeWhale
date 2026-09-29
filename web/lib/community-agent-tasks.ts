@@ -132,9 +132,9 @@ export async function runTriage(env: AgentEnv): Promise<Record<string, unknown>>
           generatedAt: new Date().toISOString(),
           posted: false,
         };
-        await saveDraft(env.CURATED_KV, draft);
         await logUsage(env.CURATED_KV, usage.input, usage.output);
-        processed++;
+        if (await saveDraft(env.CURATED_KV, draft, issue.updated_at)) processed++;
+        else skipped++;
       } catch {
         skipped++;
       }
@@ -215,9 +215,9 @@ export async function runPrReview(env: AgentEnv): Promise<Record<string, unknown
           generatedAt: new Date().toISOString(),
           posted: false,
         };
-        await saveDraft(env.CURATED_KV, draft);
         await logUsage(env.CURATED_KV, usage.input, usage.output);
-        processed++;
+        if (await saveDraft(env.CURATED_KV, draft, pr.updated_at)) processed++;
+        else skipped++;
       } catch {
         skipped++;
       }
@@ -282,9 +282,9 @@ export async function runStale(env: AgentEnv): Promise<Record<string, unknown>> 
           generatedAt: new Date().toISOString(),
           posted: false,
         };
-        await saveDraft(env.CURATED_KV, draft);
         await logUsage(env.CURATED_KV, usage.input, usage.output);
-        processed++;
+        if (await saveDraft(env.CURATED_KV, draft, issue.updated_at)) processed++;
+        else skipped++;
       } catch {
         skipped++;
       }
