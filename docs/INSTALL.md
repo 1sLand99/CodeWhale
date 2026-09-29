@@ -605,8 +605,11 @@ export DEEPSEEK_API_KEY=sk-...          # add to ~/.bashrc / ~/.zshenv to persis
 ```bash
 codewhale auth set --provider deepseek                         # prompts: "Enter API key for deepseek:"
 printf '%s\n' "$KEY" | codewhale auth set --provider deepseek --api-key-stdin   # scripted
-# -> saved API key for deepseek to file-based (~/.codewhale/secrets/) (config contains metadata only)
+# -> saved API key for deepseek to file-based ("/home/you/.codewhale/secrets/secrets.json") (config contains metadata only)
 ```
+The file-based message prints the resolved secret-store path; an explicit
+`CODEWHALE_HOME` changes that location.
+
 On Linux, the key is stored in **plaintext** in
 `~/.codewhale/secrets/secrets.json`, with mode 0600. It is not in an OS
 keyring. Note that in v0.10.0, `auth set` also writes

@@ -39,9 +39,9 @@ local supervisor / SDK / automation harness
 The engine runs as a local-only process. All APIs bind to `localhost` by
 default. No hosted relay, no provider-token custody, no secret leakage.
 
-For a proposed read-only audit export over completed turns, see
-[`docs/RECEIPTS.md`](RECEIPTS.md). That document is a protocol note; the receipt
-CLI/API surfaces are not implemented yet.
+For the read-only record of what a thread or turn did, see
+[`docs/RECEIPTS.md`](RECEIPTS.md): `codewhale receipts` on the CLI and the
+`/receipt` routes under **Threads** below.
 
 ## Runtime API entrypoints
 
@@ -1422,9 +1422,6 @@ Responses:
 Capability probe: `GET` on the route returns `405` where the endpoint exists
 and `404` on an older engine; clients treat any non-`404` as available and
 degrade with an explanation otherwise.
-
-**Receipts** (future read-only audit export)
-- Proposed only: `GET /v1/threads/{thread_id}/turns/{turn_id}/receipt`
 
 **Compatibility stream** (one-shot, backwards-compatible)
 - `POST /v1/stream`
