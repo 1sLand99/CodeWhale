@@ -1591,6 +1591,12 @@ impl CodewhaleClient {
         let stream_idle_timeout = Duration::from_secs(config.stream_chunk_timeout_secs());
         let stream_open_timeout = config.stream_open_timeout();
         let connect_timeout = config.connect_timeout();
+        let force_http1 = config.force_http1();
+        if force_http1 {
+            logging::info(
+                "HTTP/1.1 pinned ([tui].force_http1 or CODEWHALE_FORCE_HTTP1) — HTTP/2 disabled",
+            );
+        }
         let http_headers = config.http_headers();
         let auth_disabled =
             auth_mode_disables_api_key(config.auth_mode_for_provider(api_provider).as_deref());
@@ -1645,7 +1651,7 @@ impl CodewhaleClient {
             &base_url,
             wire_format,
             auth_disabled,
-            false,
+            force_http1,
             connect_timeout,
         )?
         .build()?;
@@ -1656,7 +1662,7 @@ impl CodewhaleClient {
             &base_url,
             wire_format,
             auth_disabled,
-            false,
+            force_http1,
             connect_timeout,
         )?
         .redirect(reqwest::redirect::Policy::none())
@@ -2042,11 +2048,7 @@ impl CodewhaleClient {
             .http2_keep_alive_interval(Some(Duration::from_secs(15)))
             .http2_keep_alive_timeout(Duration::from_secs(20))
             .min_tls_version(reqwest::tls::Version::TLS_1_2);
-        let pin_http1 = force_http1 || force_http1_from_env();
-        if pin_http1 {
-            if force_http1_from_env() && !force_http1 {
-                logging::info("CODEWHALE_FORCE_HTTP1=1 — pinning HTTP client to HTTP/1.1");
-            }
+        if force_http1 || force_http1_from_env() {
             builder = builder.http1_only();
         }
         if let Ok(cert_path) = std::env::var("SSL_CERT_FILE")
