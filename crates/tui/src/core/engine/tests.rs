@@ -17283,9 +17283,9 @@ async fn same_turn_fork_carries_the_updated_todo() {
 }
 
 /// U1: hosts resend the compaction config on every model, route or session
-/// sync. A config whose switch did not move must not produce a status line,
-/// which used to overwrite a real error (the missing-key notice) and the
-/// "Resumed:" receipt in the footer.
+/// sync. Neither a session sync nor a config whose switch did not move should
+/// produce a status line: it would overwrite a real error (the missing-key
+/// notice) or the host's confirmed "Resumed:" receipt in the footer.
 #[tokio::test]
 async fn unchanged_compaction_config_is_acknowledged_silently() {
     let tmp = tempdir().expect("tempdir");
@@ -17297,7 +17297,26 @@ async fn unchanged_compaction_config_is_acknowledged_silently() {
         &Config::default(),
     );
     let current = engine.config.compaction.clone();
+    let restored_messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "Restored conversation proof".to_string(),
+            cache_control: None,
+        }],
+    }];
     let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("resumed-session".to_string()),
+            messages: restored_messages.clone(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: current.model.clone(),
+            workspace: tmp.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync restored session");
     handle
         .send(Op::SetCompaction {
             config: current.clone(),
@@ -17328,18 +17347,37 @@ async fn unchanged_compaction_config_is_acknowledged_silently() {
         .expect("send changed config");
 
     let mut rx = handle.rx_event.write().await;
+    let mut session_updated = false;
     let first_status = loop {
         let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("status after a real change")
             .expect("event");
-        if let Event::Status { message } = event {
-            break message;
+        match event {
+            Event::SessionUpdated {
+                session_id,
+                messages,
+                model,
+                workspace,
+                ..
+            } => {
+                assert_eq!(session_id, "resumed-session");
+                assert_eq!(*messages, restored_messages);
+                assert_eq!(model, current.model);
+                assert_eq!(workspace, tmp.path());
+                session_updated = true;
+            }
+            Event::Status { message } => break message,
+            _ => {}
         }
     };
+    assert!(
+        session_updated,
+        "session sync still publishes its authoritative update"
+    );
     assert_eq!(
         first_status, expected,
-        "unchanged and resynced configs produced no status; only the switch did"
+        "session sync and unchanged/resynced configs produced no status; only the switch did"
     );
     drop(rx);
     run.abort();

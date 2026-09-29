@@ -3533,11 +3533,9 @@ impl Engine {
                         };
                         self.session.rebuild_working_set();
                         self.reconcile_restored_work_bindings().await;
+                        // SessionUpdated acknowledges the sync. A generic status
+                        // would immediately cover the host's confirmed resume receipt.
                         self.emit_session_updated().await;
-                        let _ = self
-                            .tx_event
-                            .send(Event::status("Session context synced".to_string()))
-                            .await;
                     }
                     Op::CompactContext {
                         id,
