@@ -6579,7 +6579,7 @@ mod tests {
 kind = "codewhale.portable-config"
 
 [project]
-verbosity = "project-imported"
+verbosity = "concise"
 "#,
         )
         .expect("write project bundle");
@@ -6600,10 +6600,7 @@ verbosity = "project-imported"
             .expect("import project bundle");
         let project = ConfigStore::load(Some(project_path.clone())).expect("reload project");
         let global = ConfigStore::load(Some(global_path.clone())).expect("reload global");
-        assert_eq!(
-            project.config.verbosity.as_deref(),
-            Some("project-imported")
-        );
+        assert_eq!(project.config.verbosity.as_deref(), Some("concise"));
         assert_eq!(global.config.verbosity.as_deref(), Some("global-only"));
 
         let explicit_argv = [
