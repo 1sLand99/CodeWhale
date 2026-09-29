@@ -32,7 +32,7 @@ notes, and relevant issue/PR comments.
 
 **Merged or adapted contributions**
 
-- **[SparkofSpike](https://github.com/SparkofSpike)** — translated seventeen more guides into Simplified Chinese, among them plugins, memory, sandbox, workflow authoring, Docker, Termux and HarmonyOS, and brought the existing zh_hans docs onto one terminology standard ([#6662](https://github.com/Hmbown/Codewhale/pull/6662)).
+- **[SparkofSpike](https://github.com/SparkofSpike)** — translated seventeen more guides into Simplified Chinese, among them plugins, memory, sandbox, workflow authoring, Docker, Termux and HarmonyOS, and brought the existing zh_hans docs onto one terminology standard ([#6662](https://github.com/Hmbown/Codewhale/pull/6662)), then translated thirteen developer and internal docs, among them the runtime API, architecture, tool surface, authorization order, operations runbook and Workroom security ([#6663](https://github.com/Hmbown/Codewhale/pull/6663)).
 
 </details>
 
