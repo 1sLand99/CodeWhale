@@ -134,6 +134,7 @@ pub(crate) fn push_assistant_message(
     }
     for (id, name, input) in tool_uses {
         blocks.push(ContentBlock::ToolUse {
+            execution_id: None,
             id,
             name,
             input,

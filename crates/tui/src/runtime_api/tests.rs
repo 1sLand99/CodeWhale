@@ -372,6 +372,7 @@ fn session_detail_scenario() {
     {
         let detail = session_to_detail(saved_session_with_blocks(vec![
             codewhale_models::ContentBlock::ToolUse {
+                execution_id: None,
                 id: "tool-1".to_string(),
                 name: "task_shell_start".to_string(),
                 input: json!({ "cmd": "cargo test" }),
@@ -392,6 +393,7 @@ fn session_detail_scenario() {
     {
         let detail = session_to_detail(saved_session_with_blocks(vec![
             codewhale_models::ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "tool-1".to_string(),
                 content: "fallback text".to_string(),
                 is_error: Some(false),
@@ -587,6 +589,7 @@ fn messages_from_thread_detail_batches_tool_results() {
             content,
             is_error,
             content_blocks,
+            ..
         } => {
             assert_eq!(tool_use_id, "tool-1");
             assert_eq!(content, "one");
@@ -606,6 +609,7 @@ fn messages_from_thread_detail_batches_tool_results() {
             content,
             is_error,
             content_blocks,
+            ..
         } => {
             assert_eq!(tool_use_id, "tool-2");
             assert_eq!(content, "two");
@@ -23091,6 +23095,7 @@ mod thread_snapshot_ownership {
                     Message {
                         role: Role::Assistant,
                         content: vec![ContentBlock::ToolUse {
+                            execution_id: None,
                             id: "call_legacy".to_string(),
                             name: "write_file".to_string(),
                             input: json!({ "path": "legacy.txt", "content": "x" }),

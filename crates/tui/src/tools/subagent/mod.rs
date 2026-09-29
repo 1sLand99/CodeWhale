@@ -14897,6 +14897,7 @@ async fn run_subagent(
                     format!("Error: {blocked}"),
                 );
                 tool_results.push(ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: tool_id,
                     content: result,
                     // Refusals reach the provider as errors, matching the
@@ -15062,6 +15063,7 @@ async fn run_subagent(
             }
 
             tool_results.push(ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: tool_id,
                 content: result,
                 // A refused or failed call is marked as an error for the

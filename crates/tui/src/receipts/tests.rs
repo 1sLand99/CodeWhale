@@ -262,6 +262,7 @@ fn tool_use(id: &str, name: &str, input: Value) -> Message {
     Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
+            execution_id: None,
             id: id.into(),
             name: name.into(),
             input,
@@ -275,6 +276,7 @@ fn tool_result(id: &str, content: &str, is_error: bool) -> Message {
     Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
+            execution_id: None,
             tool_use_id: id.into(),
             content: content.into(),
             is_error: is_error.then_some(true),

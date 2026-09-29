@@ -585,6 +585,7 @@ mod tests {
             messages.push(Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: id.clone(),
                     name: "exec_shell".to_string(),
                     input: serde_json::json!({"command": format!("echo {i}")}),
@@ -596,6 +597,7 @@ mod tests {
             messages.push(Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: id,
                     content: format!("{i}"),
                     is_error: None,

@@ -16467,6 +16467,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
                 thinking: "Need a tool before answering.".to_string(),
             },
             ContentBlock::ToolUse {
+                execution_id: None,
                 id: "tool-1".to_string(),
                 name: "read_file".to_string(),
                 input: json!({"path": "Cargo.toml"}),
@@ -18118,6 +18119,7 @@ async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
                 input: serde_json::json!({"command": "printf hi"}),
@@ -18128,6 +18130,7 @@ async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "call_1".to_string(),
                 content: "unique-tool-output-marker".to_string(),
                 is_error: None,
@@ -20794,6 +20797,7 @@ fn turn_metadata_skips_tool_result_messages() {
     engine.session.add_message(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
+            execution_id: None,
             id: "call_42".to_string(),
             name: "read_file".to_string(),
             input: serde_json::json!({"path": "src/lib.rs"}),
@@ -20805,6 +20809,7 @@ fn turn_metadata_skips_tool_result_messages() {
     engine.session.add_message(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
+            execution_id: None,
             tool_use_id: "call_42".to_string(),
             content: "pub fn sample() {}".to_string(),
             is_error: None,
@@ -20906,6 +20911,7 @@ fn turn_metadata_skips_when_only_tool_results_trail() {
     engine.session.add_message(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
+            execution_id: None,
             tool_use_id: "call_42".to_string(),
             content: "pub fn sample() {}".to_string(),
             is_error: None,

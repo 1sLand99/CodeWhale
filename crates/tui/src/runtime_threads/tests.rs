@@ -7787,6 +7787,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
                     state: None,
                 },
                 ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "tool-1".to_string(),
                     name: "shell".to_string(),
                     input: json!({ "cmd": "one" }),
@@ -7794,6 +7795,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
                     thought_signature: None,
                 },
                 ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "tool-2".to_string(),
                     name: "shell".to_string(),
                     input: json!({ "cmd": "two" }),
@@ -7805,6 +7807,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "tool-1".to_string(),
                 content: "one".to_string(),
                 is_error: None,
@@ -7817,6 +7820,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "tool-2".to_string(),
                 content: "two".to_string(),
                 is_error: Some(true),
@@ -7852,6 +7856,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
             content,
             is_error,
             content_blocks,
+            ..
         } => {
             assert_eq!(tool_use_id, "tool-1");
             assert_eq!(content, "one");
@@ -7871,6 +7876,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
             content,
             is_error,
             content_blocks,
+            ..
         } => {
             assert_eq!(tool_use_id, "tool-2");
             assert_eq!(content, "two");
@@ -7914,6 +7920,7 @@ async fn seeded_session_records_carry_a_total_order() -> Result<()> {
                     state: None,
                 },
                 ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "tool-1".to_string(),
                     name: "shell".to_string(),
                     input: json!({ "cmd": "ls" }),
@@ -7925,6 +7932,7 @@ async fn seeded_session_records_carry_a_total_order() -> Result<()> {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "tool-1".to_string(),
                 content: "listing".to_string(),
                 is_error: None,

@@ -1059,6 +1059,7 @@ fn session_recovery_projection(messages: &[Message]) -> Vec<Value> {
                     content,
                     is_error,
                     content_blocks,
+                    ..
                 } if role == "user" => projection.push(json!([
                     "tool_result",
                     tool_use_id,
@@ -10975,6 +10976,7 @@ impl RuntimeThreadManager {
                                 content,
                                 is_error,
                                 content_blocks,
+                                ..
                             } => {
                                 tool_results.push(SeedItem::ToolResult {
                                     tool_use_id: tool_use_id.clone(),
@@ -14008,6 +14010,7 @@ impl RuntimeThreadManager {
                             let input: serde_json::Value =
                                 serde_json::from_str(&input_str).unwrap_or(serde_json::Value::Null);
                             assistant_blocks.push(ContentBlock::ToolUse {
+                                execution_id: None,
                                 id: tool_use_id,
                                 name: tool_name,
                                 input,
@@ -14027,6 +14030,7 @@ impl RuntimeThreadManager {
                                 .and_then(Value::as_array)
                                 .cloned();
                             user_blocks.push(ContentBlock::ToolResult {
+                                execution_id: None,
                                 tool_use_id: tool_result_for,
                                 content,
                                 is_error: if is_error { Some(true) } else { None },
@@ -14038,6 +14042,7 @@ impl RuntimeThreadManager {
                             // its result, so the rebuilt turn is complete.
                             flush_assistant(&mut assistant_blocks, &mut messages);
                             user_blocks.push(ContentBlock::ToolResult {
+                                execution_id: None,
                                 tool_use_id: call_id,
                                 content,
                                 is_error: Some(true),

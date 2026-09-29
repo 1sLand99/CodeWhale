@@ -19361,6 +19361,7 @@ api_key = "test-only-key"
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "call-1".to_string(),
                     content: "listed files".to_string(),
                     is_error: Some(false),
@@ -19427,6 +19428,7 @@ api_key = "test-only-key"
         messages.push(Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "call-current".into(),
                 content: "result".into(),
                 is_error: None,
@@ -19480,6 +19482,7 @@ api_key = "test-only-key"
                         cache_control: None,
                     },
                     ContentBlock::ToolUse {
+                        execution_id: None,
                         id: "call-1".to_string(),
                         name: "exec_shell".to_string(),
                         input: serde_json::json!({"command": "cargo test"}),
@@ -19491,6 +19494,7 @@ api_key = "test-only-key"
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "call-1".to_string(),
                     content: "stdout line\nstderr line".to_string(),
                     is_error: Some(false),

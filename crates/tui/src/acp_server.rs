@@ -1268,6 +1268,7 @@ fn tool_result_message_with_blocks(
     Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
+            execution_id: None,
             tool_use_id: tool_use_id.to_string(),
             content,
             is_error: Some(is_error),
@@ -1392,6 +1393,7 @@ where
         }
         for call in &tool_calls {
             assistant_content.push(ContentBlock::ToolUse {
+                execution_id: None,
                 id: call.id.clone(),
                 name: call.name.clone(),
                 input: call.input.clone(),

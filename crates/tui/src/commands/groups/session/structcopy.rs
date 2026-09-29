@@ -293,6 +293,7 @@ fn block_payload(block: &ContentBlock) -> Value {
             content,
             is_error,
             content_blocks,
+            ..
         } => json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
@@ -356,6 +357,7 @@ fn tool_payload(app: &App, call_id: &str) -> Result<(&'static str, Value, Value)
                     content,
                     is_error,
                     content_blocks,
+                    ..
                 } if tool_use_id.as_str() == call_id => {
                     found_result = Some((*is_error, content.clone(), content_blocks.clone()));
                 }
@@ -1290,6 +1292,7 @@ mod tests {
                         state: None,
                     },
                     ContentBlock::ToolUse {
+                        execution_id: None,
                         id: "call-7".to_string(),
                         name: "fetch_url".to_string(),
                         input: json!({
@@ -1307,6 +1310,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "call-7".to_string(),
                     content: "Authorization: Bearer result-secret-token\nfetch ok".to_string(),
                     is_error: Some(false),
@@ -1433,6 +1437,7 @@ mod tests {
         app.api_messages_mut()[1]
             .content
             .push(ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-lonely".to_string(),
                 name: "view_image".to_string(),
                 input: json!({}),
@@ -1461,6 +1466,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "call-unknown".to_string(),
                     name: "exec_command".to_string(),
                     input: json!({}),
@@ -1472,6 +1478,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "call-unknown".to_string(),
                     content: "no error flag was recorded".to_string(),
                     is_error: None,
@@ -1753,6 +1760,7 @@ mod tests {
         app.api_messages_mut()[1]
             .content
             .push(ContentBlock::ToolUse {
+                execution_id: None,
                 id: long_id.clone(),
                 name: "exec_command".to_string(),
                 input: json!({}),
@@ -1781,6 +1789,7 @@ mod tests {
             app.api_messages_mut()[1]
                 .content
                 .push(ContentBlock::ToolUse {
+                    execution_id: None,
                     id: bearer_id.to_string(),
                     name: "exec_command".to_string(),
                     input: json!({}),
@@ -1821,6 +1830,7 @@ mod tests {
         app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-keys".to_string(),
                 name: "exec_command".to_string(),
                 input,
@@ -1890,6 +1900,7 @@ mod tests {
         app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-obfuscated-keys".to_string(),
                 name: "exec_command".to_string(),
                 input: json!({
@@ -1959,6 +1970,7 @@ mod tests {
         app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-reserve".to_string(),
                 name: "exec_command".to_string(),
                 input: json!({exact: 1, same_after_flatten: 2}),
@@ -2271,6 +2283,7 @@ mod tests {
         app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: call_id.to_string(),
                 name: "exec_command".to_string(),
                 input: json!({
@@ -2432,6 +2445,7 @@ mod tests {
         app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-deep".to_string(),
                 name: "exec_command".to_string(),
                 input: json!({"a": {"b": {"c": {"d": {"e": "too deep"}}}}}),
@@ -2472,6 +2486,7 @@ mod tests {
         app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-counts".to_string(),
                 name: "exec_command".to_string(),
                 input: json!({
@@ -2544,6 +2559,7 @@ mod tests {
         app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-deep-keys".to_string(),
                 name: "exec_command".to_string(),
                 input: json!({"deep": {"one": {long_a: 1, long_b: 2}}}),

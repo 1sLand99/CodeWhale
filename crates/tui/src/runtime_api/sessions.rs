@@ -693,6 +693,7 @@ pub(super) fn messages_from_thread_detail(detail: &ThreadDetail) -> Vec<Message>
                             .and_then(|v| v.as_array())
                             .cloned();
                         user_blocks.push(ContentBlock::ToolResult {
+                            execution_id: None,
                             tool_use_id,
                             content,
                             is_error: if is_error { Some(true) } else { None },
@@ -713,6 +714,7 @@ pub(super) fn messages_from_thread_detail(detail: &ThreadDetail) -> Vec<Message>
                         let input_str = item.detail.as_deref().unwrap_or("{}");
                         let input: Value = serde_json::from_str(input_str).unwrap_or(Value::Null);
                         assistant_blocks.push(ContentBlock::ToolUse {
+                            execution_id: None,
                             id: tool_use_id,
                             name: tool_name,
                             input,

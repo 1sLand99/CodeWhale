@@ -202,6 +202,7 @@ fn oversized_tool_pair(id: &str, content: String) -> Vec<Message> {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: id.to_string(),
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "src/compaction.rs"}),
@@ -212,6 +213,7 @@ fn oversized_tool_pair(id: &str, content: String) -> Vec<Message> {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: id.to_string(),
                 content,
                 is_error: None,
@@ -608,6 +610,7 @@ fn tool_call(id: &str) -> Message {
     Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
+            execution_id: None,
             id: id.to_string(),
             name: "Bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
@@ -621,6 +624,7 @@ fn tool_output(id: &str) -> Message {
     Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
+            execution_id: None,
             tool_use_id: id.to_string(),
             content: "ok".to_string(),
             is_error: None,

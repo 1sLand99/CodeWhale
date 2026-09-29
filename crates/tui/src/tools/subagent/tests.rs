@@ -8240,6 +8240,7 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "search-1".to_string(),
                     name: TOOL_SEARCH_NAME.to_string(),
                     input: json!({"query": "web"}),
@@ -8250,6 +8251,7 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "search-1".to_string(),
                     content: json!({
                         "type": "tool_search_tool_search_result",

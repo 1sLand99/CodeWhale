@@ -166,6 +166,7 @@ fn repair_tool_call_pairs_inner(
                 content: missing_after_message
                     .into_iter()
                     .map(|tool_use_id| ContentBlock::ToolResult {
+                        execution_id: None,
                         tool_use_id,
                         content: CRASH_REPAIR_CONTENT.to_string(),
                         is_error: Some(true),
@@ -221,6 +222,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: id.to_string(),
                 name: "read_file".to_string(),
                 input: json!({"path": "README.md"}),
@@ -234,6 +236,7 @@ mod tests {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: id.to_string(),
                 content: content.to_string(),
                 is_error: None,

@@ -2421,6 +2421,7 @@ pub(crate) async fn run_event_loop(
                             app.push_api_message(Message {
                                 role: Role::User,
                                 content: vec![ContentBlock::ToolResult {
+                                    execution_id: None,
                                     tool_use_id: id.clone(),
                                     content: tool_content,
                                     is_error: None,

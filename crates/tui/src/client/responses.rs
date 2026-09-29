@@ -625,6 +625,7 @@ impl CodewhaleClient {
                             caller,
                             thought_signature,
                         } => ContentBlock::ToolUse {
+                            execution_id: None,
                             id,
                             name,
                             input,

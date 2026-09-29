@@ -2294,6 +2294,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: id.to_string(),
                 name: name.to_string(),
                 input,
@@ -2307,6 +2308,7 @@ mod tests {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: id.to_string(),
                 content: content.to_string(),
                 is_error: None,
@@ -3396,6 +3398,7 @@ mod tests {
         // the retained copy must keep the text and drop the orphaned result.
         let mut mixed = msg("user", "Please keep this context.");
         mixed.content.push(ContentBlock::ToolResult {
+            execution_id: None,
             tool_use_id: "toolu_orphan_1".to_string(),
             content: "{\"ok\":true}".to_string(),
             is_error: None,
@@ -3836,6 +3839,7 @@ mod tests {
                         thinking: thinking.clone(),
                     },
                     ContentBlock::ToolUse {
+                        execution_id: None,
                         id: "tool-1".to_string(),
                         name: "read_file".to_string(),
                         input: serde_json::json!({"path": "Cargo.toml"}),
@@ -3847,6 +3851,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "tool-1".to_string(),
                     content: "manifest".to_string(),
                     is_error: None,

@@ -1048,6 +1048,7 @@ fn assistant_message(content: Vec<ContentBlock>) -> Message {
 
 fn tool_use(name: &str, input: Value) -> ContentBlock {
     ContentBlock::ToolUse {
+        execution_id: None,
         id: format!("call_{name}"),
         name: name.to_string(),
         input,

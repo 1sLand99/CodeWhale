@@ -753,6 +753,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: id.to_string(),
                 name: name.to_string(),
                 input,
@@ -766,6 +767,7 @@ mod tests {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: id.to_string(),
                 content: content.to_string(),
                 is_error: None,
@@ -1101,6 +1103,7 @@ mod tests {
             r#type: "message".to_string(),
             role: "assistant".to_string(),
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call_purge".to_string(),
                 name: "purge_context".to_string(),
                 input: json!({"operations": operations}),

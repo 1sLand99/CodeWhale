@@ -2207,6 +2207,7 @@ impl Engine {
                         }
                         for tool in &tool_uses {
                             resume_blocks.push(ContentBlock::ToolUse {
+                                execution_id: None,
                                 id: tool.id.clone(),
                                 name: tool.name.clone(),
                                 input: tool.input.clone(),
@@ -2385,6 +2386,7 @@ impl Engine {
             }
             for tool in &tool_uses {
                 content_blocks.push(ContentBlock::ToolUse {
+                    execution_id: None,
                     id: tool.id.clone(),
                     name: tool.name.clone(),
                     input: tool.input.clone(),
@@ -5491,6 +5493,7 @@ impl Engine {
                     self.add_session_message(Message {
                         role: Role::User,
                         content: vec![ContentBlock::ToolResult {
+                            execution_id: None,
                             tool_use_id: outcome.id,
                             content: output_for_context,
                             is_error: (!output.success).then_some(true),
@@ -5525,6 +5528,7 @@ impl Engine {
                     self.add_session_message(Message {
                         role: Role::User,
                         content: vec![ContentBlock::ToolResult {
+                            execution_id: None,
                             tool_use_id: outcome.id,
                             content: format!("Error: {error}"),
                             is_error: Some(true),
