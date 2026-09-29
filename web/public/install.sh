@@ -328,17 +328,50 @@ say "  $install_dir/codew"
 say ""
 say "Use this installation: \"$install_dir/codewhale\""
 say "Future updates: \"$install_dir/codewhale\" update"
+path_selected=1
 for command_name in codewhale codew; do
   resolved="$(command -v "$command_name" 2>/dev/null || true)"
   if [ "$resolved" != "$install_dir/$command_name" ]; then
     say "PATH selects ${resolved:-no $command_name command}; this install is $install_dir/$command_name"
+    path_selected=0
   fi
 done
-say "To use this directory in the current shell, then verify the commands:"
-say "  export PATH=\"$install_dir:\$PATH\""
-say "  hash -r"
-say "  command -v codewhale codew"
-say "Keep the directory first in your shell profile after verifying it."
+if [ "$path_selected" -eq 0 ]; then
+  # Print the persistent line for the user's login shell. The installer never
+  # edits shell profiles itself; the user runs the line once.
+  path_dir="$install_dir"
+  if [ -n "${HOME:-}" ] && [ "$install_dir" = "$(cd -P "$HOME/.local/bin" 2>/dev/null && pwd)" ]; then
+    path_dir="\$HOME/.local/bin"
+  fi
+  shell_name="${SHELL:-}"
+  shell_name="${shell_name##*/}"
+  say ""
+  say "Put $install_dir first on PATH in future shells (run once; this installer does not edit shell profiles):"
+  case "$shell_name" in
+    fish)
+      say "  fish_add_path \"$install_dir\""
+      say "It takes effect in this fish shell and in new ones."
+      ;;
+    *)
+      case "$shell_name" in
+        zsh) profile=".zshrc" ;;
+        bash)
+          case "$target" in
+            macos-*) profile=".bash_profile" ;;
+            *) profile=".bashrc" ;;
+          esac
+          ;;
+        *) profile=".profile" ;;
+      esac
+      say "  echo 'export PATH=\"$path_dir:\$PATH\"' >> ~/$profile"
+      say "Then run: source ~/$profile   (or open a new terminal)"
+      ;;
+  esac
+  say "Or for this shell only:"
+  say "  export PATH=\"$install_dir:\$PATH\"; hash -r"
+  say "Verify: command -v codewhale codew"
+  say "PATH help: https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md#put-it-on-your-path"
+fi
 if ! command -v node >/dev/null 2>&1; then
   say "Computer Use is included and needs Node.js 20 or newer on PATH."
   say "Install Node.js from https://nodejs.org/, then restart Codewhale to enable Computer Use."

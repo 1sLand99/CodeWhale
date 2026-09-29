@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -33,6 +34,8 @@ function installFixture(
     version?: string;
     glibc?: string;
     expectedStatus?: number;
+    shell?: string;
+    installUnderHome?: boolean;
   } = {},
 ) {
   const {
@@ -41,11 +44,14 @@ function installFixture(
     version,
     glibc = "2.39",
     expectedStatus = 0,
+    shell = "/bin/zsh",
+    installUnderHome = false,
   } = options;
   const root = mkdtempSync(path.join(tmpdir(), "codewhale-web-installer-"));
   fixtureRoots.push(root);
   const releaseDir = path.join(root, "release");
-  const installDir = path.join(root, "install");
+  const home = path.join(root, "home");
+  const installDir = installUnderHome ? path.join(home, ".local", "bin") : path.join(root, "install");
   const fakeBin = path.join(root, "fake-bin");
   mkdirSync(releaseDir, { recursive: true });
   mkdirSync(installDir, { recursive: true });
@@ -115,7 +121,8 @@ function installFixture(
       CODEWHALE_RELEASE_BASE_URL: "https://fixtures.invalid/download",
       ...(version ? { CODEWHALE_VERSION: version } : {}),
       FAKE_RELEASE_DIR: releaseDir,
-      HOME: path.join(root, "home"),
+      HOME: home,
+      SHELL: shell,
       PATH: `${fakeBin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     },
   });
@@ -149,6 +156,33 @@ describe.skipIf(process.platform === "win32")("public installer compatibility co
     expect(readFileSync(path.join(installDir, "codew"))).toEqual(runtime);
     expect(existsSync(legacyPath)).toBe(false);
     expect(result.stdout).not.toContain("Refreshed legacy compatibility command:");
+  });
+
+  it.each([
+    ["/bin/zsh", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.zshrc`, "source ~/.zshrc"],
+    ["/bin/bash", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.bashrc`, "source ~/.bashrc"],
+    ["/bin/bash", "Darwin", `echo 'export PATH="INSTALL:$PATH"' >> ~/.bash_profile`, "source ~/.bash_profile"],
+    ["/usr/bin/fish", "Linux", `fish_add_path "INSTALL"`, "this fish shell"],
+    ["/bin/dash", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.profile`, "source ~/.profile"],
+  ] as const)(
+    "prints the persistent PATH line for %s on %s without editing a profile",
+    (shell, os, persist, reload) => {
+      const { installDir, result } = installFixture(false, { shell, os });
+
+      // The fixture install dir is never on PATH, so the hint always prints.
+      expect(result.stdout).toContain("PATH selects");
+      expect(result.stdout).toContain(persist.replace("INSTALL", realpathSync(installDir)));
+      expect(result.stdout).toContain(reload);
+      expect(result.stdout).toContain("docs/INSTALL.md#put-it-on-your-path");
+      // HOME (a sibling of the install dir) is never created: no profile was written.
+      expect(existsSync(path.join(installDir, "..", "home"))).toBe(false);
+    },
+  );
+
+  it("writes the default directory as $HOME/.local/bin in the persistent line", () => {
+    const { result } = installFixture(false, { installUnderHome: true });
+
+    expect(result.stdout).toContain(`echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`);
   });
 
   it.each([undefined, "v0.9.6", "v0.9.11"])(

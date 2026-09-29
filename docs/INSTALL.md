@@ -156,6 +156,11 @@ Installed checksummed release commands:
   /home/you/.local/bin/codew
 …
 PATH selects no codewhale command; this install is /home/you/.local/bin/codewhale
+…
+Put /home/you/.local/bin first on PATH in future shells (run once; this installer does not edit shell profiles):
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+Then run: source ~/.bashrc   (or open a new terminal)
+…
 ```
 
 ### macOS notes
@@ -176,8 +181,9 @@ Re-checked on macOS 26.1, Apple silicon (`macos-arm64`), with a fresh `HOME`:
 
 ### Put it on your PATH
 
-If the last lines say `PATH selects no codewhale command`, `~/.local/bin` isn't
-on your PATH **in this shell**. On Ubuntu and Debian, `~/.profile` adds
+If the installer says `PATH selects no codewhale command`, `~/.local/bin` isn't
+on your PATH **in this shell**. It then prints the matching line from the block
+below for your `$SHELL`; it never edits a shell profile itself. On Ubuntu and Debian, `~/.profile` adds
 `~/.local/bin`, but only if the directory existed when you *logged in*. So:
 
 * a new SSH or login shell picks it up automatically;
@@ -188,7 +194,7 @@ on your PATH **in this shell**. On Ubuntu and Debian, `~/.profile` adds
 Fix it once:
 
 ```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # bash (macOS bash: ~/.bash_profile)
 # echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc  # zsh
 # fish_add_path ~/.local/bin                               # fish (untested on this VM)
 export PATH="$HOME/.local/bin:$PATH"; hash -r
