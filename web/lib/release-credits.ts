@@ -20,17 +20,10 @@
 
 /** Contributors whose PRs were merged or harvested into this release. */
 export const RELEASE_CONTRIBUTORS: string[] = [
-  "@AdityaVG13",
-  "@aboimpinto",
   "@gaord",
-  "@zhuowp",
-  "@h3c-hexin",
-  "@asto18089",
-  "@yrk111222",
-  "@xiechimon",
-  "@VincentCorleone",
-  "@Serendo",
-  "@yetuge",
+  "@Lstarsky0",
+  "@aboimpinto",
+  "@dajiaohuang",
   "@Water-Run",
 ];
 
@@ -39,25 +32,10 @@ export const RELEASE_CONTRIBUTORS: string[] = [
  * one. scripts/check-contributor-credit.py requires them here now; the release
  * cut moves them into RELEASE_CONTRIBUTORS with that release's changelog block.
  */
-export const UNRELEASED_CONTRIBUTORS: string[] = [
-  "@gaord",
-  "@BX166",
-  "@Lstarsky0",
-  "@aboimpinto",
-  "@dajiaohuang",
-  "@Water-Run",
-];
+export const UNRELEASED_CONTRIBUTORS: string[] = [];
 
 /**
  * Contributors who helped with reports, reproductions, and verification.
- * Credit covers the 0.10.0 reports recorded in docs/CONTRIBUTORS.md.
+ * Credit covers the 0.10.1 reports recorded in docs/CONTRIBUTORS.md.
  */
-export const RELEASE_HELPERS: string[] = [
-  "@7jrxt42BxFZo4iAnN4CX",
-  "@BX166",
-  "@Lstarsky0",
-  "@Lujc0523",
-  "@Statter",
-  "@bevis-wong",
-  "@sequico",
-];
+export const RELEASE_HELPERS: string[] = ["@BX166"];

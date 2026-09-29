@@ -305,6 +305,13 @@ export interface DocsShellDict {
   noteLabel: string;
   /** Accessible name of a page's table of contents. */
   onThisPage: string;
+
+  // --- session recording panel (components/session-media.tsx) ---
+  /** Shown in place of a recording that has not been made yet. */
+  mediaPendingNote: string;
+  mediaPlanLink: string;
+  mediaGifFallback: string;
+  mediaTranscript: string;
 }
 
 /**
@@ -517,6 +524,25 @@ export interface RoadmapDict {
   issuesDetail: string;
   discussionsDetail: string;
   pullsDetail: string;
+}
+
+/** `app/[locale]/contribute/page.tsx`. */
+export interface ContributeDict {
+  metaTitle: string;
+  metaDescription: string;
+  kicker: string;
+  /** Page H1. */
+  title: string;
+  lede: string;
+  fileIssue: string;
+  browsePulls: string;
+  fullGuide: string;
+  pathsTitle: string;
+  workflowTitle: string;
+  reviewTitle: string;
+  reviewScope: string;
+  devTitle: string;
+  devScope: string;
 }
 
 export type DocsHooksDict = DocsPageDict;

@@ -494,8 +494,8 @@ pub struct EngineConfig {
     pub stream_chunk_timeout: Duration,
     /// Cumulative wall-clock budget for one turn (R1). Counted across every
     /// model step of the turn, excluding time blocked on a human approval
-    /// decision. Resolved from `[tui].turn_wall_clock_secs`; always finite —
-    /// see [`turn_budget::resolve_turn_wall_clock`].
+    /// decision. Resolved from `[tui].turn_wall_clock_secs`; `Duration::MAX`
+    /// (no limit) by default — see [`turn_budget::resolve_turn_wall_clock`].
     pub turn_wall_clock: Duration,
     /// Per-step cap on accumulated streamed content, in bytes (R1). Resolved
     /// from `[tui].stream_max_content_mb`. Pre-R1 this was the hard-coded
