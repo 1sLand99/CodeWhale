@@ -23028,6 +23028,235 @@ fn user_follow_up_to_completed_child_requires_a_runtime_to_resume() {
     assert!(err.to_string().contains("no runtime"), "{err}");
 }
 
+/// A finished worker's unchanged isolated worktree is removed, but its
+/// checkpoint stays continuable. Continuing it used to start a child inside
+/// the missing directory, where every tool failed.
+#[tokio::test]
+async fn continuing_a_child_whose_worktree_was_removed_fails_with_the_reason() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("removed-worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let agent_id = {
+        let mut guard = manager.write().await;
+        let (id, _) = guard.insert_test_interrupted_continuable_agent(
+            "read_mostly",
+            &worktree,
+            vec![text_message("user", "prior work")],
+        );
+        guard.agents.get_mut(&id).expect("agent").status = SubAgentStatus::Completed;
+        id
+    };
+    std::fs::remove_dir(&worktree).expect("worktree removed on completion");
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+
+    let result = {
+        let mut guard = manager.write().await;
+        guard.continue_child_from_user(Arc::clone(&manager), Some(runtime), &agent_id, "more")
+    };
+    let err = result.expect_err("a child whose workspace is gone cannot be continued");
+    assert!(err.to_string().contains("no longer exists"), "{err}");
+    assert_eq!(
+        manager.read().await.agents.len(),
+        1,
+        "no continuation child was started"
+    );
+}
+
+/// A finished worker's unchanged worktree is removed on the blocking pool, and
+/// an interrupt can win while that runs. A continuation started then passed
+/// the existence check and could lose its directory to the removal. It now
+/// waits until the claimed removal has settled.
+#[tokio::test]
+async fn continuation_is_refused_while_its_worktree_removal_is_claimed() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("worktree");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let (agent_id, claim) = {
+        let mut guard = manager.write().await;
+        let (id, _) = guard.insert_test_interrupted_continuable_agent(
+            "claimed",
+            &workspace,
+            vec![text_message("user", "prior work")],
+        );
+        let claim = guard
+            .claim_worktree_cleanup(&id, &workspace)
+            .expect("the removal is claimed");
+        assert!(
+            guard.claim_worktree_cleanup(&id, &workspace).is_none(),
+            "one removal per path at a time"
+        );
+        (id, claim)
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+
+    let refused = {
+        let mut guard = manager.write().await;
+        guard.continue_child_from_user(
+            Arc::clone(&manager),
+            Some(runtime.clone()),
+            &agent_id,
+            "more",
+        )
+    };
+    let err = refused.expect_err("no successor starts while the removal is claimed");
+    assert!(err.to_string().contains("checked for removal"), "{err}");
+    assert_eq!(manager.read().await.agents.len(), 1);
+
+    drop(claim);
+    let resumed = {
+        let mut guard = manager.write().await;
+        guard.continue_child_from_user(Arc::clone(&manager), Some(runtime), &agent_id, "more")
+    };
+    resumed.expect("continues once the removal settled and kept the workspace");
+    assert!(workspace.is_dir());
+    assert_eq!(manager.read().await.agents.len(), 2);
+}
+
+/// The removal decides when it runs, not when its inputs were read before
+/// the terminal commit: a worker an interrupt made continuable in between
+/// keeps its worktree, and a completed one's is removed.
+#[tokio::test]
+async fn finished_worktree_removal_keeps_a_worker_that_became_continuable() {
+    let (_harness, repo) = git_repo_in_harness();
+    let make = |name: &str| {
+        create_isolated_worktree(
+            &repo,
+            &SubAgentWorktreeRequest {
+                branch: Some(format!("codex/agent-{name}")),
+                path: Some(PathBuf::from(name)),
+                base_ref: None,
+            },
+            Some(name),
+            &FleetRole::Builder,
+        )
+        .expect("worktree should be created")
+    };
+    let kept = make("interrupted");
+    let removed = make("completed");
+    let manager = new_shared_subagent_manager(repo.clone(), 4);
+    let (interrupted_id, completed_id, claims) = {
+        let mut guard = manager.write().await;
+        let (interrupted_id, _) = guard.insert_test_interrupted_continuable_agent(
+            "interrupted",
+            &kept,
+            vec![text_message("user", "prior work")],
+        );
+        let completed_id = guard.insert_test_running_agent("completed", &removed);
+        guard.agents.get_mut(&completed_id).expect("agent").status = SubAgentStatus::Completed;
+        let claims = (
+            guard
+                .claim_worktree_cleanup(&interrupted_id, &kept)
+                .expect("claim"),
+            guard
+                .claim_worktree_cleanup(&completed_id, &removed)
+                .expect("claim"),
+        );
+        (interrupted_id, completed_id, claims)
+    };
+    let shared = Arc::clone(&manager);
+    let outcome = tokio::task::spawn_blocking(move || {
+        let empty = std::collections::BTreeSet::new();
+        (
+            remove_finished_worktree(&shared, &interrupted_id, claims.0, Some(&empty)),
+            remove_finished_worktree(&shared, &completed_id, claims.1, Some(&empty)),
+        )
+    })
+    .await
+    .expect("blocking removal");
+    assert_eq!(outcome, (false, true));
+    assert!(kept.is_dir(), "the continuable worker keeps its worktree");
+    assert!(!removed.exists(), "the completed worker's is removed");
+    let guard = manager.read().await;
+    assert!(
+        !guard.worktree_cleanup_pending(&kept) && !guard.worktree_cleanup_pending(&removed),
+        "both claims are released"
+    );
+}
+
+/// A spawn refused after its isolated worktree was created used to leave the
+/// checkout and its branch behind, one more per failed attempt.
+#[tokio::test]
+async fn failed_spawn_removes_the_worktree_it_created() {
+    let repo = init_subagent_git_repo();
+    refuse_worktree_spawn_and_expect_cleanup(&repo, "codex/agent-rollback-probe").await;
+}
+
+/// Post-checkout hooks (and line-ending or LFS filters) can leave files in a
+/// fresh checkout. The rollback used to require a pristine `git status`, so
+/// in such repos every refused spawn still left its worktree behind.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_spawn_removes_its_worktree_despite_post_checkout_hook_output() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = init_subagent_git_repo();
+    let hook = repo.path().join(".git").join("hooks").join("post-checkout");
+    std::fs::create_dir_all(hook.parent().unwrap()).expect("hooks dir");
+    std::fs::write(&hook, "#!/bin/sh\necho generated > hook-output.txt\n").expect("hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    refuse_worktree_spawn_and_expect_cleanup(&repo, "codex/agent-hook-probe").await;
+}
+
+async fn refuse_worktree_spawn_and_expect_cleanup(repo: &tempfile::TempDir, branch: &str) {
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(repo.path().to_path_buf());
+    let manager = new_shared_subagent_manager(repo.path().to_path_buf(), 4);
+    let source = {
+        let mut guard = manager.write().await;
+        let source = guard.insert_test_running_agent("busy-source", repo.path());
+        assign_test_session_owner(&mut guard, &source, &runtime.context.state_namespace);
+        source
+    };
+    let worktree_path = format!("{}-path", branch.replace('/', "-"));
+    let err = spawn_subagent_from_input(
+        json!({
+            "prompt": "continue the review",
+            "type": "scout",
+            "worktree": true,
+            "worktree_branch": branch,
+            "worktree_path": worktree_path,
+            "resume_from": source,
+        }),
+        Arc::clone(&manager),
+        runtime,
+        false,
+        None,
+    )
+    .await
+    .expect_err("a running resume source refuses the spawn");
+    assert!(err.to_string().contains("still running"), "{err}");
+
+    // The removal runs on the blocking pool, off the async worker.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let worktrees = loop {
+        let worktrees = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]);
+        let count = worktrees
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count();
+        let branch_gone = git_stdout(repo.path(), &["branch", "--list", branch]).is_empty();
+        if (count == 1 && branch_gone) || std::time::Instant::now() >= deadline {
+            break worktrees;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        worktrees
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1,
+        "only the main checkout remains: {worktrees}"
+    );
+    assert!(
+        git_stdout(repo.path(), &["branch", "--list", branch]).is_empty(),
+        "the spawn's branch is removed too"
+    );
+}
+
 // === child permission gate: the session posture applied to a worker's calls ===
 
 mod child_permission_gate {
