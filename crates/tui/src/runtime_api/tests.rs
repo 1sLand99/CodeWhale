@@ -372,7 +372,7 @@ fn session_detail_scenario() {
     {
         let detail = session_to_detail(saved_session_with_blocks(vec![
             codewhale_models::ContentBlock::ToolUse {
-                execution_id: None,
+                execution_id: Some("host-display-only".into()),
                 id: "tool-1".to_string(),
                 name: "task_shell_start".to_string(),
                 input: json!({ "cmd": "cargo test" }),
@@ -386,6 +386,10 @@ fn session_detail_scenario() {
 
         let block = &detail.messages[0]["content"][0];
         assert_eq!(block["type"].as_str(), Some("tool_use"));
+        assert!(
+            block.get("execution_id").is_none(),
+            "detail remains a display projection"
+        );
         assert_eq!(block["caller"]["type"].as_str(), Some("subagent"));
         assert_eq!(block["caller"]["tool_id"].as_str(), Some("parent-tool"));
     }
@@ -576,7 +580,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         approval_grants: Vec::new(),
     };
 
-    let messages = messages_from_thread_detail(&detail);
+    let messages = messages_from_thread_detail(&detail).expect("rebuild thread history");
     let roles = messages
         .iter()
         .map(|message| message.role.as_str())
@@ -3429,6 +3433,11 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
         harness
             .tx_event
             .send(EngineEvent::ToolCallStarted {
+                model_call: Some(crate::core::events::ModelToolCall {
+                    provider_id: "input_compat".to_string(),
+                    caller: None,
+                    thought_signature: None,
+                }),
                 id: "input_compat".to_string(),
                 name: "request_user_input".to_string(),
                 input: serde_json::to_value(&request)?,
@@ -3454,6 +3463,7 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
         harness
             .tx_event
             .send(EngineEvent::ToolCallComplete {
+                model_call: None,
                 id: "input_compat".to_string(),
                 name: "request_user_input".to_string(),
                 result: Ok(tool_result),
@@ -23537,6 +23547,133 @@ api_key = "sk-or-test"
     assert_eq!(status, StatusCode::OK, "body: {back}");
     assert_eq!(back["model"].as_str(), Some("gpui-fixture"), "body: {back}");
 
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_export_keeps_execution_identity_and_rejects_invalid_item_correlation() -> Result<()>
+{
+    let _env = lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let root = dir.path().join("server");
+    let sessions = dir.path().join("sessions");
+    let (addr, runtime, handle) = spawn_test_server_with_root(root.clone(), sessions.clone())
+        .await?
+        .context("execution identity export requires the local API fixture")?;
+    let thread = runtime.create_thread(Default::default()).await?;
+    let original: Vec<Message> = serde_json::from_value(json!([
+        {"role":"user","content":[{"type":"text","text":"export exact executions"}]},
+        {"role":"assistant","content":[{"type":"tool_use","id":"same-wire","execution_id":"host-first","name":"read_file","input":{"path":"one"},"caller":{"type":"subagent","tool_id":"parent"},"thought_signature":"signature"}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"same-wire","execution_id":"host-first","content":"one","content_blocks":[{"type":"text","text":"rich"}]}]},
+        {"role":"assistant","content":[{"type":"tool_use","id":"same-wire","execution_id":"host-second","name":"read_file","input":{"path":"two"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"same-wire","execution_id":"host-second","content":"two"}]}
+    ]))?;
+    runtime
+        .seed_thread_from_messages(&thread.id, &original)
+        .await?;
+    let detail = runtime.get_thread_detail(&thread.id).await?;
+    assert_eq!(messages_from_thread_detail(&detail)?, original);
+
+    // A completed live item contains both sides. It must not become only a
+    // result when the same thread is saved through the API's projection.
+    let mut coalesced = detail.clone();
+    let result_index = coalesced
+        .items
+        .iter()
+        .position(|item| {
+            item.metadata
+                .as_ref()
+                .is_some_and(|m| m["tool_result_for"] == "host-first")
+        })
+        .context("result item")?;
+    let result_item = coalesced.items.remove(result_index);
+    let call = coalesced
+        .items
+        .iter_mut()
+        .find(|item| {
+            item.metadata
+                .as_ref()
+                .is_some_and(|m| m["tool_use_id"] == "host-first")
+        })
+        .context("call item")?;
+    let metadata = call.metadata.as_mut().unwrap();
+    metadata["tool_input"] = json!(call.detail.clone().unwrap());
+    metadata["tool_result_for"] = json!("host-first");
+    metadata["content_blocks"] = result_item.metadata.as_ref().unwrap()["content_blocks"].clone();
+    call.detail = result_item.detail;
+    for turn in &mut coalesced.turns {
+        turn.item_ids.retain(|id| id != &result_item.id);
+    }
+    assert_eq!(messages_from_thread_detail(&coalesced)?, original);
+
+    let client = crate::tls::reqwest_client();
+    let exported = client
+        .post(format!("http://{addr}/v1/sessions"))
+        .json(&json!({"thread_id":thread.id}))
+        .send()
+        .await?;
+    assert_eq!(exported.status(), StatusCode::CREATED);
+    let exported: Value = exported.json().await?;
+    let id = exported["session_id"].as_str().context("session id")?;
+    let manager = crate::session_manager::SessionManager::new(sessions.clone())?;
+    let saved = manager.load_session(id)?;
+    assert_eq!(saved.messages, original);
+    assert_eq!(
+        saved.journal.as_ref().context("journal")?.to_messages(),
+        original
+    );
+    let display: Value = client
+        .get(format!("http://{addr}/v1/sessions/{id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        display["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["content"].as_array().unwrap())
+            .all(|block| block.get("execution_id").is_none()),
+        "detail stays display-only"
+    );
+
+    // Corrupt an identity in the existing durable record. The export must
+    // report the error, without overwriting its prior valid saved document.
+    let mut broken = detail
+        .items
+        .iter()
+        .find(|item| {
+            item.metadata
+                .as_ref()
+                .is_some_and(|m| m["tool_use_id"] == "host-first")
+        })
+        .context("first call")?
+        .clone();
+    broken.metadata.as_mut().unwrap()["execution_id"] = json!("");
+    fs::write(
+        root.join("runtime/runtime/items")
+            .join(format!("{}.json", broken.id)),
+        serde_json::to_vec(&broken)?,
+    )?;
+    let saved_path = sessions.join(format!("{id}.json"));
+    let before = fs::read(&saved_path)?;
+    let refused = client
+        .post(format!("http://{addr}/v1/sessions"))
+        .json(&json!({"thread_id":thread.id}))
+        .send()
+        .await?;
+    assert_eq!(refused.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        refused
+            .text()
+            .await?
+            .contains("Invalid stored tool execution identity")
+    );
+    assert_eq!(fs::read(saved_path)?, before);
     handle.abort();
     Ok(())
 }

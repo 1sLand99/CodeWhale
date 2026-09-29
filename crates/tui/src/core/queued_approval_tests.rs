@@ -175,7 +175,9 @@ async fn approving_the_first_of_three_queued_calls_cancels_none_of_them() {
                 }
                 handle.approve_tool_call(id).await.expect("approve call");
             }
-            Event::ToolCallComplete { id, name, result } if name == "Bash" => {
+            Event::ToolCallComplete {
+                id, name, result, ..
+            } if name == "Bash" => {
                 results.push((id, result));
             }
             Event::TurnComplete { .. } => break,

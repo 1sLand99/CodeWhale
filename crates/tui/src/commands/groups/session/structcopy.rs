@@ -340,37 +340,51 @@ fn block_payload(block: &ContentBlock) -> Value {
 }
 
 fn tool_payload(app: &App, call_id: &str) -> Result<(&'static str, Value, Value), String> {
-    let mut found_call: Option<(String, Value)> = None;
-    let mut found_result: Option<(Option<bool>, String, Option<Vec<Value>>)> = None;
-    for message in app.api_messages.iter() {
-        for block in &message.content {
-            match block {
-                ContentBlock::ToolUse {
-                    id, name, input, ..
-                } => {
-                    if id.as_str() == call_id {
-                        found_call = Some((name.clone(), input.clone()));
-                    }
-                }
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                    content_blocks,
-                    ..
-                } if tool_use_id.as_str() == call_id => {
-                    found_result = Some((*is_error, content.clone(), content_blocks.clone()));
-                }
-                _ => {}
+    let unavailable = || unavailable_message(app, &CopyKind::Tool(call_id.to_string()));
+    if call_id.trim().is_empty() {
+        return Err(unavailable());
+    }
+    // The selector has no namespace tag, so even a local/legacy string
+    // collision is ambiguous. Never fall back from an explicit local ID.
+    let mut calls = app
+        .api_messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => block
+                .tool_call_key()
+                .filter(|key| key.as_str() == call_id)
+                .map(|key| (key, id, name, input)),
+            _ => None,
+        });
+    let Some((key, provider_id, name, input)) = calls.next() else {
+        return Err(unavailable());
+    };
+    if calls.next().is_some() || provider_id.trim().is_empty() {
+        return Err(unavailable());
+    }
+
+    let mut found_result = None;
+    for block in app.api_messages.iter().flat_map(|message| &message.content) {
+        if block.tool_call_key() != Some(key) {
+            continue;
+        }
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+            content_blocks,
+            ..
+        } = block
+        {
+            if tool_use_id != provider_id || found_result.is_some() {
+                return Err(unavailable());
             }
+            found_result = Some((*is_error, content, content_blocks));
         }
     }
-    let Some((name, input)) = found_call else {
-        return Err(unavailable_message(
-            app,
-            &CopyKind::Tool(call_id.to_string()),
-        ));
-    };
     let result = match found_result {
         Some((is_error, content, content_blocks)) => json!({
             "found": true,
@@ -1450,6 +1464,154 @@ mod tests {
         ));
         let value = parsed(&json);
         assert_eq!(value["object"]["result"]["found"], json!(false));
+    }
+
+    #[test]
+    fn tool_copy_selects_execution_when_provider_reuses_wire_id() {
+        let tmpdir = TempDir::new().expect("tempdir");
+        let mut app = test_app(&tmpdir);
+        app.api_messages = std::sync::Arc::new(
+            serde_json::from_value(json!([
+                {"role":"assistant", "content":[{"type":"tool_use", "id":"wire",
+                    "execution_id":"first", "name":"read_file", "input":{"path":"first.txt"}}]},
+                {"role":"user", "content":[{"type":"tool_result", "tool_use_id":"wire",
+                    "execution_id":"first", "content":"first output"}]},
+                {"role":"assistant", "content":[{"type":"tool_use", "id":"wire",
+                    "execution_id":"second", "name":"read_file", "input":{"path":"second.txt"}}]},
+                {"role":"user", "content":[{"type":"tool_result", "tool_use_id":"wire",
+                    "execution_id":"second", "content":"second output"}]}
+            ]))
+            .expect("transcript"),
+        );
+        let before = serde_json::to_value(app.api_messages.as_ref()).expect("transcript");
+        for (selector, path, output) in [
+            ("first", "first.txt", "first output"),
+            ("second", "second.txt", "second output"),
+        ] {
+            let value = parsed(&stdout_json(&execute_structcopy(
+                &mut app,
+                Some(&format!("tool {selector} stdout")),
+            )));
+            assert_eq!(value["receipt"]["selector"], selector);
+            assert_eq!(value["object"]["call_id"], selector);
+            assert_eq!(value["object"]["input"]["path"], path);
+            assert_eq!(value["object"]["result"]["content"], output);
+        }
+        assert!(execute_structcopy(&mut app, Some("tool wire stdout")).is_error);
+        assert_eq!(
+            serde_json::to_value(app.api_messages.as_ref()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn tool_copy_refuses_ambiguous_or_inconsistent_identity() {
+        let tmpdir = TempDir::new().expect("tempdir");
+        let mut app = test_app(&tmpdir);
+        let call = |execution_id: Option<&str>, provider: &str| {
+            json!({
+                "type":"tool_use", "id":provider, "execution_id":execution_id,
+                "name":"read_file", "input":{"path":"selected.txt"}
+            })
+        };
+        let result = |execution_id: Option<&str>, provider: &str| {
+            json!({
+                "type":"tool_result", "tool_use_id":provider, "execution_id":execution_id,
+                "content":"must not borrow this output"
+            })
+        };
+        for (label, selector, calls, results, unavailable) in [
+            (
+                "duplicate local calls",
+                "exec",
+                vec![call(Some("exec"), "wire"), call(Some("exec"), "wire")],
+                vec![result(Some("exec"), "wire")],
+                true,
+            ),
+            (
+                "duplicate legacy calls",
+                "wire",
+                vec![call(None, "wire"), call(None, "wire")],
+                vec![result(None, "wire")],
+                true,
+            ),
+            (
+                "duplicate local results",
+                "exec",
+                vec![call(Some("exec"), "wire")],
+                vec![result(Some("exec"), "wire"), result(Some("exec"), "wire")],
+                true,
+            ),
+            (
+                "duplicate legacy results",
+                "wire",
+                vec![call(None, "wire")],
+                vec![result(None, "wire"), result(None, "wire")],
+                true,
+            ),
+            (
+                "wrong provider",
+                "exec",
+                vec![call(Some("exec"), "wire")],
+                vec![result(Some("exec"), "other")],
+                true,
+            ),
+            (
+                "empty local identity",
+                "wire",
+                vec![call(Some(""), "wire")],
+                vec![result(Some(""), "wire")],
+                true,
+            ),
+            (
+                "colliding domains",
+                "exec",
+                vec![call(Some("exec"), "wire"), call(None, "exec")],
+                vec![result(Some("exec"), "wire"), result(None, "exec")],
+                true,
+            ),
+            (
+                "no local fallback",
+                "exec",
+                vec![call(Some("exec"), "wire")],
+                vec![result(Some("wrong"), "wire"), result(None, "wire")],
+                false,
+            ),
+            (
+                "no legacy fallback",
+                "wire",
+                vec![call(None, "wire")],
+                vec![result(Some("wire"), "wire")],
+                false,
+            ),
+        ] {
+            app.api_messages = std::sync::Arc::new(
+                serde_json::from_value(json!([
+                    {"role":"assistant", "content":calls}, {"role":"user", "content":results}
+                ]))
+                .expect("transcript"),
+            );
+            let before = serde_json::to_value(app.api_messages.as_ref()).unwrap();
+            let copied = execute_structcopy(&mut app, Some(&format!("tool {selector} stdout")));
+            assert_eq!(copied.is_error, unavailable, "{label}");
+            if !unavailable {
+                let value = parsed(&stdout_json(&copied));
+                assert_eq!(value["object"]["result"]["found"], false, "{label}");
+            }
+            assert!(
+                !copied
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("must not borrow"),
+                "{label}"
+            );
+            assert_eq!(
+                serde_json::to_value(app.api_messages.as_ref()).unwrap(),
+                before,
+                "{label}"
+            );
+        }
     }
 
     /// An unknown `Option<bool>` must serialize as JSON `null`. Collapsing it

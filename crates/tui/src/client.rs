@@ -1445,7 +1445,41 @@ fn add_extra_root_certs(
     builder
 }
 
+/// Admit a complete response's tool pairing ids before hooks, approvals or
+/// replayable history. Use the protocol frozen with the actual request.
+pub(crate) fn validate_tool_call_ids_for_protocol<'a>(
+    protocol: WireFormat,
+    ids: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        let pairing_id = if protocol == WireFormat::Responses {
+            responses::parse_tool_use_id(id).0
+        } else {
+            id.to_string()
+        };
+        if pairing_id.trim().is_empty() {
+            anyhow::bail!("Provider returned a tool call without a pairing id");
+        }
+        if !seen.insert(pairing_id) {
+            anyhow::bail!("Provider returned duplicate tool call pairing ids in one response");
+        }
+    }
+    Ok(())
+}
+
 impl CodewhaleClient {
+    pub(crate) fn wire_format(&self) -> WireFormat {
+        self.wire_format
+    }
+
+    pub(crate) fn validate_tool_call_ids<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        validate_tool_call_ids_for_protocol(self.wire_format, ids)
+    }
+
     fn is_local_ds4_model(&self, model: &str) -> bool {
         self.api_provider == ApiProvider::Custom
             && self.provider_identity.eq_ignore_ascii_case("ds4")
@@ -13888,26 +13922,77 @@ mod tests {
     }
 
     #[test]
+    fn tool_pairing_admission_uses_the_frozen_wire_protocol() {
+        for wire in [
+            WireFormat::ChatCompletions,
+            WireFormat::AnthropicMessages,
+            WireFormat::Responses,
+        ] {
+            let client = route_cap_test_client(wire, RouteLimits::default());
+            assert!(
+                client
+                    .validate_tool_call_ids(["unique-a", "unique-b"])
+                    .is_ok()
+            );
+            for ids in [["", "valid"], ["   ", "valid"], ["same", "same"]] {
+                assert!(
+                    client.validate_tool_call_ids(ids).is_err(),
+                    "{wire:?}: {ids:?}"
+                );
+            }
+            let result = client.validate_tool_call_ids(["call|item-a", "call|item-b"]);
+            assert_eq!(result.is_err(), wire == WireFormat::Responses);
+            assert_eq!(
+                client.validate_tool_call_ids(["|item"]).is_err(),
+                wire == WireFormat::Responses
+            );
+            // Each response is independent: provider reuse on another round is valid.
+            assert!(client.validate_tool_call_ids(["reused"]).is_ok());
+            assert!(client.validate_tool_call_ids(["reused"]).is_ok());
+        }
+    }
+
+    #[test]
     fn outbound_seam_excludes_host_execution_identity_for_every_dialect() {
         let _lock = crate::test_support::lock_test_env();
         const IMAGE: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
-        for wire in [
-            WireFormat::ChatCompletions,
-            WireFormat::Responses,
-            WireFormat::AnthropicMessages,
+        for (wire, google_route) in [
+            (WireFormat::ChatCompletions, false),
+            (WireFormat::ChatCompletions, true),
+            (WireFormat::Responses, false),
+            (WireFormat::AnthropicMessages, false),
         ] {
-            let client = route_cap_test_client(wire, RouteLimits::default());
+            let model = if google_route {
+                "gemini-2.5-flash"
+            } else {
+                "DeepSeek-V4-Flash"
+            };
+            let client = if google_route {
+                let base_url = "https://generativelanguage.googleapis.com/v1beta/openai";
+                let config = Config {
+                    provider: Some("custom".to_string()),
+                    default_text_model: Some(model.to_string()),
+                    ..Config::default()
+                }
+                .with_legacy_root(Some("fixture".to_string()), Some(base_url.to_string()));
+                CodewhaleClient::from_parts(
+                    base_url.to_string(),
+                    model.to_string(),
+                    wire,
+                    Some(RouteLimits::default()),
+                    &config,
+                )
+                .unwrap()
+            } else {
+                route_cap_test_client(wire, RouteLimits::default())
+            };
             let provider_id = if wire == WireFormat::Responses {
                 "wire-call|provider-item"
             } else {
                 "wire-call"
             };
-            let mut request = translation_message_request(
-                "inspect",
-                "DeepSeek-V4-Flash".to_string(),
-                "English",
-                1024,
-            );
+            let mut request =
+                translation_message_request("inspect", model.to_string(), "English", 1024);
             request.messages.extend([
                 Message {
                     role: Role::Assistant,
@@ -13965,7 +14050,12 @@ mod tests {
                 );
                 assert!(bytes.contains("wire-call") && bytes.contains(IMAGE));
                 if wire == WireFormat::ChatCompletions {
-                    assert!(bytes.contains("parent-wire") && bytes.contains("provider-signature"));
+                    assert!(bytes.contains("parent-wire"));
+                    assert_eq!(
+                        bytes.contains("provider-signature"),
+                        google_route,
+                        "Google signatures remain restricted to Google's route"
+                    );
                 }
                 if wire == WireFormat::Responses {
                     let input = prepared.body["input"].as_array().unwrap();

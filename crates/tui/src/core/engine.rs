@@ -2095,6 +2095,7 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::ToolCallStarted {
+                model_call: None,
                 id: tool_id.clone(),
                 name: tool_name.clone(),
                 input: tool_input.clone(),
@@ -2185,6 +2186,7 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::ToolCallComplete {
+                model_call: None,
                 id: tool_id,
                 name: tool_name,
                 result,

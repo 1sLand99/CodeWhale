@@ -685,3 +685,25 @@ fn overflow_retry_keeps_the_previous_note_and_the_instruction() {
     assert!(drop_oldest_history_messages(&mut quoted));
     assert_eq!(quoted[0], text_message(Role::User, "later"));
 }
+
+#[test]
+fn pruning_metadata_belongs_to_the_exact_execution() {
+    let messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+        {"role":"assistant","content":[{"type":"tool_use","id":"reused","execution_id":"first","name":"read","input":{"path":"first.txt"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"reused","execution_id":"first","content":"A".repeat(20000)}]},
+        {"role":"assistant","content":[{"type":"tool_use","id":"reused","execution_id":"second","name":"search","input":{"pattern":"second"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"reused","execution_id":"second","content":"B".repeat(20000)}]}
+    ])).unwrap();
+    let plan = plan_tool_result_prunes(&messages, 0);
+    assert_eq!(plan.len(), 2);
+    let first = plan.iter().find(|item| item.message_idx == 1).unwrap();
+    assert!(first.summary.contains("first.txt"), "{}", first.summary);
+    assert!(!first.summary.contains("second"), "{}", first.summary);
+    let mut ambiguous = messages.clone();
+    ambiguous.push(messages[0].clone());
+    assert!(
+        !plan_tool_result_prunes(&ambiguous, 0)
+            .iter()
+            .any(|item| item.message_idx == 1)
+    );
+}

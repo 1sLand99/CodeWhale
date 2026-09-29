@@ -49,7 +49,7 @@ use crate::tui::streaming::StreamingState;
 use crate::tui::transcript::TranscriptViewCache;
 use crate::tui::views::ViewStack;
 use codewhale_localization::{Locale, MessageId, resolve_locale, tr};
-use codewhale_models::{Message, SystemPrompt, Tool, Usage};
+use codewhale_models::{ContentBlock, Message, SystemPrompt, Tool, Usage};
 use codewhale_palette::{self as palette, UiTheme};
 
 mod composer;
@@ -2316,7 +2316,7 @@ pub struct App {
     /// Last completed reasoning block
     pub last_reasoning: Option<String>,
     /// Tool calls captured for the pending assistant message
-    pub pending_tool_uses: Vec<(String, String, Value)>,
+    pub pending_tool_uses: Vec<ContentBlock>,
     /// One-line permission receipts (`tool_id`, text) for decisions nobody
     /// was prompted for, held until that tool's card completes so the note
     /// lands directly under the card instead of splitting a running tool run.

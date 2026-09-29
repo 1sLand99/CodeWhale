@@ -695,6 +695,52 @@ fn test_prune_undone_tool_context_preserves_prior_tool_pairs() {
     ));
 }
 
+#[test]
+fn undo_uses_execution_identity_and_preserves_coalesced_result_stamp() {
+    let mut app = create_test_app();
+    let stamp = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"wire","execution_id":"first","name":"write_file","input":{"path":"a.txt"}},
+            {"type":"tool_use","id":"wire","execution_id":"second","name":"write_file","input":{"path":"b.txt"}}
+        ]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"wire","execution_id":"first","content":"kept"},
+            {"type":"tool_result","tool_use_id":"wire","execution_id":"second","content":"undone"}
+        ]}
+    ])).unwrap();
+    for message in messages {
+        app.push_api_message_stamped(message, stamp);
+    }
+    prune_undone_tool_context(&mut app, "second");
+    assert_eq!(app.api_messages.len(), 2);
+    assert_eq!(app.api_messages[0].content.len(), 1);
+    assert!(
+        matches!(&app.api_messages[1].content[..], [ContentBlock::ToolResult {
+        execution_id: Some(id), tool_use_id, content, ..
+    }] if id == "first" && tool_use_id == "wire" && content == "kept")
+    );
+    assert_eq!(app.api_messages_stamped().nth(1).unwrap().1, stamp);
+
+    // A legacy provider ID that happens to spell a local ID is not another
+    // spelling for that execution. With both present, the raw undo request is
+    // ambiguous and must leave every message intact.
+    app.push_api_message_stamped(
+        serde_json::from_value(serde_json::json!({
+            "role":"assistant","content":[
+                {"type":"tool_use","id":"first","name":"write_file","input":{}}
+            ]
+        }))
+        .unwrap(),
+        stamp,
+    );
+    let before = serde_json::to_value(&*app.api_messages).unwrap();
+    prune_undone_tool_context(&mut app, "first");
+    assert_eq!(serde_json::to_value(&*app.api_messages).unwrap(), before);
+}
+
 // ── /cache stats tests ──────────────────────────────────────────────
 
 #[test]
