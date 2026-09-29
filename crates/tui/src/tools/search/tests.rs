@@ -526,5 +526,90 @@ async fn grep_files_skips_an_unreadable_subdirectory() {
             .is_some_and(|file| file.ends_with("found.txt")),
         "{parsed}"
     );
-    assert_eq!(parsed["unreadable_dirs_skipped"], json!(1), "{parsed}");
+    assert_eq!(parsed["unreadable_paths_skipped"], json!(1), "{parsed}");
+}
+
+#[test]
+fn double_star_without_a_directory_boundary_is_a_string_prefix() {
+    assert!(matches_glob("src/test_foo.rs", "src/test_**"));
+    assert!(matches_glob("src/test_dir/a.rs", "src/test_**"));
+    assert!(!matches_glob("src/other.rs", "src/test_**"));
+}
+
+#[tokio::test]
+async fn grep_files_include_directory_glob_matches_nested_files() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    fs::create_dir_all(tmp.path().join("src").join("inner")).expect("mkdir");
+    fs::create_dir_all(tmp.path().join("srcs")).expect("mkdir");
+    fs::write(
+        tmp.path().join("src").join("inner").join("a.rs"),
+        "needle\n",
+    )
+    .expect("write");
+    fs::write(tmp.path().join("srcs").join("b.rs"), "needle\n").expect("write");
+
+    let result = GrepFilesTool
+        .execute(json!({"pattern": "needle", "include": ["src/**"]}), &ctx)
+        .await
+        .expect("execute");
+    let parsed: Value = serde_json::from_str(&result.content).unwrap();
+    let files: Vec<&str> = parsed["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["file"].as_str())
+        .collect();
+    assert_eq!(files.len(), 1, "{parsed}");
+    assert!(
+        files[0].replace('\\', "/").ends_with("src/inner/a.rs"),
+        "{parsed}"
+    );
+}
+
+#[tokio::test]
+async fn grep_files_stops_at_the_cap_without_scanning_further_files() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        fs::write(tmp.path().join(name), "needle\n").expect("write");
+    }
+
+    let result = GrepFilesTool
+        .execute(json!({"pattern": "needle", "max_results": 2}), &ctx)
+        .await
+        .expect("execute");
+    let parsed: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(parsed["matches"].as_array().unwrap().len(), 2, "{parsed}");
+    // The budget fills exactly at the end of the second file; the walk
+    // must stop there rather than scan on looking for one more match.
+    assert_eq!(parsed["files_searched"], json!(2), "{parsed}");
+    assert_eq!(parsed["truncated"], json!(true), "{parsed}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn grep_files_counts_an_unreadable_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    fs::write(tmp.path().join("found.txt"), "needle\n").expect("write");
+    let locked = tmp.path().join("locked.txt");
+    fs::write(&locked, "needle\n").expect("write");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    if fs::File::open(&locked).is_ok() {
+        // Running with privileges that ignore file modes; nothing to prove.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("chmod");
+        return;
+    }
+
+    let result = GrepFilesTool
+        .execute(json!({"pattern": "needle"}), &ctx)
+        .await;
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+    let parsed: Value = serde_json::from_str(&result.expect("execute").content).unwrap();
+    assert_eq!(parsed["matches"].as_array().unwrap().len(), 1, "{parsed}");
+    assert_eq!(parsed["unreadable_paths_skipped"], json!(1), "{parsed}");
 }

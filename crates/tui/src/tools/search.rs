@@ -198,10 +198,12 @@ impl ToolSpec for GrepFilesTool {
             let mut results: Vec<GrepMatch> = Vec::new();
             let mut files_searched = 0;
             let mut total_matches = 0;
-            // Set once a match exists beyond `max_results`. The walk keeps
-            // going past a full budget only until it sees one, so a capped
-            // result set is reported as capped rather than complete.
+            // Set when the cap stopped the search before it covered the whole
+            // tree: a match was seen beyond `max_results` in the file that
+            // filled the budget, or another candidate file was left unread.
+            // The walk never scans past the file that fills the budget.
             let mut truncated = false;
+            let mut unreadable_files = 0usize;
 
             let skipped_dirs = visit_files(
                 &search_path,
@@ -210,7 +212,8 @@ impl ToolSpec for GrepFilesTool {
                 cancel_token,
                 follow_symlinks,
                 &mut |file_path| {
-                    if truncated {
+                    if truncated || results.len() >= max_results {
+                        truncated = true;
                         return Ok(WalkControl::Stop);
                     }
                     check_cancelled(cancel_token)?;
@@ -230,16 +233,23 @@ impl ToolSpec for GrepFilesTool {
                         .to_string();
 
                     let budget = max_results.saturating_sub(results.len());
-                    let Some((file_matches, overflowed)) = search_file_streaming(
+                    let (file_matches, overflowed) = match search_file_streaming(
                         file_path,
                         &relative_path,
                         &regex,
                         context_lines,
                         budget,
                         cancel_token,
-                    )?
-                    else {
-                        return Ok(WalkControl::Continue); // Skip binary or unreadable files
+                    )? {
+                        FileScan::Scanned {
+                            matches,
+                            overflowed,
+                        } => (matches, overflowed),
+                        FileScan::NotText => return Ok(WalkControl::Continue),
+                        FileScan::Unreadable => {
+                            unreadable_files += 1;
+                            return Ok(WalkControl::Continue);
+                        }
                     };
 
                     files_searched += 1;
@@ -270,8 +280,12 @@ impl ToolSpec for GrepFilesTool {
             if truncated {
                 output["max_results"] = json!(max_results);
             }
-            if skipped_dirs > 0 {
-                output["unreadable_dirs_skipped"] = json!(skipped_dirs);
+            // Anything the walk could not read (a directory, a directory
+            // entry, or a file) is counted so the caller knows coverage was
+            // incomplete rather than reading silence as "no matches there".
+            let unreadable = skipped_dirs + unreadable_files;
+            if unreadable > 0 {
+                output["unreadable_paths_skipped"] = json!(unreadable);
             }
             Ok(output)
         })
@@ -343,13 +357,12 @@ fn grep_match_to_json(item: &GrepMatch, context_lines: usize) -> Value {
 /// Search a single file line-by-line with a small ring buffer for
 /// before-context, so file contents are never fully materialized.
 ///
-/// Returns `Ok(None)` when the file is unreadable or contains invalid UTF-8
-/// anywhere — the same "skip binary or unreadable files" semantics as the
-/// previous `read_to_string` implementation, which required the whole file to
-/// be valid before contributing any match. At most `budget` matches are
+/// Returns [`FileScan::NotText`] when the file contains invalid UTF-8
+/// anywhere (the whole file must be valid before contributing any match) and
+/// [`FileScan::Unreadable`] when it cannot be opened or read. At most `budget` matches are
 /// recorded; the scan still runs to EOF so late invalid bytes disqualify the
-/// file and pending after-context is completed. The returned flag is true
-/// when the file held at least one match beyond `budget`.
+/// file and pending after-context is completed. `overflowed` is true when
+/// the file held at least one match beyond `budget`.
 fn search_file_streaming(
     path: &Path,
     relative_path: &str,
@@ -357,9 +370,9 @@ fn search_file_streaming(
     context_lines: usize,
     budget: usize,
     cancel_token: Option<&CancellationToken>,
-) -> Result<Option<(Vec<GrepMatch>, bool)>, ToolError> {
+) -> Result<FileScan, ToolError> {
     let Ok(file) = fs::File::open(path) else {
-        return Ok(None);
+        return Ok(FileScan::Unreadable);
     };
     let mut reader = std::io::BufReader::new(file);
     let mut raw: Vec<u8> = Vec::new();
@@ -375,7 +388,7 @@ fn search_file_streaming(
         raw.clear();
         let n = match reader.read_until(b'\n', &mut raw) {
             Ok(n) => n,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(FileScan::Unreadable),
         };
         if n == 0 {
             break;
@@ -392,7 +405,7 @@ fn search_file_streaming(
             }
         }
         let Ok(line) = std::str::from_utf8(&raw[..end]) else {
-            return Ok(None);
+            return Ok(FileScan::NotText);
         };
 
         for (idx, remaining) in &mut pending {
@@ -430,7 +443,22 @@ fn search_file_streaming(
         line_idx += 1;
     }
 
-    Ok(Some((matches, overflowed)))
+    Ok(FileScan::Scanned {
+        matches,
+        overflowed,
+    })
+}
+
+/// Outcome of scanning one file.
+enum FileScan {
+    Scanned {
+        matches: Vec<GrepMatch>,
+        overflowed: bool,
+    },
+    /// Binary or not valid UTF-8: skipped on purpose.
+    NotText,
+    /// Could not be opened or read: skipped, and counted as incomplete coverage.
+    Unreadable,
 }
 
 /// Flow control for the streaming file walk.
@@ -527,9 +555,16 @@ fn visit_files_recursive(
             continue;
         }
 
-        // Get relative path for pattern matching
+        // Get relative path for pattern matching. Globs use `/`, so a native
+        // `\` separator is normalized as file_search does; otherwise
+        // `src/**` could never match `src\a.rs` on Windows.
         let relative = path.strip_prefix(root).unwrap_or(&path);
         let relative_str = relative.to_string_lossy();
+        let relative_str = if std::path::MAIN_SEPARATOR == '/' {
+            relative_str
+        } else {
+            std::borrow::Cow::Owned(relative_str.replace(std::path::MAIN_SEPARATOR, "/"))
+        };
 
         // Check exclusions
         if should_exclude(&relative_str, exclude_patterns) {
@@ -635,12 +670,17 @@ pub(crate) fn matches_glob(path: &str, pattern: &str) -> bool {
             let prefix = parts[0].trim_end_matches('/');
             let suffix = parts[1].trim_start_matches('/');
 
-            // The prefix names a directory: `build/**` covers `build` and
-            // `build/...`, never `build.rs` or `builders/`.
-            let under_prefix = path == prefix
-                || path
-                    .strip_prefix(prefix)
-                    .is_some_and(|rest| rest.starts_with('/'));
+            // A prefix ending in `/` names a directory: `build/**` covers
+            // `build` and `build/...`, never `build.rs` or `builders/`. A
+            // prefix without one (`src/test_**`) is a plain string prefix.
+            let under_prefix = if parts[0].ends_with('/') {
+                path == prefix
+                    || path
+                        .strip_prefix(prefix)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            } else {
+                path.starts_with(prefix)
+            };
             if !prefix.is_empty() && !under_prefix {
                 return false;
             }
