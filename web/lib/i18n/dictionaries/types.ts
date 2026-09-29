@@ -477,6 +477,27 @@ export interface DigestDict {
   lead: string;
 }
 
+/** `app/[locale]/feed/page.tsx`. */
+export interface FeedDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Page H1. */
+  title: string;
+  /** The H1 again in the other script, set beside it (the bilingual Han title). */
+  titleAside: string;
+  /** BCP 47 language of `titleAside`. */
+  titleAsideLang: string;
+  /** `{repo}` is where the page typesets the repository link. */
+  lede: string;
+  pulls: string;
+  issues: string;
+  /** Items in a column; `{count}` is filled at render time. */
+  shownCount: string;
+  openIssue: string;
+  openPull: string;
+  startDiscussion: string;
+}
+
 /** `app/[locale]/faq/page.tsx` and its `components/faq-search.tsx`. */
 export interface FaqDict {
   metaTitle: string;
