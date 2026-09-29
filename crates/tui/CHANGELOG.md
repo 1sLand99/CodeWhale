@@ -55,6 +55,7 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Added
 
+- `tool_call_after` hooks for shell tools receive `DEEPSEEK_TOOL_EXECUTION_RECEIPT`: the command that actually ran after admission, its working directory, how it ended, and bounded stdout/stderr previews, so a hook can record exactly what executed ([#6689](https://github.com/Hmbown/Codewhale/issues/6689), requested by [@wuisabel-gif](https://github.com/wuisabel-gif)).
 - Runtime API: turns now record what they produced. Each item and turn
   carries typed artifact references (path, kind, size, revision, and a
   restore point when file-revert would accept one) for files a tool wrote,
