@@ -1904,8 +1904,24 @@ async fn create_summary(
             }
             Err(err) if is_request_too_large_error(&err) => match size_ladder {
                 RequestSizeLadder::Start => {
-                    let shrunk =
-                        crate::image_attach::shrink_images_for_request(&mut request_messages);
+                    // Decoding, resizing and re-encoding megabytes of inline
+                    // images is CPU-bound work; run it off the async worker so
+                    // the engine keeps servicing events while it happens.
+                    let mut outbound = std::mem::take(&mut request_messages);
+                    let joined = tokio::task::spawn_blocking(move || {
+                        let shrunk = crate::image_attach::shrink_images_for_request(&mut outbound);
+                        (outbound, shrunk)
+                    })
+                    .await;
+                    let (outbound, shrunk) = match joined {
+                        Ok(joined) => joined,
+                        Err(join_error) => {
+                            return Err(err.context(format!(
+                                "The summary request exceeded the provider's request-body limit and re-encoding its inline images failed: {join_error}"
+                            )));
+                        }
+                    };
+                    request_messages = outbound;
                     if shrunk.images_seen == 0 {
                         return Err(err.context(
                             "The summary request exceeded the provider's request-body limit and the history carries no inline images to re-encode",
