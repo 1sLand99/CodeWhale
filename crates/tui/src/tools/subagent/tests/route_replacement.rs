@@ -277,13 +277,14 @@ replacements = ["fixture-backup-model"]
 /// The founder's shape: a saved agent profile (not a config pin) routes the
 /// reviewer role to a provider whose account refuses authorization, while
 /// the parent route works.
-fn write_refusing_reviewer_profile(root: &std::path::Path) {
+async fn write_refusing_reviewer_profile(root: &std::path::Path) {
     let dir = root.join(".codewhale/agents");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(
         dir.join("reviewer.toml"),
         "id = \"reviewer\"\ndisplay_name = \"reviewer\"\nprovider = \"PinRoute\"\nmodel = \"fixture-pin-model\"\nrole_hint = \"reviewer\"\n",
     )
+    .await
     .unwrap();
 }
 
@@ -323,7 +324,7 @@ async fn refused_saved_profile_pin_runs_on_the_parent_route_visibly_and_once() {
     let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
     let _provider = crate::test_support::EnvVarGuard::set("CODEWHALE_PROVIDER", "deepseek");
     let _model = crate::test_support::EnvVarGuard::set("CODEWHALE_MODEL", "deepseek-v4-flash");
-    write_refusing_reviewer_profile(root.path());
+    write_refusing_reviewer_profile(root.path()).await;
     let (tool, context, manager, pin_calls, backup_calls) = reviewer_tool(root.path(), "").await;
 
     // First worker: the pin is asked once, refuses, and the same request runs
@@ -397,7 +398,7 @@ async fn strict_saved_profile_pin_stays_exact_and_names_its_source() {
     let _profiles = ProjectProfiles::enabled();
     let root = tempdir().unwrap();
     let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path().join("state"));
-    write_refusing_reviewer_profile(root.path());
+    write_refusing_reviewer_profile(root.path()).await;
     let (tool, _context, _manager, _pin, _backup) = reviewer_tool(root.path(), "").await;
     let runtime = tool.runtime.clone();
     let bind = |allow_fallback: bool| {

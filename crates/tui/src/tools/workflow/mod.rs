@@ -8191,22 +8191,31 @@ export default workflow({
     fn leaf_absolute_cwd_inside_the_workspace_lowers_repo_relative() {
         // Founder run: a plan leaf with cwd "/Volumes/VIXinSSD/CW/codewhale"
         // was refused although it named the workspace's own checkout.
+        // `/a/b` has no drive on Windows and is not absolute there.
+        let native_abs = |unix_path: &str| {
+            if cfg!(windows) {
+                format!("C:{}", unix_path.replace('/', "\\"))
+            } else {
+                unix_path.to_string()
+            }
+        };
         let leaf: LeafSpec = serde_json::from_value(json!({
             "id": "engine-readiness",
             "prompt": "Audit release readiness",
             "agent_type": "review",
             "mode": "read_only",
-            "cwd": "/Volumes/VIXinSSD/CW/codewhale"
+            "cwd": native_abs("/Volumes/VIXinSSD/CW/codewhale")
         }))
         .expect("leaf");
-        let workspace = Path::new("/Volumes/VIXinSSD/CW");
-        let source = leaf_task_options_expression(&leaf, None, false, Some(workspace)).unwrap();
+        let workspace = PathBuf::from(native_abs("/Volumes/VIXinSSD/CW"));
+        let source =
+            leaf_task_options_expression(&leaf, None, false, Some(workspace.as_path())).unwrap();
         assert!(source.contains("cwd: \"codewhale\""), "{source}");
-        assert!(!source.contains("/Volumes"), "{source}");
+        assert!(!source.contains("Volumes"), "{source}");
 
         let mut outside = leaf.clone();
-        outside.cwd = Some("/Volumes/VIXinSSD/other".to_string());
-        let error = leaf_task_options_expression(&outside, None, false, Some(workspace))
+        outside.cwd = Some(native_abs("/Volumes/VIXinSSD/other"));
+        let error = leaf_task_options_expression(&outside, None, false, Some(workspace.as_path()))
             .unwrap_err()
             .to_string();
         assert!(error.contains("outside the workspace"), "{error}");

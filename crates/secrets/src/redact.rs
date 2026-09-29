@@ -792,11 +792,18 @@ mod prose_key_tests {
 
     #[test]
     fn credentials_inside_prose_and_real_headers_are_still_masked() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        // Synthetic JWT shape (header `{"alg":"HS256"}`, payload `{"sub":"fixture"}`,
+        // a placeholder signature); never a real signed token.
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiJmaXh0dXJlIn0",
+            "c3ludGhldGljLXNpZ25hdHVyZQ",
+        ]
+        .join(".");
         let out = redact_secrets(&format!(
             "Authorization failed: the server rejected Bearer {jwt} for this route"
         ));
-        assert!(!out.contains(jwt), "{out}");
+        assert!(!out.contains(&jwt), "{out}");
         assert!(out.contains("the server rejected"), "{out}");
         let out = redact_secrets("Authorization failed: key sk-live-abcdef0123456789 was revoked");
         assert!(!out.contains("sk-live-abcdef0123456789"), "{out}");
