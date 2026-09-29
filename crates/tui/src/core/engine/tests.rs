@@ -22446,11 +22446,21 @@ fn stream_retry_scenario() {
         // The decoder hit Err on the very first poll → engine should retry
         // because DeepSeek hasn't billed and the user has seen nothing.
         assert!(
-            super::should_transparently_retry_stream(false, 0, false),
+            super::should_transparently_retry_stream(
+                false,
+                0,
+                super::MAX_TRANSPARENT_STREAM_RETRIES,
+                false
+            ),
             "first attempt with no content must be eligible for transparent retry"
         );
         assert!(
-            super::should_transparently_retry_stream(false, 1, false),
+            super::should_transparently_retry_stream(
+                false,
+                1,
+                super::MAX_TRANSPARENT_STREAM_RETRIES,
+                false
+            ),
             "second attempt (one prior retry) with no content must still be eligible"
         );
     }
@@ -22461,11 +22471,21 @@ fn stream_retry_scenario() {
         // and the UI has streamed deltas; resending would double-bill and the
         // user would see the same prefix twice.
         assert!(
-            !super::should_transparently_retry_stream(true, 0, false),
+            !super::should_transparently_retry_stream(
+                true,
+                0,
+                super::MAX_TRANSPARENT_STREAM_RETRIES,
+                false
+            ),
             "any content received → no transparent retry, even with full budget"
         );
         assert!(
-            !super::should_transparently_retry_stream(true, 1, false),
+            !super::should_transparently_retry_stream(
+                true,
+                1,
+                super::MAX_TRANSPARENT_STREAM_RETRIES,
+                false
+            ),
             "any content received → no transparent retry on subsequent attempts"
         );
     }
@@ -22474,11 +22494,21 @@ fn stream_retry_scenario() {
         // Cancellation overrides every other condition. If the user pressed
         // Esc / Ctrl-C, do not silently re-issue the request behind their back.
         assert!(
-            !super::should_transparently_retry_stream(false, 0, true),
+            !super::should_transparently_retry_stream(
+                false,
+                0,
+                super::MAX_TRANSPARENT_STREAM_RETRIES,
+                true
+            ),
             "cancelled turn must not be transparently retried"
         );
         assert!(
-            !super::should_transparently_retry_stream(false, 1, true),
+            !super::should_transparently_retry_stream(
+                false,
+                1,
+                super::MAX_TRANSPARENT_STREAM_RETRIES,
+                true
+            ),
             "cancelled turn must not be transparently retried even with budget"
         );
     }
@@ -22569,6 +22599,7 @@ fn stream_retry_budget_caps_transparent_retries_at_two() {
         super::should_transparently_retry_stream(
             false,
             super::MAX_TRANSPARENT_STREAM_RETRIES - 1,
+            super::MAX_TRANSPARENT_STREAM_RETRIES,
             false,
         ),
         "one short of the cap should still retry"
@@ -22576,6 +22607,7 @@ fn stream_retry_budget_caps_transparent_retries_at_two() {
     assert!(
         !super::should_transparently_retry_stream(
             false,
+            super::MAX_TRANSPARENT_STREAM_RETRIES,
             super::MAX_TRANSPARENT_STREAM_RETRIES,
             false,
         ),
@@ -22585,6 +22617,7 @@ fn stream_retry_budget_caps_transparent_retries_at_two() {
         !super::should_transparently_retry_stream(
             false,
             super::MAX_TRANSPARENT_STREAM_RETRIES + 5,
+            super::MAX_TRANSPARENT_STREAM_RETRIES,
             false,
         ),
         "well past the cap, definitely no transparent retries"
@@ -22627,11 +22660,16 @@ fn sleep_resume_scenario() {
         // detected sleep gap retries regardless of streamed content — the
         // partial output predates the sleep and the user was not watching.
         assert!(
-            super::should_resume_after_sleep(true, 0, false),
+            super::should_resume_after_sleep(true, 0, super::MAX_STREAM_RETRIES, false),
             "detected sleep with full budget must resume"
         );
         assert!(
-            super::should_resume_after_sleep(true, super::MAX_STREAM_RETRIES - 1, false),
+            super::should_resume_after_sleep(
+                true,
+                super::MAX_STREAM_RETRIES - 1,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "detected sleep one short of the budget must still resume"
         );
     }
@@ -22641,18 +22679,23 @@ fn sleep_resume_scenario() {
         // deliberate no-retry-after-content policy for ordinary flakes (#103)
         // is preserved.
         assert!(
-            !super::should_resume_after_sleep(false, 0, false),
+            !super::should_resume_after_sleep(false, 0, super::MAX_STREAM_RETRIES, false),
             "no sleep gap → never resume via this layer"
         );
     }
     // from sleep_resume_respects_budget_and_cancellation
     {
         assert!(
-            !super::should_resume_after_sleep(true, super::MAX_STREAM_RETRIES, false),
+            !super::should_resume_after_sleep(
+                true,
+                super::MAX_STREAM_RETRIES,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "budget exhausted → surface the failure instead of looping"
         );
         assert!(
-            !super::should_resume_after_sleep(true, 0, true),
+            !super::should_resume_after_sleep(true, 0, super::MAX_STREAM_RETRIES, true),
             "cancelled turn must not be resumed behind the user's back"
         );
     }
@@ -22674,11 +22717,23 @@ fn network_drop_scenario() {
     // from network_drop_resume_only_fires_for_headless_hosts
     {
         assert!(
-            super::should_resume_after_network_drop(true, true, 0, false),
+            super::should_resume_after_network_drop(
+                true,
+                true,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "headless host + network-class drop with budget must resume"
         );
         assert!(
-            !super::should_resume_after_network_drop(false, true, 0, false),
+            !super::should_resume_after_network_drop(
+                false,
+                true,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "interactive sessions keep the #103 surface-the-warning policy: \
              the user saw the partial deltas and replay would render them twice"
         );
@@ -22686,7 +22741,13 @@ fn network_drop_scenario() {
     // from network_drop_resume_requires_network_class_error
     {
         assert!(
-            !super::should_resume_after_network_drop(true, false, 0, false),
+            !super::should_resume_after_network_drop(
+                true,
+                false,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "non-network failures (model/parse/auth) must never be replayed"
         );
     }
@@ -22697,16 +22758,29 @@ fn network_drop_scenario() {
                 true,
                 true,
                 super::MAX_STREAM_RETRIES - 1,
-                false
+                super::MAX_STREAM_RETRIES,
+                false,
             ),
             "one short of the budget should still resume"
         );
         assert!(
-            !super::should_resume_after_network_drop(true, true, super::MAX_STREAM_RETRIES, false),
+            !super::should_resume_after_network_drop(
+                true,
+                true,
+                super::MAX_STREAM_RETRIES,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "budget exhausted → surface the failure instead of looping"
         );
         assert!(
-            !super::should_resume_after_network_drop(true, true, 0, true),
+            !super::should_resume_after_network_drop(
+                true,
+                true,
+                0,
+                super::MAX_STREAM_RETRIES,
+                true
+            ),
             "cancelled turn must not be resumed behind the operator's back"
         );
     }
@@ -22728,29 +22802,69 @@ fn interactive_network_scenario() {
     // from interactive_network_drop_resume_only_fires_for_interactive_hosts
     {
         assert!(
-            super::should_resume_interactive_after_network_drop(true, true, true, true, 0, false),
+            super::should_resume_interactive_after_network_drop(
+                true,
+                true,
+                true,
+                true,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "interactive TUI + partial text + no tools + budget must resume"
         );
         assert!(
-            !super::should_resume_interactive_after_network_drop(false, true, true, true, 0, false),
+            !super::should_resume_interactive_after_network_drop(
+                false,
+                true,
+                true,
+                true,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "headless hosts must use the headless resume path, not this one"
         );
     }
     // from interactive_network_drop_resume_requires_partial_content_and_no_tools
     {
         assert!(
-            !super::should_resume_interactive_after_network_drop(true, true, false, true, 0, false),
+            !super::should_resume_interactive_after_network_drop(
+                true,
+                true,
+                false,
+                true,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "no streamed content → transparent retry or nothing-streamed path"
         );
         assert!(
-            !super::should_resume_interactive_after_network_drop(true, true, true, false, 0, false),
+            !super::should_resume_interactive_after_network_drop(
+                true,
+                true,
+                true,
+                false,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "in-flight tool calls must never be resumed (side-effect duplication)"
         );
     }
     // from interactive_network_drop_resume_requires_network_class_error
     {
         assert!(
-            !super::should_resume_interactive_after_network_drop(true, false, true, true, 0, false),
+            !super::should_resume_interactive_after_network_drop(
+                true,
+                false,
+                true,
+                true,
+                0,
+                super::MAX_STREAM_RETRIES,
+                false
+            ),
             "non-network failures must surface normally"
         );
     }
@@ -22765,7 +22879,8 @@ fn interactive_network_drop_resume_respects_budget_and_cancellation() {
             true,
             true,
             super::MAX_STREAM_RETRIES - 1,
-            false
+            super::MAX_STREAM_RETRIES,
+            false,
         ),
         "one short of the budget should still resume"
     );
@@ -22776,12 +22891,21 @@ fn interactive_network_drop_resume_respects_budget_and_cancellation() {
             true,
             true,
             super::MAX_STREAM_RETRIES,
-            false
+            super::MAX_STREAM_RETRIES,
+            false,
         ),
         "budget exhausted → surface the failure"
     );
     assert!(
-        !super::should_resume_interactive_after_network_drop(true, true, true, true, 0, true),
+        !super::should_resume_interactive_after_network_drop(
+            true,
+            true,
+            true,
+            true,
+            0,
+            super::MAX_STREAM_RETRIES,
+            true
+        ),
         "cancelled turn must not resume"
     );
 }
@@ -22796,6 +22920,70 @@ struct FlakyNetworkDropModelClient {
     failures: usize,
     terminal_before_drop: bool,
     content_before_drop: bool,
+    /// #6699: fail the request itself, before any stream exists, in the
+    /// given shape.
+    open_failure: Option<StreamOpenFailure>,
+}
+
+/// #6699/#6711: how a request fails before any stream exists.
+#[derive(Clone, Copy, Debug)]
+enum StreamOpenFailure {
+    /// The typed transport error `open_sse_response` returns on a header
+    /// stall.
+    HeaderStall,
+    /// A reqwest connect error under the Anthropic adapter's outer context,
+    /// as an HTTP/1.1-pinned open returns it: the outer message names no
+    /// transport cause.
+    WrappedConnectError,
+    /// The Responses adapter shape: the typed retry-layer network error
+    /// under the adapter's outer context.
+    WrappedTypedNetworkError,
+    /// A provider answered with an HTTP rejection whose body mentions a
+    /// connection reset, as the Anthropic adapter reports it (untyped).
+    HttpRejectionMentioningConnection,
+}
+
+impl StreamOpenFailure {
+    async fn error(self) -> anyhow::Error {
+        use anyhow::Context as _;
+        match self {
+            Self::HeaderStall => anyhow::Error::new(crate::llm_client::LlmError::NetworkError(
+                "SSE stream request did not receive response headers after 45s \
+                 (HTTP/2 and HTTP/1.1)."
+                    .to_string(),
+            )),
+            Self::WrappedConnectError => {
+                // A port that was just released refuses the connection.
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                let addr = listener.local_addr().expect("local addr");
+                drop(listener);
+                let client = crate::tls::reqwest_client_builder()
+                    .no_proxy()
+                    .build()
+                    .expect("client");
+                let send = client
+                    .post(format!("http://{addr}/v1/messages"))
+                    .send()
+                    .await;
+                let err = send
+                    .context("Anthropic Messages API request failed")
+                    .expect_err("closed port must refuse the connection");
+                assert_eq!(err.to_string(), "Anthropic Messages API request failed");
+                err
+            }
+            Self::WrappedTypedNetworkError => Err::<(), _>(anyhow::Error::new(
+                crate::llm_client::LlmError::NetworkError(
+                    "Connection failed: error sending request".to_string(),
+                ),
+            ))
+            .context("Responses API request failed")
+            .expect_err("wrapped network error"),
+            Self::HttpRejectionMentioningConnection => anyhow::anyhow!(
+                "Anthropic API error (HTTP 500 Internal Server Error api_error): \
+                 upstream connection reset"
+            ),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -22825,6 +23013,9 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .saturating_add(1);
         if call <= self.failures {
+            if let Some(open_failure) = self.open_failure {
+                return Err(open_failure.error().await);
+            }
             if self.terminal_before_drop {
                 let start_usage = Usage {
                     input_tokens: 31,
@@ -22896,6 +23087,7 @@ async fn run_headless_turn_with_flaky_network(
         failures,
         terminal_before_drop: false,
         content_before_drop: true,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -23037,6 +23229,7 @@ async fn terminal_diagnostics_count_transparent_stream_requests_without_extra_sn
         failures: 1,
         terminal_before_drop: false,
         content_before_drop: false,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let (mut engine, handle) = Engine::new_with_model_client(
@@ -23070,6 +23263,165 @@ async fn terminal_diagnostics_count_transparent_stream_requests_without_extra_sn
     );
 }
 
+/// #6699: drive one interactive turn whose first `failures` requests fail
+/// before a stream opens, with `max_resumes` as the configured budget.
+async fn run_turn_with_stream_open_failures(
+    failures: usize,
+    max_resumes: Option<u32>,
+    open_failure: StreamOpenFailure,
+) -> (
+    std::sync::Arc<FlakyNetworkDropModelClient>,
+    TurnOutcomeStatus,
+    Option<String>,
+    crate::tool_inspection::TurnStopDiagnostics,
+    Vec<Event>,
+) {
+    let workspace = tempdir().expect("tempdir");
+    let model = std::sync::Arc::new(FlakyNetworkDropModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        failures,
+        terminal_before_drop: false,
+        content_before_drop: false,
+        open_failure: Some(open_failure),
+    });
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let engine_config = EngineConfig {
+        terminal_chrome_enabled: true,
+        stream_retry_limits: turn_budget::resolve_stream_retry_limits(max_resumes, None, None),
+        ..deterministic_engine_config(workspace.path())
+    };
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    let terminal = turn
+        .terminal_request_snapshot(status)
+        .expect("terminal snapshot")
+        .terminal
+        .expect("terminal facts");
+    let mut rx = handle.rx_event.write().await;
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    (model, status, error, terminal, events)
+}
+
+#[tokio::test]
+async fn stream_open_failure_is_retried_through_the_resume_budget() {
+    let (model, status, error, terminal, events) =
+        run_turn_with_stream_open_failures(1, None, StreamOpenFailure::HeaderStall).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "a request that never opened must be re-issued once"
+    );
+    assert_eq!(terminal.model_requests_started, 2);
+    assert_eq!(terminal.stream_resumes, 1);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Error { .. })),
+        "a recovered open failure must not surface an error event: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_open_failure_fails_the_turn_once_the_budget_is_spent() {
+    let (model, status, error, terminal, events) =
+        run_turn_with_stream_open_failures(usize::MAX, None, StreamOpenFailure::HeaderStall).await;
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1 + super::MAX_STREAM_RETRIES as usize,
+        "initial attempt plus the default resume budget, then the turn fails"
+    );
+    assert_eq!(terminal.stream_resumes, super::MAX_STREAM_RETRIES);
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("did not receive response headers")),
+        "the real transport error must surface: {error:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Error { .. }))
+            .count(),
+        1,
+        "only the exhausted attempt emits an error event: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn stream_open_failure_honors_a_configured_resume_budget() {
+    let (model, status, _error, terminal, _events) =
+        run_turn_with_stream_open_failures(usize::MAX, Some(0), StreamOpenFailure::HeaderStall)
+            .await;
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "`stream_max_resumes = 0` disables the turn-level retry"
+    );
+    assert_eq!(terminal.stream_resumes, 0);
+}
+
+/// #6711: an HTTP/1.1-pinned Anthropic open returns the reqwest connect
+/// error under an outer context that names no transport cause. The retry gate
+/// must read the error chain, not the outer message.
+#[tokio::test]
+async fn stream_open_failure_behind_adapter_context_is_retried() {
+    for open_failure in [
+        StreamOpenFailure::WrappedConnectError,
+        StreamOpenFailure::WrappedTypedNetworkError,
+    ] {
+        let (model, status, error, terminal, _events) =
+            run_turn_with_stream_open_failures(1, None, open_failure).await;
+        assert_eq!(
+            status,
+            TurnOutcomeStatus::Completed,
+            "{open_failure:?}: {error:?}"
+        );
+        assert_eq!(
+            model.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "{open_failure:?}: a wrapped transport failure must be re-issued"
+        );
+        assert_eq!(terminal.stream_resumes, 1, "{open_failure:?}");
+    }
+}
+
+/// #6711: a provider that answered with an HTTP rejection is not an open
+/// failure, even when its body mentions a connection or a timeout. The request
+/// must not be re-issued through the resume budget.
+#[tokio::test]
+async fn stream_open_http_rejection_mentioning_connection_is_not_retried() {
+    let (model, status, _error, terminal, events) = run_turn_with_stream_open_failures(
+        usize::MAX,
+        None,
+        StreamOpenFailure::HttpRejectionMentioningConnection,
+    )
+    .await;
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a provider rejection must fail the turn on the first answer"
+    );
+    assert_eq!(terminal.stream_resumes, 0);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Error { .. }))
+            .count(),
+        1,
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retried() {
     let model = std::sync::Arc::new(FlakyNetworkDropModelClient {
@@ -23077,6 +23429,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
         failures: 1,
         terminal_before_drop: true,
         content_before_drop: true,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -23435,6 +23788,7 @@ async fn run_interactive_turn_with_flaky_network(
         failures,
         terminal_before_drop: false,
         content_before_drop: true,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();

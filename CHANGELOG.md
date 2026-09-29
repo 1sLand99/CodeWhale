@@ -50,6 +50,7 @@ quieter, and Fleet runs can be checked before they spend anything.
 - **[@Lstarsky0](https://github.com/Lstarsky0)** — moved the docs/work, legal, digest and FAQ pages onto the dictionary spine ([#6405](https://github.com/Hmbown/Codewhale/pull/6405), [#6417](https://github.com/Hmbown/Codewhale/pull/6417), [#6499](https://github.com/Hmbown/Codewhale/pull/6499), [#6574](https://github.com/Hmbown/Codewhale/pull/6574)), tightened the Chinese-branching ceiling to 18 ([#6403](https://github.com/Hmbown/Codewhale/pull/6403)), and made Fleet publish without a two-link window ([#6431](https://github.com/Hmbown/Codewhale/pull/6431)).
 - **[@aboimpinto](https://github.com/aboimpinto)** — restored a green Linux full-workspace test gate without loosening any test, twice ([#6581](https://github.com/Hmbown/Codewhale/pull/6581), [#6666](https://github.com/Hmbown/Codewhale/pull/6666)).
 - **[@dajiaohuang](https://github.com/dajiaohuang)** — `codewhale config set` checks a known setting's value against its schema type before saving it ([#6568](https://github.com/Hmbown/Codewhale/pull/6568)).
+- **[@cenab](https://github.com/cenab)** — requested the Tsubasa provider row and supplied its endpoint, key and model values ([#6695](https://github.com/Hmbown/Codewhale/issues/6695)).
 - **[@BX166](https://github.com/BX166)** — reported the AICraft provider row missing its key console, docs link and guidance, and supplied the values ([#6616](https://github.com/Hmbown/Codewhale/issues/6616)).
 - **[@Water-Run](https://github.com/Water-Run)** — ingested namespaced model-only catalog entries so models present only in the canonical `models` map reach the offering list ([#6400](https://github.com/Hmbown/Codewhale/pull/6400)), and retired the blanket dead-code allowance with its unused feature stages, tightening the budget to match ([#6402](https://github.com/Hmbown/Codewhale/pull/6402)).
 
@@ -110,6 +111,11 @@ quieter, and Fleet runs can be checked before they spend anything.
   Computer Use bundle
   ([#6562](https://github.com/Hmbown/Codewhale/issues/6562),
   [#6509](https://github.com/Hmbown/Codewhale/issues/6509)).
+- Tsubasa is a bundled OpenAI-compatible provider row: base
+  `https://api.tsubasa.sh/v1`, key `TSUBASA_API_KEY`, model `tsubasa-pro`
+  (also `tsubasa-fast`). Its window is 32,768 tokens; set
+  `providers.tsubasa.context_window` to match
+  ([#6695](https://github.com/Hmbown/Codewhale/issues/6695), thanks @cenab).
 
 ### Security
 

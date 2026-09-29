@@ -506,6 +506,17 @@ pub struct EngineConfig {
     /// from `[tui].stream_max_duration_secs`. Pre-R1 this was the hard-coded
     /// `STREAM_MAX_DURATION_SECS`.
     pub stream_max_duration: Duration,
+    /// Stream-level retry budgets (#6700): whole-request resumes (also spent
+    /// by stream-open failures, #6699), in-stream transparent retries, and
+    /// the per-stream error streak. Resolved from `[tui].stream_max_resumes`,
+    /// `[tui].stream_max_transparent_retries` and `[tui].stream_max_errors`;
+    /// the defaults are the historical compiled-in values.
+    pub stream_retry_limits: turn_budget::StreamRetryLimits,
+    /// Bounded wait for SSE response headers (#6700). Resolved from
+    /// `[tui].stream_open_timeout_secs`, then
+    /// `CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`; only the awaiting-model
+    /// heartbeat bound reads it here — the client owns the real timeout.
+    pub stream_open_timeout: Duration,
     /// No-progress heartbeat timeout for live sub-agents. Used by the manager
     /// and parent wait loop to auto-cancel stuck children before they exhaust
     /// the sub-agent slot pool indefinitely (#2614).
@@ -642,6 +653,8 @@ impl Default for EngineConfig {
             turn_wall_clock: turn_budget::resolve_turn_wall_clock(None),
             stream_max_content_bytes: turn_budget::DEFAULT_STREAM_MAX_CONTENT_BYTES,
             stream_max_duration: Duration::from_secs(turn_budget::DEFAULT_STREAM_MAX_DURATION_SECS),
+            stream_retry_limits: turn_budget::StreamRetryLimits::default(),
+            stream_open_timeout: crate::client::resolve_stream_open_timeout(None),
             subagent_heartbeat_timeout: Duration::from_secs(
                 crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
             ),
@@ -4626,9 +4639,16 @@ impl Engine {
                 }
                 let snapshot = state.snapshot();
                 if snapshot.status != GoalStatus::Blocked.as_str() {
-                    tracing::warn!(
+                    // Not an ordering bug: only an Active goal is moved to
+                    // Blocked above, so reaching here means there was no
+                    // active goal to block — most often no goal at all
+                    // (`status=none`) on an ordinary turn that failed, or one
+                    // the user paused or completed during the turn. The
+                    // turn's own failure already reached the host through
+                    // `TurnComplete`; there is nothing goal-side to publish.
+                    tracing::debug!(
                         status = %snapshot.status,
-                        "goal changed before continuation blocker could be published"
+                        "no active goal to block after a non-completed turn"
                     );
                     return;
                 }
@@ -7285,15 +7305,28 @@ impl Engine {
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let mut pool = pool.lock().await;
+        // The outcome is logged here, at the one manager every surface drives,
+        // so a panel retry, `/mcp retry`, and the runtime API all leave the
+        // same receipt in the session log.
         match pool.retry_connection(name).await {
-            Ok(_) => {
+            Ok(connection) => {
+                tracing::info!(
+                    target: "mcp",
+                    server = %name,
+                    tools = connection.tools().len(),
+                    "MCP server connected on retry"
+                );
                 self.mcp_connection_errors.remove(name);
             }
             Err(error) => {
-                self.mcp_connection_errors.insert(
-                    name.to_string(),
-                    crate::mcp::format_mcp_error_for_display(&error),
+                let reason = crate::mcp::format_mcp_error_for_display(&error);
+                tracing::warn!(
+                    target: "mcp",
+                    server = %name,
+                    error = %reason,
+                    "MCP server retry failed"
                 );
+                self.mcp_connection_errors.insert(name.to_string(), reason);
             }
         }
         let snapshot = pool.manager_snapshot(
@@ -8596,12 +8629,15 @@ use self::streaming::TOOL_CALL_START_MARKERS;
 #[cfg(test)]
 use self::streaming::filter_tool_call_delta;
 use self::streaming::{
-    ContentBlockKind, MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES,
-    MAX_TRANSPARENT_STREAM_RETRIES, StreamResume, StreamRetryBudget, ToolCallDeltaFilterState,
-    ToolUseState, contains_fake_tool_wrapper, filter_tool_call_delta_with_state,
-    flush_tool_call_delta_state, should_resume_after_network_drop, should_resume_after_sleep,
+    ContentBlockKind, StreamResume, StreamRetryBudget, ToolCallDeltaFilterState, ToolUseState,
+    contains_fake_tool_wrapper, filter_tool_call_delta_with_state, flush_tool_call_delta_state,
+    should_resume_after_network_drop, should_resume_after_sleep,
     should_resume_interactive_after_network_drop, should_transparently_retry_stream,
     sleep_gap_detected, stream_read_error_user_message,
+};
+#[cfg(test)]
+use self::streaming::{
+    MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES, MAX_TRANSPARENT_STREAM_RETRIES,
 };
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, EXECUTE_TOOLS_TOOL_NAME, JS_EXECUTION_TOOL_NAME,

@@ -97,6 +97,20 @@ pub(crate) enum McpLoginProgress {
     Finished(Result<(), String>),
 }
 
+/// One `/mcp retry <name>` in flight. The retry runs as an engine op from a
+/// background task, so a running turn queues it in the engine mailbox instead
+/// of parking the UI loop (#6159) or asking the person to press it again; the
+/// outcome lands in `result` and `poll_mcp_retries` reports it.
+pub(crate) struct PendingMcpRetry {
+    pub server: String,
+    /// A turn owned the engine when the retry was requested, so it waits for
+    /// that turn to finish before it connects.
+    pub queued: bool,
+    pub result: std::sync::Arc<
+        std::sync::Mutex<Option<Result<crate::core::ops::McpManagerUpdate, String>>>,
+    >,
+}
+
 impl Drop for PendingMcpLogin {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -1570,6 +1584,10 @@ pub struct App {
     /// that `TurnComplete { error: .. }` would otherwise emit on top of
     /// the in-transcript error cell.
     pub turn_error_posted: bool,
+    /// Text of the error cell posted for the current turn, when
+    /// `turn_error_posted`. A turn that then ends `Failed` persists exactly
+    /// this text, so resume shows what the live transcript showed.
+    pub(crate) turn_error_notice: Option<String>,
     /// Legacy status text sink retained for compatibility with existing call sites.
     pub status_message: Option<String>,
     /// Recent status toasts (ephemeral, newest at back).
@@ -2134,6 +2152,9 @@ pub struct App {
     pub(crate) current_session_metadata: Option<SessionMetadata>,
     /// Metadata-only registry of large tool outputs produced in this session.
     pub session_artifacts: Vec<ArtifactRecord>,
+    /// Turns in this session that ended `Failed`, persisted with the session
+    /// so the reason survives the TUI closing.
+    pub(crate) session_turn_outcomes: Vec<crate::session_manager::SavedTurnOutcome>,
     /// Trust mode - allow access outside workspace
     pub trust_mode: bool,
     /// Translation mode — when enabled, the model is instructed to respond in
@@ -2384,6 +2405,8 @@ pub struct App {
     /// Discovery, registration and the browser callback all run in the
     /// background. Esc or dropping the app cancels the entire operation.
     pub(crate) mcp_login: Option<PendingMcpLogin>,
+    /// `/mcp retry` requests still waiting on the engine, one per server.
+    pub(crate) mcp_retries: Vec<PendingMcpRetry>,
     /// Shared cell for async prompt suggestion delivery from background task.
     pub prompt_suggestion_cell: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     /// Tracks whether the initial balance fetch has been attempted for this session.
@@ -4782,6 +4805,7 @@ impl App {
         self.context_references_by_cell.clear();
         self.session_context_references.clear();
         self.session_artifacts.clear();
+        self.session_turn_outcomes.clear();
         self.prune_transcript_index_state(0);
         self.history_version = self.history_version.wrapping_add(1);
         self.needs_redraw = true;
