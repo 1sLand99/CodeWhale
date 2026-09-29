@@ -1177,7 +1177,7 @@ async fn ingest_runtime_event(
                 let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
                 if kind == "tool_call" || kind == "file_change" || kind == "command_execution" {
                     let metadata = item.get("metadata");
-                    // Starts carry the provider call ID; item.id is Runtime's
+                    // Starts carry the call execution ID; item.id is Runtime's
                     // separate receipt ID. Runtime preserves the call identity
                     // in terminal metadata, including errors and redacted input.
                     let id = metadata

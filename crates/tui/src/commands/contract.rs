@@ -1641,6 +1641,7 @@ fn project_block(block: &ContentBlock) -> ExportBlock {
             content,
             is_error,
             content_blocks,
+            ..
         } => ExportBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: content.clone(),

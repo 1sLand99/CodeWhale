@@ -5617,6 +5617,59 @@ mod tests {
     }
 
     #[test]
+    fn saved_history_keeps_execution_identity_in_snapshots_and_journal() {
+        let tmp = tempdir().unwrap();
+        let manager = SessionManager::new(tmp.path().join("sessions")).unwrap();
+        let mut messages = vec![make_test_message("user", "inspect")];
+        for execution in ["execution-a", "execution-b"] {
+            messages.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "reused-provider-id".to_string(),
+                    execution_id: Some(execution.to_string()),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "README.md"}),
+                    caller: Some(codewhale_models::ToolCaller {
+                        caller_type: "code_execution".to_string(),
+                        tool_id: Some("provider-parent".to_string()),
+                    }),
+                    thought_signature: Some("provider-signature".to_string()),
+                }],
+            });
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "reused-provider-id".to_string(),
+                    execution_id: Some(execution.to_string()),
+                    content: format!("result for {execution}"),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            });
+        }
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        manager.save_session(&session).unwrap();
+        manager.save_checkpoint(&session).unwrap();
+        let snapshot = manager.load_session_snapshot(&session.metadata.id).unwrap();
+        let checkpoint = manager
+            .load_session_checkpoint(&session.metadata.id)
+            .unwrap()
+            .unwrap();
+        for restored in [snapshot, checkpoint] {
+            assert_eq!(restored.messages, messages);
+            assert_eq!(
+                restored.journal.as_ref().unwrap().active_messages(false),
+                messages
+            );
+            let first = restored.messages[1].content[0].tool_call_key();
+            let second = restored.messages[3].content[0].tool_call_key();
+            assert_ne!(first, second);
+            assert_eq!(first, restored.messages[2].content[0].tool_call_key());
+            assert_eq!(second, restored.messages[4].content[0].tool_call_key());
+        }
+    }
+
+    #[test]
     fn approval_hydration_distinguishes_missing_and_present_logs_on_disk() {
         let ask = ApprovalReceipt::asked("receipt-hydration", "exec_shell");
         let decision = ApprovalReceipt::decided("receipt-hydration", ApprovalOutcome::ApprovedOnce);
@@ -5949,6 +6002,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-in-flight".to_string(),
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "README.md"}),
@@ -5984,6 +6038,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-crashed".to_string(),
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "README.md"}),
@@ -6021,6 +6076,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-crashed".to_string(),
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "README.md"}),
@@ -6051,6 +6107,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "call-crashed".to_string(),
                 name: "read_file".to_string(),
                 input: serde_json::json!({"path": "README.md"}),
@@ -6105,6 +6162,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "plan-1".to_string(),
                     name: "update_plan".to_string(),
                     input: serde_json::json!({
@@ -6125,6 +6183,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "plan-1".to_string(),
                     content: "Plan updated".to_string(),
                     is_error: None,
@@ -6163,6 +6222,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "call-big".to_string(),
                     name: "exec_shell".to_string(),
                     input: serde_json::json!({"command": "cargo test -p codewhale-tui"}),
@@ -6173,6 +6233,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "call-big".to_string(),
                     content: raw.clone(),
                     is_error: None,
@@ -6216,6 +6277,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "call-legacy".to_string(),
                     name: "exec_shell".to_string(),
                     input: serde_json::json!({"command": "cargo check"}),
@@ -6226,6 +6288,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "call-legacy".to_string(),
                     content: raw.clone(),
                     is_error: None,
