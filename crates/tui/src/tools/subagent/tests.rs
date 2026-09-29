@@ -23107,8 +23107,14 @@ mod child_permission_gate {
         (store, registry.gate_runtime.context.state_namespace.clone())
     }
 
+    /// Readiness ceiling for a child's approval prompt or wait-end event to
+    /// reach hosts. It ends on the first matching event, so it only bounds how
+    /// long a stuck case takes to fail; a loaded shared-process `cargo test`
+    /// run overran the earlier 2s and 5s ceilings (#6698).
+    const CHILD_APPROVAL_EVENT_READINESS: std::time::Duration = std::time::Duration::from_secs(30);
+
     async fn next_child_approval_id(rx: &mut tokio::sync::mpsc::Receiver<Event>) -> String {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(CHILD_APPROVAL_EVENT_READINESS, async {
             while let Some(event) = rx.recv().await {
                 if let Event::ApprovalRequired { id, .. } = event {
                     return id;
@@ -23634,7 +23640,7 @@ mod child_permission_gate {
         rx: &mut tokio::sync::mpsc::Receiver<Event>,
         approval_id: &str,
     ) -> AgentWorkerStatus {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(CHILD_APPROVAL_EVENT_READINESS, async {
             while let Some(event) = rx.recv().await {
                 if let Event::AgentProgress { activity, .. } = event
                     && activity.approval_id.as_deref() == Some(approval_id)

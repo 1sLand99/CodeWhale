@@ -12053,6 +12053,12 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
     Ok(())
 }
 
+/// Readiness ceiling for an approval to be persisted, registered, or resolved.
+/// Every wait under it ends as soon as its condition holds, so it only bounds
+/// how long a stuck case takes to fail; a loaded shared-process `cargo test`
+/// run overran the earlier 2s ceiling (#6698).
+const APPROVAL_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Reads the approval identity exactly as an external client does: off the
 /// `approval.required` event for `raw_call_id`, returning the opaque ID that
 /// client must echo back. Also pins the two properties every caller below
@@ -12063,7 +12069,7 @@ async fn await_approval_identity(
     thread_id: &str,
     raw_call_id: &str,
 ) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     loop {
         let found = manager
             .events_since(thread_id, None)?
@@ -12156,7 +12162,7 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
         sleep(Duration::from_millis(20)).await;
     }
@@ -14746,7 +14752,7 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + APPROVAL_READINESS_TIMEOUT;
     while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
         sleep(Duration::from_millis(20)).await;
     }
@@ -15229,7 +15235,7 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
         })
         .await?;
 
-    let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+    let decision = tokio::time::timeout(APPROVAL_READINESS_TIMEOUT, harness.recv_approval_event())
         .await
         .context("approval timeout should resolve the engine's wait")?;
     // The engine hears a timeout, not the user's denial, so the model and the
