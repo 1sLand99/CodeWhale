@@ -1,0 +1,391 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  agentChat: vi.fn(),
+  getAgentEnv: vi.fn(),
+  validateSession: vi.fn(),
+  fetchRepoStats: vi.fn(),
+}));
+
+vi.mock("@/lib/community-agent", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./community-agent")>();
+  return {
+    ...actual,
+    agentChat: mocks.agentChat,
+    getAgentEnv: mocks.getAgentEnv,
+    validateSession: mocks.validateSession,
+  };
+});
+
+vi.mock("@/lib/github", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./github")>();
+  return { ...actual, fetchRepoStats: mocks.fetchRepoStats };
+});
+
+import { POST as adminPost } from "../app/api/admin/post/route";
+import { isPublishedDigest, listDrafts, saveDraft, type AgentDraft } from "./community-agent";
+import { runDigest, runDupes, runTriage } from "./community-agent-tasks";
+
+/** In-memory KV that pages like Cloudflare KV (max 1000 keys per list call). */
+class FakeKv {
+  readonly values = new Map<string, string>();
+  failPutsMatching: RegExp | null = null;
+
+  async get(key: string): Promise<string | null> {
+    return this.values.get(key) ?? null;
+  }
+
+  async put(key: string, value: string): Promise<void> {
+    if (this.failPutsMatching?.test(key)) throw new Error("kv put failed");
+    this.values.set(key, value);
+  }
+
+  async list(options?: { prefix?: string; limit?: number; cursor?: string }) {
+    const prefix = options?.prefix ?? "";
+    const limit = Math.min(options?.limit ?? 1000, 1000);
+    const start = options?.cursor ? Number(options.cursor) : 0;
+    const all = [...this.values.keys()].filter((k) => k.startsWith(prefix)).sort();
+    const page = all.slice(start, start + limit);
+    const next = start + page.length;
+    const complete = next >= all.length;
+    return {
+      keys: page.map((name) => ({ name })),
+      list_complete: complete,
+      ...(complete ? {} : { cursor: String(next) }),
+    };
+  }
+
+  async delete(key: string): Promise<void> {
+    this.values.delete(key);
+  }
+}
+
+function draft(overrides: Partial<AgentDraft> = {}): AgentDraft {
+  return {
+    id: "42",
+    type: "triage",
+    targetNumber: 42,
+    bodyEn: "English body",
+    bodyZh: "中文正文",
+    generatedAt: "2026-01-01T00:00:00.000Z",
+    posted: false,
+    ...overrides,
+  };
+}
+
+function jsonResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+}
+
+function inputUrl(input: string | URL | Request): string {
+  if (typeof input === "string") return input;
+  return input instanceof URL ? input.toString() : input.url;
+}
+
+function adminRequest(body: BodyInit, headers: Record<string, string> = {}): Request {
+  return new Request("https://codewhale.net/api/admin/post", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: "mt_sid=test-session",
+      origin: "https://codewhale.net",
+      ...headers,
+    },
+    body,
+    // Required by undici for a streamed request body.
+    ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
+  } as RequestInit);
+}
+
+function postBody(value: Record<string, unknown>): string {
+  return JSON.stringify(value);
+}
+
+function useAdminEnv(kv: FakeKv) {
+  mocks.getAgentEnv.mockResolvedValue({
+    CURATED_KV: kv,
+    MAINTAINER_TOKEN: "configured",
+    MAINTAINER_GITHUB_PAT: "ghp_test",
+    GITHUB_REPO: "Hmbown/CodeWhale",
+  });
+}
+
+/** GitHub stub that records every comment/issue creation. */
+function stubGitHub(status = 201) {
+  const posts: string[] = [];
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = inputUrl(input);
+    posts.push(url);
+    if (url.endsWith("/issues")) {
+      return jsonResponse({ number: 900, html_url: "https://github.com/Hmbown/CodeWhale/issues/900" }, status);
+    }
+    return jsonResponse({ id: 1 }, status);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return posts;
+}
+
+const DIGEST_MODEL_OUTPUT = {
+  titleEn: "Weekly Digest",
+  titleZh: "每周摘要",
+  summaryEn: "A quiet week.",
+  summaryZh: "平静的一周。",
+  sections: [{ heading: "Shipped", items: ["PR #1: fix"] }],
+};
+
+function stubDigestSources() {
+  mocks.fetchRepoStats.mockResolvedValue({ stars: 1, forks: 1 });
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+    const url = inputUrl(input);
+    if (url.includes("/issues?") || url.includes("/pulls?")) return jsonResponse([]);
+    throw new Error(`unexpected URL: ${url}`);
+  }));
+}
+
+function onlyKey(kv: FakeKv, prefix: string): string {
+  const keys = [...kv.values.keys()].filter((k) => k.startsWith(prefix));
+  expect(keys).toHaveLength(1);
+  return keys[0];
+}
+
+beforeEach(() => {
+  mocks.agentChat.mockReset();
+  mocks.getAgentEnv.mockReset();
+  mocks.fetchRepoStats.mockReset();
+  mocks.validateSession.mockReset();
+  mocks.validateSession.mockResolvedValue(true);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("weekly digest publication requires maintainer approval", () => {
+  it("stages the cron digest unapproved and publishes it only when the maintainer posts it", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    // Model output cannot self-approve.
+    mocks.agentChat.mockResolvedValue({
+      content: JSON.stringify({ ...DIGEST_MODEL_OUTPUT, approved: true }),
+      usage: { input: 1, output: 1 },
+    });
+
+    await expect(runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" })).resolves.toMatchObject({ ok: true });
+    const recordKey = onlyKey(kv, "digest:weekly-");
+    const staged: unknown = JSON.parse(kv.values.get(recordKey)!);
+    expect(staged).toMatchObject({ approved: false });
+    expect(isPublishedDigest(staged)).toBe(false);
+
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+    const draftKey = onlyKey(kv, "draft:digest:");
+    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en" })));
+    await expect(res.json()).resolves.toMatchObject({ ok: true, published: true, number: 900 });
+    expect(posts).toHaveLength(1);
+    expect(isPublishedDigest(JSON.parse(kv.values.get(recordKey)!))).toBe(true);
+  });
+
+  it("does not publish an edited digest's unedited model text", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
+    await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+
+    useAdminEnv(kv);
+    stubGitHub();
+    const draftKey = onlyKey(kv, "draft:digest:");
+    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en", editedBody: "# Edited" })));
+    await expect(res.json()).resolves.toMatchObject({ ok: true, published: false });
+    expect(isPublishedDigest(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!))).toBe(false);
+  });
+
+  it("discarding a digest removes the staged record and the cron does not regenerate it", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
+    await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+
+    useAdminEnv(kv);
+    const draftKey = onlyKey(kv, "draft:digest:");
+    const res = await adminPost(adminRequest(postBody({ action: "discard", draftKey })));
+    await expect(res.json()).resolves.toMatchObject({ ok: true, action: "discarded" });
+    expect([...kv.values.keys()].filter((k) => k.startsWith("digest:weekly-"))).toEqual([]);
+
+    mocks.agentChat.mockClear();
+    await expect(runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" })).resolves.toMatchObject({ skipped: true });
+    expect(mocks.agentChat).not.toHaveBeenCalled();
+    expect(kv.values.has(draftKey)).toBe(false);
+  });
+
+  it("surfaces a GitHub failure on a digest post as a 502 and does not publish", async () => {
+    const kv = new FakeKv();
+    stubDigestSources();
+    mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
+    await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+
+    useAdminEnv(kv);
+    stubGitHub(422);
+    const draftKey = onlyKey(kv, "draft:digest:");
+    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey, lang: "en" })));
+    expect(res.status).toBe(502);
+    const payload = await res.json();
+    expect(payload.ok).toBeUndefined();
+    expect(payload.error).toMatch(/^GitHub 422/);
+    expect(isPublishedDigest(JSON.parse(kv.values.get(onlyKey(kv, "digest:weekly-"))!))).toBe(false);
+  });
+
+  it("hides legacy records that were never approved", () => {
+    const legacy = { ...DIGEST_MODEL_OUTPUT, weekId: "2026-W01", generatedAt: "2026-01-05T00:00:00.000Z" };
+    expect(isPublishedDigest(legacy)).toBe(false);
+    expect(isPublishedDigest({ ...legacy, approved: true })).toBe(true);
+    expect(isPublishedDigest({ ...legacy, approved: true, sections: [{ heading: "x", items: [1] }] })).toBe(false);
+  });
+});
+
+describe("resolved drafts are not resurrected by the cron", () => {
+  function stubIssues(updatedAt: string) {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = inputUrl(input);
+      if (!url.includes("/issues?")) throw new Error(`unexpected URL: ${url}`);
+      return jsonResponse([{
+        number: 42,
+        title: "Issue",
+        body: "body",
+        updated_at: updatedAt,
+        html_url: "https://github.com/Hmbown/CodeWhale/issues/42",
+        labels: [],
+      }]);
+    }));
+  }
+
+  beforeEach(() => {
+    mocks.agentChat.mockResolvedValue({
+      content: JSON.stringify({ bodyEn: "review", bodyZh: "审阅" }),
+      usage: { input: 1, output: 1 },
+    });
+  });
+
+  it("does not redraft a discarded triage item", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    const res = await adminPost(adminRequest(postBody({ action: "discard", draftKey: "draft:triage:42" })));
+    expect(res.status).toBe(200);
+
+    stubIssues("2020-01-01T00:00:00.000Z");
+    await expect(runTriage({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" })).resolves.toMatchObject({ processed: 0, skipped: 1 });
+    expect(mocks.agentChat).not.toHaveBeenCalled();
+    expect(kv.values.has("draft:triage:42")).toBe(false);
+  });
+
+  it("does not turn a posted triage draft back into a pending one after the issue updates", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    stubGitHub();
+    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42", lang: "en" })));
+    expect(res.status).toBe(200);
+
+    // Our own comment bumps updated_at past the draft's generatedAt.
+    stubIssues("2099-01-01T00:00:00.000Z");
+    await runTriage({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
+    expect(mocks.agentChat).not.toHaveBeenCalled();
+    expect(JSON.parse(kv.values.get("draft:triage:42")!)).toMatchObject({ posted: true });
+  });
+
+  it("does not let the dupes run overwrite a posted dupes draft", async () => {
+    const kv = new FakeKv();
+    kv.values.set("draft:dupes:7", JSON.stringify(draft({ id: "7", type: "dupes", targetNumber: 7, posted: true })));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(
+      [1, 2, 7].map((n) => ({ number: n, title: `t${n}`, updated_at: "2020-01-01T00:00:00.000Z", html_url: `u${n}` }))
+    )));
+    mocks.agentChat.mockResolvedValue({
+      content: JSON.stringify({ suggestions: [{ targetNumber: 1, duplicateNumber: 7, reason: "r", bodyEn: "dup", bodyZh: "重复" }] }),
+      usage: { input: 1, output: 1 },
+    });
+
+    await expect(runDupes({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" })).resolves.toMatchObject({ ok: true, processed: 0 });
+    expect(JSON.parse(kv.values.get("draft:dupes:7")!)).toMatchObject({ posted: true });
+  });
+});
+
+describe("admin post action is idempotent and bounded", () => {
+  it("refuses to post a draft that is already posted", async () => {
+    const kv = new FakeKv();
+    kv.values.set("draft:triage:42", JSON.stringify(draft({ posted: true })));
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+
+    const res = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    expect(res.status).toBe(409);
+    expect(posts).toEqual([]);
+  });
+
+  it("returns ok when saving state fails after GitHub accepted the comment, and a retry does not post twice", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    const posts = stubGitHub();
+    kv.failPutsMatching = /^draft:triage:42$/;
+
+    const first = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toMatchObject({ ok: true, action: "posted", warning: expect.any(String) });
+
+    const retry = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    expect(retry.status).toBe(409);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("releases the claim when GitHub rejects the post so the maintainer can retry", async () => {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    useAdminEnv(kv);
+    stubGitHub(500);
+
+    const failed = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    expect(failed.status).toBe(502);
+
+    const posts = stubGitHub();
+    const retry = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
+    expect(retry.status).toBe(200);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("answers malformed JSON with a JSON 400", async () => {
+    const kv = new FakeKv();
+    useAdminEnv(kv);
+
+    const res = await adminPost(adminRequest("{not json"));
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({ error: "invalid JSON body" });
+  });
+
+  it("counts streamed body bytes instead of trusting a missing Content-Length", async () => {
+    const kv = new FakeKv();
+    useAdminEnv(kv);
+    const chunk = new TextEncoder().encode("x".repeat(40_000));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(chunk);
+        controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+
+    const res = await adminPost(adminRequest(stream));
+    expect(res.status).toBe(413);
+  });
+});
+
+describe("admin draft queue", () => {
+  it("lists every draft across KV list pages", async () => {
+    const kv = new FakeKv();
+    for (let i = 1; i <= 1_500; i++) {
+      kv.values.set(`draft:triage:${i}`, JSON.stringify(draft({ id: String(i), targetNumber: i })));
+    }
+
+    const drafts = await listDrafts(kv);
+    expect(drafts).toHaveLength(1_500);
+  });
+});

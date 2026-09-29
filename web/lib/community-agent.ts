@@ -234,7 +234,11 @@ ${VOICE_CONSTRAINTS}`;
 interface KVNamespace {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
-  list(opts?: { prefix?: string; limit?: number }): Promise<{ keys: { name: string }[] }>;
+  list(opts?: { prefix?: string; limit?: number; cursor?: string }): Promise<{
+    keys: { name: string }[];
+    list_complete?: boolean;
+    cursor?: string;
+  }>;
   delete(key: string): Promise<void>;
 }
 
@@ -270,10 +274,151 @@ export async function getAgentEnv(): Promise<CommunityAgentEnv> {
   }
 }
 
-export async function saveDraft(kv: KVNamespace | undefined, draft: AgentDraft): Promise<void> {
-  if (!kv) return;
+/**
+ * Persist a generated draft for maintainer review. Returns false without
+ * writing when the maintainer already posted or discarded this draft
+ * identity, so a cron run can never resurrect a resolved draft as pending.
+ */
+export async function saveDraft(kv: KVNamespace | undefined, draft: AgentDraft): Promise<boolean> {
+  if (!kv) return false;
   const key = draftKey(draft.type, draft.id);
+  if (await getDraftResolution(kv, draft.type, draft.id)) return false;
+  const existing = await getDraft(kv, key);
+  if (existing?.posted) return false;
   await kv.put(key, JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 30 }); // 30 days
+  return true;
+}
+
+// --- Draft resolution markers ---
+//
+// Posting or discarding deletes/expires the draft itself, so the marker is
+// what tells the generators and the post action that a maintainer already
+// acted on this identity. It outlives the draft TTLs.
+
+export type DraftResolutionState = "posting" | "posted" | "discarded";
+
+export interface DraftResolution {
+  state: DraftResolutionState;
+  at: string;
+}
+
+const RESOLUTION_PREFIX = "draft-resolved:";
+const RESOLUTION_TTL_SEC = 60 * 60 * 24 * 90; // 90 days
+// A claim taken before the GitHub call. It is short-lived so an unknown
+// outcome (network error mid-request) blocks immediate retries without
+// locking the draft forever.
+const POSTING_CLAIM_TTL_SEC = 60 * 15;
+
+function resolutionKey(type: AgentDraftType, id: string): string {
+  return RESOLUTION_PREFIX + draftKey(type, id).slice("draft:".length);
+}
+
+export async function getDraftResolution(
+  kv: KVNamespace | undefined,
+  type: AgentDraftType,
+  id: string
+): Promise<DraftResolution | null> {
+  if (!kv) return null;
+  const raw = await kv.get(resolutionKey(type, id));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DraftResolution>;
+    if (parsed.state === "posting" || parsed.state === "posted" || parsed.state === "discarded") {
+      return { state: parsed.state, at: typeof parsed.at === "string" ? parsed.at : "" };
+    }
+  } catch {
+    /* fall through: treat an unreadable marker as present */
+  }
+  return { state: "posted", at: "" };
+}
+
+export async function markDraftResolved(
+  kv: KVNamespace | undefined,
+  type: AgentDraftType,
+  id: string,
+  state: DraftResolutionState
+): Promise<void> {
+  if (!kv) return;
+  const value: DraftResolution = { state, at: new Date().toISOString() };
+  await kv.put(resolutionKey(type, id), JSON.stringify(value), {
+    expirationTtl: state === "posting" ? POSTING_CLAIM_TTL_SEC : RESOLUTION_TTL_SEC,
+  });
+}
+
+export async function clearDraftResolution(
+  kv: KVNamespace | undefined,
+  type: AgentDraftType,
+  id: string
+): Promise<void> {
+  if (!kv) return;
+  await kv.delete(resolutionKey(type, id));
+}
+
+// --- Public weekly digest records ---
+//
+// The cron writes the structured digest unapproved; only the maintainer's
+// post action flips `approved`, and the public /digest page renders only
+// approved records.
+
+export const DIGEST_RECORD_PREFIX = "digest:weekly-";
+const DIGEST_RECORD_TTL_SEC = 60 * 60 * 24 * 90;
+
+export interface WeeklyDigestRecord {
+  weekId: string;
+  titleEn: string;
+  titleZh: string;
+  summaryEn: string;
+  summaryZh: string;
+  sections: { heading: string; items: string[] }[];
+  generatedAt: string;
+  approved?: boolean;
+  approvedAt?: string;
+}
+
+export function digestRecordKey(weekId: string): string {
+  if (!DRAFT_ID_PATTERN.test(weekId)) throw new Error("invalid digest id");
+  return DIGEST_RECORD_PREFIX + weekId;
+}
+
+/** True only for a well-formed record a maintainer approved for publication. */
+export function isPublishedDigest(value: unknown): value is WeeklyDigestRecord {
+  if (!value || typeof value !== "object") return false;
+  const d = value as Record<string, unknown>;
+  return (
+    d.approved === true &&
+    typeof d.weekId === "string" &&
+    typeof d.titleEn === "string" &&
+    typeof d.titleZh === "string" &&
+    typeof d.summaryEn === "string" &&
+    typeof d.summaryZh === "string" &&
+    typeof d.generatedAt === "string" &&
+    Array.isArray(d.sections) &&
+    d.sections.every(
+      (s: unknown) =>
+        !!s &&
+        typeof (s as { heading?: unknown }).heading === "string" &&
+        Array.isArray((s as { items?: unknown }).items) &&
+        (s as { items: unknown[] }).items.every((i) => typeof i === "string")
+    )
+  );
+}
+
+/** Mark the stored digest for `weekId` approved. Returns false if it is gone. */
+export async function approveDigestRecord(kv: KVNamespace | undefined, weekId: string): Promise<boolean> {
+  if (!kv) return false;
+  const key = digestRecordKey(weekId);
+  const raw = await kv.get(key);
+  if (!raw) return false;
+  const record = JSON.parse(raw) as WeeklyDigestRecord;
+  const approved: WeeklyDigestRecord = { ...record, approved: true, approvedAt: new Date().toISOString() };
+  if (!isPublishedDigest(approved)) return false;
+  await kv.put(key, JSON.stringify(approved), { expirationTtl: DIGEST_RECORD_TTL_SEC });
+  return true;
+}
+
+export async function deleteDigestRecord(kv: KVNamespace | undefined, weekId: string): Promise<void> {
+  if (!kv) return;
+  await kv.delete(digestRecordKey(weekId));
 }
 
 /**
@@ -303,11 +448,18 @@ export async function getDraft(kv: KVNamespace | undefined, key: string): Promis
 
 export async function listDrafts(kv: KVNamespace | undefined, prefix = "draft:"): Promise<AgentDraft[]> {
   if (!kv) return [];
-  const listed = await kv.list({ prefix, limit: 100 });
   const drafts: AgentDraft[] = [];
-  for (const k of listed.keys) {
-    const draft = await getDraft(kv, k.name);
-    if (draft) drafts.push(draft);
+  let cursor: string | undefined;
+  // KV returns at most 1000 keys per call; follow the cursor so the admin
+  // queue is never silently truncated. The page cap only bounds a runaway.
+  for (let page = 0; page < 20; page++) {
+    const listed = await kv.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+    for (const k of listed.keys) {
+      const draft = await getDraft(kv, k.name);
+      if (draft) drafts.push(draft);
+    }
+    if (listed.list_complete !== false || !listed.cursor) break;
+    cursor = listed.cursor;
   }
   return drafts;
 }
@@ -379,6 +531,11 @@ export async function logUsage(
   await kv.put(key, JSON.stringify(existing), { expirationTtl: 60 * 60 * 24 * 90 }); // 90 days
 }
 
+/**
+ * True when a generator should not spend a model call drafting this item:
+ * the maintainer already posted or discarded it, or the stored draft is newer
+ * than the item's last update.
+ */
 export async function hasFreshDraft(
   kv: KVNamespace | undefined,
   type: string,
@@ -387,8 +544,9 @@ export async function hasFreshDraft(
 ): Promise<boolean> {
   if (!kv) return false;
   if (!AGENT_DRAFT_TYPE_SET.has(type)) return false;
+  if (await getDraftResolution(kv, type as AgentDraftType, id)) return true;
   const existing = await getDraft(kv, draftKey(type as AgentDraftType, id));
   if (!existing) return false;
-  // Skip if draft is newer than the item's last update
+  if (existing.posted) return true;
   return new Date(existing.generatedAt) > new Date(updatedAt);
 }
