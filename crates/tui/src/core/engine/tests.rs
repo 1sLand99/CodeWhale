@@ -6373,12 +6373,12 @@ fn repeated_provider_id_ask_rejects_stale_answer_and_keeps_local_artifact_origin
                     .expect("fixture model limits"),
                 ]);
                 turn.route = resolved_route_for_test(&config, &turn.route.model);
-                let limits = Some(turn.route.candidate.limits());
+                let limits = turn.route.candidate.limits();
                 let provider = turn.route.identity.provider;
-                assert_eq!(limits.unwrap().context_tokens, Some(64_000));
-                assert_eq!(limits.unwrap().output_tokens, Some(4_096));
+                assert_eq!(limits.context_tokens, Some(64_000));
+                assert_eq!(limits.output_tokens, Some(4_096));
                 assert!(
-                    context_input_budget_for_route(provider, &turn.route.model, limits, 0)
+                    context_input_budget_for_route(provider, &turn.route.model, Some(limits), 0)
                         .unwrap()
                         >= 58_880,
                     "the resolved input budget must fit the real instructions and two calls"
@@ -6387,7 +6387,7 @@ fn repeated_provider_id_ask_rejects_stale_answer_and_keeps_local_artifact_origin
                     crate::route_budget::route_inline_char_budget_for_route(
                         provider,
                         &turn.route.model,
-                        limits,
+                        Some(limits),
                     ) < 10_000,
                     "the unchanged output fixture must still require an artifact"
                 );
@@ -6479,7 +6479,7 @@ fn repeated_provider_id_ask_rejects_stale_answer_and_keeps_local_artifact_origin
                 assert_eq!(starts, completions);
                 let receipts = receipt_store.load(&session_id).unwrap();
                 assert_eq!(receipts.len(), 4);
-                for (pair, id) in receipts.chunks_exact(2).zip(&starts) {
+                for (pair, id) in receipts.as_chunks::<2>().0.iter().zip(&starts) {
                     assert!(matches!(&pair[0], ApprovalReceipt::Asked { approval_id, tool_call_id, .. } if approval_id == id && tool_call_id == id));
                     assert!(matches!(&pair[1], ApprovalReceipt::Decided { approval_id, tool_call_id, outcome: ApprovalOutcome::ApprovedOnce, .. } if approval_id == id && tool_call_id == id));
                 }
