@@ -445,7 +445,7 @@ pub fn set_live_session(session_id: Option<&str>) {
 static LIVE_SESSION_LEASE: std::sync::Mutex<Option<(String, Option<fs::File>)>> =
     std::sync::Mutex::new(None);
 
-/// Lock attempts [`SessionManager::claim_live_session_for_attach`] makes
+/// Lock attempts [`SessionManager::reserve_session_for_attach`] makes
 /// before it treats contention as a running owner.
 const LIVE_LEASE_ATTACH_ATTEMPTS: u32 = 3;
 
@@ -458,6 +458,32 @@ pub(crate) fn session_open_elsewhere(session_id: &str) -> std::io::Error {
              Continue it there, or run `codewhale fork {session_id}` to work on a copy"
         ),
     )
+}
+
+/// A reservation of a session's cross-process live lease, taken by
+/// [`SessionManager::reserve_session_for_attach`] before a surface attaches.
+/// Dropping it releases the reservation; [`Self::commit`] makes the session
+/// this process's live session and releases the previous one's lease.
+#[must_use = "an uncommitted reservation is released when dropped"]
+#[derive(Debug)]
+pub struct SessionLease {
+    id: String,
+    /// `None` when this process already holds the session's lease.
+    file: Option<fs::File>,
+}
+
+impl SessionLease {
+    /// Make the reserved session this process's live session. Called after
+    /// the attach has been validated and applied, so a failed attach never
+    /// costs the session this process already owns its lease.
+    pub fn commit(self) {
+        set_live_session(Some(&self.id));
+        if let Some(file) = self.file
+            && let Ok(mut lease) = LIVE_SESSION_LEASE.lock()
+        {
+            *lease = Some((self.id, Some(file)));
+        }
+    }
 }
 
 /// Is this session currently owned by **this process's** interactive surface?
@@ -1541,56 +1567,54 @@ impl SessionManager {
         *lease = Some((id.to_string(), file.ok().flatten()));
     }
 
-    /// Claim `session_id` before attaching to it (`resume`, `--continue`,
-    /// `exec --resume`, the session picker). Unlike [`Self::claim_live_session`],
-    /// which records whatever it gets, this refuses with `ResourceBusy` when
-    /// another process holds the session open: attaching anyway gives the
-    /// document two autosaving writers, and the last save silently drops the
-    /// other's turns. Taking the lock is the check, so nothing can claim the
-    /// session between a check and the attach.
+    /// Reserve `session_id` before attaching to it (`resume`, `--continue`,
+    /// `exec --resume`, the session picker, `/load`). Unlike
+    /// [`Self::claim_live_session`], which records whatever it gets, this
+    /// refuses with `ResourceBusy` when another process holds the session
+    /// open: attaching anyway gives the document two autosaving writers, and
+    /// the last save silently drops the other's turns. Taking the lock is the
+    /// check, so nothing can claim the session between a check and the attach.
     ///
-    /// A lease file that cannot be opened (an unwritable store) does not block
-    /// the attach; saves will surface that failure on their own.
-    pub fn claim_live_session_for_attach(&self, session_id: &str) -> io::Result<()> {
+    /// The reservation does not touch the session this process owns now: that
+    /// claim and its lease stay until [`SessionLease::commit`], which the
+    /// caller runs only once the new session is loaded and applied. Dropping
+    /// the reservation (a load or apply that failed) releases it and leaves
+    /// the current session leased.
+    ///
+    /// It fails closed: a lease that cannot be opened or locked is an error,
+    /// not an unguarded attach.
+    pub fn reserve_session_for_attach(&self, session_id: &str) -> io::Result<SessionLease> {
         let id = self.validated_session_id(session_id)?;
         if LIVE_SESSION_LEASE
             .lock()
             .is_ok_and(|lease| matches!(lease.as_ref(), Some((held, Some(_))) if held == id))
         {
-            set_live_session(Some(id));
-            return Ok(());
+            return Ok(SessionLease {
+                id: id.to_string(),
+                file: None,
+            });
         }
-        let file = match self
+        let lease_unavailable = |error: io::Error| {
+            io::Error::new(
+                error.kind(),
+                format!("could not take session {id}'s live lease: {error}"),
+            )
+        };
+        let file = self
             .live_lease_path(id, true)
             .and_then(|path| open_private_lock_file(&path))
-        {
-            Ok(file) => file,
-            Err(error) => {
-                tracing::debug!(session_id = id, %error, "session live lease unavailable");
-                self.claim_live_session(id);
-                return Ok(());
-            }
-        };
+            .map_err(lease_unavailable)?;
         // A liveness probe from another process holds this lock for a moment;
         // a few short retries tell that apart from a running owner.
         for attempt in 0..LIVE_LEASE_ATTACH_ATTEMPTS {
-            match crate::runtime_threads::try_lock_file_exclusive(&file) {
-                Ok(true) => {
-                    set_live_session(Some(id));
-                    if let Ok(mut lease) = LIVE_SESSION_LEASE.lock() {
-                        *lease = Some((id.to_string(), Some(file)));
-                    }
-                    return Ok(());
-                }
-                Ok(false) if attempt + 1 < LIVE_LEASE_ATTACH_ATTEMPTS => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::debug!(session_id = id, %error, "session live lease unavailable");
-                    self.claim_live_session(id);
-                    return Ok(());
-                }
+            if crate::runtime_threads::try_lock_file_exclusive(&file).map_err(lease_unavailable)? {
+                return Ok(SessionLease {
+                    id: id.to_string(),
+                    file: Some(file),
+                });
+            }
+            if attempt + 1 < LIVE_LEASE_ATTACH_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
         Err(session_open_elsewhere(id))
@@ -2353,7 +2377,7 @@ impl SessionManager {
         self.read_checkpoint_file(&path)
     }
 
-    fn legacy_checkpoint_origin(&self) -> io::Result<Option<String>> {
+    pub(crate) fn legacy_checkpoint_origin(&self) -> io::Result<Option<String>> {
         use std::io::Read as _;
 
         let path = self.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE);
@@ -2729,17 +2753,46 @@ impl SessionManager {
     }
 
     /// [`Self::resume_session`] for a surface that will own and autosave the
-    /// session: it first takes the session's live lease, and refuses with
+    /// session: it first reserves the session's live lease, and refuses with
     /// `ResourceBusy` when another process has it open
-    /// ([`Self::claim_live_session_for_attach`]).
-    pub fn attach_session(&self, id: &str) -> std::io::Result<SessionRecovery> {
-        self.claim_live_session_for_attach(id)?;
-        self.resume_session(id)
+    /// ([`Self::reserve_session_for_attach`]). The caller commits the
+    /// returned lease once the session is applied.
+    pub fn attach_session(&self, id: &str) -> std::io::Result<(SessionRecovery, SessionLease)> {
+        let lease = self.reserve_session_for_attach(id)?;
+        let recovery = self.resume_session(id)?;
+        Ok((recovery, lease))
     }
 
     /// [`Self::attach_session`] with a partial-ID prefix.
-    pub fn attach_session_by_prefix(&self, prefix: &str) -> std::io::Result<SessionRecovery> {
+    pub fn attach_session_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> std::io::Result<(SessionRecovery, SessionLease)> {
         self.attach_session(&self.resolve_session_id_prefix(prefix)?)
+    }
+
+    /// [`Self::attach_session`] for a session file `/load` has already read.
+    /// Either way the surface becomes the writer of the id the file names, so
+    /// a managed record and a foreign file take the same contract: the id's
+    /// live lease is reserved first and refused while another window has it
+    /// open. A managed record then resumes through the manager so its repair
+    /// is persisted in place; a foreign file is not ours to rewrite, so its
+    /// journal projection and repair stay in memory.
+    pub fn attach_session_file(
+        &self,
+        parsed: SavedSession,
+        path: &Path,
+    ) -> std::io::Result<(SavedSession, SessionLease)> {
+        if self.owns_session_path(&parsed.metadata.id, path) {
+            return self
+                .attach_session(&parsed.metadata.id)
+                .map(|(recovery, lease)| (recovery.session, lease));
+        }
+        let lease = self.reserve_session_for_attach(&parsed.metadata.id)?;
+        let mut session = parsed;
+        session.ensure_journal();
+        repair_recovered_session(&mut session);
+        Ok((session, lease))
     }
 
     /// [`Self::resume_session`] with a partial-ID prefix.
@@ -7487,21 +7540,127 @@ mod tests {
 
         let lease = hold_live_lease(&manager, "sess-open");
         let error = manager
-            .claim_live_session_for_attach("sess-open")
+            .reserve_session_for_attach("sess-open")
             .expect_err("a session open elsewhere is refused");
         assert_eq!(error.kind(), io::ErrorKind::ResourceBusy);
         assert!(error.to_string().contains("sess-open"), "{error}");
         assert!(!is_live_session("sess-open"), "nothing was claimed");
 
         drop(lease);
-        manager
-            .claim_live_session_for_attach("sess-open")
+        let (_, reserved) = manager
+            .attach_session("sess-open")
             .expect("attach once the other window has closed");
         assert!(
             !try_lock_elsewhere(&manager, "sess-open"),
             "the attach holds the lease from the start"
         );
+        reserved.commit();
+        assert!(is_live_session("sess-open"));
+        assert!(!try_lock_elsewhere(&manager, "sess-open"));
         set_live_session(None);
+    }
+
+    /// Switching from session A to B must not give up A until B is applied:
+    /// a reservation that is dropped (B failed to load or apply) leaves A
+    /// claimed and leased, and B free.
+    #[test]
+    fn a_failed_attach_keeps_the_current_sessions_lease() {
+        let _env = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+        write_prior_interrupted_session(&manager, "sess-a", &workspace);
+        write_prior_interrupted_session(&manager, "sess-b", &workspace);
+        manager.claim_live_session("sess-a");
+        assert!(!try_lock_elsewhere(&manager, "sess-a"), "A is leased");
+
+        let reserved = manager
+            .reserve_session_for_attach("sess-b")
+            .expect("reserve B");
+        assert!(is_live_session("sess-a"), "A stays claimed while B loads");
+        assert!(!try_lock_elsewhere(&manager, "sess-a"), "and leased");
+        drop(reserved);
+        assert!(is_live_session("sess-a"));
+        assert!(!try_lock_elsewhere(&manager, "sess-a"), "A is still leased");
+        assert!(try_lock_elsewhere(&manager, "sess-b"), "B was released");
+
+        // A B whose document cannot be loaded is refused the same way.
+        let b_path = manager.validated_session_path("sess-b").expect("path");
+        fs::write(&b_path, "{ not json").expect("corrupt B");
+        manager
+            .attach_session("sess-b")
+            .expect_err("a corrupt B fails to attach");
+        assert!(is_live_session("sess-a"));
+        assert!(!try_lock_elsewhere(&manager, "sess-a"), "A is still leased");
+        assert!(try_lock_elsewhere(&manager, "sess-b"), "B was released");
+        set_live_session(None);
+    }
+
+    /// `/load` takes the same contract as `resume`: a managed record and a
+    /// foreign file naming a session open in another window are both
+    /// refused, and neither is claimed.
+    #[test]
+    fn load_of_a_session_open_elsewhere_is_refused_for_managed_and_foreign_files() {
+        let _env = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let session = write_prior_interrupted_session(&manager, "sess-load", &workspace);
+        let managed = manager.validated_session_path("sess-load").expect("path");
+        let foreign = tmp.path().join("exported.json");
+        fs::write(&foreign, serde_json::to_vec(&session).expect("json")).expect("export");
+
+        let lease = hold_live_lease(&manager, "sess-load");
+        for path in [&managed, &foreign] {
+            let error = manager
+                .attach_session_file(session.clone(), path)
+                .expect_err("a session open elsewhere is not loaded");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::ResourceBusy,
+                "{}",
+                path.display()
+            );
+        }
+        assert!(!is_live_session("sess-load"), "nothing was claimed");
+
+        drop(lease);
+        for path in [&managed, &foreign] {
+            let (loaded, reserved) = manager
+                .attach_session_file(session.clone(), path)
+                .expect("loads once the other window has closed");
+            assert_eq!(loaded.metadata.id, "sess-load");
+            assert!(
+                !try_lock_elsewhere(&manager, "sess-load"),
+                "the load holds the lease"
+            );
+            drop(reserved);
+        }
+        set_live_session(None);
+    }
+
+    /// A lease that cannot be taken is an error, not an unguarded attach.
+    #[cfg(unix)]
+    #[test]
+    fn attach_fails_closed_when_the_lease_cannot_be_taken() {
+        let _env = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+        write_prior_interrupted_session(&manager, "sess-x", &workspace);
+        // The lease directory is a regular file: no lock file can be opened.
+        let _ = fs::remove_dir_all(sessions_dir.join(LATE_USAGE_DIR));
+        fs::write(sessions_dir.join(LATE_USAGE_DIR), "").expect("block lease dir");
+
+        let error = manager
+            .attach_session("sess-x")
+            .expect_err("no lease, no attach");
+        assert!(error.to_string().contains("live lease"), "{error}");
+        assert!(!is_live_session("sess-x"), "nothing was claimed");
     }
 
     /// A liveness probe from another process briefly holds the lease lock. A

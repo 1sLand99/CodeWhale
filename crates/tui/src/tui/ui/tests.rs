@@ -31027,6 +31027,23 @@ fn a_failing_session_save_shows_an_error_until_a_save_lands() {
     super::event_loop::surface_session_save_health(&mut app, Some(failing), &mut seen);
     assert_eq!(save_errors(&app), 1);
 
+    // The failure outlives any toast lifetime: well past the sticky TTL, and
+    // behind a full queue of newer notices, it is still there and shown once
+    // they expire, because nothing has recovered.
+    for toast in app.status_toasts.iter_mut() {
+        toast.created_at = std::time::Instant::now()
+            - std::time::Duration::from_millis(App::STICKY_ERROR_TTL_MS * 10);
+    }
+    for i in 0..30 {
+        app.push_status_toast(format!("newer {i}"), StatusToastLevel::Info, Some(1));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let shown = app
+        .active_status_toast(crate::tui::underwater::ShellPhase::Idle)
+        .expect("a toast is shown");
+    assert!(shown.text.contains("toast-pr"), "{}", shown.text);
+    assert_eq!(save_errors(&app), 1, "a standing failure does not expire");
+
     let healed = SaveHealthReading {
         generation: 2,
         failing: None,

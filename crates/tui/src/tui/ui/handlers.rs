@@ -1687,7 +1687,7 @@ pub(crate) async fn handle_view_events(
                 // Another window's open session is refused, not attached
                 // as a second autosaving writer.
                 match manager.attach_session(&session_id) {
-                    Ok(recovery) => {
+                    Ok((recovery, lease)) => {
                         let session = recovery.session;
                         let next_config = config.clone();
                         let message_count = session.metadata.message_count;
@@ -1701,7 +1701,13 @@ pub(crate) async fn handle_view_events(
                             next_config,
                             false,
                         ) {
-                            Ok(outcome) => outcome,
+                            Ok(outcome) => {
+                                // Only now does this window give up the
+                                // session it had open; a failed restore
+                                // above keeps that session's lease.
+                                lease.commit();
+                                outcome
+                            }
                             Err(err) => {
                                 crate::tui::ui::session_state::surface_session_load_failure(
                                     app,

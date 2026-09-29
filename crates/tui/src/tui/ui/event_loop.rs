@@ -634,14 +634,13 @@ pub(crate) fn surface_session_save_health(
             .tr(MessageId::SessionSaveFailed)
             .replace("{id}", crate::session_manager::truncate_id(&session_id))
             .replace("{error}", &kind.to_string());
-        app.push_status_toast_record(
-            StatusToast::new(
-                text,
-                StatusToastLevel::Error,
-                Some(App::STICKY_ERROR_TTL_MS),
-            )
-            .for_event(SESSION_SAVE_FAILURE_TOAST),
-        );
+        // Standing, not timed: it must outlast the failure, and only the
+        // recovery reading above withdraws it.
+        app.push_status_toast_record(StatusToast::standing(
+            text,
+            StatusToastLevel::Error,
+            SESSION_SAVE_FAILURE_TOAST,
+        ));
     }
 }
 
@@ -878,31 +877,38 @@ pub async fn run_tui(
         && let Ok(manager) = SessionManager::default_location()
     {
         // Try to load by prefix or full ID
-        let load_result: std::io::Result<Option<crate::session_manager::SavedSession>> =
-            // `attach_*` takes the session's live lease first, and refuses a
-            // session another window has open instead of becoming its second
-            // autosaving writer.
+        let load_result: std::io::Result<
+            Option<(
+                crate::session_manager::SavedSession,
+                crate::session_manager::SessionLease,
+            )>,
+        > =
+            // `attach_*` reserves the session's live lease first, and refuses
+            // a session another window has open instead of becoming its second
+            // autosaving writer. The lease is committed once the session is
+            // applied.
             if session_id == "latest" {
                 // Special case: resume the most recent session in this workspace.
                 match manager.get_latest_session_for_workspace(&options.workspace) {
                     Ok(Some(meta)) => manager
                         .attach_session(&meta.id)
-                        .map(|recovery| Some(recovery.session)),
+                        .map(|(recovery, lease)| Some((recovery.session, lease))),
                     Ok(None) => Ok(None),
                     Err(e) => Err(e),
                 }
             } else {
                 manager
                     .attach_session_by_prefix(session_id)
-                    .map(|recovery| Some(recovery.session))
+                    .map(|(recovery, lease)| Some((recovery.session, lease)))
             };
 
         match load_result {
-            Ok(Some(saved)) => match manager.load_session_goal(&saved.metadata.id) {
+            Ok(Some((saved, lease))) => match manager.load_session_goal(&saved.metadata.id) {
                 Ok(goal) => {
                     let saved_id = saved.metadata.id.clone();
                     match apply_loaded_session_with_goal(&mut app, config, saved, goal.as_ref()) {
                         Ok(()) => {
+                            lease.commit();
                             app.status_message = Some(format!(
                                 "Resumed session: {}",
                                 crate::session_manager::truncate_id(&saved_id)

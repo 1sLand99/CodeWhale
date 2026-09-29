@@ -1105,7 +1105,11 @@ fn load_exec_resume_session(session_id: &str) -> Result<session_manager::SavedSe
         .context("could not open session manager for resume")?
         .attach_session_by_prefix(session_id)
     {
-        Ok(recovery) => Ok(recovery.session),
+        Ok((recovery, lease)) => {
+            // This exec run owns the session until it exits.
+            lease.commit();
+            Ok(recovery.session)
+        }
         // Resuming a session a TUI has open would give its document two
         // writers; the TUI's next autosave would drop this run's turns.
         Err(error) if error.kind() == io::ErrorKind::ResourceBusy => {
@@ -11413,10 +11417,16 @@ fn load_recent_checkpoints(manager: &session_manager::SessionManager) -> Vec<Rec
     for checkpoint_ref in refs {
         // A session open in another terminal refreshes its own checkpoint
         // mid-turn. It is not interrupted: promoting or clearing it would
-        // take that session's only crash-recovery record while it runs.
-        if let session_manager::CheckpointSource::Session(id) = &checkpoint_ref.source
-            && manager.is_session_live_anywhere(id)
-        {
+        // take that session's only crash-recovery record while it runs. The
+        // legacy slot is checked by the session it names, before anything
+        // prunes, promotes or migrates it over that session's live state.
+        let owner = match &checkpoint_ref.source {
+            session_manager::CheckpointSource::Session(id) => Some(id.clone()),
+            session_manager::CheckpointSource::Legacy => {
+                manager.legacy_checkpoint_origin().ok().flatten()
+            }
+        };
+        if owner.is_some_and(|id| manager.is_session_live_anywhere(&id)) {
             continue;
         }
         let Ok(age) = std::time::SystemTime::now().duration_since(checkpoint_ref.modified) else {
@@ -11525,6 +11535,15 @@ fn recover_interrupted_checkpoint_for_resume(launch_workspace: &Path) -> Option<
     };
 
     let session_id = best.session.metadata.id.clone();
+
+    // Take the session's live lease before promoting or clearing anything:
+    // the liveness filter above is a check, and another terminal can attach
+    // between it and these writes. The TUI's own attach then finds the lease
+    // already held by this process. Losing the race leaves every file alone.
+    match manager.reserve_session_for_attach(&session_id) {
+        Ok(lease) => lease.commit(),
+        Err(_) => return None,
+    }
 
     // Persist the checkpoint as a regular session so the TUI can load it by
     // id — unless a newer regular session file for the same id already
@@ -21168,6 +21187,9 @@ mod setup_helper_tests {
             std::env::set_var("USERPROFILE", home);
         }
         let result = f();
+        // `--continue` recovery takes the recovered session's live lease for
+        // the process; release it with the temporary home it lives in.
+        crate::session_manager::set_live_session(None);
         unsafe {
             match prev_home {
                 Some(value) => std::env::set_var("HOME", value),
@@ -21428,6 +21450,80 @@ mod setup_helper_tests {
         std::fs::create_dir_all(&checkpoints).expect("create checkpoints dir");
         let content = serde_json::to_string_pretty(session).expect("serialize checkpoint");
         std::fs::write(checkpoints.join("latest.json"), content).expect("write legacy checkpoint");
+    }
+
+    /// The legacy `latest.json` slot names a session. When that session is
+    /// open in another terminal, neither `--continue` nor a plain launch may
+    /// promote the slot over its document, overwrite its per-session
+    /// checkpoint, or consume the slot.
+    #[test]
+    fn legacy_checkpoint_of_a_session_live_elsewhere_is_left_alone() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        with_home(tmp.path(), || {
+            let manager = SessionManager::default_location().expect("manager");
+            let message = |text: &str| {
+                vec![Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: text.to_string(),
+                        cache_control: None,
+                    }],
+                }]
+            };
+            let live =
+                create_saved_session(&message("live turn"), "test-model", &workspace, 0, None);
+            let session_id = live.metadata.id.clone();
+            let document = manager.save_session(&live).expect("save live document");
+            manager
+                .save_checkpoint(&live)
+                .expect("save live checkpoint");
+            let mut stale = live.clone();
+            stale.messages = message("stale legacy slot");
+            stale.metadata.updated_at = live.metadata.updated_at + chrono::Duration::seconds(60);
+            write_legacy_checkpoint(&manager, &stale);
+            let legacy = manager
+                .sessions_dir()
+                .join("checkpoints")
+                .join("latest.json");
+            let document_before = std::fs::read(&document).expect("document");
+            let checkpoint = || {
+                serde_json::to_string(
+                    &manager
+                        .load_session_checkpoint(&session_id)
+                        .expect("checkpoint")
+                        .expect("present")
+                        .messages,
+                )
+                .expect("serialize")
+            };
+            let checkpoint_before = checkpoint();
+
+            let lease = manager.hold_live_lease_elsewhere(&session_id);
+            let recovered = recover_interrupted_checkpoint_for_resume(&workspace);
+            preserve_interrupted_checkpoint_for_explicit_resume(&workspace);
+
+            assert_eq!(recovered, None, "nothing is recovered over a live session");
+            assert!(legacy.exists(), "the legacy slot is not consumed");
+            assert_eq!(
+                std::fs::read(&document).expect("document"),
+                document_before,
+                "the live document is not overwritten"
+            );
+            assert_eq!(
+                checkpoint(),
+                checkpoint_before,
+                "the live checkpoint is not replaced by the legacy slot"
+            );
+            assert!(
+                !crate::session_manager::is_live_session(&session_id),
+                "no claim was taken"
+            );
+            drop(lease);
+        });
     }
 
     #[test]
