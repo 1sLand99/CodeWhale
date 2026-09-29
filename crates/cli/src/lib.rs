@@ -209,6 +209,10 @@ enum Commands {
     Speech(TuiPassthroughArgs),
     /// List saved sessions.
     Sessions(TuiPassthroughArgs),
+    /// Show what a session did: files, commands, web and MCP calls, agents,
+    /// approvals, and failures. `codewhale receipts [ID|--last] [--format md|json]`.
+    #[command(visible_alias = "receipt")]
+    Receipts(TuiPassthroughArgs),
     /// Resume a saved session.
     Resume(TuiPassthroughArgs),
     /// Launch an interactive session and hand it to the Codewhale web app.
@@ -338,8 +342,9 @@ New integrations should prefer `codewhale app-server`.")]
     Web(WebArgs),
     /// Sign in to your Codewhale account (browser device flow).
     Login(LoginArgs),
-    /// Remove saved authentication state.
-    Logout,
+    /// Remove saved authentication state (every provider key, OAuth login,
+    /// the account session and the Daytona token). Asks before deleting.
+    Logout(LogoutArgs),
     /// Manage authentication credentials and provider mode.
     Auth(AuthArgs),
     /// Sign in to your Codewhale account and manage account-scoped provider keys.
@@ -1520,6 +1525,13 @@ fn remote_setup_tui_args(args: RemoteSetupArgs) -> Vec<String> {
 }
 
 #[derive(Debug, Args)]
+struct LogoutArgs {
+    /// Delete without the confirmation prompt (required when stdin is not a terminal).
+    #[arg(long, short = 'y', default_value_t = false)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
 struct LoginArgs {
     /// Print the verification URL without trying to open a browser.
     #[arg(long, default_value_t = false)]
@@ -1678,6 +1690,37 @@ enum ConfigCommand {
     Import(config_bundles::ImportArgs),
     /// Export a portable, secret-free config bundle.
     Export(config_bundles::ExportArgs),
+    /// Move legacy top-level `base_url` / `api_key` into their
+    /// `[providers.<name>]` tables, keeping comments. Writes a one-time,
+    /// credential-free backup first. Codewhale already reads the old shape;
+    /// this only tidies the file.
+    Migrate {
+        /// Print what would move without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Resolve a top-level value that disagrees with its provider table
+        /// by keeping one of them. Without it, a conflicting pair is left
+        /// exactly as it is.
+        #[arg(long, value_enum)]
+        prefer: Option<LegacyRootPreferArg>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum LegacyRootPreferArg {
+    /// Keep the top-level value (the key Codewhale sends today).
+    TopLevel,
+    /// Keep the `[providers.<name>]` value.
+    Table,
+}
+
+impl From<LegacyRootPreferArg> for codewhale_config::legacy_root::LegacyRootPrefer {
+    fn from(value: LegacyRootPreferArg) -> Self {
+        match value {
+            LegacyRootPreferArg::TopLevel => Self::TopLevel,
+            LegacyRootPreferArg::Table => Self::Table,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -1835,7 +1878,13 @@ fn install_rustls_crypto_provider() {
 pub fn run_cli() -> std::process::ExitCode {
     install_rustls_crypto_provider();
 
-    match run() {
+    let outcome = run();
+    // A config write may have moved legacy top-level `base_url` / `api_key`
+    // into their provider tables (#6394); say so once, off stdout.
+    for notice in codewhale_config::legacy_root::take_notices() {
+        eprintln!("note: {notice}");
+    }
+    match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             // Use the full anyhow chain so callers see the underlying
@@ -2089,6 +2138,12 @@ fn run() -> Result<()> {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_tui_in_process(&cli, &resolved_runtime, tui_args("sessions", args))
         }
+        Some(Commands::Receipts(args)) => {
+            // Read-only: resolve the runtime without first-run setup side effects.
+            let resolved_runtime =
+                resolve_runtime_for_diagnostic_dispatch(&store, &runtime_overrides);
+            run_tui_in_process(&cli, &resolved_runtime, tui_args("receipts", args))
+        }
         Some(Commands::Resume(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_resume_command(&cli, &resolved_runtime, args)
@@ -2210,7 +2265,10 @@ fn run() -> Result<()> {
                 &store,
             )
         }
-        Some(Commands::Logout) => run_logout_command(&mut store, cli.profile.as_deref()),
+        Some(Commands::Logout(args)) => {
+            confirm_logout(args.yes)?;
+            run_logout_command(&mut store, cli.profile.as_deref())
+        }
         Some(Commands::Auth(args)) => match args.command {
             AuthCommand::XaiDevice => {
                 let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -2579,6 +2637,37 @@ fn reject_legacy_login_provider_args(args: &LoginArgs) -> Result<()> {
     )
 }
 
+const LOGOUT_CONFIRM_PROMPT: &str = "This deletes every saved provider API key and OAuth login, \
+the Codewhale account session and the Daytona token. Type 'yes' to log out: ";
+
+/// `codewhale logout` wipes every provider credential at once, so it must not
+/// run on a stray keystroke. Non-interactive callers opt in with `--yes`.
+fn confirm_logout(yes: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() {
+        bail!(
+            "logout would delete every saved provider key; nothing was deleted. \
+             Re-run with --yes to confirm non-interactively."
+        );
+    }
+    confirm_logout_answer(&mut io::stdin().lock(), &mut io::stderr().lock())
+}
+
+fn confirm_logout_answer(reader: &mut impl io::BufRead, writer: &mut impl io::Write) -> Result<()> {
+    write!(writer, "{LOGOUT_CONFIRM_PROMPT}")?;
+    writer.flush()?;
+    let mut answer = String::new();
+    reader
+        .read_line(&mut answer)
+        .context("reading logout confirmation")?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "yes" | "y") {
+        bail!("logout cancelled; no credentials were deleted");
+    }
+    Ok(())
+}
+
 fn run_logout_command(store: &mut ConfigStore, profile: Option<&str>) -> Result<()> {
     run_logout_command_with_secrets(store, &Secrets::auto_detect(), profile)
 }
@@ -2588,18 +2677,25 @@ fn run_logout_command_with_secrets(
     secrets: &Secrets,
     profile: Option<&str>,
 ) -> Result<()> {
-    codewhale_config::with_xai_oauth_revocation_transaction(|| {
+    let failures = codewhale_config::with_xai_oauth_revocation_transaction(|| {
         run_logout_command_with_secrets_unlocked(store, secrets, profile)
-    })
+    })?;
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "logout incomplete: failed to delete stored credentials for: {}",
+            failures.join(", ")
+        );
+    }
+    println!("logged out");
+    Ok(())
 }
 
 fn run_logout_command_with_secrets_unlocked(
     store: &mut ConfigStore,
     secrets: &Secrets,
     profile: Option<&str>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let original_config = store.config.clone();
-    store.config.api_key = None;
     for provider in ProviderKind::ALL {
         clear_provider_api_key_from_config(store, provider);
         store
@@ -2645,16 +2741,9 @@ fn run_logout_command_with_secrets_unlocked(
     if let Err(error) = clear_account_session(profile) {
         keyring_failures.push(format!("account session: {error}"));
     }
-    if keyring_failures.is_empty() {
-        println!("logged out");
-    } else {
-        eprintln!(
-            "failed to delete stored credentials for: {}",
-            keyring_failures.join(", ")
-        );
-        println!("logged out (some stored credentials could not be deleted)");
-    }
-    Ok(())
+    // The config save committed the authority change. Partial deletions must
+    // not roll back xAI revocation; report them after its transaction commits.
+    Ok(keyring_failures)
 }
 
 fn clear_daytona_slot(secrets: &Secrets) -> Result<(), codewhale_secrets::SecretsError> {
@@ -2879,11 +2968,7 @@ fn provider_config_api_key(store: &ConfigStore, provider: ProviderKind) -> Optio
         .for_provider(provider)
         .api_key
         .as_deref();
-    let root = (provider == ProviderKind::Deepseek)
-        .then_some(store.config.api_key.as_deref())
-        .flatten();
-    slot.or(root)
-        .filter(|value| classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal)
+    slot.filter(|value| classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal)
 }
 
 fn provider_config_set(store: &ConfigStore, provider: ProviderKind) -> bool {
@@ -4444,12 +4529,9 @@ fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -
             .api_key
             .clone()
             .filter(literal);
-        let from_root = (provider == ProviderKind::Deepseek)
-            .then(|| store.config.api_key.clone())
-            .flatten()
-            .filter(literal);
-        let value = from_provider_block.or(from_root);
-        let Some(value) = value else { continue };
+        let Some(value) = from_provider_block else {
+            continue;
+        };
 
         if let Ok(Some(existing)) = secrets.get(slot)
             && existing == value
@@ -4466,9 +4548,6 @@ fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -
         }
         if !dry_run {
             store.config.providers.for_provider_mut(provider).api_key = None;
-            if provider == ProviderKind::Deepseek {
-                store.config.api_key = None;
-            }
         }
         migrated.push((provider, slot));
     }
@@ -4528,6 +4607,7 @@ fn run_config_command(
             ConfigCommand::Set { .. }
                 | ConfigCommand::Unset { .. }
                 | ConfigCommand::Import(_)
+                | ConfigCommand::Migrate { dry_run: false, .. }
                 | ConfigCommand::Telemetry {
                     accept_notice: Some(_)
                 }
@@ -4648,7 +4728,7 @@ fn run_config_command(
                 }
             } else {
                 store.save()?;
-                println!("set {key}");
+                println!("set {}", config_key_label(store, &key));
             }
             Ok(())
         }
@@ -4684,9 +4764,10 @@ fn run_config_command(
                 println!("unset notifications.{}", setting.key());
                 return Ok(());
             }
+            let label = config_key_label(store, &key);
             store.config.unset_value(&key)?;
             store.save()?;
-            println!("unset {key}");
+            println!("unset {label}");
             Ok(())
         }
         ConfigCommand::List => {
@@ -4742,7 +4823,65 @@ fn run_config_command(
             config_bundles::run_import(&args, store, &workspace)
         }
         ConfigCommand::Export(args) => config_bundles::run_export(&args, store),
+        ConfigCommand::Migrate { dry_run, prefer } => {
+            run_config_migrate(store, dry_run, prefer.map(Into::into))
+        }
     }
+}
+
+/// `key`, or `key (providers.<name>.<field>)` when `key` is a legacy
+/// top-level spelling that addresses the active provider's table (#6394).
+fn config_key_label(store: &ConfigStore, key: &str) -> String {
+    match store.config.root_alias_key(key) {
+        Some(real) => format!("{real} (`{key}` now names the active provider's table)"),
+        None => key.to_string(),
+    }
+}
+
+fn run_config_migrate(
+    store: &mut ConfigStore,
+    dry_run: bool,
+    prefer: Option<codewhale_config::legacy_root::LegacyRootPrefer>,
+) -> Result<()> {
+    let path = store.path().to_path_buf();
+    let receipt = if dry_run {
+        codewhale_config::preview_legacy_root_config(&path, prefer)?
+    } else {
+        let (receipt, backup) = codewhale_config::migrate_legacy_root_config(&path, prefer)?;
+        if let Some(backup) = backup {
+            println!("backup: {}", backup.display());
+        }
+        store.reload()?;
+        receipt
+    };
+    if receipt.is_empty() {
+        println!("nothing to migrate in {}", path.display());
+        return Ok(());
+    }
+    for line in receipt.lines() {
+        println!("{line}");
+    }
+    if dry_run {
+        println!("dry run: {} was not changed", path.display());
+    }
+    Ok(())
+}
+
+/// Doctor lines for legacy top-level keys: sources only, never values.
+fn legacy_root_doctor_lines(
+    receipt: &codewhale_config::legacy_root::LegacyRootMigration,
+) -> Vec<String> {
+    use codewhale_config::legacy_root::LegacyRootNote;
+    let mut lines = Vec::new();
+    for note in &receipt.notes {
+        match note {
+            LegacyRootNote::Conflict { .. } => lines.push(format!("warning: {note}")),
+            _ => lines.push(format!(
+                "note: {note} (in memory; the next save or `codewhale config migrate` updates the file)"
+            )),
+        }
+    }
+    lines
 }
 
 /// settings.toml is user-global. A `config` command aimed at a workspace
@@ -4808,10 +4947,15 @@ fn run_config_doctor(store: &ConfigStore) -> Result<()> {
         println!("warning: {finding}");
     }
 
-    let mut secrets: Vec<(String, Option<String>)> =
-        vec![("api_key".to_string(), store.config.api_key.clone())];
-    let mut endpoints: Vec<(String, Option<String>)> =
-        vec![("base_url".to_string(), store.config.base_url.clone())];
+    // Legacy top-level `base_url` / `api_key` (#6394): what loading moved in
+    // memory, which pair still disagrees, and which value is in use. Sources
+    // only, never values.
+    for line in legacy_root_doctor_lines(store.legacy_root_migration()) {
+        println!("{line}");
+    }
+
+    let mut secrets: Vec<(String, Option<String>)> = Vec::new();
+    let mut endpoints: Vec<(String, Option<String>)> = Vec::new();
     for provider in ProviderKind::ALL {
         let table = store.config.providers.for_provider(provider);
         secrets.push((format!("{provider:?}.api_key"), table.api_key.clone()));
@@ -5711,6 +5855,7 @@ mod tests {
     struct RecordingKeyringStore {
         gets: Mutex<Vec<String>>,
         values: Mutex<std::collections::BTreeMap<String, String>>,
+        fail_delete_slot: Option<&'static str>,
     }
 
     impl RecordingKeyringStore {
@@ -5753,6 +5898,11 @@ mod tests {
         }
 
         fn delete(&self, key: &str) -> std::result::Result<(), codewhale_secrets::SecretsError> {
+            if self.fail_delete_slot == Some(key) {
+                return Err(codewhale_secrets::SecretsError::Keyring(
+                    "test delete failure".into(),
+                ));
+            }
             self.values
                 .lock()
                 .expect("recording values lock")
@@ -6236,7 +6386,13 @@ mod tests {
     fn config_doctor_fails_on_empty_secret_and_bad_url() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("config.toml");
-        write_config_fixture(&path, "api_key = \"\"\nbase_url = \"gopher://x\"\n");
+        // The top-level endpoint is checked where it now lives (#6394); an
+        // empty top-level key would simply be dropped, so the empty key is a
+        // table value here.
+        write_config_fixture(
+            &path,
+            "base_url = \"gopher://x\"\n\n[providers.deepseek]\napi_key = \"\"\n",
+        );
         let store = ConfigStore::load(Some(path)).expect("load fixture");
         let error = run_config_doctor(&store).expect_err("doctor must fail");
         let message = format!("{error:#}");
@@ -7975,8 +8131,6 @@ verbosity = "project-imported"
             &secrets,
         )
         .expect("auth set should persist credential");
-
-        assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
         // Intentional change: auth set used to pin `deepseek-v4-pro` here,
         // silently moving a fresh install off the cheaper `deepseek-flash`
@@ -8480,8 +8634,6 @@ verbosity = "project-imported"
             &secrets,
         )
         .expect("set should succeed");
-
-        assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
         let saved = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(!saved.contains("sk-keyring"), "{saved}");
@@ -8633,7 +8785,6 @@ verbosity = "project-imported"
             std::process::id()
         ));
         let mut store = ConfigStore::load(Some(path.clone())).expect("store should load");
-        store.config.api_key = Some("sk-stale".to_string());
         store.config.providers.deepseek.api_key = Some("sk-stale".to_string());
         store.save().unwrap();
 
@@ -8649,8 +8800,6 @@ verbosity = "project-imported"
             &secrets,
         )
         .expect("clear should succeed");
-
-        assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
         assert_eq!(inner.get("deepseek").unwrap(), None);
 
@@ -9028,7 +9177,6 @@ verbosity = "project-imported"
         ));
         let mut store = ConfigStore::load(Some(path.clone())).expect("store should load");
         store.config.provider = ProviderKind::Deepseek;
-        store.config.api_key = Some("sk-config-3333".to_string());
         store.config.providers.deepseek.api_key = Some("sk-config-3333".to_string());
 
         let inner = Arc::new(InMemoryKeyringStore::new());
@@ -10087,7 +10235,6 @@ verbosity = "project-imported"
 
         assert_eq!(resolved.api_key.as_deref(), Some("ring-key"));
         assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Keyring));
-        assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
         assert!(
             !path.exists(),
@@ -10113,6 +10260,38 @@ verbosity = "project-imported"
     }
 
     #[test]
+    fn logout_confirmation_accepts_only_an_explicit_yes() {
+        let mut out = Vec::new();
+        confirm_logout_answer(&mut std::io::Cursor::new("yes\n"), &mut out).expect("yes confirms");
+        assert!(String::from_utf8_lossy(&out).contains("Type 'yes' to log out"));
+        confirm_logout_answer(&mut std::io::Cursor::new("Y\n"), &mut Vec::new())
+            .expect("y confirms");
+        for answer in ["\n", "no\n", "", "yess\n"] {
+            let err = confirm_logout_answer(&mut std::io::Cursor::new(answer), &mut Vec::new())
+                .expect_err("anything else cancels");
+            assert!(
+                err.to_string().contains("no credentials were deleted"),
+                "{err}"
+            );
+        }
+        assert!(confirm_logout(true).is_ok(), "--yes skips the prompt");
+    }
+
+    #[test]
+    fn logout_parses_yes_flag() {
+        let cli = parse_ok(&["codewhale", "logout", "--yes"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Logout(LogoutArgs { yes: true }))
+        ));
+        let cli = parse_ok(&["codewhale", "logout"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Logout(LogoutArgs { yes: false }))
+        ));
+    }
+
+    #[test]
     fn logout_removes_plaintext_provider_keys() {
         let _lock = env_lock();
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -10124,7 +10303,6 @@ verbosity = "project-imported"
         let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
         let path = home.join("config.toml");
         let mut store = ConfigStore::load(Some(path.clone())).expect("store should load");
-        store.config.api_key = Some("sk-stale".to_string());
         store.config.providers.deepseek.api_key = Some("sk-stale".to_string());
         store.config.providers.fireworks.api_key = Some("fw-stale".to_string());
         store.config.providers.xai.auth_mode = Some("oauth".to_string());
@@ -10147,8 +10325,6 @@ verbosity = "project-imported"
         let secrets = no_keyring_secrets();
 
         run_logout_command_with_secrets(&mut store, &secrets, None).expect("logout should succeed");
-
-        assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
         assert!(store.config.providers.fireworks.api_key.is_none());
         assert!(store.config.providers.xai.auth_mode.is_none());
@@ -10165,6 +10341,99 @@ verbosity = "project-imported"
         assert!(credentials.join("other-provider.json").exists());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn logout_finishes_revocation_and_other_deletions_before_reporting_failures() {
+        use codewhale_secrets::account::{
+            ACCOUNT_API_BASE_ENV, AccountAuthBundle, AccountSessionStore, DEFAULT_ACCOUNT_API_BASE,
+            secure_account_session_secrets,
+        };
+
+        let _lock = env_lock();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("codewhale-home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.to_string_lossy());
+        let _api_base = ScopedEnvVar::remove(ACCOUNT_API_BASE_ENV);
+        let mut store = ConfigStore::load(Some(home.join("config.toml"))).expect("load config");
+        let generation = "xai-auth-0123456789abcdef0123456789abcdef.json";
+        store.config.providers.xai.auth_mode = Some("oauth".into());
+        store.config.providers.xai.oauth_credential_generation = Some(generation.into());
+        store.save().expect("save xAI authority");
+        let owned_files = [
+            generation,
+            codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME,
+            codewhale_config::LEGACY_CHATGPT_OAUTH_FILE_NAME,
+        ];
+        codewhale_config::with_xai_oauth_lifecycle_lock(|owned| {
+            for name in owned_files {
+                owned.write(name, b"test-oauth-credential", false)?;
+            }
+            Ok(())
+        })
+        .expect("seed OAuth credentials");
+        let account = AccountSessionStore::new(
+            secure_account_session_secrets().expect("account store"),
+            None,
+            DEFAULT_ACCOUNT_API_BASE,
+        );
+        account
+            .save(AccountAuthBundle {
+                token_type: "Bearer".into(),
+                access_token: "test-access".into(),
+                refresh_token: "test-refresh".into(),
+                session: None,
+                user: None,
+            })
+            .expect("seed account session");
+        let failing_slot = provider_slot(ProviderKind::Deepseek);
+        let keyring = RecordingKeyringStore {
+            fail_delete_slot: Some(failing_slot),
+            ..RecordingKeyringStore::default()
+        };
+        for provider in [ProviderKind::Deepseek, ProviderKind::Fireworks] {
+            keyring.set_value(provider_slot(provider), "test-credential");
+        }
+        keyring.set_value(codewhale_secrets::DAYTONA_TOKEN_SLOT, "test-daytona");
+        let secrets = Secrets::new(std::sync::Arc::new(keyring));
+        let error = run_logout_command_with_secrets(&mut store, &secrets, None)
+            .expect_err("partial logout must fail");
+        assert!(error.to_string().contains("logout incomplete"));
+        for name in owned_files {
+            assert!(
+                !home.join("credentials").join(name).exists(),
+                "{name} survived"
+            );
+        }
+        assert!(error.to_string().contains(failing_slot));
+        assert!(secrets.get(failing_slot).unwrap().is_some());
+        assert!(
+            secrets
+                .get(provider_slot(ProviderKind::Fireworks))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            secrets
+                .get(codewhale_secrets::DAYTONA_TOKEN_SLOT)
+                .unwrap()
+                .is_none()
+        );
+        assert!(account.load().expect("load cleared account").is_none());
+        let saved = ConfigStore::load(Some(home.join("config.toml"))).expect("reload config");
+        assert!(saved.config.providers.xai.auth_mode.is_none());
+        assert!(
+            saved
+                .config
+                .providers
+                .xai
+                .oauth_credential_generation
+                .is_none()
+        );
     }
 
     #[test]
@@ -10311,7 +10580,6 @@ verbosity = "project-imported"
             std::process::id()
         ));
         let mut store = ConfigStore::load(Some(path.clone())).expect("store should load");
-        store.config.api_key = Some("sk-deep".to_string());
         store.config.providers.deepseek.api_key = Some("sk-deep".to_string());
         store.config.providers.openrouter.api_key = Some("or-key".to_string());
         store.config.providers.novita.api_key = Some("nv-key".to_string());
@@ -10332,7 +10600,6 @@ verbosity = "project-imported"
         assert_eq!(inner.get("novita").unwrap(), Some("nv-key".to_string()));
 
         // Config file must no longer contain the api keys.
-        assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
         assert!(store.config.providers.openrouter.api_key.is_none());
         assert!(store.config.providers.novita.api_key.is_none());

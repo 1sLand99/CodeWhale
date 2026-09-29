@@ -1,10 +1,10 @@
-//! Lifecycle hooks for the Codewhale **TUI runtime**.
+//! Lifecycle hooks for the Codewhale TUI and Runtime API threads.
 //!
-//! Scope, stated plainly: every firing point in this system lives in the
-//! interactive TUI (`crates/tui/src/tui/`) and the engine turn loop it drives.
-//! `codewhale exec`, the CLI dispatcher, the app-server / ACP surfaces, and
-//! the workflow tool do not fire these hooks. The unrelated `crates/hooks`
-//! event-sink crate is a different mechanism and shares no configuration.
+//! Hooks fire in the interactive TUI (`crates/tui/src/tui/`), the engine turn
+//! loop, and Runtime API threads (`runtime_threads.rs`). Which surface fires
+//! which event is the scope table in `docs/HOOKS.md`. The unrelated
+//! `crates/hooks` event-sink crate is a different mechanism and shares no
+//! configuration.
 //!
 //! Hooks execute user-defined shell commands at:
 //! - Session start/end

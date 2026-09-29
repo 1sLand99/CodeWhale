@@ -549,7 +549,17 @@ mod tests {
             listener,
             "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok".to_string(),
         ));
-        let configured = client(url, false);
+        // This path proves proxy routing, not a two-second scheduling bound.
+        let configured = McpHttpClient::new(
+            url,
+            false,
+            false,
+            false,
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .unwrap();
         assert_eq!(
             configured
                 .send(configured.get(url))

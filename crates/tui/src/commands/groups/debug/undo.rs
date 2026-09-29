@@ -4,6 +4,7 @@ use crate::dependencies::{ExternalTool, Git};
 use crate::tui::app::{App, AppAction};
 use crate::tui::history::HistoryCell;
 use codewhale_models::ContentBlock;
+use std::path::PathBuf;
 
 use super::CommandResult;
 
@@ -146,12 +147,295 @@ fn tool_result_id(block: &ContentBlock) -> Option<&String> {
     }
 }
 
+/// Deepest fork chain [`snapshot_owners`] follows. A chain this long is
+/// already unusual; the bound only stops a corrupt lineage from looping.
+const MAX_FORK_ANCESTORS: usize = 32;
+
+/// A session whose restore points this conversation owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) struct SnapshotOwner {
+    /// Session tag the snapshots carry.
+    pub(in crate::commands) session_id: String,
+    /// Newest snapshot time (Unix seconds) owned from this session: `None`
+    /// for the current session, the fork time for a session it was forked
+    /// from. The source keeps working after the fork, and its later
+    /// snapshots are not the fork's.
+    pub(in crate::commands) until: Option<i64>,
+}
+
+impl SnapshotOwner {
+    fn owns(&self, snapshot: &crate::snapshot::Snapshot) -> bool {
+        snapshot.session_id.as_deref() == Some(self.session_id.as_str())
+            && self.until.is_none_or(|until| snapshot.timestamp <= until)
+    }
+}
+
+/// The sessions whose restore points `/undo` may use: the current session,
+/// and for a fork each session it was forked from, up to the fork. A fork
+/// copies its source's turns, so the snapshots those turns took (tagged
+/// with the source's id) are the fork's too, as the Runtime's thread-owned
+/// restore points are (#6621).
+///
+/// Lineage the saved sessions cannot prove ends the chain: fewer owners
+/// means fewer restorable steps, never someone else's.
+pub(in crate::commands) fn snapshot_owners(app: &App) -> Vec<SnapshotOwner> {
+    let Some(current) = app.current_session_id.clone() else {
+        return Vec::new();
+    };
+    let manager = crate::session_manager::SessionManager::default_location().ok();
+    let load = |id: &str| {
+        manager
+            .as_ref()
+            .and_then(|manager| manager.load_session_metadata_by_id(id).ok())
+    };
+    let mut metadata = app
+        .current_session_metadata
+        .clone()
+        .filter(|metadata| metadata.id == current)
+        .or_else(|| load(&current));
+    let mut owners = vec![SnapshotOwner {
+        session_id: current,
+        until: None,
+    }];
+    while let Some(child) = metadata.take() {
+        let Some(parent) = child.parent_session_id.clone() else {
+            break;
+        };
+        if owners.len() > MAX_FORK_ANCESTORS
+            || owners.iter().any(|owner| owner.session_id == parent)
+        {
+            break;
+        }
+        let forked_at = child.created_at.timestamp();
+        let until = owners
+            .last()
+            .and_then(|owner| owner.until)
+            .map_or(forked_at, |child_until| child_until.min(forked_at));
+        metadata = load(&parent);
+        owners.push(SnapshotOwner {
+            session_id: parent,
+            until: Some(until),
+        });
+    }
+    owners
+}
+
+/// Labels a `/undo` step starts at: before one tool call, or before a turn.
+fn is_undo_step_label(label: &str) -> bool {
+    label.starts_with("tool:") || label.starts_with("pre-turn:")
+}
+
+/// Labels of the restore points an engine takes for a turn. A step runs from
+/// one of them to the next one the conversation owns.
+fn is_restore_point_label(label: &str) -> bool {
+    is_undo_step_label(label) || label.starts_with("post-tool:") || label.starts_with("post-turn:")
+}
+
+/// One `/undo` step, planned but not applied.
+pub(in crate::commands) struct UndoStep {
+    /// Restore point the step started at.
+    pub(in crate::commands) target: crate::snapshot::Snapshot,
+    /// Tree the step ended at: the next restore point this conversation
+    /// owns, or, for the newest step, a snapshot of the workspace as it is
+    /// now. Trees, not commit ids, because a prune rewrites commit ids.
+    pub(in crate::commands) end: crate::snapshot::SnapshotId,
+    /// The paths the step changed that are still as it left them.
+    pub(in crate::commands) restore: Vec<PathBuf>,
+    /// Changed paths `/undo` leaves in place because they are not regular
+    /// files (a symlink, a directory, a submodule), in this step or in a
+    /// newer one it walked past.
+    pub(in crate::commands) skipped: Vec<PathBuf>,
+    /// The `pre-restore:` snapshot planning took of the workspace, when the
+    /// step ends now; the restore reuses it as its safety backup.
+    pub(in crate::commands) backup: Option<crate::snapshot::SnapshotId>,
+}
+
+/// Why no step can be undone.
+pub(in crate::commands) enum UndoRefusal {
+    /// Nothing this conversation owns is left to undo.
+    Nothing(String),
+    /// A step is there, but undoing it would clobber later work, or the
+    /// snapshot repo failed; nothing was changed.
+    Refused(Box<CommandResult>),
+}
+
+/// Find the newest step of `snapshots` (newest first) that `owners` own and
+/// that is not undone yet, and the paths undoing it restores.
+///
+/// A step is scoped to the paths that changed between its restore point and
+/// the next one: edits to any other file (the user's, another session's)
+/// are never touched. A path the step changed that changed again since is
+/// refused rather than overwritten. A step whose paths are all back at its
+/// restore point is already undone, so `/undo` walks back one tool call (or
+/// turn) at a time (#384). A changed path that is not a regular file is
+/// left in place and reported (file-scoped restore never writes symlinks or
+/// directories); it does not block the step's other paths or older steps.
+///
+/// Planning writes nothing, except when the newest step ends now: the
+/// workspace is then snapshotted, and only when `trusted`, since `/undo`
+/// outside trusted mode refuses to touch files anyway.
+///
+/// Known limits: the TUI records no per-tool receipts (the Runtime's
+/// `post-tool:` spans and declared write paths), so a step owns everything
+/// that changed between its restore point and the next one this
+/// conversation owns, including a write another session made in that window.
+/// The newest step, when no later restore point exists yet (the turn is still
+/// running, or its post-turn snapshot failed), ends at the workspace as it
+/// is now, so an edit made since the step's restore point counts as the
+/// step's. [`patch_undo`] first waits for a post-turn snapshot this process
+/// is still taking, so this is not the case right after a turn.
+pub(in crate::commands) fn plan_undo_step(
+    repo: &crate::snapshot::SnapshotRepo,
+    snapshots: Vec<crate::snapshot::Snapshot>,
+    owners: &[SnapshotOwner],
+    trusted: bool,
+) -> Result<UndoStep, UndoRefusal> {
+    let owned: Vec<crate::snapshot::Snapshot> = snapshots
+        .into_iter()
+        .filter(|snapshot| is_restore_point_label(&snapshot.label))
+        .filter(|snapshot| owners.iter().any(|owner| owner.owns(snapshot)))
+        .collect();
+    if !owned
+        .iter()
+        .any(|snapshot| is_undo_step_label(&snapshot.label))
+    {
+        return Err(UndoRefusal::Nothing(
+            "No undoable snapshots for the current session — nothing to revert.".to_string(),
+        ));
+    }
+
+    let compare_failed = |error: std::io::Error| {
+        UndoRefusal::Refused(Box::new(CommandResult::error(format!(
+            "Failed to compare snapshot: {error}"
+        ))))
+    };
+    // `InvalidInput` from a path comparison: the path is not a regular file
+    // (or not a safe workspace path) on one side, so it is left alone.
+    let unrestorable = |error: &std::io::Error| error.kind() == std::io::ErrorKind::InvalidInput;
+
+    let mut skipped: Vec<PathBuf> = Vec::new();
+    for (index, target) in owned.iter().enumerate() {
+        if !is_undo_step_label(&target.label) {
+            continue;
+        }
+        let mut backup = None;
+        let end = match index.checked_sub(1) {
+            Some(newer) => owned[newer].tree.clone(),
+            // The newest step has no later restore point (the turn is still
+            // running, stopped early, or its post-turn snapshot has not
+            // landed): the workspace now is the only record of its end.
+            None => {
+                if repo
+                    .work_tree_matches_snapshot(&target.tree)
+                    .map_err(compare_failed)?
+                {
+                    continue;
+                }
+                if !trusted {
+                    return Err(UndoRefusal::Refused(Box::new(untrusted_refusal())));
+                }
+                let short = &target.id.as_str()[..target.id.as_str().len().min(12)];
+                let taken = repo
+                    .take_snapshot(&format!("pre-restore:{short}"), None)
+                    .map_err(|error| {
+                        UndoRefusal::Refused(Box::new(CommandResult::error(format!(
+                            "Failed to snapshot the workspace before undo: {error}"
+                        ))))
+                    })?;
+                backup = Some(taken.id);
+                taken.tree
+            }
+        };
+        let changed = repo
+            .changed_paths_between(&target.tree, &end)
+            .map_err(compare_failed)?;
+        let mut restore = Vec::new();
+        let mut changed_since = Vec::new();
+        'paths: for path in changed {
+            match repo.path_matches_snapshot(&end, &path) {
+                // Still as the step left it. Comparing the step's start too
+                // proves it holds a regular file (or nothing) to restore.
+                Ok(true) => match repo.path_same_in_snapshots(&target.tree, &end, &path) {
+                    Ok(_) => {
+                        restore.push(path);
+                        continue;
+                    }
+                    Err(error) if unrestorable(&error) => {
+                        skipped.push(path);
+                        continue;
+                    }
+                    Err(error) => return Err(compare_failed(error)),
+                },
+                Ok(false) => {}
+                Err(error) if unrestorable(&error) => {
+                    skipped.push(path);
+                    continue;
+                }
+                Err(error) => return Err(compare_failed(error)),
+            }
+            // Back at the step's start, or at an older restore point that an
+            // earlier `/undo` walked it back to: already undone.
+            for older in &owned[index..] {
+                match repo.path_matches_snapshot(&older.tree, &path) {
+                    Ok(true) => continue 'paths,
+                    Ok(false) => {}
+                    Err(error) if unrestorable(&error) => {
+                        skipped.push(path);
+                        continue 'paths;
+                    }
+                    Err(error) => return Err(compare_failed(error)),
+                }
+            }
+            changed_since.push(path.display().to_string());
+        }
+        if !changed_since.is_empty() {
+            return Err(UndoRefusal::Refused(Box::new(CommandResult::message(
+                format!(
+                    "Refusing to undo snapshot '{}': {} changed after it, and undoing would overwrite \
+                 that change. Nothing was changed; revert those files yourself, or use /restore \
+                 for a whole-workspace rollback.",
+                    target.label,
+                    changed_since.join(", ")
+                ),
+            ))));
+        }
+        if restore.is_empty() {
+            // Already undone, changed nothing, or changed only paths `/undo`
+            // cannot restore: keep walking back.
+            continue;
+        }
+        skipped.sort();
+        skipped.dedup();
+        return Ok(UndoStep {
+            target: target.clone(),
+            end,
+            restore,
+            skipped,
+            backup,
+        });
+    }
+    Err(UndoRefusal::Nothing(
+        "No undoable snapshot differs from the current workspace — nothing to revert.".to_string(),
+    ))
+}
+
+/// How long `/undo` waits for a post-turn snapshot still being written.
+const POST_TURN_SNAPSHOT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn untrusted_refusal() -> CommandResult {
+    CommandResult::message(
+        "Refusing to undo workspace files outside trusted mode.\n\
+         Run `/trust on` or select Full Access with Shift+Tab, then re-run `/undo`.",
+    )
+}
+
 /// Revert the most recent write tool (apply_patch/edit_file/write_file) or turn.
 ///
-/// Opens the side-git snapshot repo and finds the most recent snapshot,
-/// preferring per-tool snapshots (`tool:*`) over pre-turn snapshots
-/// (`pre-turn:*`). Restores files from that snapshot and shows a diff
-/// summary. Falls back to conversation undo when no snapshots exist.
+/// Opens the side-git snapshot repo and finds the newest `tool:*` or
+/// `pre-turn:*` restore point this conversation owns (see
+/// [`snapshot_owners`]) whose step is not undone yet, then restores only the
+/// files that step changed (see [`plan_undo_step`]). Falls back to
+/// conversation undo when no snapshots exist.
 ///
 /// Posts a `HistoryCell::System` entry so the user can see what was
 /// reverted in the transcript.
@@ -168,7 +452,19 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
         }
     };
 
-    let snapshots = match repo.list(100) {
+    // A post-turn snapshot this process is still taking is the newest step's
+    // end: without it, every edit since the step's restore point would count
+    // as the step's.
+    if !crate::snapshot::wait_for_pending_post_turn_snapshots(POST_TURN_SNAPSHOT_WAIT) {
+        return CommandResult::message(
+            "The last turn's workspace snapshot is still being written; nothing was changed. \
+             Run /undo again in a moment.",
+        );
+    }
+
+    // The whole store: an older restore point that is still stored must not
+    // be mistaken for a pruned one.
+    let snapshots = match repo.list(usize::MAX) {
         Ok(s) => s,
         Err(e) => {
             return CommandResult::error(format!("Failed to list snapshots: {e}"));
@@ -183,72 +479,70 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
     // Untagged legacy snapshots and snapshots from another conversation may
     // describe unrelated user work in this same workspace, so fail closed
     // and let the command dispatcher fall back to conversation-only undo.
-    let Some(current_session) = app.current_session_id.as_deref() else {
+    let owners = snapshot_owners(app);
+    if owners.is_empty() {
         return CommandResult::message(
             "No undoable snapshot is tagged for the current session — nothing to revert.",
         );
-    };
-    let candidates: Vec<crate::snapshot::Snapshot> = snapshots
-        .into_iter()
-        .filter(|s| s.label.starts_with("tool:") || s.label.starts_with("pre-turn:"))
-        .filter(|s| s.session_id.as_deref() == Some(current_session))
-        .collect();
-
-    if candidates.is_empty() {
-        return CommandResult::message(
-            "No undoable snapshots for the current session — nothing to revert.",
-        );
     }
-
-    // Pick the newest current-session candidate whose tree differs from the
-    // workspace. Skipping identical snapshots makes repeated `/undo` walk
-    // backward only inside the proven session boundary.
-    let mut target = None;
-    for snapshot in &candidates {
-        match repo.work_tree_matches_snapshot(&snapshot.id) {
-            Ok(false) => {
-                target = Some(snapshot);
-                break;
-            }
-            Ok(true) => {}
-            Err(error) => {
-                return CommandResult::error(format!("Failed to compare snapshot: {error}"));
-            }
-        }
-    }
-
-    let Some(target) = target else {
-        return CommandResult::message(
-            "No undoable snapshot differs from the current workspace — nothing to revert.",
-        );
-    };
 
     // Restoring workspace files is a mutation. Apply the trust gate only
-    // after finding a real, current-session target so chat-only `/undo` can
-    // still fall back to conversation history in ordinary mode.
-    if !(app.yolo || app.trust_mode) {
-        return CommandResult::message(
-            "Refusing to undo workspace files outside trusted mode.\n\
-             Run `/trust on` or select Full Access with Shift+Tab, then re-run `/undo`.",
-        );
+    // after finding a real, owned step so chat-only `/undo` can still fall
+    // back to conversation history in ordinary mode; planning itself writes
+    // nothing outside trusted mode.
+    let trusted = app.yolo || app.trust_mode;
+    let step = match plan_undo_step(&repo, snapshots, &owners, trusted) {
+        Ok(step) => step,
+        Err(UndoRefusal::Nothing(message)) => return CommandResult::message(message),
+        Err(UndoRefusal::Refused(result)) => return *result,
+    };
+    let target = &step.target;
+    if !trusted {
+        return untrusted_refusal();
     }
 
-    // Capture what this restore is about to change *before* it runs: after the
-    // checkout the work tree matches the snapshot and the diff is empty by
-    // construction. Computed in the side repo, not the user's — the user's
-    // `git diff --stat` reports their own uncommitted work, which is not what
-    // the undo changed.
-    let diff_stat = match repo.snapshot_diff_stat(&target.id) {
-        Ok(stat) => stat,
-        Err(e) => {
-            tracing::warn!(target: "snapshot", "diff stat for the undo summary failed: {e}");
-            None
+    let plan: Vec<(PathBuf, crate::snapshot::SnapshotId)> = step
+        .restore
+        .iter()
+        .map(|path| (path.clone(), target.tree.clone()))
+        .collect();
+    // Re-verify after the safety snapshot, immediately before the first
+    // write: a change that landed meanwhile is refused.
+    let preflight = || {
+        for path in &step.restore {
+            if !repo.path_matches_snapshot(&step.end, path)? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "'{}' changed while the undo was being prepared; nothing was changed.",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    };
+    let restored = match &step.backup {
+        // Planning already snapshotted the workspace (and `preflight` proves
+        // every planned path is still as that snapshot holds it).
+        Some(backup) => repo.restore_path_plan_with_backup(&plan, backup, true, preflight),
+        None => {
+            let backup_short = &target.id.as_str()[..target.id.as_str().len().min(12)];
+            repo.restore_path_plan(
+                &plan,
+                &format!("pre-restore:{backup_short}"),
+                true,
+                preflight,
+            )
         }
     };
-
-    if let Err(e) = repo.restore(&target.id) {
-        return CommandResult::error(format!("Restore failed: {e}"));
-    }
+    let outcomes = match restored {
+        Ok(outcomes) => outcomes,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            return CommandResult::message(e.to_string());
+        }
+        Err(e) => return CommandResult::error(format!("Restore failed: {e}")),
+    };
 
     if let Some(tool_id) = target.label.strip_prefix("tool:") {
         prune_undone_tool_context(app, tool_id);
@@ -257,25 +551,34 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
     }
 
     let short = &target.id.as_str()[..target.id.as_str().len().min(8)];
-    let summary = match diff_stat {
-        Some(ref stat) => {
-            format!(
-                "Restored snapshot '{}' ({}). Files affected:\n{stat}",
-                target.label, short
-            )
-        }
-        None => {
-            format!(
-                "Restored snapshot '{}' ({}). No diff changes detected.",
-                target.label, short
-            )
-        }
-    };
+    let lines: Vec<String> = outcomes
+        .iter()
+        .map(|outcome| format!("{} {}", outcome.action.as_str(), outcome.path.display()))
+        .collect();
+    let mut summary = format!(
+        "Restored {} file(s) to snapshot '{}' ({}):\n{}",
+        outcomes.len(),
+        target.label,
+        short,
+        lines.join("\n")
+    );
+    if !step.skipped.is_empty() {
+        let skipped: Vec<String> = step
+            .skipped
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        summary.push_str(&format!(
+            "\nLeft in place (not a regular file, which /undo does not restore; use /restore \
+             for a whole-workspace rollback): {}",
+            skipped.join(", ")
+        ));
+    }
 
     // Post a system cell so the reverted state is visible in the transcript.
     app.push_history_cell(HistoryCell::System {
         content: format!(
-            "/undo reverted workspace to snapshot '{}' ({})",
+            "/undo reverted workspace files to snapshot '{}' ({})",
             target.label, short
         ),
     });

@@ -349,9 +349,12 @@ fn create_session(
         command.arg(arg);
     }
     command.cwd(&prepared.cwd);
-    for (key, value) in &prepared.env {
-        command.env(key, value);
-    }
+    // Same sanitized environment as the `exec_shell` PTY path; sandbox
+    // markers from `prepared.env` are applied as explicit overrides.
+    crate::child_env::apply_to_pty_command(
+        &mut command,
+        crate::child_env::string_map_env(&prepared.env),
+    );
     let child = pair
         .slave
         .spawn_command(command)
@@ -1496,6 +1499,38 @@ mod tests {
                 "a killed shell must report its exit"
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn new_session_does_not_inherit_parent_secret_env() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _env_lock = lock_test_env();
+        let _secret = EnvVarGuard::set("CODEWHALE_TEST_PTY_SECRET", "pty-secret-value");
+        let session = fresh("test-env-scrub");
+        let result = run(
+            &session,
+            "printf 'se''cret=%s ho''me=%s' \"${CODEWHALE_TEST_PTY_SECRET-unset}\" \"${HOME-none}\"",
+            Duration::from_secs(10),
+        );
+        assert!(
+            !result.content.contains("pty-secret-value"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("secret=unset"),
+            "{}",
+            result.content
+        );
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            assert!(
+                result.content.contains(&format!("home={home}")),
+                "allowlisted variables still reach the shell: {}",
+                result.content
+            );
         }
     }
 }

@@ -155,7 +155,7 @@ jobs:
               scripts/release/npm-wrapper-smoke.js|scripts/mobile-smoke.sh|scripts/check-provider-registry.py)
                 heavy=true
                 ;;
-              crates/*|docs/HOOKS.md|docs/KEYBINDINGS.md|docs/TELEMETRY.md|docs/FLEET_WORKFLOW_TUTORIAL.md|docs/2512.24601v2.pdf|docs/cloud-facts/*|docs/examples/*)
+              crates/*|docs/HOOKS.md|docs/KEYBINDINGS.md|docs/TELEMETRY.md|docs/FLEET_WORKFLOW_TUTORIAL.md|docs/zh_hans/FLEET.md|docs/2512.24601v2.pdf|docs/cloud-facts/*|docs/examples/*)
                 heavy=true
                 ;;
               docs/*|*.md|packaging/aur/*|.github/PULL_REQUEST_TEMPLATE.md|.github/ISSUE_TEMPLATE/*|.github/scripts/agent-task-metadata.test.sh|.github/workflows/agent-task-labels.yml|.github/workflows/auto-tag.yml|.github/workflows/stale.yml|.github/workflows/triage.yml|scripts/release/check-versions.sh|scripts/release/check-ohos-deps.sh|scripts/release/install-dogfood.sh|scripts/release/install-dogfood.test.sh|scripts/release/prepare-release.sh|scripts/release/prepare-release.test.sh|scripts/dev-cache.sh|scripts/dev-cache.test.sh|scripts/dev-cargo.sh|scripts/dev-test.sh)
@@ -295,6 +295,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Run Runtime SDK runtime and type tests
+        run: |
+          npm ci --ignore-scripts --workspace @codewhale/runtime-sdk
+          npm test --workspace @codewhale/runtime-sdk
       - name: Run chat-bridge suites
         # All four bridges + bridge-core ship dependency-free node --test
         # suites that no workflow ran. weixin has no lockfile by design
@@ -487,6 +491,14 @@ jobs:
       - name: Check provider registry drift
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-provider-registry.py
+      - name: Check the offline model seed is generated
+        if: needs.changes.outputs.heavy == 'true'
+        # crates/config/assets/models_dev.bundled.json is rendered from
+        # scripts/catalog/models_dev_seed.toml and its lock (#6396). A hand edit
+        # fails here; docs/CATALOG_REFRESH.md has the regenerate steps.
+        run: |
+          python3 scripts/catalog_models_dev.py seed render --check
+          python3 -m unittest scripts/catalog_models_dev_test.py
       - name: Check command-contract prototype boundary
         if: needs.changes.outputs.heavy == 'true'
         # The runtime -> UI ratchet baseline is compared with the one at the

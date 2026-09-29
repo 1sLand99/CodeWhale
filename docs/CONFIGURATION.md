@@ -318,7 +318,6 @@ Supported keys in the project overlay (top-level fields only):
 | `reasoning_effort` | force `"high"` / `"max"` for a complex repo |
 | `approval_policy` | only values that tighten the user's current permission posture |
 | `sandbox_mode` | only values that tighten the user's current sandbox posture |
-| `notes_path` | keep notes in-repo |
 | `max_subagents` | clamp sub-agent concurrency for a constrained repo (clamped to 1..=128) |
 | `allow_shell` | `false` can disable shell access; `true` is ignored |
 
@@ -326,8 +325,8 @@ The overlay is intentionally narrow — it covers the fields a repo
 maintainer is most likely to want to standardize across contributors.
 Credential, endpoint, provider-selection, MCP config, hooks, skills,
 retry, hotbar bindings, and `instructions = [...]` settings stay user-global.
-If a repo-local config declares `api_key`, `base_url`, `provider`,
-`mcp_config_path`, `hotbar`, `allow_shell = true`, or `instructions`,
+If a repo-local config declares `api_key`, `base_url`, `providers`, `provider`,
+`mcp_config_path`, `notes_path`, `hotbar`, `allow_shell = true`, or `instructions`,
 Codewhale ignores that key and keeps the user's global setting.
 
 The consolidated `codewhale` runtime uses one config file for DeepSeek auth
@@ -413,11 +412,11 @@ For the active provider, the runtime resolves the API key in this exact order
    `[providers.xai] auth_mode = "oauth"` reads Codewhale's own xAI
    device-login store (or a consent-granted Grok CLI file).
 2. **Explicit CLI key.** `--api-key` forwarded with its source marker wins
-   over every saved slot; for `deepseek`/`deepseek-CN` it also wins over the
-   root `api_key`.
+   over every saved slot.
 3. **Config file `api_key`.** The `[providers.<name>] api_key` table slot for
-   the active provider, plus the legacy root `api_key` for
-   `deepseek`/`deepseek-CN` and the literal `provider = "custom"` route.
+   the active provider. `deepseek-CN` also reads `[providers.deepseek]`. An
+   older top-level `api_key` is read as `[providers.deepseek] api_key` (see
+   [Legacy top-level `base_url` and `api_key`](#legacy-top-level-base_url-and-api_key)).
    File-owned keys stay bound to their file-owned endpoint: when the
    environment replaces the route's base URL with a custom host, the saved
    key is not sent there.
@@ -1089,18 +1088,22 @@ actually measures.
 You can define multiple profiles in the same file:
 
 ```toml
-api_key = "PERSONAL_KEY"
 default_text_model = "deepseek-flash"
 
-[profiles.work]
+[providers.deepseek]
+api_key = "PERSONAL_KEY"
+
+[profiles.work.providers.deepseek]
 api_key = "WORK_KEY"
 base_url = "https://api.deepseek.com/beta"
 
 [profiles.nvidia-nim]
 provider = "nvidia-nim"
+default_text_model = "deepseek-ai/deepseek-v4-pro"
+
+[profiles.nvidia-nim.providers.nvidia_nim]
 api_key = "NVIDIA_KEY"
 base_url = "https://integrate.api.nvidia.com/v1"
-default_text_model = "deepseek-ai/deepseek-v4-pro"
 
 [profiles.fireworks]
 provider = "fireworks"
@@ -1157,6 +1160,53 @@ Select a profile with:
 
 If a profile is selected but missing, codewhale exits with an error listing available profiles.
 
+## Legacy top-level `base_url` and `api_key`
+
+Older releases kept DeepSeek's endpoint and key at the top of `config.toml`,
+and each reader decided for itself which other routes inherited them. They
+now live in provider tables only. An older file keeps working unchanged:
+every load reads the top-level keys as if they were already in their table,
+by one rule, per file and per `[profiles.<name>]`:
+
+1. `provider = "custom"` with no `[providers.custom]` table: the endpoint, key
+   and a copy of the model become `[providers.custom]`.
+2. An endpoint on another vendor's official host (for example
+   `integrate.api.nvidia.com`, `xiaomimimo.com`, `openrouter.ai`, or the
+   ChatGPT Codex endpoint) belongs to that vendor's table, so a DeepSeek route
+   never sends requests there.
+3. Anything else belongs to `[providers.deepseek]`, which DeepSeek-CN also
+   reads for its endpoint and key.
+
+The key goes with DeepSeek (or the literal custom route). It follows the
+endpoint to another vendor only when the same table sets `provider` to that
+vendor, the host is that vendor's own, and the vendor's table has no key. When
+no `provider` is set, a NIM host still selects `nvidia-nim` and
+`api.deepseeki.com` still selects `deepseek-cn`. A `[vision_model]` without a
+key of its own keeps using the top-level key. A profile's top-level
+`base_url` now overrides the base file's `[providers.deepseek] base_url`
+(before, the base table silently won).
+
+When a top-level value and its table disagree, the table's `base_url` and the
+top-level `api_key` are used, which is what the runtime sent before.
+
+Loading never rewrites the file. The next save Codewhale makes (for example
+`codewhale config set`, `/config ... --save`, or `auth set`) moves the keys,
+keeps comments, writes a one-time credential-free copy of the old file to
+`config.toml.pre-migrate.bak`, and prints one line saying what moved. A
+disagreeing pair is never resolved in the file on its own; both values stay
+until you choose, and `codewhale config doctor` / `codewhale doctor` report
+it (sources only, never values). `codewhale config get|set|unset base_url`
+(and `api_key`) address the active provider's table.
+
+To tidy the file yourself:
+
+```bash
+codewhale config migrate --dry-run            # show what would move
+codewhale config migrate                      # move it (backup first)
+codewhale config migrate --prefer top-level   # resolve a conflict: keep the top-level value
+codewhale config migrate --prefer table       # resolve a conflict: keep the table value
+```
+
 ## Environment Variables
 
 Most runtime environment variables override config values. API-key variables are
@@ -1178,10 +1228,10 @@ auto-router, a picker preview — resolves its endpoint from that provider's own
 `OPENAI_BASE_URL`, …), then that provider's default. It never inherits the
 active session's host, and a custom route with no configured `base_url` fails
 closed on a loopback placeholder rather than borrowing another provider's
-endpoint. The legacy root `base_url` behaves the same way: written in your
-config file it stays shared by the DeepSeek and DeepSeek-CN identities as it
-always has, but a value the environment wrote belongs to the identity it was
-addressed to. A managed-config overlay that supplies or reselects the effective
+endpoint. The environment writes the value into the active identity's own
+table: DeepSeek-CN falls back to `[providers.deepseek]` for its endpoint and
+key, but never to a DeepSeek value the environment addressed to DeepSeek alone.
+A managed-config overlay that supplies or reselects the effective
 route's endpoint takes the generic override away from every route.
 
 Remaining variables:
@@ -1990,7 +2040,7 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `minimax-anthropic` (string provider value): selects MiniMax's Anthropic-compatible Messages route through `[providers.minimax_anthropic]`. The default Base URL is `https://api.minimax.io/anthropic`; set `https://api.minimaxi.com/anthropic` for China. Keep the `/anthropic` suffix because Codewhale appends `/v1/messages`. The route uses `MINIMAX_API_KEY` and defaults to `MiniMax-M3`; `MiniMax-M2.7` is also registered. Official M3 input modalities are text, image, and video, with adaptive or disabled thinking. M2.7 is text-only and always keeps thinking enabled.
 - `api_key` (string, required for hosted providers): must be non-empty for DeepSeek/hosted providers (or set the provider API key env var). Self-hosted SGLang, vLLM, and local `ollama` can omit it. `ollama-cloud` requires a key saved for that provider or supplied by `OLLAMA_CLOUD_API_KEY`, then `OLLAMA_API_KEY`.
 - `auth_mode` (string, optional provider-table key): selects a provider-specific authentication contract. Kimi Code membership uses `auth_mode = "api_key"` (or omit the field), a key created in the [Kimi Code console](https://www.kimi.com/code/console), `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"` for K3. Codewhale gives that route a safe 262,144-token baseline; set `context_window = 1048576` only when the Kimi Code plan includes 1M access (Allegretto and above). `k3[1m]` is a Claude Code-only convention, not an API model ID, and Codewhale rejects it instead of silently changing the wire model or assuming an entitlement. `model = "kimi-for-coding"` remains the valid K2.7 compatibility route available to all Kimi Code members. Legacy `auth_mode = "kimi_oauth"` fails closed with API-key guidance and never probes, reads, refreshes, or rewrites `kimi_cli`/`kimi_code_cli` credential files. First-class OAuth requires Codewhale's own vendor-registered client identity and remains tracked in #4417.
-- `base_url` (string, optional): defaults to `https://api.deepseek.com/beta` for DeepSeek's OpenAI-compatible Chat Completions API, including legacy `provider = "deepseek-cn"` configs. Other defaults are `https://api.deepseek.com/anthropic` for `deepseek-anthropic`, `https://integrate.api.nvidia.com/v1` for `nvidia-nim`, `https://api.openai.com/v1` for `openai`, `https://api.atlascloud.ai/v1` for `atlascloud`, `https://maas-openapi.wanjiedata.com/api/v1` for `wanjie-ark`, `https://ark.cn-beijing.volces.com/api/coding/v3` for `volcengine`, `https://openrouter.ai/api/v1` for `openrouter`, `https://token-plan-sgp.xiaomimimo.com/v1` for `xiaomi-mimo` when the API key starts with `tp-...` and `https://api.xiaomimimo.com/v1` otherwise, `https://api.novita.ai/openai/v1` for `novita`, `https://api.fireworks.ai/inference/v1` for `fireworks`, `https://api.siliconflow.com/v1` for `siliconflow`, `https://api.siliconflow.cn/v1` for `siliconflow-CN`, `https://api.arcee.ai/api/v1` for `arcee`, `https://api.moonshot.ai/v1` for `moonshot`, `https://api.minimax.io/v1` for `minimax`, `https://api.openmodel.ai` for `openmodel`, `https://api.z.ai/api/coding/paas/v4` for `zai`, `https://api.stepfun.ai/v1` for `stepfun`, `https://api.deepinfra.com/v1/openai` for `deepinfra`, `https://api.sakana.ai/v1` for `sakana`, `https://router.huggingface.co/v1` for `huggingface`, `https://api-inference.modelscope.cn/v1` for `modelscope`, `https://api.together.xyz/v1` for `together`, `https://api.baiduqianfan.ai/v1` for `qianfan`, `https://chatgpt.com/backend-api` for `openai-codex`, `https://api.anthropic.com` for `anthropic`, `https://api.mistral.ai/v1` for `mistral`, `http://localhost:30000/v1` for `sglang`, `http://localhost:8000/v1` for `vllm`, `http://localhost:11434/v1` for `ollama`, and `https://ollama.com/v1` for `ollama-cloud`. Set `base_url = "https://token-plan-cn.xiaomimimo.com/v1"` for China-region Xiaomi MiMo Token Plan accounts or `base_url = "https://token-plan-ams.xiaomimimo.com/v1"` for Europe/Amsterdam accounts. Mistral-specific reasoning fields and polymorphic replay are enabled only on the documented first-party HTTPS `/v1` hosts; a custom Mistral base URL keeps generic Chat semantics. Set `https://api.deepseek.com` or `https://api.deepseek.com/v1` explicitly to opt out of DeepSeek beta features.
+- `base_url` (string, optional, `[providers.<name>]` key; see [Legacy top-level `base_url` and `api_key`](#legacy-top-level-base_url-and-api_key) for the older top-level spelling): defaults to `https://api.deepseek.com/beta` for DeepSeek's OpenAI-compatible Chat Completions API, including legacy `provider = "deepseek-cn"` configs. Other defaults are `https://api.deepseek.com/anthropic` for `deepseek-anthropic`, `https://integrate.api.nvidia.com/v1` for `nvidia-nim`, `https://api.openai.com/v1` for `openai`, `https://api.atlascloud.ai/v1` for `atlascloud`, `https://maas-openapi.wanjiedata.com/api/v1` for `wanjie-ark`, `https://ark.cn-beijing.volces.com/api/coding/v3` for `volcengine`, `https://openrouter.ai/api/v1` for `openrouter`, `https://token-plan-sgp.xiaomimimo.com/v1` for `xiaomi-mimo` when the API key starts with `tp-...` and `https://api.xiaomimimo.com/v1` otherwise, `https://api.novita.ai/openai/v1` for `novita`, `https://api.fireworks.ai/inference/v1` for `fireworks`, `https://api.siliconflow.com/v1` for `siliconflow`, `https://api.siliconflow.cn/v1` for `siliconflow-CN`, `https://api.arcee.ai/api/v1` for `arcee`, `https://api.moonshot.ai/v1` for `moonshot`, `https://api.minimax.io/v1` for `minimax`, `https://api.openmodel.ai` for `openmodel`, `https://api.z.ai/api/coding/paas/v4` for `zai`, `https://api.stepfun.ai/v1` for `stepfun`, `https://api.deepinfra.com/v1/openai` for `deepinfra`, `https://api.sakana.ai/v1` for `sakana`, `https://router.huggingface.co/v1` for `huggingface`, `https://api-inference.modelscope.cn/v1` for `modelscope`, `https://api.together.xyz/v1` for `together`, `https://api.baiduqianfan.ai/v1` for `qianfan`, `https://chatgpt.com/backend-api` for `openai-codex`, `https://api.anthropic.com` for `anthropic`, `https://api.mistral.ai/v1` for `mistral`, `http://localhost:30000/v1` for `sglang`, `http://localhost:8000/v1` for `vllm`, `http://localhost:11434/v1` for `ollama`, and `https://ollama.com/v1` for `ollama-cloud`. Set `base_url = "https://token-plan-cn.xiaomimimo.com/v1"` for China-region Xiaomi MiMo Token Plan accounts or `base_url = "https://token-plan-ams.xiaomimimo.com/v1"` for Europe/Amsterdam accounts. Mistral-specific reasoning fields and polymorphic replay are enabled only on the documented first-party HTTPS `/v1` hosts; a custom Mistral base URL keeps generic Chat semantics. Set `https://api.deepseek.com` or `https://api.deepseek.com/v1` explicitly to opt out of DeepSeek beta features.
 - `ollama-cloud` route: select `provider = "ollama-cloud"`, configure `[providers.ollama_cloud]` when overriding the default `https://ollama.com/v1` / `gpt-oss:120b` tuple, and save a key from [Ollama account settings](https://ollama.com/settings/keys) with `codewhale auth set --provider ollama-cloud`. Ambient precedence is `OLLAMA_CLOUD_API_KEY`, then `OLLAMA_API_KEY`; arbitrary Ollama model IDs pass through unchanged.
 - Legacy Ollama Cloud migration: a released `provider = "ollama"` config whose normalized `[providers.ollama].base_url` is exactly `https://ollama.com/v1` is upgraded to the `ollama-cloud` runtime identity in memory. Only that exact tuple may read its old `ollama` provider table and secret slot. The config and secrets are never rewritten, and neighboring paths, HTTP downgrades, lookalike hosts, or an explicit `ollama-cloud` selection never consume the fallback.
 - `telecomjs` base URL and catalog: `[providers.telecomjs]` defaults to `https://aigw.telecomjs.com/v1`; `TELECOMJS_BASE_URL` overrides it. With `TELECOMJS_API_KEY`, `/models` refreshes a key-scoped catalog without mixing rows into another provider.
@@ -2462,6 +2512,10 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `notifications.sound_file`: custom local WAV path for `sound = "file"` or legacy
   `completion_sound = "file"`.
 - `notifications.subagent_completion`: `always`, `final-only` (default), `off`.
+  Covers all background work that finishes: sub-agents, background shells and
+  durable tasks. `final-only` sends one notice naming everything that finished
+  once no agent, workflow or durable task is still running; a running shell
+  (a dev server, a watcher) never holds it back. `always` sends one per item.
 - `notifications.quiet`: boolean, default `false`.
 - `notifications.events`: six boolean categories, all enabled by default; see below.
 - `notifications.completion_sound`: legacy completion cue, default `off`, with the
@@ -2492,7 +2546,7 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `tui.stream_chunk_timeout_secs` (int, optional, default `900`): per-SSE-chunk idle timeout for streamed model responses. Slow local or compatible servers can raise this with `/config stream_chunk_timeout_secs <seconds>`; `0` maps to the default and explicit values must be `1..=3600`. The legacy `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var is still honored when this key is omitted.
 - `tui.osc8_links` (bool, optional, default on for macOS/Linux, off for Windows): emit OSC 8 escape sequences around URLs in transcript output so supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty, WezTerm, Alacritty, recent gnome-terminal/konsole) can open them with the terminal's link gesture—usually Cmd-click on macOS and Ctrl-click on Linux/Windows. Terminals without OSC 8 support render the plain label and ignore the escape. The escapes are emitted out-of-band (not inside buffer cells), so column corruption is not a concern; set `false` only for terminals that misrender the OSC 8 terminator itself. Windows legacy consoles default off; opt in with `true`.
 - `tui.max_model_steps` (int, optional, default uncapped): optional model-step ceiling for one ordinary turn. Omission or `0` leaves model steps uncapped; explicit positive values are clamped to `1..=100000`. Headless `exec` and Fleet workers also have no implicit model-step ceiling; `exec --max-turns N` and positive worker budgets still apply. At ~80% of an explicit step budget the model gets one soft-landing notice; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` after one bounded final-report response when needed. Cumulative wall-clock and per-stream limits remain independent. Active interactive goal turns use `goal.max_steps` instead (default `1000`); see the Goal loop section below.
-- `tui.turn_wall_clock_secs` (int, optional, default `3600`): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Clamped to `30..=86400` (24 hours is the documented ceiling); `0` resolves to the default. When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
+- `tui.turn_wall_clock_secs` (int, optional, default: no limit): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Omitted or `0` means no limit; positive values clamp to `30..=86400` (24 hours is the ceiling). When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
 - `transcript.prose_measure` (positive integer, optional, default absent = full width): wrap cap, in columns, for prose cells — user messages, assistant answers, and reasoning/thinking blocks — in the live transcript (#5436). Absent (or `0`) spends the full content width, consistent with tool/status cells and the #5322 wide-frame decision; the former 105-column prose rail is gone. Set a positive whole number (e.g. `prose_measure = 120` under `[transcript]`) to restore a bounded reading measure on ultrawide terminals. Narrow terminals always keep their content width — the cap clamps from above only. Tool, diff, and status cells never inherit this cap. Invalid values (negative or non-integer) are rejected at startup with a `transcript.prose_measure` config error. Resolved once per render pass, so the main transcript cache and the full-screen overlay always agree on the effective width.
 - `hooks` (optional): lifecycle hooks configuration (see `config.example.toml`).
 - `features.*` (optional): feature flag overrides (see below).
@@ -3340,3 +3394,31 @@ The config value itself is forgiving: `true`/`false`, `"on"`/`"off"`, and
 A confirmed opt-out still sends your configured API keys to the provider you
 are already talking to. Only use it when the model must read and edit files
 that contain real credentials.
+
+### Stored sessions
+
+The masking runs once, when tool output enters the transcript, so saved
+session files (`~/.codewhale/sessions/*.json` and their checkpoints) and
+Runtime API thread items (their text and tool metadata) do not store a
+credential-shaped value from tool output. With the confirmed opt-out above,
+tool output is stored as the model saw it.
+
+Not yet masked: large outputs spilled to `~/.codewhale/tool_outputs`, shell
+completion evidence artifacts, and tool-call *inputs* (for example a
+`curl -H "Authorization: Bearer …"` command line). `doctor` and
+`scrub-secrets` do not check those either.
+
+Sessions saved by builds before this change may still hold credentials in
+their tool output; nothing rewrites them automatically. `codewhale doctor`
+reports them under **Stored Sessions** (it checks the newest 50 files), and
+this command finds and masks them across every saved session:
+
+```sh
+codewhale sessions scrub-secrets          # report only
+codewhale sessions scrub-secrets --apply  # rewrite the affected files
+```
+
+`--apply` rewrites each file under the same per-session lock a save takes,
+so it never loses a concurrent save. A session that is still open can write
+its in-memory copy back on its next save, so close open sessions first, and
+rotate any credential that was exposed — masking a stored copy cannot un-leak it.

@@ -199,6 +199,11 @@ export function createRuntimeClient(options = {}) {
   return new CodeWhaleRuntimeClient(options);
 }
 
+/** Distinguish a stream-end transport frame from thread journal/progress events. */
+export function isThreadStreamEnd(event) {
+  return event.event === "stream.end";
+}
+
 function normalizeBaseUrl(value) {
   return value.endsWith("/") ? value : `${value}/`;
 }
