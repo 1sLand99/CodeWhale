@@ -966,6 +966,14 @@ fn denied_prefix_matches(rule: &str, command: &str) -> bool {
                 stack.push((i + 2, j));
             }
         }
+        // A rule option (`--force` in `git push --force`) may appear after
+        // positionals: most CLIs permute their arguments, so
+        // `git push origin main --force` is still a force push. Skipping a
+        // positional is only allowed while looking for such an option; the
+        // command word and the rule's own positionals stay anchored.
+        else if j > 0 && rule_tokens[j].len() > 1 && rule_tokens[j].starts_with('-') {
+            stack.push((i + 1, j));
+        }
         // A positional token that matches neither the rule nor a flag ends
         // this path, which is what keeps the match anchored.
     }
@@ -1387,6 +1395,25 @@ mod tests {
         assert!(!denied_prefix_matches("rm file", "rm /q file"));
         assert!(!denied_prefix_matches("git push", "git.exe push"));
         assert!(denied_prefix_matches("rm /q file", "rm /q file"));
+    }
+
+    #[test]
+    fn deny_rule_options_may_follow_positionals() {
+        assert!(denied_prefix_matches(
+            "git push --force",
+            "git push origin main --force"
+        ));
+        assert!(denied_prefix_matches("rm -rf /", "rm x -rf /"));
+        // The command word and the rule's positionals stay anchored.
+        assert!(!denied_prefix_matches(
+            "git push --force",
+            "echo git push --force"
+        ));
+        assert!(!denied_prefix_matches("rm -rf /", "rm -rf ./x"));
+        assert!(!denied_prefix_matches(
+            "git push --force",
+            "git push --force-with-lease"
+        ));
     }
 
     #[test]
