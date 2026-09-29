@@ -115,7 +115,8 @@ export interface ChromeDict {
   /**
    * Visible badge marking a partial locale pack in the switcher, e.g.
    * "(partial)" — honest scope signal, per the localization quality
-   * contract. Keep it short.
+   * contract. Keep it short. The switcher shows it, brackets stripped, as
+   * the heading of the group that lists partial packs.
    */
   partialBadge: string;
 }
