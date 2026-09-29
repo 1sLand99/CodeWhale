@@ -7,10 +7,8 @@ description: Scaffold a local Codewhale plugin bundle with a versioned manifest,
 
 Use this skill when a user wants a local Codewhale plugin bundle. Trusted and
 enabled bundles may add declarative Skills, commands, agents, hooks, and MCP
-servers (stdio and remote) through the existing engines. LSP, filesystem
-roots, and lifecycle mutation are inventory-only. Native extensions (host
-code) are inventory-only unless the user has turned on the experimental
-`[features] extension_host` flag.
+servers (stdio and remote) through the existing engines. LSP, native
+extensions, filesystem roots, and lifecycle mutation are inventory-only.
 
 ## Workflow
 
@@ -18,39 +16,35 @@ code) are inventory-only unless the user has turned on the experimental
    - User bundle: `~/.codewhale/plugins/<plugin-name>/`
    - Workspace bundle: `<workspace>/.codewhale/plugins/<plugin-name>/`
 2. Normalize the bundle name to lowercase hyphen-case.
-3. Create `plugin.json` (Agent Plugins v1.0.0; a legacy `plugin.toml` stays
-   readable, but new bundles use `plugin.json`):
+3. Create `plugin.toml`:
 
-```json
-{
-  "$schema": "https://agent-plugins.org/schemas/plugin.json",
-  "name": "my-plugin",
-  "version": "0.1.0",
-  "description": "What this bundle provides"
-}
+```toml
+schema_version = 1
+
+[plugin]
+name = "my-plugin"
+version = "0.1.0"
+description = "What this bundle provides"
+
+[skills]
+path = "skills"
 ```
 
-4. Put each Skill under `skills/<skill-name>/SKILL.md`; Codewhale finds
-   `skills/` automatically and exposes each as `my-plugin:<skill-name>`,
-   never as an unqualified command.
-5. Add MCP servers in a sibling `mcp.json` only when the bundle needs an
-   existing MCP engine. Keep stdio commands and paths inside the bundle. Map local
+4. Put each Skill under `skills/<skill-name>/SKILL.md`. Codewhale exposes it
+   as `my-plugin:<skill-name>`, never as an unqualified command.
+5. Add `[mcp_servers.<name>]` only when the bundle needs an existing MCP
+   engine. Keep stdio commands and paths inside the bundle. Map local
    environment values only as exact `${SOURCE_ENV}` references. For remote MCP,
    use HTTPS (or loopback HTTP), forbid URL user information/query/fragment,
    use only environment-backed headers or bearer tokens, and declare the exact
-   normalized endpoint host set in `capabilities.network_hosts` under
-   `extensions["net.codewhale"]`. Never place credentials in the manifest.
+   normalized endpoint host set in `[capabilities].network_hosts`. Never place
+   credentials in the manifest.
 6. Commands (`commands/*.md`), agents (`agents/*.toml`), and hooks
-   (`hooks/*.toml`), declared under `extensions["net.codewhale"]`, activate
-   under the current policy — workspace bundles win same-name collisions over
-   user and built-in bundles. LSP, filesystem roots, and lifecycle mutation
-   are inventory-only: declare them only when inventorying future work. A
-   `native` entry runs only under the experimental extension host; there it
-   must be one `.mjs` or `.js` ES module file, `/plugin validate` rejects
-   anything else, and its tools always use `Required` approval, never a
-   plugin's read-only hint. Full Access, Bypass, or an exact session grant
-   for the reviewed build can satisfy that gate without a prompt. A bundle
-   that declares only unsupported surfaces cannot be enabled.
+   (`hooks/*.toml`) activate under the current policy — workspace bundles win
+   same-name collisions over user and built-in bundles. LSP, native
+   extensions, filesystem roots, and lifecycle mutation are inventory-only:
+   declare them only when inventorying future work. A bundle that declares
+   only unsupported surfaces cannot be enabled.
 7. Validate and review without executing bundle content:
    - `/plugin validate <plugin-name>`
    - `/plugin show <plugin-name>`

@@ -27140,10 +27140,8 @@ async fn extension_tool_is_deferred_gated_and_attributed_on_the_model_path() {
     let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(true);
     let fixture = crate::extension_host::tests::FixturePlugins::new(&["dsh-workspace-deps"]).await;
     let manager = fixture.manager(node);
-    manager
-        .sync(fixture.registry())
-        .await
-        .expect("host activation");
+    let warm = manager.attach(fixture.registry());
+    warm.sync().await.expect("host activation");
     let _manager = crate::extension_host::TestManagerGuard::install(Arc::clone(&manager));
 
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
@@ -27161,6 +27159,9 @@ async fn extension_tool_is_deferred_gated_and_attributed_on_the_model_path() {
     engine_config.features.enable(Feature::ExtensionHost);
     engine_config.plugin_registry = Some(fixture.registry());
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
+    // The engine attached its own snapshot; let a reconcile publish what it
+    // desires before its first turn build installs tools.
+    manager.reconcile().await.expect("reconcile");
     let task = tokio::spawn(engine.run());
     handle
         .send(external_user_message_op(

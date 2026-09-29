@@ -8,11 +8,24 @@
 //! `ToolSpec`s ([`tool::HostToolSpec`]) behind the existing gate.
 //!
 //! Lifecycle: a reviewed, enabled plugin with a `native` entry (activation
-//! policy v4, selected by the flag) makes [`ExtensionHostManager::sync`]
+//! policy v4, selected by the flag) makes [`ExtensionHostManager::reconcile`]
 //! spawn the host in the background — never on the first-prompt path — and
 //! activate one owner per plugin. Tools join the per-turn registry at the next
 //! rebuild, deferred. Disabling, revoking or updating the plugin revokes its
 //! registrations synchronously before the host is asked to tear down.
+//!
+//! Engines: the manager and its one host are process-wide, but each engine
+//! holds its own [`HostAttachment`] carrying the plugin snapshot of its
+//! workspace. Reconcile activates the union of what every attached snapshot
+//! desires and revokes only owners no attachment desires. Each snapshot is
+//! re-verified against persisted plugin state on every reconcile, so a
+//! disable or revoke made through any registry revokes the plugin for every
+//! engine. An engine installs only the tools of owners its own snapshot
+//! desires, so a workspace never sees another workspace's project plugins.
+//! Dropping an attachment detaches without revoking; the next reconcile
+//! revokes whatever no remaining attachment desires. Engines without a
+//! plugin snapshot of their own (isolated chats, the empty fallback) never
+//! attach.
 //!
 //! Known limitations (phase 1, by design — see the design doc §8):
 //! * Tools only: no commands, hooks, skills, prompt sections, MCP, or
@@ -43,10 +56,11 @@
 //!   the group and is not killed with it. When the core goes away, the host
 //!   kills its own group at stdin EOF, and a watchdog thread does the same
 //!   when its parent process changes, even if a plugin blocks the event loop.
-//! * One manager per process: `sync` reconciles against the calling engine's
-//!   plugin registry, so engines for different workspaces in one process
-//!   would revoke each other's plugins. Only one workspace runs per process
-//!   today.
+//! * A running engine's snapshot is replaced only by its own workspace
+//!   switch or by [`plugins_changed`] for the same workspace. A plugin newly
+//!   enabled through another workspace's registry reaches an engine at its
+//!   next snapshot, not at once; disables and revokes always reach it at the
+//!   next reconcile, through the persisted-state check.
 //! * The host re-hashes each `native` entry file before importing it; other
 //!   files in the staged snapshot are covered by Rust's per-call receipt
 //!   check, not re-hashed by the host.
@@ -180,8 +194,17 @@ struct DesiredOwner {
     entries: Vec<(PathBuf, String)>,
 }
 
+/// One engine's view: its plugin snapshot and the owners (plugin id →
+/// reviewed content hash) that snapshot desired at the last reconcile.
+struct AttachmentState {
+    plugins: Arc<PluginRegistry>,
+    desired: BTreeMap<String, String>,
+}
+
 pub(crate) struct ManagerShared {
     options: ExtensionHostOptions,
+    attachments: Mutex<BTreeMap<u64, AttachmentState>>,
+    next_attachment: AtomicU64,
     registry: Mutex<OwnerRegistry>,
     host: Mutex<HostSlot>,
     host_generation: AtomicU64,
@@ -335,6 +358,8 @@ impl ExtensionHostManager {
         Self {
             shared: Arc::new(ManagerShared {
                 options,
+                attachments: Mutex::new(BTreeMap::new()),
+                next_attachment: AtomicU64::new(0),
                 registry: Mutex::new(OwnerRegistry::new()),
                 host: Mutex::new(HostSlot::Idle),
                 host_generation: AtomicU64::new(0),
@@ -423,27 +448,97 @@ impl ExtensionHostManager {
         self.shared.seen_plugins.lock().expect("seen lock").clear();
     }
 
-    /// Record the native tool names (the registry before scripts, plugins and
-    /// extensions are added) so `registry/register` refuses collisions.
+    /// Record native tool names from one engine's turn build (the registry
+    /// before scripts, plugins and extensions are added) so
+    /// `registry/register` refuses collisions. Additive: engines in one
+    /// process report different native surfaces and none may shrink the set.
     pub fn note_native_names<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
         self.shared
             .registry
             .lock()
             .expect("registry lock")
-            .set_native_names(names);
+            .add_native_names(names);
     }
 
-    /// Add every live extension tool to `tool_registry`, *after* natives and
-    /// `~/.codewhale/tools` scripts. A name already present is skipped with a
-    /// diagnostic — `ToolRegistry::register` would silently overwrite it.
-    /// Returns the names added.
-    pub fn install_tools(&self, tool_registry: &mut crate::tools::ToolRegistry) -> Vec<String> {
-        let tools = self
+    /// Attach an engine whose workspace plugin snapshot is `plugins`. Nothing
+    /// is reconciled until [`HostAttachment::sync`] or a background sync.
+    #[must_use]
+    pub fn attach(self: &Arc<Self>, plugins: Arc<PluginRegistry>) -> HostAttachment {
+        let id = self.shared.next_attachment.fetch_add(1, Ordering::SeqCst) + 1;
+        self.shared
+            .attachments
+            .lock()
+            .expect("attachments lock")
+            .insert(
+                id,
+                AttachmentState {
+                    plugins,
+                    desired: BTreeMap::new(),
+                },
+            );
+        HostAttachment {
+            id,
+            manager: Arc::clone(self),
+        }
+    }
+
+    /// How many engines are attached.
+    #[must_use]
+    pub fn attached_engines(&self) -> usize {
+        self.shared
+            .attachments
+            .lock()
+            .expect("attachments lock")
+            .len()
+    }
+
+    /// Replace the snapshot of every engine attached to `plugins`'s
+    /// workspace: a plugin was enabled, disabled, trusted or revoked there.
+    fn refresh_workspace(&self, plugins: &Arc<PluginRegistry>) {
+        for state in self
+            .shared
+            .attachments
+            .lock()
+            .expect("attachments lock")
+            .values_mut()
+        {
+            if state.plugins.workspace() == plugins.workspace() {
+                state.plugins = Arc::clone(plugins);
+                state.desired.clear();
+            }
+        }
+    }
+
+    /// Add the live tools of the owners attachment `id` desires to
+    /// `tool_registry`, *after* natives and `~/.codewhale/tools` scripts. A
+    /// name already present is skipped with a diagnostic —
+    /// `ToolRegistry::register` would silently overwrite it. Returns the
+    /// names added.
+    fn install_tools_for(
+        &self,
+        id: u64,
+        tool_registry: &mut crate::tools::ToolRegistry,
+    ) -> Vec<String> {
+        let desired = self
+            .shared
+            .attachments
+            .lock()
+            .expect("attachments lock")
+            .get(&id)
+            .map(|state| state.desired.clone())
+            .unwrap_or_default();
+        if desired.is_empty() {
+            return Vec::new();
+        }
+        let tools: Vec<ToolRegistration> = self
             .shared
             .registry
             .lock()
             .expect("registry lock")
-            .live_tools();
+            .live_tools()
+            .into_iter()
+            .filter(|tool| desired.get(&tool.owner.plugin_id) == Some(&tool.content_hash))
+            .collect();
         if tools.is_empty() {
             return Vec::new();
         }
@@ -474,32 +569,49 @@ impl ExtensionHostManager {
         installed
     }
 
-    /// Kick [`Self::sync`] without waiting (turn builds, session start).
-    pub fn sync_in_background(self: &Arc<Self>, plugins: Arc<PluginRegistry>) {
+    /// Kick [`Self::reconcile`] without waiting (turn builds, session start,
+    /// plugin changes).
+    pub fn reconcile_in_background(self: &Arc<Self>) {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
         let manager = Arc::clone(self);
         tokio::spawn(async move {
-            if let Err(error) = manager.sync(plugins).await {
+            if let Err(error) = manager.reconcile().await {
                 manager.shared.diagnostic(error);
             }
         });
     }
 
     /// Reconcile host owners with the reviewed, enabled plugins that declare
-    /// `native` entries: revoke what is gone or changed (synchronously, then
-    /// ask the host to tear down), spawn the host if needed, activate the rest.
-    pub async fn sync(&self, plugins: Arc<PluginRegistry>) -> Result<(), String> {
+    /// `native` entries in any attached engine's snapshot: revoke what no
+    /// attachment desires any more or what changed (synchronously, then ask
+    /// the host to tear down), spawn the host if needed, activate the rest.
+    pub async fn reconcile(&self) -> Result<(), String> {
         let shared = &self.shared;
         let _serial = shared.sync_lock.lock().await;
-        let policy = activation::extension_host_policy_enabled();
-        let (desired, errors) = tokio::task::spawn_blocking(move || {
-            let _scope = activation::PolicyScope::propagate(policy);
-            desired_owners(&plugins)
-        })
-        .await
-        .map_err(|error| format!("plugin scan failed: {error}"))?;
+        let (desired, errors) = loop {
+            let snapshots: Vec<(u64, Arc<PluginRegistry>)> = shared
+                .attachments
+                .lock()
+                .expect("attachments lock")
+                .iter()
+                .map(|(id, state)| (*id, Arc::clone(&state.plugins)))
+                .collect();
+            let policy = activation::extension_host_policy_enabled();
+            let scan = tokio::task::spawn_blocking(move || {
+                let _scope = activation::PolicyScope::propagate(policy);
+                union_of_desired_owners(snapshots)
+            })
+            .await
+            .map_err(|error| format!("plugin scan failed: {error}"))?;
+            let published = scan.publish(&mut shared.attachments.lock().expect("attachments lock"));
+            if let Some(published) = published {
+                break published;
+            }
+            // Attach, detach, or workspace refresh raced the blocking scan.
+            // Rescan before changing either engine views or global owners.
+        };
         for error in errors {
             shared.diagnostic(error);
         }
@@ -773,6 +885,11 @@ impl ExtensionHostManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn host_requests_started(&self) -> Option<u64> {
+        self.shared.ready_host().map(|host| host.requests_started())
+    }
+
+    #[cfg(test)]
     pub(crate) fn host_pid(&self) -> Option<u32> {
         self.shared.ready_host().and_then(|host| host.pid)
     }
@@ -820,7 +937,12 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
             }
         }
     }
-    let _ = write!(out, "\n  spawn attempts: {}", manager.spawn_attempts());
+    let _ = write!(
+        out,
+        "\n  spawn attempts: {} · engines attached: {}",
+        manager.spawn_attempts(),
+        manager.attached_engines()
+    );
     let (tools, owners) = {
         let registry = manager.shared.registry.lock().expect("registry lock");
         let owners = registry
@@ -838,7 +960,7 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
     for tool in tools {
         let _ = write!(
             out,
-            "\n  tool {} (extension:{}; needs approval, which your approval mode or a session grant for this exact tool may give)",
+            "\n  tool {} (extension:{}; needs approval, which your approval mode or a session grant for this exact call of this plugin build may give)",
             tool.name, tool.plugin_name
         );
     }
@@ -854,7 +976,9 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
 /// down without waiting for the next turn. No-op with the flag off.
 pub fn plugins_changed(plugins: Arc<PluginRegistry>) {
     if activation::extension_host_policy_enabled() {
-        manager().sync_in_background(plugins);
+        let manager = manager();
+        manager.refresh_workspace(&plugins);
+        manager.reconcile_in_background();
     }
 }
 
@@ -875,14 +999,11 @@ fn desired_owners(plugins: &PluginRegistry) -> (BTreeMap<String, DesiredOwner>, 
     let mut broken: BTreeSet<String> = BTreeSet::new();
     for source in sources {
         let plugin_id = source.authority.plugin_id.as_str().to_string();
-        let is_module = source
-            .path
-            .extension()
-            .is_some_and(|extension| extension == "mjs" || extension == "js");
-        let bytes = if is_module {
-            std::fs::read(&source.path).map_err(|error| error.to_string())
-        } else {
-            Err("a native entry must be one .mjs or .js ES module file".to_string())
+        // The rule discovery reports, re-checked on the staged copy: the
+        // name here, and file-ness by the read itself.
+        let bytes = match crate::plugins::runtime::native_entry_problem(&source.path, true) {
+            None => std::fs::read(&source.path).map_err(|error| error.to_string()),
+            Some(problem) => Err(problem.to_string()),
         };
         match bytes {
             Ok(bytes) => desired
@@ -909,6 +1030,140 @@ fn desired_owners(plugins: &PluginRegistry) -> (BTreeMap<String, DesiredOwner>, 
         desired.remove(&plugin_id);
     }
     (desired, errors)
+}
+
+/// One scan of the complete attachment set. Its per-engine views and global
+/// owner union must be published together, against those same snapshots.
+struct DesiredScan {
+    attachments: Vec<(u64, Arc<PluginRegistry>, BTreeMap<String, String>)>,
+    owners: BTreeMap<String, DesiredOwner>,
+    errors: Vec<String>,
+}
+
+impl DesiredScan {
+    fn publish(
+        self,
+        current: &mut BTreeMap<u64, AttachmentState>,
+    ) -> Option<(BTreeMap<String, DesiredOwner>, Vec<String>)> {
+        if current.len() != self.attachments.len()
+            || self.attachments.iter().any(|(id, scanned, _)| {
+                !current
+                    .get(id)
+                    .is_some_and(|state| Arc::ptr_eq(&state.plugins, scanned))
+            })
+        {
+            return None;
+        }
+        for (id, _, desired) in self.attachments {
+            current.get_mut(&id).expect("validated attachment").desired = desired;
+        }
+        Some((self.owners, self.errors))
+    }
+}
+
+/// Scan every attached snapshot (engines sharing one snapshot scan it once)
+/// and merge what they desire. Blocking.
+///
+/// Two snapshots can disagree about one plugin id only while one of them is
+/// stale; the stale one then fails its persisted-state check and desires
+/// nothing, so the first valid scan wins and the per-attachment hashes keep
+/// each engine's tools to the bytes it desires.
+fn union_of_desired_owners(snapshots: Vec<(u64, Arc<PluginRegistry>)>) -> DesiredScan {
+    let mut union: BTreeMap<String, DesiredOwner> = BTreeMap::new();
+    let mut per_attachment = Vec::with_capacity(snapshots.len());
+    let mut scanned: Vec<(Arc<PluginRegistry>, BTreeMap<String, String>)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (id, plugins) in snapshots {
+        if let Some((_, hashes)) = scanned.iter().find(|(seen, _)| Arc::ptr_eq(seen, &plugins)) {
+            per_attachment.push((id, Arc::clone(&plugins), hashes.clone()));
+            continue;
+        }
+        let (desired, scan_errors) = desired_owners(&plugins);
+        for error in scan_errors {
+            if !errors.contains(&error) {
+                errors.push(error);
+            }
+        }
+        let hashes: BTreeMap<String, String> = desired
+            .iter()
+            .map(|(plugin_id, want)| (plugin_id.clone(), want.authority.content_hash.clone()))
+            .collect();
+        for (plugin_id, want) in desired {
+            union.entry(plugin_id).or_insert(want);
+        }
+        per_attachment.push((id, Arc::clone(&plugins), hashes.clone()));
+        scanned.push((plugins, hashes));
+    }
+    DesiredScan {
+        attachments: per_attachment,
+        owners: union,
+        errors,
+    }
+}
+
+/// One engine's hold on the process-wide extension host.
+///
+/// The engine publishes its workspace plugin snapshot here and installs only
+/// the tools of owners that snapshot desires. Dropping it detaches without
+/// revoking anything: the next reconcile revokes owners no remaining
+/// attachment desires, so an engine being replaced never tears down plugins
+/// its successor is about to use.
+pub struct HostAttachment {
+    id: u64,
+    manager: Arc<ExtensionHostManager>,
+}
+
+impl HostAttachment {
+    #[must_use]
+    pub fn manager(&self) -> &Arc<ExtensionHostManager> {
+        &self.manager
+    }
+
+    /// The engine switched workspace: publish the new snapshot.
+    pub fn set_plugins(&self, plugins: Arc<PluginRegistry>) {
+        if let Some(state) = self
+            .manager
+            .shared
+            .attachments
+            .lock()
+            .expect("attachments lock")
+            .get_mut(&self.id)
+        {
+            state.plugins = plugins;
+            state.desired.clear();
+        }
+    }
+
+    /// Reconcile the host against every attachment, waiting for it.
+    pub async fn sync(&self) -> Result<(), String> {
+        self.manager.reconcile().await
+    }
+
+    /// Reconcile the host against every attachment, without waiting.
+    pub fn sync_in_background(&self) {
+        self.manager.reconcile_in_background();
+    }
+
+    /// Add this engine's live extension tools to `tool_registry`.
+    pub fn install_tools(&self, tool_registry: &mut crate::tools::ToolRegistry) -> Vec<String> {
+        self.manager.install_tools_for(self.id, tool_registry)
+    }
+}
+
+impl Drop for HostAttachment {
+    fn drop(&mut self) {
+        if let Ok(mut attachments) = self.manager.shared.attachments.lock() {
+            attachments.remove(&self.id);
+        }
+    }
+}
+
+impl std::fmt::Debug for HostAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostAttachment")
+            .field("id", &self.id)
+            .finish()
+    }
 }
 
 static GLOBAL: OnceLock<Arc<ExtensionHostManager>> = OnceLock::new();

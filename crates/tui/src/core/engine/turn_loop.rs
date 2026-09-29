@@ -528,19 +528,17 @@ impl Engine {
             return Some("a before-tool hook changed the code".to_string());
         }
         let approved = if plan.approval_required {
+            let (approval_key, approval_grouping_key) =
+                crate::tools::approval_cache::approval_keys_for_call(
+                    tool_registry,
+                    tool_name,
+                    &plan.input,
+                );
             let event = Event::ApprovalRequired {
                 id: approval_id.to_string(),
                 tool_name: tool_name.to_string(),
-                approval_key: crate::tools::approval_cache::build_approval_key(
-                    tool_name,
-                    &plan.input,
-                )
-                .0,
-                approval_grouping_key: crate::tools::approval_cache::build_approval_grouping_key(
-                    tool_name,
-                    &plan.input,
-                )
-                .0,
+                approval_key: approval_key.0,
+                approval_grouping_key: approval_grouping_key.0,
                 input: plan.input,
                 description: format!(
                     "Run the reply's ```repl block(s) in the session REPL kernel (a local \
@@ -4561,17 +4559,14 @@ impl Engine {
                             "tool_id": tool_id.clone(),
                             "tool_name": tool_name.clone(),
                         }));
-                        let approval_key = crate::tools::approval_cache::build_approval_key(
-                            &tool_name,
-                            &tool_input,
-                        )
-                        .0;
-                        let approval_grouping_key =
-                            crate::tools::approval_cache::build_approval_grouping_key(
+                        let (approval_key, approval_grouping_key) =
+                            crate::tools::approval_cache::approval_keys_for_call(
+                                tool_registry,
                                 &tool_name,
                                 &tool_input,
-                            )
-                            .0;
+                            );
+                        let (approval_key, approval_grouping_key) =
+                            (approval_key.0, approval_grouping_key.0);
                         let approval_event = Event::ApprovalRequired {
                             id: tool_id.clone(),
                             tool_name: tool_name.clone(),
@@ -5099,21 +5094,19 @@ impl Engine {
                 "caller": "code_mode",
                 "parent_tool_id": parent_id,
             }));
+            let (approval_key, approval_grouping_key) =
+                crate::tools::approval_cache::approval_keys_for_call(
+                    tool_registry,
+                    &plan.name,
+                    &plan.input,
+                );
             let approval_event = Event::ApprovalRequired {
                 id: nested_id.clone(),
                 tool_name: plan.name.clone(),
                 input: plan.input.clone(),
                 description: format!("execute_tools program call: {}", plan.approval_description),
-                approval_key: crate::tools::approval_cache::build_approval_key(
-                    &plan.name,
-                    &plan.input,
-                )
-                .0,
-                approval_grouping_key: crate::tools::approval_cache::build_approval_grouping_key(
-                    &plan.name,
-                    &plan.input,
-                )
-                .0,
+                approval_key: approval_key.0,
+                approval_grouping_key: approval_grouping_key.0,
                 intent_summary: None,
                 approval_force_prompt: plan.approval_force_prompt,
             };

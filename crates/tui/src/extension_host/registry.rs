@@ -61,6 +61,9 @@ pub struct ToolRegistration {
     pub handle: u64,
     pub owner: OwnerRef,
     pub plugin_name: String,
+    /// The reviewed bundle content hash of the owner that registered it: the
+    /// receipt its approval grants are bound to.
+    pub content_hash: String,
     pub name: String,
     pub description: String,
     pub input_schema: Value,
@@ -74,7 +77,10 @@ pub struct OwnerRegistry {
     tools: BTreeMap<u64, ToolRegistration>,
     /// Lower-cased tool name → handle, so `Read` cannot impersonate `read`.
     by_name: HashMap<String, u64>,
-    /// Lower-cased names of native tools seen at the last turn build.
+    /// Lower-cased names of every native tool any engine's turn build has
+    /// reported, plus the static set. Only ever grows: engines in one
+    /// process build different native surfaces, and a name that is native
+    /// anywhere is refused everywhere.
     native_names: HashSet<String>,
 }
 
@@ -140,25 +146,26 @@ fn core_special_case(name: &str) -> Option<&'static str> {
 impl OwnerRegistry {
     #[must_use]
     pub fn new() -> Self {
-        let mut registry = Self::default();
-        registry.set_native_names(std::iter::empty::<&str>());
-        registry
-    }
-
-    /// Record the native tool names of the current build (the registry before
-    /// scripts, plugins or extensions are added), on top of the static set.
-    pub fn set_native_names<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
-        let mut set: HashSet<String> = RESERVED_NAMES
+        let mut native_names: HashSet<String> = RESERVED_NAMES
             .iter()
             .chain(crate::core::engine::tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS)
             .map(|name| name.to_ascii_lowercase())
             .collect();
         for (family, _, alias) in crate::tools::canonical_action::CANONICAL_ACTION_ALIASES {
-            set.insert(family.to_ascii_lowercase());
-            set.insert(alias.to_ascii_lowercase());
+            native_names.insert(family.to_ascii_lowercase());
+            native_names.insert(alias.to_ascii_lowercase());
         }
-        set.extend(names.into_iter().map(str::to_ascii_lowercase));
-        self.native_names = set;
+        Self {
+            native_names,
+            ..Self::default()
+        }
+    }
+
+    /// Add native tool names from one engine's turn build (the registry
+    /// before scripts, plugins or extensions are added). Never removes one.
+    pub fn add_native_names<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+        self.native_names
+            .extend(names.into_iter().map(str::to_ascii_lowercase));
     }
 
     /// Start a new activation for `plugin_id`, superseding any previous one.
@@ -236,6 +243,7 @@ impl OwnerRegistry {
             .current(&params.owner)
             .ok_or_else(|| "stale or unknown owner".to_string())?;
         let plugin_name = entry.plugin_name.clone();
+        let content_hash = entry.content_hash.clone();
         let spec = &params.spec;
         let name = spec.name.as_str();
         if !valid_tool_name(name) {
@@ -322,6 +330,7 @@ impl OwnerRegistry {
                 handle,
                 owner: params.owner.clone(),
                 plugin_name,
+                content_hash,
                 name: name.to_string(),
                 description: spec.description.clone(),
                 input_schema: schema,
