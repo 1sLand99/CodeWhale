@@ -22851,7 +22851,10 @@ async fn resume_keeps_recorded_reasoning_in_manifest_and_request_after_parent_ch
                 "resuming must not rewrite the interrupted record"
             );
         }
-        tokio::time::timeout(Duration::from_secs(5), async {
+        // Readiness only: the poll ends on the first request. A loaded
+        // shared-process `cargo test` run, where env readers can queue behind the
+        // process-wide test env barrier, overran 5s here (#6698).
+        tokio::time::timeout(Duration::from_secs(30), async {
             while calls.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -23721,19 +23724,30 @@ mod child_permission_gate {
     async fn wall_deadline_ends_pending_wait_with_receipt() {
         let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
         let (receipt_store, session_id) = receipt_context(&registry);
+        let mut gated =
+            Box::pin(registry.execute("agent_gate", "bash", json!({"command": "echo gated"})));
+        // Drive the call until its prompt is out, then start the deadline:
+        // a deadline armed before the prompt could expire first on a loaded
+        // shared-process run and never exercise the pending wait (#6698).
+        let approval_id = tokio::select! {
+            id = next_child_approval_id(&mut rx) => id,
+            _ = &mut gated => panic!("the gated call finished without prompting"),
+        };
         let work_deadline = Instant::now() + Duration::from_millis(300);
         let ran = run_tool_with_person_aware_timeout(
             Duration::from_secs(60),
             Some(work_deadline),
             &registry.person_wait,
-            registry.execute("agent_gate", "bash", json!({"command": "echo gated"})),
+            &mut gated,
         )
         .await;
         assert!(
             ran.is_none(),
             "the wall-clock deadline still ends the agent"
         );
-        let approval_id = next_child_approval_id(&mut rx).await;
+        // The production deadline drops the owned call; drop it here too so
+        // its wait guard withdraws the request.
+        drop(gated);
         let status = next_wait_end(&mut rx, &approval_id).await;
         assert!(status.is_terminal(), "{status:?}");
         assert_eq!(manager.read().await.pending_child_approvals(), 0);
