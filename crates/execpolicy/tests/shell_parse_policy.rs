@@ -106,6 +106,11 @@ const HIDDEN_RM: &[&str] = &[
     "bash -c -e 'rm -rf /'",
     "sh -c -- 'rm -rf /'",
     "bash -c -o pipefail 'rm x'",
+    // A script operand that names stdin reads the pipe or here-string.
+    "echo 'rm x' | bash /dev/stdin",
+    "bash /dev/stdin <<< 'rm x'",
+    ". /dev/stdin <<< 'rm x'",
+    "sh /proc/self/fd/0 <<< 'rm x'",
 ];
 
 /// Literal spellings that were already denied and must stay denied.

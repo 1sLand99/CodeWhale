@@ -35,7 +35,8 @@
 //! command (a substitution, `eval`, a `-c` payload, `find -exec`), which is
 //! never covered by an allow rule written for the outer command.
 //!
-//! Known limits: a script *file* (`bash ./x.sh`, `. ./env.sh`) is opaque, as
+//! Known limits: a script *file* (`bash ./x.sh`, `. ./env.sh`) is opaque
+//! (a descriptor path such as `/dev/stdin` is not a file: it is dynamic), as
 //! is any program that interprets its arguments as code (`python -c`, `ssh
 //! host cmd`, `git -c alias.x=!cmd`). Aliases and functions defined in an
 //! earlier call are not tracked. Arithmetic contexts (`(( ))`, `$(( ))`,
@@ -962,6 +963,7 @@ impl Expander {
                 "source" | "." => match tokens.get(head + 1) {
                     None if !line.heredoc => self.dynamic = true,
                     Some(_) if dynamic[head + 1] => self.dynamic = true,
+                    Some(script) => self.dynamic |= script_read_at_run_time(script, line),
                     _ => {}
                 },
                 "find" => self.record_find_exec(line, head, depth),
@@ -1014,7 +1016,8 @@ impl Expander {
                             }
                         }
                         ShellInput::Script(offset) => {
-                            self.dynamic |= dynamic[head + offset];
+                            self.dynamic |= dynamic[head + offset]
+                                || script_read_at_run_time(&tokens[head + offset], line);
                         }
                         // A heredoc body was already expanded as the script;
                         // any other stdin is only known at run time.
@@ -1648,6 +1651,40 @@ fn command_heads(tokens: &[String]) -> Heads {
     }
 }
 
+/// A script operand that names a file descriptor rather than a file:
+/// `/dev/stdin`, `/dev/fd/N` or `/proc/<pid>/fd/N`. Its text arrives through
+/// a pipe, a here-string or a redirect, so it is only known at run time —
+/// unless it is stdin and a heredoc body (already expanded as the script)
+/// feeds it.
+fn script_read_at_run_time(script: &str, line: &Line) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in script.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    if !script.starts_with('/') {
+        return false;
+    }
+    let descriptor = match parts.as_slice() {
+        ["dev", "stdin"] => "0",
+        ["dev", "fd", fd] => fd,
+        ["proc", process, "fd", fd]
+            if *process == "self"
+                || *process == "thread-self"
+                || process.chars().all(|ch| ch.is_ascii_digit()) =>
+        {
+            fd
+        }
+        _ => return false,
+    };
+    descriptor != "0" || !line.heredoc
+}
+
 /// How the shell invocation `tokens` (with `tokens[0]` the shell) gets its
 /// script.
 ///
@@ -1879,6 +1916,29 @@ mod tests {
         }
         // Arguments after the command string are positional parameters.
         assert!(!contains("bash -c 'echo $0' 'rm -rf /'", "rm -rf /"));
+    }
+
+    #[test]
+    fn script_operand_naming_a_descriptor_is_read_at_run_time() {
+        for command in [
+            "echo 'rm -rf /' | bash /dev/stdin",
+            "bash /dev/stdin <<< 'rm -rf /'",
+            "sh /dev/fd/0 <<< 'rm -rf /'",
+            "sh /proc/self/fd/0 <<< 'rm -rf /'",
+            "bash //dev/./stdin <<< 'rm -rf /'",
+            "bash /dev/fd/3 3< script",
+            ". /dev/stdin <<< 'rm -rf /'",
+            "source /proc/self/fd/0 <<< 'rm -rf /'",
+        ] {
+            assert!(expand_command(command).dynamic, "{command}");
+        }
+        // A heredoc on stdin was expanded as the script itself.
+        let heredoc = expand_for_platform("bash /dev/stdin <<EOF\nrm -rf /\nEOF", false);
+        assert!(!heredoc.dynamic);
+        assert!(heredoc.commands.iter().any(|target| target == "rm -rf /"));
+        // An ordinary script file is still opaque, not unresolved.
+        assert!(!expand_command("bash ./dev/stdin").dynamic);
+        assert!(!expand_command(". ./env.sh").dynamic);
     }
 
     #[test]
