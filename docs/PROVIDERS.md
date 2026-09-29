@@ -42,11 +42,16 @@ against the vendor's own docs before trusting any value here:
 | Command Code | `https://api.commandcode.ai/provider/v1` | `deepseek/deepseek-v4-flash` | `COMMAND_CODE_API_KEY` |
 | Alibaba Model Studio (DashScope) | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen3.8-flash` | `DASHSCOPE_API_KEY` |
 | AICraft | `https://aicraftapi.com/v1` | `claude-4.6-sonnet`; DeepSeek / Claude / Gemini / Qwen / GLM / MiniMax / Doubao families | `AICRAFT_API_KEY` |
+| Tsubasa | `https://api.tsubasa.sh/v1` | `tsubasa-pro`, `tsubasa-fast` (32,768-token context) | `TSUBASA_API_KEY` |
 
 AICraft's roster spans DeepSeek, Anthropic Claude, Google Gemini, Qwen, GLM,
 MiniMax and Doubao ids on its OpenAI-compatible endpoint. The authority is
 `GET https://aicraftapi.com/v1/models` with your key — pick a model from that
 list, not from this table.
+Tsubasa implements only `GET /v1/models` and Chat Completions. Its two public
+model ids share a 32,768-token context, smaller than the 128,000 tokens Codewhale assumes
+for an unknown model, so set it on the route after saving:
+`codewhale config set providers.tsubasa.context_window 32768`.
 OpenCode Zen and OpenCode Go are first-class provider routes, configured like
 any other provider below; they are not part of this table. In `/provider`,
 type to filter the list (letters not bound to a row action); `Ctrl+T` probes the
