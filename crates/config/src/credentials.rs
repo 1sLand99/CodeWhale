@@ -50,7 +50,13 @@ pub fn clear_provider_api_key_from_config(store: &mut ConfigStore, provider: Pro
 /// unset model to its own default, and model choice belongs to the
 /// model/config commands.
 pub fn prepare_provider_api_key_metadata(store: &mut ConfigStore, provider: ProviderKind) {
-    store.config.auth_mode = Some("api_key".to_string());
+    // The root `auth_mode` is the active provider's fallback marker. Writing
+    // it for an inactive provider would leak `api_key` onto the active route
+    // (e.g. a keyless local Ollama), so only the saved provider's own table
+    // is marked unless it is the active one.
+    if provider == store.config.provider {
+        store.config.auth_mode = Some("api_key".to_string());
+    }
     let provider_config = store.config.providers.for_provider_mut(provider);
     provider_config.auth_mode = Some("api_key".to_string());
     provider_config.external_credentials = None;
@@ -205,4 +211,52 @@ pub fn clear_provider_api_key(
         slot,
         secret_store_error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_with(body: &str) -> (tempfile::TempDir, ConfigStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, body).expect("seed config");
+        let store = ConfigStore::load(Some(path)).expect("store loads");
+        (dir, store)
+    }
+
+    fn in_memory_secrets() -> Secrets {
+        Secrets::new(std::sync::Arc::new(
+            codewhale_secrets::InMemoryKeyringStore::new(),
+        ))
+    }
+
+    #[test]
+    fn saving_a_key_for_an_inactive_provider_leaves_root_auth_mode_alone() {
+        let (_dir, mut store) = store_with("provider = \"ollama\"\n");
+        let secrets = in_memory_secrets();
+
+        set_provider_api_key(&mut store, &secrets, ProviderKind::Openrouter, "or-key")
+            .expect("save succeeds");
+
+        let saved = ConfigStore::load(Some(store.path().to_path_buf())).expect("reload");
+        assert_eq!(saved.config.provider, ProviderKind::Ollama);
+        assert_eq!(saved.config.auth_mode, None);
+        assert_eq!(
+            saved.config.providers.openrouter.auth_mode.as_deref(),
+            Some("api_key")
+        );
+    }
+
+    #[test]
+    fn saving_a_key_for_the_active_provider_still_marks_root_auth_mode() {
+        let (_dir, mut store) = store_with("provider = \"openrouter\"\n");
+        let secrets = in_memory_secrets();
+
+        set_provider_api_key(&mut store, &secrets, ProviderKind::Openrouter, "or-key")
+            .expect("save succeeds");
+
+        let saved = ConfigStore::load(Some(store.path().to_path_buf())).expect("reload");
+        assert_eq!(saved.config.auth_mode.as_deref(), Some("api_key"));
+    }
 }
