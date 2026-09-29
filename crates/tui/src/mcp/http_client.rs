@@ -85,33 +85,35 @@ impl McpHttpClient {
     /// Send the long-lived GET that carries a legacy SSE event stream.
     ///
     /// Response headers are still bounded by `read_timeout`, but the body is
-    /// not: reqwest's client-wide timeout also covers body streaming, so it
-    /// would cut a healthy, quiet stream at `read_timeout` and silently drop
-    /// every later server message. Dead peers are still detected by TCP
-    /// keepalive and by the stream ending.
+    /// not: a reqwest request timeout also covers body streaming, so it would
+    /// cut a healthy, quiet stream at `read_timeout` and silently drop every
+    /// later server message. The stream ending is reported through the
+    /// transport's `probe_dead`; a dead direct peer is found by TCP keepalive
+    /// (set in `client_for_target`). Through an operator HTTP(S) proxy,
+    /// keepalive only covers the hop to the proxy. MCP servers are not required
+    /// to send heartbeats, so no idle deadline can tell a quiet stream from a
+    /// dead one.
     pub(super) async fn send_event_stream(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<Response> {
-        self.execute_with(request.build()?, true, BodyDeadline::None)
-            .await
+        self.execute_with(request.build()?, true).await
     }
 
     pub(super) async fn execute(
         &self,
-        request: Request,
-        follow_redirects: bool,
-    ) -> Result<Response> {
-        self.execute_with(request, follow_redirects, BodyDeadline::ReadTimeout)
-            .await
-    }
-
-    async fn execute_with(
-        &self,
         mut request: Request,
         follow_redirects: bool,
-        body_deadline: BodyDeadline,
     ) -> Result<Response> {
+        // Every MCP and OAuth body must finish within `read_timeout` unless the
+        // caller chose its own bound. This is a per-request timeout, not a
+        // client-wide one, so the event stream shares the same pooled client
+        // and connection as the POSTs that go with it.
+        request.timeout_mut().get_or_insert(self.read_timeout);
+        self.execute_with(request, follow_redirects).await
+    }
+
+    async fn execute_with(&self, mut request: Request, follow_redirects: bool) -> Result<Response> {
         if request.url().origin().ascii_serialization() == self.origin {
             for (name, value) in &self.default_headers {
                 if !request.headers().contains_key(name) {
@@ -120,23 +122,19 @@ impl McpHttpClient {
             }
         }
         let timeout = request.timeout().copied().unwrap_or(self.read_timeout);
-        tokio::time::timeout(
-            timeout,
-            self.execute_inner(request, follow_redirects, body_deadline),
-        )
-        .await
-        .context("MCP HTTP request timed out")?
+        tokio::time::timeout(timeout, self.execute_inner(request, follow_redirects))
+            .await
+            .context("MCP HTTP request timed out")?
     }
 
     async fn execute_inner(
         &self,
         mut request: Request,
         follow_redirects: bool,
-        body_deadline: BodyDeadline,
     ) -> Result<Response> {
         for redirect_count in 0..=5 {
             let url = request.url().clone();
-            let client = self.client_for_target(&url, body_deadline).await?;
+            let client = self.client_for_target(&url).await?;
             // MCP and OAuth requests have buffered bodies. Keep the exact request
             // to replay only after the Location has passed the same guard.
             let next_request = request
@@ -188,11 +186,7 @@ impl McpHttpClient {
         unreachable!("redirect loop is bounded")
     }
 
-    async fn client_for_target(
-        &self,
-        url: &Url,
-        body_deadline: BodyDeadline,
-    ) -> Result<reqwest::Client> {
+    async fn client_for_target(&self, url: &Url) -> Result<reqwest::Client> {
         validate_url(url)?;
         let same_origin = url.origin().ascii_serialization() == self.origin;
         if self.reviewed_plugin && !super::reviewed_redirect_matches_origin(url, &self.origin) {
@@ -217,10 +211,7 @@ impl McpHttpClient {
         // Validate DNS before reusing a client too: a new private answer revokes
         // this request. Each cached client itself remains pinned to its old public
         // address, including reconnects after a keep-alive socket expires.
-        let key = format!(
-            "{}:{pin:?}:{body_deadline:?}",
-            url.origin().ascii_serialization()
-        );
+        let key = format!("{}:{pin:?}", url.origin().ascii_serialization());
         if proxy.is_none()
             && let Some(client) = self
                 .clients
@@ -232,10 +223,10 @@ impl McpHttpClient {
         }
         let mut builder = guarded_reqwest_client_builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(self.connect_timeout);
-        if body_deadline == BodyDeadline::ReadTimeout {
-            builder = builder.timeout(self.read_timeout);
-        }
+            .connect_timeout(self.connect_timeout)
+            // reqwest's current default, pinned here because a long-lived SSE
+            // stream relies on it to notice a peer that vanished silently.
+            .tcp_keepalive(Duration::from_secs(15));
         let proxied = proxy.is_some();
         if let Some(proxy) = proxy {
             builder = builder.proxy(proxy);
@@ -254,15 +245,6 @@ impl McpHttpClient {
         }
         Ok(client)
     }
-}
-
-/// Whether a response body must finish within `read_timeout`. Every MCP and
-/// OAuth request does, except the legacy SSE event stream, whose body is
-/// meant to stay open for the life of the connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BodyDeadline {
-    ReadTimeout,
-    None,
 }
 
 fn validate_network_policy(url: &Url, network_policy: Option<&NetworkPolicyDecider>) -> Result<()> {
@@ -551,10 +533,7 @@ mod tests {
         .unwrap();
         assert!(
             client
-                .client_for_target(
-                    &Url::parse(config.url.as_deref().unwrap()).unwrap(),
-                    BodyDeadline::ReadTimeout,
-                )
+                .client_for_target(&Url::parse(config.url.as_deref().unwrap()).unwrap())
                 .await
                 .is_err()
         );
@@ -639,15 +618,9 @@ mod tests {
             vec!["8.8.8.8:443".parse().unwrap()],
             vec!["127.0.0.1:443".parse().unwrap()],
         ]));
-        configured
-            .client_for_target(&url, BodyDeadline::ReadTimeout)
-            .await
-            .unwrap();
+        configured.client_for_target(&url).await.unwrap();
         assert_eq!(configured.clients.lock().unwrap().len(), 1);
-        let error = configured
-            .client_for_target(&url, BodyDeadline::ReadTimeout)
-            .await
-            .unwrap_err();
+        let error = configured.client_for_target(&url).await.unwrap_err();
         assert!(error.to_string().contains("restricted"), "{error:#}");
         assert!(
             configured
@@ -669,12 +642,7 @@ mod tests {
         *configured.dns_answers.lock().unwrap() = Some(std::collections::VecDeque::from([vec![
             "10.0.0.3:443".parse().unwrap(),
         ]]));
-        assert!(
-            configured
-                .client_for_target(&url, BodyDeadline::ReadTimeout)
-                .await
-                .is_err()
-        );
+        assert!(configured.client_for_target(&url).await.is_err());
         let approved = McpHttpClient::new(
             url.as_str(),
             false,
@@ -685,9 +653,53 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
-        approved
-            .client_for_target(&url, BodyDeadline::ReadTimeout)
+        approved.client_for_target(&url).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_stream_shares_the_client_and_other_bodies_keep_the_read_deadline() {
+        let _env = crate::test_support::lock_test_env();
+        let _no_proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
+        crate::tls::ensure_rustls_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        // Every response promises 10 body bytes, sends 3 and then stalls.
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut buffer = [0u8; 2048];
+                    while !seen.windows(4).any(|part| part == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(n) if n > 0 => seen.extend_from_slice(&buffer[..n]),
+                            _ => return,
+                        }
+                    }
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
+                        .await;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+        let client = McpHttpClient::new(
+            &url,
+            false,
+            false,
+            false,
+            None,
+            Duration::from_secs(5),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        let stream = client.send_event_stream(client.get(&url)).await.unwrap();
+        let response = client.send(client.post(&url)).await.unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(5), response.bytes())
             .await
-            .unwrap();
+            .expect("a stalled body must hit read_timeout, not hang");
+        assert!(body.is_err());
+        // The event stream and its POSTs share one pooled client.
+        assert_eq!(client.clients.lock().unwrap().len(), 1);
+        drop(stream);
     }
 }

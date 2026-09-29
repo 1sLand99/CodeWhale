@@ -48,7 +48,10 @@ pub struct ImportCandidate {
     pub name: String,
     pub source_kind: ExternalMcpSourceKind,
     pub source_path: PathBuf,
-    /// Hex sha256 of the raw source file (or marketplace entry blob).
+    /// Hex sha256 of this server's name and entry as parsed from the source.
+    /// It covers exactly what an approval imports, so review tokens and
+    /// decisions survive unrelated rewrites of the same file (Claude Code
+    /// rewrites `~/.claude.json` on nearly every run).
     pub content_hash: String,
     pub summary: String,
     /// When true the entry is present but must never connect.
@@ -124,9 +127,13 @@ fn discover_from_json_file(path: &Path, kind: ExternalMcpSourceKind) -> Vec<Impo
         .unwrap_or_default()
 }
 
+/// Most per-entry problems reported for one source; the rest are counted.
+const MAX_PROBLEMS_PER_SOURCE: usize = 20;
+
 /// Read one source. A file-level failure is an `Err`; an entry that fails
 /// validation is reported in the second list (content-free) and skipped, so
-/// one unsupported entry cannot hide its valid siblings.
+/// one unsupported entry cannot hide its valid siblings. At most
+/// [`MAX_PROBLEMS_PER_SOURCE`] entries are named, then one summary line.
 fn checked_source(
     path: &Path,
     kind: ExternalMcpSourceKind,
@@ -142,7 +149,6 @@ fn checked_source(
     let Some(raw) = super::read_bounded_mcp_config_file(path, max_bytes)? else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let hash = hex_sha256(raw.as_bytes());
     let value: Value = serde_json::from_str(&raw)
         .map_err(|_| anyhow::anyhow!("Source is not valid JSON; contents omitted"))?;
     anyhow::ensure!(
@@ -155,15 +161,24 @@ fn checked_source(
     );
     let mut out = Vec::new();
     let mut problems = Vec::new();
+    let mut unreported = 0usize;
+    let mut report = |problem: String| {
+        if problems.len() < MAX_PROBLEMS_PER_SOURCE {
+            problems.push(problem);
+        } else {
+            unreported += 1;
+        }
+    };
     for (name, config) in extract_servers_map(&value) {
         if !(super::mcp_name_is_command_safe(&name) && name.len() <= 128) {
-            problems.push("An entry with an unsupported server name was skipped".to_string());
+            report("An entry with an unsupported server name was skipped".to_string());
             continue;
         }
+        let hash = entry_hash(&name, &config);
         let server = match checked_entry(config, value.is_array()) {
             Ok(server) => server,
             Err(error) => {
-                problems.push(format!("Server '{name}' was skipped: {error}"));
+                report(format!("Server '{name}' was skipped: {error}"));
                 continue;
             }
         };
@@ -173,13 +188,23 @@ fn checked_source(
             name,
             source_kind: kind.clone(),
             source_path: path.to_path_buf(),
-            content_hash: hash.clone(),
+            content_hash: hash,
             hard_blocked,
             block_reason: hard_blocked.then(|| "Disabled at its source; cannot import".into()),
             server,
         });
     }
+    if unreported > 0 {
+        problems.push(format!("{unreported} more entries were skipped"));
+    }
     Ok((out, problems))
+}
+
+fn entry_hash(name: &str, entry: &Value) -> String {
+    let mut bytes = name.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend(entry.to_string().into_bytes());
+    hex_sha256(&bytes)
 }
 
 /// Validate one server entry. Error messages never echo entry contents.
@@ -438,7 +463,7 @@ pub fn record_decisions(
     decisions: &HashMap<String, ImportDecision>,
     now_unix: u64,
 ) {
-    // Group by source path + hash so one file approval is one entry.
+    // Group by source path + entry hash: one record per reviewed entry.
     let mut by_source: HashMap<(PathBuf, String), Vec<(&ImportCandidate, ImportDecision)>> =
         HashMap::new();
     for candidate in candidates {
@@ -1041,6 +1066,73 @@ mod tests {
             assert_eq!(legacy.server.transport.as_deref(), Some("sse"));
             let remote = candidates.iter().find(|c| c.name == "remote").unwrap();
             assert_eq!(remote.server.transport, None);
+        });
+    }
+
+    #[test]
+    fn skipped_entries_from_one_source_are_capped() {
+        with_import_context(|context| {
+            let entries: Vec<String> = (0..MAX_PROBLEMS_PER_SOURCE + 5)
+                .map(|i| format!(r#""bad{i}":{{"x":1}}"#))
+                .collect();
+            write_claude_json(
+                &context.home,
+                &format!(
+                    r#"{{"mcpServers":{{{},"ok":{{"command":"echo"}}}}}}"#,
+                    entries.join(",")
+                ),
+            );
+            let preview = preview_imports(context).unwrap();
+            assert_eq!(preview.candidates.len(), 1);
+            assert_eq!(preview.problems.len(), MAX_PROBLEMS_PER_SOURCE + 1);
+            assert_eq!(
+                preview.problems.last().unwrap().message,
+                "5 more entries were skipped"
+            );
+        });
+    }
+
+    #[test]
+    fn unrelated_source_rewrites_keep_review_tokens_and_declines() {
+        with_import_context(|context| {
+            let source = write_claude_json(
+                &context.home,
+                r#"{"numStartups":1,"mcpServers":{"x":{"command":"echo"},"y":{"command":"echo"}}}"#,
+            );
+            let preview = preview_imports(context).unwrap();
+            // Claude Code rewrites its state file on every run.
+            fs::write(
+                &source,
+                r#"{"numStartups":2,"mcpServers":{"x":{"command":"echo"},"y":{"command":"echo"}}}"#,
+            )
+            .unwrap();
+            let row = preview.candidates.iter().find(|c| c.name == "x").unwrap();
+            let receipt = apply_reviewed_import(
+                context,
+                &row.id,
+                &row.content_hash,
+                &preview.revision,
+                ImportDecision::Approve,
+            )
+            .unwrap();
+            assert!(receipt.imported);
+
+            let candidates = discover_from_json_file(&source, ExternalMcpSourceKind::ClaudeJson);
+            let mut store = ImportConsentStore::default();
+            let decisions = HashMap::from([("y".to_string(), ImportDecision::Decline)]);
+            record_decisions(&mut store, &candidates, &decisions, 1);
+            fs::write(
+                &source,
+                r#"{"numStartups":3,"mcpServers":{"x":{"command":"echo"},"y":{"command":"echo"}}}"#,
+            )
+            .unwrap();
+            let refreshed = discover_from_json_file(&source, ExternalMcpSourceKind::ClaudeJson);
+            let needing: Vec<_> = candidates_needing_consent(&refreshed, &store)
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            // `y` stays declined; `x` was never decided in this store.
+            assert_eq!(needing, ["x"]);
         });
     }
 

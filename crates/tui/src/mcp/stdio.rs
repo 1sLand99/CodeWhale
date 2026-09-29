@@ -236,8 +236,9 @@ impl StdioTransport {
     }
 }
 
-/// Longest stderr line retained in the tail; the rest of the line is drained
-/// and discarded so a newline-free progress stream cannot grow memory.
+/// Longest stderr line retained in the tail, in bytes after decoding. An
+/// overlong line keeps its end, where the error usually is, and the start is
+/// drained and discarded so a newline-free progress stream cannot grow memory.
 const STDERR_LINE_CAP: usize = 4 * 1024;
 
 /// Drain a child's stderr until EOF, retaining lossily decoded, length-capped
@@ -267,8 +268,10 @@ where
             };
             if tail.is_some() {
                 let content = &available[..consumed - usize::from(line_ended)];
-                let room = STDERR_LINE_CAP.saturating_sub(line.len());
-                line.extend_from_slice(&content[..content.len().min(room)]);
+                let keep = content.len().min(STDERR_LINE_CAP);
+                let overflow = (line.len() + keep).saturating_sub(STDERR_LINE_CAP);
+                line.drain(..overflow);
+                line.extend_from_slice(&content[content.len() - keep..]);
             }
             (consumed, line_ended)
         };
@@ -286,7 +289,13 @@ async fn push_stderr_line(tail: Option<&StderrTail>, line: &mut Vec<u8>) {
     if let Some(tail) = tail {
         let bytes: &[u8] = line;
         let text = String::from_utf8_lossy(bytes.strip_suffix(b"\r").unwrap_or(bytes));
-        tail.push(text.into_owned()).await;
+        // Lossy decoding can triple invalid bytes; hold the retained size to
+        // the cap too, again keeping the end.
+        let mut start = text.len().saturating_sub(STDERR_LINE_CAP);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        tail.push(text[start..].to_owned()).await;
     }
     line.clear();
 }
@@ -538,6 +547,37 @@ mod stderr_drain_tests {
         assert_eq!(lines[1], "caf\u{fffd} \u{fffd}\u{fffd}");
         assert_eq!(lines[2].len(), STDERR_LINE_CAP);
         assert_eq!(lines[3], "panic: boom");
+    }
+
+    #[tokio::test]
+    async fn overlong_lines_keep_their_end_within_the_cap() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let tail = StderrTail::new();
+        let drain = tokio::spawn(drain_stderr(reader, Some(tail.clone())));
+        // A long prefix, then the actual failure at the end of the line.
+        writer
+            .write_all(&vec![b'.'; STDERR_LINE_CAP * 3])
+            .await
+            .unwrap();
+        writer.write_all(b"error: config missing\n").await.unwrap();
+        // Invalid bytes decode to three-byte U+FFFD each.
+        writer
+            .write_all(&vec![0xff; STDERR_LINE_CAP])
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        drop(writer);
+        drain.await.unwrap();
+        let lines = tail.snapshot().await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].ends_with("error: config missing"),
+            "{:?}",
+            &lines[0][lines[0].len() - 40..]
+        );
+        assert_eq!(lines[0].len(), STDERR_LINE_CAP);
+        assert!(lines[1].len() <= STDERR_LINE_CAP, "{}", lines[1].len());
+        assert!(lines[1].chars().all(|c| c == '\u{fffd}'));
     }
 
     #[tokio::test]
