@@ -151,7 +151,7 @@ struct Cli {
     #[arg(short = 'C', long = "workspace", alias = "cd", value_name = "DIR")]
     workspace: Option<PathBuf>,
     /// Enable terminal mouse capture for internal scrolling, transcript
-    /// selection, and scrollbar dragging (default off on Windows).
+    /// selection, and scrollbar dragging (default off in legacy Windows consoles).
     #[arg(long = "mouse-capture", conflicts_with = "no_mouse_capture")]
     mouse_capture: bool,
     /// Disable terminal mouse capture so terminal-native text selection works.
@@ -215,49 +215,42 @@ enum Commands {
     /// Run an interactive or non-interactive task.
     Run(RunArgs),
     /// Run Codewhale diagnostics.
-    #[command(disable_help_flag = true)]
     Doctor(TuiPassthroughArgs),
     /// List cached models; use --update to refresh configured provider catalogs.
     #[command(
-        disable_help_flag = true,
         after_help = "Examples:\n  codewhale models --update\n  codewhale models --update --provider openai\n  codewhale models --provider openai-codex --json\n\n--update (alias: --refresh) refreshes configured provider catalogs. --provider ID limits the scope."
     )]
     Models(TuiPassthroughArgs),
     /// Generate speech audio with Xiaomi MiMo TTS models.
-    #[command(visible_alias = "tts", disable_help_flag = true)]
+    #[command(visible_alias = "tts")]
     Speech(TuiPassthroughArgs),
     /// List saved sessions.
-    #[command(disable_help_flag = true)]
     Sessions(TuiPassthroughArgs),
     /// Show what a session did: files, commands, web and MCP calls, agents,
     /// approvals, and failures. `codewhale receipts [ID|--last] [--format md|json]`.
-    #[command(visible_alias = "receipt", disable_help_flag = true)]
+    #[command(visible_alias = "receipt")]
     Receipts(TuiPassthroughArgs),
     /// Resume a saved session.
-    #[command(disable_help_flag = true)]
     Resume(TuiPassthroughArgs),
     /// Launch an interactive session and hand it to the Codewhale web app.
-    #[command(disable_help_flag = true)]
     Rc(TuiPassthroughArgs),
     /// Fork a saved session.
-    #[command(disable_help_flag = true)]
     Fork(TuiPassthroughArgs),
     /// Create a default AGENTS.md in the current directory.
-    #[command(disable_help_flag = true)]
     Init(TuiPassthroughArgs),
     /// Bootstrap MCP config and/or skills directories.
-    #[command(disable_help_flag = true)]
     Setup(TuiPassthroughArgs),
     /// Generate a remote Codewhale agent deploy bundle (cloud + chat bridge).
     RemoteSetup(RemoteSetupArgs),
     /// Run a non-interactive prompt.
-    #[command(
-        disable_help_flag = true,
-        after_help = "\
+    #[command(after_help = "\
 Examples:
   codewhale exec \"explain this function\"
   codewhale exec --auto \"list crates/ with ls\"
   codewhale exec --auto --output-format stream-json \"fix the failing test\"
+
+Global options such as --model, --provider, --config and --profile go before exec:
+  codewhale --model MODEL exec \"explain this function\"
 
 Common forwarded flags:
   --auto                           Enable tool-backed agent mode with auto-approvals
@@ -271,13 +264,11 @@ Common forwarded flags:
 Plain `codewhale exec` is a one-shot model response. Use `--auto` for
 non-interactive filesystem/shell tool use, matching the supported automation
 path used by stream-json wrappers.
-"
-    )]
+")]
     Exec(TuiPassthroughArgs),
     /// Manage durable Agent fleet runs.
     #[command(
         name = "fleet",
-        disable_help_flag = true,
         after_help = "\
 Examples:
   codewhale fleet init
@@ -329,26 +320,20 @@ lifecycle generation you observed.
 ")]
     Lane(LaneArgs),
     /// Run a Codewhale-powered code review over a git diff.
-    #[command(disable_help_flag = true)]
     Review(TuiPassthroughArgs),
     /// Apply a patch file or stdin to the working tree.
-    #[command(disable_help_flag = true)]
     Apply(TuiPassthroughArgs),
     /// Run the offline evaluation harness.
-    #[command(disable_help_flag = true)]
     Eval(TuiPassthroughArgs),
     /// Manage MCP servers.
-    #[command(disable_help_flag = true)]
     Mcp(TuiPassthroughArgs),
     /// Run the shared ambient pet owner (`pet serve`). Internal: spawned
     /// lazily by clients when no owner is running.
     #[command(name = "pet", hide = true)]
     Pet(TuiPassthroughArgs),
     /// Inspect feature flags.
-    #[command(disable_help_flag = true)]
     Features(TuiPassthroughArgs),
     /// Connect third-party harnesses through Codewhale (e.g. `integrations dsh status`).
-    #[command(disable_help_flag = true)]
     Integrations(TuiPassthroughArgs),
     /// Run a local Codewhale server.
     #[command(after_help = "\
@@ -2065,7 +2050,8 @@ fn retired_output_mode_warning(cli: &Cli) -> Option<&'static str> {
 /// A secret passed as an argv value is readable by other local users through
 /// the process list (and lands in shell history). Name the non-argv route.
 /// `login`/`account` already reject the global `--api-key` with their own
-/// guidance, so they get no second line.
+/// guidance, so they get no second line. The pipe-only credential handoff
+/// keeps its existing bounded diagnostics instead of adding interactive advice.
 fn argv_secret_warning(cli: &Cli, command: Option<&Commands>) -> Option<&'static str> {
     const RUNTIME_TOKEN: &str =
         "warning: --auth-token is visible in the process list; use CODEWHALE_RUNTIME_TOKEN instead";
@@ -2087,7 +2073,10 @@ fn argv_secret_warning(cli: &Cli, command: Option<&Commands>) -> Option<&'static
         })) => {
             Some("warning: --api-key is visible in the process list; use --api-key-stdin instead")
         }
-        Some(Commands::Login(_) | Commands::Account(_)) => None,
+        Some(Commands::Login(_) | Commands::Account(_))
+        | Some(Commands::Auth(AuthArgs {
+            command: AuthCommand::PrintApiKey { .. },
+        })) => None,
         _ if cli.api_key.is_some() => Some(
             "warning: --api-key is visible in the process list; use `codewhale auth set --api-key-stdin` or the provider's API-key env var instead",
         ),
@@ -11325,11 +11314,11 @@ verbosity = "project-imported"
         }
     }
 
-    /// `--help`/`-h` on a passthrough subcommand reaches the delegated binary,
-    /// which knows the real flags; the wrapper only knows a trailing `ARGS`.
+    /// Help must exit in the wrapper's parser, before config, credentials or
+    /// provider setup can run. Its schema also preserves wrapper-only rules.
     #[test]
-    fn passthrough_subcommands_forward_help_flags() {
-        let subcommands = [
+    fn passthrough_subcommand_help_exits_in_the_wrapper() {
+        for subcommand in [
             "doctor",
             "setup",
             "init",
@@ -11348,40 +11337,24 @@ verbosity = "project-imported"
             "rc",
             "fork",
             "speech",
-        ];
-        for subcommand in subcommands {
+        ] {
             for flag in ["--help", "-h"] {
-                let cli = Cli::try_parse_from(["codewhale", subcommand, flag])
-                    .unwrap_or_else(|err| panic!("`{subcommand} {flag}` should parse: {err}"));
-                let Some(command) = cli.command else {
-                    panic!("`{subcommand} {flag}` should select a subcommand");
-                };
-                let args = match command {
-                    Commands::Doctor(args)
-                    | Commands::Setup(args)
-                    | Commands::Init(args)
-                    | Commands::Models(args)
-                    | Commands::Exec(args)
-                    | Commands::Review(args)
-                    | Commands::Sessions(args)
-                    | Commands::Resume(args)
-                    | Commands::Fleet(args)
-                    | Commands::Apply(args)
-                    | Commands::Eval(args)
-                    | Commands::Mcp(args)
-                    | Commands::Features(args)
-                    | Commands::Integrations(args)
-                    | Commands::Receipts(args)
-                    | Commands::Rc(args)
-                    | Commands::Fork(args)
-                    | Commands::Speech(args) => args,
-                    other => panic!("`{subcommand}` parsed as {other:?}"),
-                };
-                assert_eq!(args.args, vec![flag.to_string()], "{subcommand} {flag}");
+                let error = Cli::try_parse_from(["codewhale", subcommand, flag])
+                    .expect_err("help must exit before dispatch");
+                assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("Usage: codewhale {subcommand}")),
+                    "{subcommand} must show its own help: {error}"
+                );
             }
         }
-        // Wrapper-owned subcommands still render their own help.
-        help_for(&["codewhale", "auth", "--help"]);
+        let exec = help_for(&["codewhale", "exec", "--help"]);
+        assert!(exec.contains("go before exec"), "{exec}");
+        assert!(exec.contains("codewhale --model MODEL exec"), "{exec}");
+        let rc = help_for(&["codewhale", "rc", "--help"]);
+        assert!(rc.contains("hand it to the Codewhale web app"), "{rc}");
     }
 
     #[test]
@@ -11465,6 +11438,18 @@ verbosity = "project-imported"
         assert_eq!(warn(&["codewhale", "app-server", "--http"]), None);
         // login/account reject the global flag with their own guidance.
         assert_eq!(warn(&["codewhale", "--api-key", "sk-x", "login"]), None);
+        assert_eq!(
+            warn(&[
+                "codewhale",
+                "--api-key",
+                "sk-x",
+                "auth",
+                "print-api-key",
+                "--provider",
+                "deepseek",
+            ]),
+            None
+        );
     }
 
     /// #6516: `--output-mode` never had a reader. It stays accepted so old

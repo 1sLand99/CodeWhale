@@ -316,7 +316,7 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 # There is no config.toml `auto_allow` key. To pre-approve a command, add an
 # `action = "allow"` rule to permissions.toml `[[rules]]` (see the
 # permissions.toml example above).
-max_subagents = 10 # optional (default 64, clamped to 1-128)
+max_subagents = 64 # optional (default 64, clamped to 1-128)
 
 # Optional managed policy paths (defaults to /etc/deepseek/*.toml on unix):
 # managed_config_path = "/etc/deepseek/managed_config.toml"
