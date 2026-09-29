@@ -880,6 +880,10 @@ fn bracketed_paste_returns_dock_focus_to_the_visible_composer() {
 /// One representative terminal encoding per shell binding.
 fn shell_binding_probe(id: ShellBindingId) -> KeyEvent {
     match id {
+        ShellBindingId::ElevationUp => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        ShellBindingId::ElevationDown => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        ShellBindingId::ElevationConfirm => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ShellBindingId::ElevationAbort => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         ShellBindingId::PetResultUp => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
         ShellBindingId::PetResultDown => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         ShellBindingId::PetResultPageUp => KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
@@ -26693,6 +26697,54 @@ fn typeahead_before_card_does_not_answer() {
     assert!(app.view_stack.key_predates_top_approval(typed_before));
     assert!(!app.view_stack.key_predates_top_approval(Instant::now()));
     assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
+}
+
+#[test]
+fn stale_keys_cannot_answer_a_raised_or_revealed_elevation() {
+    use crate::tui::approval::ElevationOption;
+
+    let mut app = ask_posture_app();
+    let typed_before = Instant::now() - Duration::from_secs(1);
+    app.view_stack.push(ElevationView::new(
+        ElevationRequest::for_shell("elevation-id", "cargo test", "blocked", true, false),
+        codewhale_localization::Locale::En,
+    ));
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+    assert!(route_key_to_view_stack(&mut app, up, typed_before).is_none());
+    assert_eq!(app.view_stack.top_approval_id(), None);
+    // Deliberately select Full Access, then cover it with another decision.
+    assert!(route_key_to_view_stack(&mut app, up, Instant::now()).is_some());
+    push_approval_request_view(
+        &mut app,
+        "approval-id",
+        "exec_shell",
+        "Run a command",
+        &serde_json::json!({"command": "cargo test"}),
+        "k",
+        "g",
+        None,
+        crate::config::ApprovalDefaultSelection::AllowOnce,
+        None,
+    );
+    let queued_enter = Instant::now();
+    std::thread::sleep(Duration::from_millis(2));
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let events = route_key_to_view_stack(&mut app, enter, queued_enter).expect("visible approval");
+    assert!(
+        matches!(events.as_slice(), [ViewEvent::ApprovalDecision { tool_id, .. }] if tool_id == "approval-id")
+    );
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Elevation));
+    assert!(
+        route_key_to_view_stack(&mut app, enter, queued_enter).is_none(),
+        "Enter queued for the previous card must not elevate the newly revealed one"
+    );
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Elevation));
+    let events =
+        route_key_to_view_stack(&mut app, enter, Instant::now()).expect("fresh confirmation");
+    assert!(matches!(events.as_slice(), [ViewEvent::ElevationDecision {
+        tool_id, option: ElevationOption::FullAccess, ..
+    }] if tool_id == "elevation-id"));
+    assert!(app.view_stack.is_empty());
 }
 
 #[test]
