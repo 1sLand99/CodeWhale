@@ -163,6 +163,11 @@ fn http_response_boundary_classifies_status_contract() {
         "prompt is too long: 250000 tokens > 200000 maximum",
         "input tokens exceed the configured limit",
         "The input token count (2000000) exceeds the maximum number of tokens allowed (1048576).",
+        // xAI, Moonshot, Anthropic and Bedrock wording.
+        "This model's maximum prompt length is 131072 but the request contains 200000 tokens.",
+        "Invalid request: Your request exceeded model token limit: 262144",
+        "input length and `max_tokens` exceed context limit: 187254 + 20000 > 204798",
+        "Input is too long for requested model.",
     ] {
         assert!(
             matches!(

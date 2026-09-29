@@ -5132,13 +5132,7 @@ impl Config {
                 .and_then(|providers| providers.custom_provider_config(provider))
                 .is_none()
         {
-            return Err(SafeConfigDiagnostic::invalid_value(
-                "provider",
-                provider,
-                &ApiProvider::names_hint(),
-                ApiProvider::Deepseek.as_str(),
-            )
-            .into());
+            return Err(invalid_provider_diagnostic(provider).into());
         }
         let active_provider = self.api_provider();
         match validate_kimi_code_api_model_id(
@@ -5201,7 +5195,7 @@ impl Config {
                     "auto or a model ID provider '{}' serves{hint}",
                     provider.as_str()
                 ),
-                "auto",
+                user_config_fix("model", "auto", Some("a *_MODEL environment variable")),
             )
             .into());
         }
@@ -5215,7 +5209,11 @@ impl Config {
                     "approval_policy",
                     policy,
                     "on-request, untrusted, never, auto, or suggest",
-                    "on-request",
+                    user_config_fix(
+                        "approval_policy",
+                        "on-request",
+                        Some("CODEWHALE_APPROVAL_POLICY"),
+                    ),
                 )
                 .into());
             }
@@ -5227,7 +5225,7 @@ impl Config {
                     "verbosity",
                     v,
                     "normal or concise",
-                    "normal",
+                    user_config_fix("verbosity", "normal", None),
                 )
                 .into());
             }
@@ -5242,7 +5240,11 @@ impl Config {
                     "sandbox_mode",
                     mode,
                     "read-only, workspace-write, danger-full-access, or external-sandbox",
-                    "workspace-write",
+                    user_config_fix(
+                        "sandbox_mode",
+                        "workspace-write",
+                        Some("CODEWHALE_SANDBOX_MODE"),
+                    ),
                 )
                 .into());
             }
@@ -5256,7 +5258,7 @@ impl Config {
                     "tui.alternate_screen",
                     &mode,
                     "auto, always, or never",
-                    "auto",
+                    user_config_fix("tui.alternate_screen", "auto", None),
                 )
                 .into());
             }
@@ -7316,7 +7318,7 @@ impl Config {
             ),
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
                 anyhow::bail!(deepseek_missing_key_message(
-                    crate::integrations::dsh::detect::dsh_on_path()
+                    crate::integrations::dsh::detect::dsh_present()
                 ))
             }
             ApiProvider::SiliconflowCn => anyhow::bail!(
@@ -10724,7 +10726,7 @@ pub(crate) fn is_kimi_code_membership_model(model: &str) -> bool {
 
 /// Missing-key guidance for DeepSeek. Built from lines so indentation
 /// survives (a `\` string continuation strips it). The DeepSeek Harness
-/// bullet appears only when `dsh` is installed.
+/// bullet appears only when `dsh` is on PATH or its credentials file exists.
 fn deepseek_missing_key_message(dsh_detected: bool) -> String {
     let mut lines = vec![
         "DeepSeek API key not found.",
@@ -10777,11 +10779,11 @@ pub(crate) enum SafeConfigDiagnostic {
 }
 
 impl SafeConfigDiagnostic {
-    fn invalid_value(key: &str, value: &str, expected: &str, valid: &str) -> Self {
+    fn invalid_value(key: &str, value: &str, expected: &str, fix: String) -> Self {
         Self::InvalidValue {
             message: format!("Invalid {key} '{value}': expected {expected}."),
             shareable: format!("Invalid {key} (value not shown): expected {expected}."),
-            fix: Some(format!("codewhale config set {key} {valid}")),
+            fix: Some(fix),
         }
     }
 
@@ -10809,16 +10811,41 @@ impl SafeConfigDiagnostic {
     }
 }
 
-/// The one wording for an unknown provider name, shared by config validation
-/// and `config set provider`.
-pub(crate) fn invalid_provider_message(provider: &str) -> String {
+/// How to correct a rejected value in the user config. `config set` does not
+/// take dotted keys, so a table field names the table to edit. Validation runs
+/// after the environment, profile and managed layers are applied, and any of
+/// them outranks the user config, so the fix names those layers too.
+fn user_config_fix(key: &str, valid: &str, env_var: Option<&str>) -> String {
+    let edit = match key.split_once('.') {
+        Some((table, field)) => {
+            format!("set {field} = \"{valid}\" in the [{table}] table of config.toml")
+        }
+        None => format!("codewhale config set {key} {valid}"),
+    };
+    let layers = match env_var {
+        Some(env_var) => format!("{env_var}, a profile, or managed config"),
+        None => "a profile or managed config".to_string(),
+    };
+    format!("{edit} (if {layers} sets it, correct it there)")
+}
+
+fn invalid_provider_diagnostic(provider: &str) -> SafeConfigDiagnostic {
     SafeConfigDiagnostic::invalid_value(
         "provider",
         provider,
         &ApiProvider::names_hint(),
-        ApiProvider::Deepseek.as_str(),
+        user_config_fix(
+            "provider",
+            ApiProvider::Deepseek.as_str(),
+            Some("CODEWHALE_PROVIDER"),
+        ),
     )
-    .to_string()
+}
+
+/// The one wording for an unknown provider name, shared by config validation
+/// and `config set provider`.
+pub(crate) fn invalid_provider_message(provider: &str) -> String {
+    invalid_provider_diagnostic(provider).to_string()
 }
 
 /// Fail closed on known-bad model/endpoint pairings (#4687).
@@ -11195,11 +11222,16 @@ fn apply_profile(config: ConfigFile, profile: Option<&str>) -> Result<Config> {
                         }
                     })
                     .unwrap_or_else(|| "none".to_string());
-                let message =
-                    format!("Profile '{profile_name}' not found. Available profiles: {available}");
+                // Profile names are user-typed (`--profile`), so the shareable
+                // text omits the requested one like every other InvalidValue;
+                // the available names are config table keys, not values.
                 Err(SafeConfigDiagnostic::InvalidValue {
-                    shareable: message.clone(),
-                    message,
+                    message: format!(
+                        "Profile '{profile_name}' not found. Available profiles: {available}"
+                    ),
+                    shareable: format!(
+                        "Profile not found (name not shown). Available profiles: {available}"
+                    ),
                     fix: None,
                 }
                 .into())
@@ -12445,18 +12477,6 @@ pub fn active_provider_has_env_api_key(config: &Config) -> bool {
         || provider_config_env_api_key(config, provider).is_some()
         || (!config.should_skip_secret_store_for_provider(provider)
             && provider_env_api_key(provider).is_some())
-}
-
-/// Whether the active provider has a credential in the environment, the
-/// durable secret store, or the user-global config. Presence only: the store
-/// is opened read-only and every value is dropped unread by the caller, so
-/// diagnostics can answer "is a key saved?" without probing or showing it.
-#[must_use]
-pub(crate) fn active_provider_credential_present(config: &Config) -> bool {
-    let provider = config.api_provider();
-    active_provider_has_env_api_key(config)
-        || provider_secret_store_api_key_with_mode(config, provider, true).is_some()
-        || user_global_config_api_key(provider).is_some()
 }
 
 #[must_use]

@@ -229,10 +229,14 @@ pub(crate) fn resolve_dsh_home(env: &DetectEnv) -> (PathBuf, bool) {
     (home.join(".dsh"), false)
 }
 
-/// Whether a DeepSeek Harness launcher is on this process's `PATH`. A cheap
-/// `PATH` scan only: nothing is run and `$DSH_HOME` is not touched.
-pub(crate) fn dsh_on_path() -> bool {
-    find_on_path(std::env::var_os("PATH").as_ref()).is_some()
+/// Whether DeepSeek Harness looks set up here: a launcher on `PATH`, or a
+/// `$DSH_HOME/.credentials.yaml` (a GUI-launched shell may lack the launcher
+/// on `PATH` while the saved key still exists). A `PATH` scan and one
+/// existence check only: nothing is run and no file is read.
+pub(crate) fn dsh_present() -> bool {
+    let env = DetectEnv::from_process();
+    find_on_path(env.path.as_ref()).is_some()
+        || resolve_dsh_home(&env).0.join(".credentials.yaml").exists()
 }
 
 fn find_on_path(path: Option<&OsString>) -> Option<PathBuf> {

@@ -250,7 +250,9 @@ impl std::fmt::Debug for ValidatedRuntimeRoute {
 }
 
 /// Who reads a route preflight failure. The interactive app can run slash
-/// commands; `codewhale exec` and other headless callers only have the CLI.
+/// commands; a headless caller only has the CLI. Only `codewhale exec` asks
+/// for [`Self::Headless`] today (through [`ResolvedRuntimeRoute::validate_for`]);
+/// `preflight` and other callers keep the interactive wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouteErrorSurface {
     Interactive,
@@ -383,16 +385,25 @@ fn classify_provider_route_preflight_next_step(
                 "Run /auth or /provider setup {identity_key} to configure credentials."
             ));
         }
-        // The reason usually names its own `codewhale auth set` command
-        // already; repeating it would make two instructions out of one.
-        if lower.contains("codewhale auth set") {
+        // The reason usually names its own command (`codewhale auth set`,
+        // `codewhale auth chatgpt`, `codewhale auth xai-device`, ...);
+        // repeating one would make two instructions out of one.
+        if lower.contains("codewhale auth") {
             return None;
+        }
+        // `auth set` stores an API key. An access-token or other credential
+        // failure may belong to an OAuth route, where it is the wrong fix.
+        if !lower.contains("api key") {
+            return Some(
+                "Run `codewhale doctor` to see which credential this route needs.".to_string(),
+            );
         }
         return Some(
             match ApiProvider::parse(identity_key).filter(|p| *p != ApiProvider::Custom) {
                 Some(provider) => {
                     format!("Run `codewhale auth set --provider {}`.", provider.as_str())
                 }
+                // A custom identity's key is its `[providers.<name>]` table.
                 None => format!(
                     "Add api_key or api_key_env to [providers.{identity_key}] in config.toml."
                 ),
@@ -1276,6 +1287,17 @@ mod tests {
             formatted,
             "DeepSeek API key not found. Failed to configure provider route deepseek / deepseek-v4-flash. Next step: Run `codewhale auth set --provider deepseek`."
         );
+
+        // An OAuth access-token failure is not an `auth set` (API key) fix.
+        let oauth = anyhow::anyhow!("OAuth access token is empty");
+        let formatted = format_provider_route_preflight_error(
+            "xai",
+            "grok-4",
+            &oauth,
+            RouteErrorSurface::Headless,
+        );
+        assert!(!formatted.contains("auth set"), "{formatted}");
+        assert!(formatted.contains("codewhale doctor"), "{formatted}");
 
         let multi = anyhow::anyhow!(
             "DeepSeek API key not found.\n\n  codewhale auth set --provider deepseek"

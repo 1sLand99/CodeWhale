@@ -2114,13 +2114,28 @@ const SANITIZED_ERROR_MAX_CHARS: usize = 240;
 /// long text keeps its head and its tail, because harness and command output
 /// put the actual failure last.
 pub fn sanitize_error(message: &str) -> String {
-    let flat = message
-        .split(|ch: char| ch.is_control() || ch.is_whitespace())
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    fn redact(text: &str) -> String {
+        redact_machine_tokens(&redact_url_userinfo(text))
+    }
+    fn flatten(text: &str) -> String {
+        text.split(|ch: char| ch.is_control() || ch.is_whitespace())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    // A secret split by a control character (a newline, BEL, an ANSI
+    // fragment) must still be caught, so redaction first sees the text with
+    // every control removed, which rejoins it. Only when that finds nothing
+    // do controls become spaces for readability; flattening only inserts
+    // separators, so it cannot expose a token the rejoined text did not.
+    let fused: String = message.chars().filter(|ch| !ch.is_control()).collect();
+    let fused_redacted = redact(&fused);
     // Redact before cutting so a secret can never be split past the redactor.
-    let redacted = redact_machine_tokens(&redact_url_userinfo(&flat));
+    let redacted = if fused_redacted == fused {
+        redact(&flatten(message))
+    } else {
+        flatten(&fused_redacted)
+    };
     let count = redacted.chars().count();
     if count <= SANITIZED_ERROR_MAX_CHARS {
         return redacted;
@@ -2586,6 +2601,17 @@ mod tests {
                 .contains("token"),
             "userinfo must not survive sanitize_error"
         );
+    }
+
+    #[test]
+    fn sanitize_error_redacts_a_token_split_by_a_control_character() {
+        let head = "0123456789abcdef01234567";
+        for split in ['\u{7}', '\n', '\u{1b}'] {
+            let message = format!("push failed: cwc_key_{head}{split}tailsecret0123456789 done");
+            let sanitized = sanitize_error(&message);
+            assert!(!sanitized.contains("tailsecret"), "{sanitized}");
+            assert!(sanitized.contains("[redacted]"), "{sanitized}");
+        }
     }
 
     #[test]

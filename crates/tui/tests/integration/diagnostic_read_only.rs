@@ -145,9 +145,10 @@ api_key = "doctor-json-arbitrary-secret"
         message.starts_with("Invalid provider (value not shown): expected deepseek"),
         "{message}"
     );
-    assert_eq!(
-        report["error"]["fix"],
-        "codewhale config set provider deepseek"
+    let fix = report["error"]["fix"].as_str().expect("fix");
+    assert!(
+        fix.starts_with("codewhale config set provider deepseek (if CODEWHALE_PROVIDER"),
+        "{fix}"
     );
     let all_output = format!(
         "{}\n{}",

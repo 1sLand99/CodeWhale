@@ -15569,3 +15569,58 @@ fn deepseek_missing_key_message_keeps_indentation_and_gates_the_harness_bullet()
         "{with_dsh}"
     );
 }
+
+#[test]
+fn invalid_value_fixes_are_commands_that_work_and_name_overriding_layers() {
+    let error = Config {
+        tui: Some(TuiConfig {
+            alternate_screen: Some("sometimes".to_string()),
+            ..TuiConfig::default()
+        }),
+        ..Config::default()
+    }
+    .validate()
+    .expect_err("unknown alternate_screen");
+    let diagnostic = SafeConfigDiagnostic::find_in(&error).expect("safe diagnostic");
+    // `config set` refuses dotted keys, so the fix edits the table instead.
+    assert_eq!(
+        diagnostic.fix(),
+        Some(
+            "set alternate_screen = \"auto\" in the [tui] table of config.toml (if a profile or managed config sets it, correct it there)"
+        )
+    );
+
+    let error = Config {
+        sandbox_mode: Some("bogus".to_string()),
+        ..Config::default()
+    }
+    .validate()
+    .expect_err("unknown sandbox_mode");
+    let fix = SafeConfigDiagnostic::find_in(&error)
+        .and_then(SafeConfigDiagnostic::fix)
+        .expect("fix");
+    assert!(
+        fix.starts_with("codewhale config set sandbox_mode workspace-write (if CODEWHALE_SANDBOX_MODE, a profile, or managed config sets it"),
+        "{fix}"
+    );
+}
+
+#[test]
+fn missing_profile_diagnostic_does_not_show_the_requested_name() {
+    let mut profiles = HashMap::new();
+    profiles.insert("work".to_string(), Config::default());
+    let config = ConfigFile {
+        base: Box::default(),
+        profiles: Some(profiles),
+        legacy_root: Default::default(),
+    };
+    let error = apply_profile(config, Some("sk-pasted-token")).expect_err("no such profile");
+    let diagnostic = SafeConfigDiagnostic::find_in(&error).expect("safe diagnostic");
+    let shown = diagnostic.display_message();
+    assert_eq!(
+        shown,
+        "Profile not found (name not shown). Available profiles: work"
+    );
+    // The local error keeps the typed name for the person at the terminal.
+    assert!(error.to_string().contains("sk-pasted-token"), "{error}");
+}
