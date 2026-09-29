@@ -519,6 +519,25 @@ export interface RoadmapDict {
   pullsDetail: string;
 }
 
+/** `app/[locale]/contribute/page.tsx`. */
+export interface ContributeDict {
+  metaTitle: string;
+  metaDescription: string;
+  kicker: string;
+  /** Page H1. */
+  title: string;
+  lede: string;
+  fileIssue: string;
+  browsePulls: string;
+  fullGuide: string;
+  pathsTitle: string;
+  workflowTitle: string;
+  reviewTitle: string;
+  reviewScope: string;
+  devTitle: string;
+  devScope: string;
+}
+
 export type DocsHooksDict = DocsPageDict;
 
 export type DocsTroubleshootingDict = DocsPageDict;
