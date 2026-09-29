@@ -4707,6 +4707,8 @@ impl Config {
     /// Whether organization requirements, rather than a user-editable config
     /// key, own approval posture. User config still outranks TUI settings, but
     /// `/config approval_mode ... --save` may edit that user-owned key.
+    /// Sandbox requirements also lock posture: Full Access changes the implicit
+    /// sandbox. This conservatively locks even posture changes that would fit.
     #[must_use]
     pub fn approval_policy_is_requirements_managed(&self) -> bool {
         let path = self
@@ -4725,7 +4727,10 @@ impl Config {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|contents| toml::from_str::<RequirementsFile>(&contents).ok())
-            .is_none_or(|requirements| !requirements.allowed_approval_policies.is_empty())
+            .is_none_or(|requirements| {
+                !requirements.allowed_approval_policies.is_empty()
+                    || !requirements.allowed_sandbox_modes.is_empty()
+            })
     }
 
     #[must_use]
@@ -6238,6 +6243,53 @@ impl Config {
         deepseek_alias_deprecation(&alias)
     }
 
+    /// The root `default_text_model` alias is the *active* route's fallback.
+    /// When a switch to `incoming` leaves a route that has no model leaf of its
+    /// own and was actually resolving the alias, return that outgoing identity
+    /// and value: the choice belongs to the outgoing route and must follow it
+    /// onto its own leaf, rather than stay at the root where the incoming route
+    /// would inherit it and the outgoing route would forget it (falling back to
+    /// its catalog default on the way back). The alias is `default_text_model`
+    /// or, when that is unset, the legacy root `model` it falls back to. A
+    /// persisted writer that moves it clears both roots
+    /// (`config_persistence::unset_root_model_aliases`); clearing only the
+    /// first would resurrect the second on the incoming route after reload.
+    pub(crate) fn root_model_alias_owned_by_outgoing(
+        &self,
+        incoming: &ProviderIdentity,
+    ) -> Option<(ProviderIdentity, String)> {
+        // `default_model` reads the legacy root `model` whenever
+        // `default_text_model` is unset, so the effective alias is either one.
+        let value = self
+            .default_text_model
+            .as_deref()
+            .or(self.legacy_model.as_deref())?
+            .trim();
+        if value.is_empty()
+            || value.eq_ignore_ascii_case("auto")
+            || value.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let outgoing = self.active_provider_identity(self.api_provider()).ok()?;
+        // An unnamed custom route stores its model in the alias itself.
+        if outgoing == *incoming
+            || (outgoing.provider == ApiProvider::Custom && outgoing.persisted_id().is_none())
+        {
+            return None;
+        }
+        let mut scoped = self.clone();
+        scoped.scope_to_provider_identity(&outgoing);
+        if scoped
+            .provider_config_for(outgoing.provider)
+            .and_then(|entry| entry.model.as_deref())
+            .is_some()
+        {
+            return None;
+        }
+        (scoped.default_model() == value).then(|| (outgoing, value.to_string()))
+    }
+
     #[must_use]
     pub fn default_model(&self) -> String {
         if self.default_text_model.is_none() && self.legacy_model.is_some() {
@@ -6705,6 +6757,16 @@ impl Config {
         provider_env_base_url_override(provider).is_some()
             || (matches!(self.base_url_env_receipt, BaseUrlEnvReceipt::Unrecorded)
                 && env_base_url_override().is_some())
+    }
+
+    /// The active route names its own endpoint: its `[providers.<name>]`
+    /// `base_url` (where a legacy top-level `base_url` lands too) or an
+    /// environment endpoint override. An endpoint is a configured route even
+    /// without a model or a working key.
+    pub(crate) fn active_route_endpoint_configured(&self) -> bool {
+        let provider = self.api_provider();
+        self.configured_base_url_for_provider(provider).is_some()
+            || self.active_base_url_is_environment_owned(provider)
     }
 
     /// The endpoint `provider` owns through a file or in-memory layer, before
@@ -7921,8 +7983,8 @@ impl Config {
     /// R1: resolved cumulative per-turn wall-clock budget.
     ///
     /// Reads `[tui].turn_wall_clock_secs`, falling back to the
-    /// `CODEWHALE_TURN_WALL_CLOCK_SECS` env var, then to the finite
-    /// default. `0` resolves to the default; it never means "unlimited".
+    /// `CODEWHALE_TURN_WALL_CLOCK_SECS` env var, then to no limit. `0`
+    /// also means no limit.
     #[must_use]
     pub fn turn_wall_clock(&self) -> std::time::Duration {
         let raw = self
@@ -8352,6 +8414,10 @@ pub(crate) fn is_workspace_trusted(workspace: &Path) -> bool {
 }
 
 pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
+    set_workspace_trust(workspace, true)
+}
+
+pub(crate) fn set_workspace_trust(workspace: &Path, trusted: bool) -> Result<PathBuf> {
     let config_path =
         try_default_config_path().context("Failed to resolve config path for workspace trust.")?;
     ensure_parent_dir(&config_path)?;
@@ -8361,7 +8427,7 @@ pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
         crate::config_persistence::set_document_value(
             doc,
             &["projects", project_key.as_str(), "trust_level"],
-            "trusted",
+            if trusted { "trusted" } else { "untrusted" },
         )
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
@@ -11714,25 +11780,63 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
         )
     })?;
 
-    if !requirements.allowed_approval_policies.is_empty()
-        && let Some(policy) = config.approval_policy.as_ref()
-    {
-        let policy = policy.to_ascii_lowercase();
-        if !requirements
-            .allowed_approval_policies
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case(&policy))
-        {
+    if !requirements.allowed_approval_policies.is_empty() {
+        use codewhale_execpolicy::ApprovalMode;
+
+        let policy = config
+            .approval_policy
+            .as_deref()
+            .unwrap_or("on-request")
+            .to_ascii_lowercase();
+        if !requirements.allowed_approval_policies.iter().any(|p| {
+            match (
+                ApprovalMode::from_config_value(p),
+                ApprovalMode::from_config_value(&policy),
+            ) {
+                (Some(allowed), Some(effective)) => allowed == effective,
+                _ => p.eq_ignore_ascii_case(&policy),
+            }
+        }) {
             anyhow::bail!(
                 "approval_policy '{policy}' is not allowed by requirements ({})",
                 requirements.allowed_approval_policies.join(", ")
             );
         }
     }
-    if !requirements.allowed_sandbox_modes.is_empty()
-        && let Some(mode) = config.sandbox_mode.as_ref()
-    {
-        let mode = mode.to_ascii_lowercase();
+    if !requirements.allowed_sandbox_modes.is_empty() {
+        // At config load there is no live turn mode yet. Check the Agent
+        // baseline with the engine's resolver; Plan can narrow it later.
+        // Explicit settings retain their existing allow-list check.
+        let mode = config
+            .sandbox_mode
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| {
+                use crate::core::authority::{SandboxNetworkAccess, sandbox_policy_for_turn};
+                use crate::sandbox::SandboxPolicy;
+                use codewhale_execpolicy::ApprovalMode;
+
+                // Sandbox requirements lock approval posture at startup,
+                // excluding saved preferences and every YOLO override.
+                let approval = config
+                    .approval_policy
+                    .as_deref()
+                    .and_then(ApprovalMode::from_config_value)
+                    .unwrap_or_default();
+                match sandbox_policy_for_turn(
+                    codewhale_config::AppMode::Agent,
+                    approval,
+                    None,
+                    Path::new("."),
+                    SandboxNetworkAccess::from_config(config.sandbox_network_access),
+                ) {
+                    SandboxPolicy::ReadOnly => "read-only",
+                    SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
+                    SandboxPolicy::DangerFullAccess => "danger-full-access",
+                    SandboxPolicy::ExternalSandbox { .. } => "external-sandbox",
+                }
+                .to_string()
+            });
         if !requirements
             .allowed_sandbox_modes
             .iter()

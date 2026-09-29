@@ -1071,7 +1071,39 @@ pub fn discover_in_workspace_with_mode_and_plugins(
     mode: SkillDiscoveryMode,
     plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> SkillRegistry {
-    discover_from_directories_with_plugins(skills_directories_for_mode(workspace, mode), plugins)
+    let registry = discover_from_directories_with_plugins(
+        skills_directories_for_mode(workspace, mode),
+        plugins,
+    );
+    with_untrusted_project_skills_warning(registry, workspace)
+}
+
+/// Name the project skill directories an untrusted workspace kept out, so
+/// `/skills` and the model see why a repository's skills are missing.
+fn with_untrusted_project_skills_warning(
+    mut registry: SkillRegistry,
+    workspace: &Path,
+) -> SkillRegistry {
+    if let Some(warning) = untrusted_project_skills_warning(workspace) {
+        registry.warnings.push(warning);
+    }
+    registry
+}
+
+pub(crate) fn untrusted_project_skills_warning(workspace: &Path) -> Option<String> {
+    let home = crate::config::effective_home_dir();
+    let skipped = roots::untrusted_project_skill_dirs(workspace, home.as_deref());
+    if skipped.is_empty() {
+        return None;
+    }
+    let dirs = skipped
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Project skills in {dirs} were not loaded: this workspace is not trusted. Run /trust on --save to persist workspace trust and enable project skills, commands, hooks, MCP servers, and project context."
+    ))
 }
 
 /// Discover skills from the workspace search set plus the configured install
@@ -1087,7 +1119,8 @@ pub fn discover_for_workspace_and_dir_with_mode_and_plugins(
     plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> SkillRegistry {
     let dirs = skill_directories_for_workspace_and_dir(workspace, skills_dir, mode);
-    discover_from_directories_with_plugins(dirs, plugins)
+    let registry = discover_from_directories_with_plugins(dirs, plugins);
+    with_untrusted_project_skills_warning(registry, workspace)
 }
 
 #[must_use]
@@ -1359,8 +1392,11 @@ pub fn render_available_skills_context_for_workspace_with_mode_and_plugins(
     plugins: Option<&crate::plugins::PluginRegistry>,
     budget_chars: usize,
 ) -> Option<String> {
-    let registry =
-        discover_in_workspace_with_mode_and_plugins(workspace, mode, plugins).into_enabled();
+    let registry = discover_from_directories_with_plugins(
+        skills_directories_for_mode(workspace, mode),
+        plugins,
+    )
+    .into_enabled();
     render_skills_block_with_configured_root(&registry, locale, workspace, None, budget_chars)
 }
 
@@ -1386,9 +1422,11 @@ pub fn render_available_skills_context_for_workspace_and_dir_with_mode_and_plugi
     plugins: Option<&crate::plugins::PluginRegistry>,
     budget_chars: usize,
 ) -> Option<String> {
-    let registry =
-        discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, plugins)
-            .into_enabled();
+    let registry = discover_from_directories_with_plugins(
+        skill_directories_for_workspace_and_dir(workspace, skills_dir, mode),
+        plugins,
+    )
+    .into_enabled();
     let home = crate::config::effective_home_dir();
     let configured_skills_root = matches!(
         classify_configured_skills_dir(workspace, home.as_deref(), skills_dir).0,

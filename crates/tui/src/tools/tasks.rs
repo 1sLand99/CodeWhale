@@ -33,7 +33,7 @@ const MAX_GATE_TIMEOUT_MS: u64 = 600_000;
 fn build_gate_command_parts(command: &str) -> (String, Vec<String>) {
     (
         "/bin/sh".to_string(),
-        vec!["-lc".to_string(), command.to_string()],
+        vec!["-c".to_string(), command.to_string()],
     )
 }
 
@@ -44,6 +44,9 @@ fn build_gate_command(command: &str, cwd: &Path) -> Command {
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Gate commands run workspace code; start them from the sanitized child
+    // environment, like `exec_shell`, so parent credentials are not inherited.
+    crate::child_env::apply_to_tokio_command(&mut cmd, std::iter::empty::<(&str, &str)>());
     cmd
 }
 
@@ -473,10 +476,21 @@ impl TasksTool {
             .task_manager
             .as_ref()
             .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
-        let workspace = optional_str(input, "workspace")?
-            .map(PathBuf::from)
-            .unwrap_or_else(|| context.workspace.clone());
+        // A task may run in another directory only where this session could
+        // already reach: inside its workspace, or anywhere in trust mode.
+        let workspace = match optional_str(input, "workspace")? {
+            Some(raw) => context.resolve_path(raw)?,
+            None => context.workspace.clone(),
+        };
         let prompt = required_str(input, "prompt")?.to_string();
+        // Authority declarations: read strictly (a malformed value that
+        // silently reads as "unset" is a restriction that evaporates), then
+        // capped at what this session holds.
+        let (allow_shell, trust_mode, auto_approve) = context.cap_delegated_authority(
+            optional_bool_opt(input, "allow_shell")?,
+            optional_bool_opt(input, "trust_mode")?,
+            optional_bool_opt(input, "auto_approve")?,
+        );
         let req = NewTaskRequest {
             prompt: prompt.clone(),
             name: optional_str(input, "name")?.map(ToString::to_string),
@@ -485,11 +499,9 @@ impl TasksTool {
             model_provider_id: optional_str(input, "model_provider_id")?.map(ToString::to_string),
             workspace: Some(workspace),
             mode: optional_str(input, "mode")?.map(ToString::to_string),
-            // Authority declarations: read strictly. A malformed value that
-            // silently reads as "unset" is a restriction that evaporates.
-            allow_shell: optional_bool_opt(input, "allow_shell")?,
-            trust_mode: optional_bool_opt(input, "trust_mode")?,
-            auto_approve: optional_bool_opt(input, "auto_approve")?,
+            allow_shell,
+            trust_mode,
+            auto_approve,
             // The task runs on the posture this session is in. The bits above
             // are declarations the engine only reads when no posture is given,
             // and a task started from a session must not run under authority
@@ -761,18 +773,12 @@ impl TasksTool {
         let branch = git_output(&context.workspace, &["rev-parse", "--abbrev-ref", "HEAD"])
             .await
             .ok();
-        let diff = git_output(&context.workspace, &["diff", "--binary", "--no-color"]).await?;
+        let (diff, changed_files) = attempt_diff(&context.workspace).await?;
         if diff.trim().is_empty() {
             return Ok(ToolResult::error(
                 "No working-tree diff to record as an attempt.",
             ));
         }
-        let changed_files = git_output(&context.workspace, &["diff", "--name-only"])
-            .await?
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
         let patch_path = write_task_artifact_for(context, &task_id, "attempt_patch", &diff).await?;
         let attempt = TaskAttemptRecord {
             id: format!("attempt_{}", &Uuid::new_v4().to_string()[..8]),
@@ -994,11 +1000,26 @@ impl ToolSpec for TaskShellWaitTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::ReadOnly]
+        vec![
+            ToolCapability::WritesFiles,
+            ToolCapability::RequiresApproval,
+        ]
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
+        ApprovalRequirement::Required
+    }
+
+    fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
+        if self.is_read_only_for(input) {
+            ApprovalRequirement::Auto
+        } else {
+            ApprovalRequirement::Required
+        }
+    }
+
+    fn is_read_only_for(&self, input: &Value) -> bool {
+        input.get("gate").is_none_or(Value::is_null)
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
@@ -1252,12 +1273,37 @@ fn task_id_schema() -> Value {
     })
 }
 
+/// The working-tree patch and changed paths an attempt records, read without
+/// running repository-configured diff drivers or filters.
+async fn attempt_diff(workspace: &Path) -> Result<(String, Vec<String>), ToolError> {
+    let review = crate::dependencies::Git::REVIEW_DIFF_ARGS;
+    let diff = git_output(
+        workspace,
+        &[&["diff", "--binary", "--no-color"][..], &review[..]].concat(),
+    )
+    .await?;
+    let changed_files = git_output(
+        workspace,
+        &[&["diff", "--name-only"][..], &review[..]].concat(),
+    )
+    .await?
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .map(ToString::to_string)
+    .collect();
+    Ok((diff, changed_files))
+}
+
 async fn git_output(workspace: &Path, args: &[&str]) -> Result<String, ToolError> {
     let args_owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
     let cwd = workspace.to_path_buf();
+    // Reads repository content, so repository-configured filters, fsmonitor
+    // and hooks stay off.
     let out = tokio::task::spawn_blocking(move || {
-        let arg_refs: Vec<&str> = args_owned.iter().map(String::as_str).collect();
-        crate::dependencies::Git::output(&arg_refs, &cwd)
+        crate::dependencies::Git::review_command(&cwd)
+            .map_err(|e| std::io::Error::other(format!("{e:#}")))?
+            .args(&args_owned)
+            .output()
     })
     .await
     .map_err(|e| {
@@ -1345,6 +1391,62 @@ fn sanitize_filename(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::tools::spec::ToolSpec;
+
+    /// Recording an attempt reads the working-tree patch; repository diff
+    /// drivers and clean filters must not run, and the patch stays a patch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn attempt_diff_runs_no_repository_configured_commands() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        let marker = outside.path().join("marker");
+        let script = |name: &str, body: &str| {
+            let path = outside.path().join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho {name} >> '{}'\n{body}", marker.display()),
+            )
+            .expect("write script");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            path.display().to_string()
+        };
+        let clean = script("clean.sh", "cat\n");
+        let external = script("external.sh", "");
+        let textconv = script("textconv.sh", "cat \"$1\"\n");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let status = crate::dependencies::Git::status(args, repo).expect("git should spawn");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            repo.join(".gitattributes"),
+            "a.md diff=conv\nf.txt filter=x\n",
+        )
+        .expect("attrs");
+        std::fs::write(repo.join("a.md"), "one\n").expect("write");
+        std::fs::write(repo.join("f.txt"), "one\n").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["config", "filter.x.clean", &clean]);
+        git(&["config", "diff.conv.textconv", &textconv]);
+        std::fs::write(repo.join("a.md"), "two\n").expect("modify");
+        std::fs::write(repo.join("f.txt"), "two\n").expect("modify");
+        git(&["config", "diff.external", &external]);
+
+        let (diff, changed) = attempt_diff(repo).await.expect("attempt diff");
+        assert!(
+            !marker.exists(),
+            "recording ran a repository-configured command: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        assert!(diff.contains("+two"), "{diff}");
+        assert_eq!(changed, vec!["a.md".to_string(), "f.txt".to_string()]);
+    }
 
     #[test]
     fn durable_task_schema_requires_prompt() {
@@ -1496,6 +1598,31 @@ mod tests {
     }
 
     #[test]
+    fn runtime_surface_hardening_task_gate_recording_requires_approval() {
+        let tool = TaskShellWaitTool;
+        for input in [
+            json!({"task_id": "shell_1"}),
+            json!({"task_id": "shell_1", "gate": null}),
+        ] {
+            assert_eq!(
+                tool.approval_requirement_for(&input),
+                ApprovalRequirement::Auto
+            );
+            assert!(tool.is_read_only_for(&input));
+        }
+        for gate in ["fmt", "check", "clippy", "test", "custom"] {
+            let input = json!({"task_id": "shell_1", "gate": gate, "command": "cargo check"});
+            assert_eq!(
+                tool.approval_requirement_for(&input),
+                ApprovalRequirement::Required
+            );
+            assert!(!tool.is_read_only_for(&input));
+        }
+        assert!(tool.capabilities().contains(&ToolCapability::WritesFiles));
+        assert!(!tool.is_read_only());
+    }
+
+    #[test]
     fn task_shell_wait_keeps_its_documented_nonblocking_default() {
         assert_eq!(
             task_shell_wait_input(json!({"task_id": "shell_1"}))["wait"],
@@ -1606,11 +1733,19 @@ mod tests {
 
         let mut context = ToolContext::new(workspace.path());
         context.approval_mode = codewhale_execpolicy::ApprovalMode::Auto;
+        context.shell_policy = crate::worker_profile::ShellPolicy::None;
         context.runtime.task_manager = Some(manager.clone());
 
         TasksTool::new("tasks")
             .execute(
-                json!({"action": "create", "prompt": "run the sweep", "auto_approve": true}),
+                json!({
+                    "action": "create",
+                    "prompt": "run the sweep",
+                    "auto_approve": true,
+                    "trust_mode": true,
+                    "allow_shell": true,
+                    "mode": "yolo"
+                }),
                 &context,
             )
             .await
@@ -1623,12 +1758,64 @@ mod tests {
             Some("auto_review"),
             "the task runs under its session's posture, not the model's legacy bit"
         );
+        // Requested authority the session does not hold is not stored.
+        assert!(!created.auto_approve);
+        assert!(!created.trust_mode);
+        assert!(!created.allow_shell);
+
+        // The turn the task starts runs under the pinned posture: neither the
+        // legacy bit nor a legacy full-access mode alias can re-derive one.
+        let turn = crate::task_manager::ExecutionTask::from(&created).turn_request();
+        assert_eq!(turn.permission_posture.as_deref(), Some("auto_review"));
+        assert_eq!(turn.auto_approve, None);
+        let policy = crate::runtime_policy::RuntimePolicyProjection::from_request(
+            turn.mode.as_deref().expect("mode"),
+            turn.permission_posture.as_deref(),
+            turn.auto_approve,
+        )
+        .expect("policy");
+        assert_eq!(policy.permission, codewhale_execpolicy::ApprovalMode::Auto);
+
+        // A workspace outside what the session can reach is refused.
+        let outside = TasksTool::new("tasks")
+            .execute(
+                json!({"action": "create", "prompt": "look", "workspace": "/"}),
+                &context,
+            )
+            .await;
+        assert!(
+            outside.is_err(),
+            "a workspace outside the session is refused"
+        );
     }
 
     #[test]
-    fn gate_command_uses_login_shell_invocation() {
+    fn gate_command_uses_non_login_shell_invocation() {
+        // A login shell would source profile files that can re-export
+        // credentials the sanitized child environment just removed.
         let (program, args) = build_gate_command_parts("echo hello");
         assert_eq!(program, "/bin/sh");
-        assert_eq!(args, vec!["-lc".to_string(), "echo hello".to_string()]);
+        assert_eq!(args, vec!["-c".to_string(), "echo hello".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gate_command_does_not_inherit_parent_secret_env() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _env_lock = lock_test_env();
+        let _secret = EnvVarGuard::set("CODEWHALE_TEST_GATE_SECRET", "gate-secret-value");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output = build_gate_command(
+            "printf 'secret=%s\\n' \"${CODEWHALE_TEST_GATE_SECRET-unset}\"; printf 'path-ok\\n'",
+            tmp.path(),
+        )
+        .output()
+        .await
+        .expect("gate command runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("secret=unset"), "{stdout}");
+        assert!(!stdout.contains("gate-secret-value"), "{stdout}");
+        assert!(stdout.contains("path-ok"), "{stdout}");
     }
 }

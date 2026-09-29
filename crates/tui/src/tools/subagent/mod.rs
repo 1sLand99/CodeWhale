@@ -307,6 +307,15 @@ fn resolve_max_steps(role: FleetRole, explicit: Option<u32>, configured: Option<
     .min(MAX_SUBAGENT_STEPS)
 }
 
+/// A queued child whose launch slot never opened did no work: it is a
+/// failure to start, not a run that used up its budget (#6015).
+fn never_started_reason(queue_limit: Duration) -> String {
+    format!(
+        "never started: no sub-agent launch slot opened within {}s, so no work ran; start fewer agents at once or retry when running agents finish",
+        queue_limit.as_secs()
+    )
+}
+
 fn child_wall_time_exhausted_reason(limit: Duration) -> String {
     format!(
         "child wall-time budget exhausted (limit: {}s); partial work is preserved; narrow the task or have the operator raise the inherited limit",
@@ -333,7 +342,7 @@ fn child_runtime_budget_context(
                 crate::elapsed::format_elapsed_ms(deadline_ms.saturating_sub(epoch_millis_now()));
             match runtime.worker_profile.wall_time_secs {
                 Some(total_secs) => format!(
-                    "task work stops about {remaining} from now (total run budget {}); queue, model, and tool time all count against it",
+                    "task work stops about {remaining} from now (total run budget {}); model and tool time count against it",
                     crate::elapsed::format_elapsed_secs(total_secs)
                 ),
                 None => format!("task work stops about {remaining} from now"),
@@ -731,6 +740,17 @@ pub struct SubAgentResult {
     /// keeping the records reachable via `include_archived=true`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub from_prior_session: bool,
+    /// Milliseconds since this running agent last showed the manager any
+    /// progress, at snapshot time: the same clock the heartbeat reads when it
+    /// auto-stops a stalled child (#6565). `None` once settled. Live-only,
+    /// like `started_at`: never serialized, so a model-visible listing and a
+    /// persisted record do not change every time they are read.
+    #[serde(skip)]
+    pub idle_ms: Option<u64>,
+    /// The heartbeat bound the manager enforces on that clock: a running
+    /// child idle this long is stopped. `None` once settled. Live-only.
+    #[serde(skip)]
+    pub heartbeat_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3510,6 +3530,8 @@ impl SubAgent {
             // this in when it produces a snapshot via its own
             // `snapshot_for_listing` helper (#405).
             from_prior_session: false,
+            idle_ms: None,
+            heartbeat_timeout_ms: None,
         }
     }
 }
@@ -7541,11 +7563,13 @@ impl SubAgentManager {
             .as_deref()
             .and_then(|id| self.worker_records.get(id))
             .and_then(|record| record.spec.runtime_profile.wall_deadline_ms);
-        let deadline_ms =
-            narrow_optional_limit(runtime.worker_profile.wall_deadline_ms, source_deadline)
-                .map_or(requested_deadline, |deadline| {
-                    deadline.min(requested_deadline)
-                });
+        // Parent, saved-run and source deadlines: a hard ceiling that also
+        // bounds a work clock restarted at launch (see `run_subagent_task_inner`).
+        let wall_ceiling_ms =
+            narrow_optional_limit(runtime.worker_profile.wall_deadline_ms, source_deadline);
+        let deadline_ms = wall_ceiling_ms.map_or(requested_deadline, |deadline| {
+            deadline.min(requested_deadline)
+        });
         if deadline_ms <= now_ms {
             return Err(anyhow!(
                 "child wall-time budget exhausted; continuation cannot reset its deadline"
@@ -7949,6 +7973,7 @@ impl SubAgentManager {
             started_at,
             max_steps,
             wall_time,
+            wall_ceiling_ms,
             input_rx,
             launch_gate,
             _foreground_child_registration: foreground_child_registration,
@@ -8251,6 +8276,12 @@ impl SubAgentManager {
         let mut snap = agent.snapshot();
         snap.started_at = Some(agent.started_at);
         snap.from_prior_session = self.is_from_prior_session(agent);
+        if agent.status == SubAgentStatus::Running {
+            let millis =
+                |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+            snap.idle_ms = Some(millis(agent.last_activity_at.elapsed()));
+            snap.heartbeat_timeout_ms = Some(millis(self.running_heartbeat_timeout));
+        }
         if let Some(record) = self.worker_records.get(&agent.id) {
             snap.usage = Some(record.usage.clone());
             snap.worker_status = Some(record.status);
@@ -9971,6 +10002,11 @@ fn start_requests_read_only_role(input: &Value) -> bool {
     // A parameter this function cannot even read is not proof of anything,
     // so a type error fails closed into the approval modal. `execute` then
     // refuses the call outright with the named-parameter error.
+    // Provisioning a git worktree creates a branch and a checkout on disk,
+    // so it is never read-only whatever the role.
+    if !matches!(parse_optional_worktree_request(input), Ok(None)) {
+        return false;
+    }
     let read = |keys: &[&str]| optional_input_str(input, keys).map(|v| v.map(str::to_string));
     let Ok(profile) = read(&["profile", "fleet_profile", "roster_profile"]) else {
         return false;
@@ -11293,6 +11329,14 @@ async fn spawn_subagent_from_input(
                      Use agent action=status to list available agents."
                         ))
                     })?;
+                manager_read
+                    .ensure_caller_controls_descendant_for_session(
+                        &runtime.context.state_namespace,
+                        &source_id,
+                        runtime.parent_agent_id.as_deref(),
+                        "agent/resume_from",
+                    )
+                    .map_err(|err| ToolError::invalid_input(err.to_string()))?;
                 let source = manager_read.agents.get(&source_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("resume_from: agent '{source_id}' not found"))
                 })?;
@@ -12020,8 +12064,13 @@ struct SubAgentTask {
     fork_context: bool,
     started_at: Instant,
     max_steps: u32,
-    /// Hard wall-clock deadline for the whole child run.
+    /// Wall-clock budget for the child's work. A child that waits for a
+    /// launch slot gets it in full from the moment it launches, bounded by
+    /// `wall_ceiling_ms`; the queue wait itself is bounded by the same length.
     wall_time: Duration,
+    /// Inherited absolute deadline (epoch ms) from the parent, saved-run or
+    /// source record, which a restarted work clock never passes.
+    wall_ceiling_ms: Option<u64>,
     input_rx: mpsc::UnboundedReceiver<SubAgentInput>,
     /// Interactive launch gate (#3095). `Some` only for direct (depth-1)
     /// children: the task acquires a permit before its first model step and
@@ -12326,7 +12375,7 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
         }
     }
 
-    let deadline = (task.started_at + task.wall_time).min(
+    let mut deadline = (task.started_at + task.wall_time).min(
         task.runtime.worker_profile.wall_deadline_ms.map_or(
             task.started_at + task.wall_time,
             |deadline| {
@@ -12361,12 +12410,15 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
     // Interactive launch gate (#3095): direct children acquire a permit
     // before their first model step so a fanout burst beyond the limit
     // queues visibly instead of executing all at once. The permit is held
-    // for the lifetime of the task. The permit wait shares the authored child
-    // deadline with model/tool work, so saturation cannot extend the whole
-    // child beyond its wall-time budget. Cancellation while queued is handled
-    // by `run_subagent` before it emits Started/Starting.
+    // for the lifetime of the task. The queue wait is bounded by the same
+    // deadline, and a child that never gets a slot fails as "never started"
+    // rather than as a run that exhausted its budget. A child that does get a
+    // slot after waiting starts its work clock then (#6015), still bounded by
+    // any inherited deadline. Cancellation while queued is handled by
+    // `run_subagent` before it emits Started/Starting.
     let mut _launch_permit = None;
     let mut launch_wait_timed_out = false;
+    let mut launched_from_queue = false;
     if let Some(gate) = task.launch_gate.as_ref() {
         match Arc::clone(gate).try_acquire() {
             Some(permit) => _launch_permit = Some(permit),
@@ -12377,10 +12429,36 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
                 )
                 .await
                 {
-                    Ok(permit) => _launch_permit = permit,
+                    Ok(permit) => {
+                        launched_from_queue = permit.is_some();
+                        _launch_permit = permit;
+                    }
                     Err(_) => launch_wait_timed_out = true,
                 }
             }
+        }
+    }
+    let queue_limit = deadline.saturating_duration_since(task.started_at);
+    let mut work_started_at = task.started_at;
+    if launched_from_queue {
+        let now = Instant::now();
+        let now_ms = epoch_millis_now();
+        let restarted_ms =
+            now_ms.saturating_add(u64::try_from(task.wall_time.as_millis()).unwrap_or(u64::MAX));
+        let deadline_ms = task
+            .wall_ceiling_ms
+            .map_or(restarted_ms, |ceiling| ceiling.min(restarted_ms));
+        deadline = now + Duration::from_millis(deadline_ms.saturating_sub(now_ms));
+        task.runtime.worker_profile.wall_deadline_ms = Some(deadline_ms);
+        work_started_at = now;
+        // Continuation reads the saved deadline, so save the restarted one;
+        // otherwise a child that launched late would be refused as out of
+        // budget while most of its work budget was left.
+        let mut manager = task.manager_handle.write().await;
+        if let Some(record) = manager.worker_records.get_mut(&task.agent_id) {
+            record.spec.runtime_profile.wall_deadline_ms = Some(deadline_ms);
+            record.updated_at_ms = now_ms;
+            manager.persist_state_debounced();
         }
     }
 
@@ -12397,10 +12475,10 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
     // generic error below (#6277). The grace keeps the anti-hang guarantee
     // while letting the inner receipt win.
     let backstop = deadline + Duration::from_secs(30);
-    let effective_limit = deadline.saturating_duration_since(task.started_at);
+    let effective_limit = deadline.saturating_duration_since(work_started_at);
     let result = if launch_wait_timed_out {
         task.runtime.cancel_token.cancel();
-        Err(anyhow!(child_wall_time_exhausted_reason(effective_limit)))
+        Err(anyhow!(never_started_reason(queue_limit)))
     } else {
         tokio::time::timeout_at(
             backstop.into(),
@@ -12512,10 +12590,9 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
 }
 
 /// Queued-row reason (addendum F5): why the child waits — a free slot, or the
-/// rate-limit governor's pause/throttle — and how much of its wall budget is
-/// left (as its end time). The wall clock starts at spawn and keeps running while queued (it is
-/// shared with the permit wait so saturation cannot stretch a child past its
-/// budget, #6277); the row says so instead of hiding it.
+/// rate-limit governor's pause/throttle — and when it gives up waiting (as
+/// an end time). The work budget starts at launch (#6015); the queue wait is
+/// bounded separately so saturation cannot keep a child waiting forever.
 fn queued_launch_reason(task: &SubAgentTask, deadline: Instant) -> String {
     let now = Instant::now();
     let governor_line = task
@@ -12554,7 +12631,7 @@ fn queued_budget_note(remaining: Duration, now: chrono::DateTime<chrono::Local>)
         .and_then(|remaining| now.checked_add_signed(remaining))
         .unwrap_or(now);
     format!(
-        "(wall budget ends at {}; it keeps running while queued)",
+        "(stops waiting at {}; its work budget starts at launch)",
         ends_at.format("%H:%M")
     )
 }
@@ -13830,6 +13907,8 @@ async fn cancelled_subagent_result(
         duration_ms,
         started_at: Some(started_at),
         from_prior_session: false,
+        idle_ms: None,
+        heartbeat_timeout_ms: None,
     }
 }
 
@@ -14616,6 +14695,8 @@ async fn run_subagent(
                             duration_ms,
                             started_at: Some(started_at),
                             from_prior_session: false,
+                            idle_ms: None,
+                            heartbeat_timeout_ms: None,
                         });
                     }
                 }
@@ -14818,7 +14899,9 @@ async fn run_subagent(
                 tool_results.push(ContentBlock::ToolResult {
                     tool_use_id: tool_id,
                     content: result,
-                    is_error: None,
+                    // Refusals reach the provider as errors, matching the
+                    // parent turn loop (#6015).
+                    is_error: Some(true),
                     content_blocks: None,
                 });
                 continue;
@@ -14981,7 +15064,9 @@ async fn run_subagent(
             tool_results.push(ContentBlock::ToolResult {
                 tool_use_id: tool_id,
                 content: result,
-                is_error: None,
+                // A refused or failed call is marked as an error for the
+                // provider, matching the parent turn loop (#6015).
+                is_error: (!tool_ok).then_some(true),
                 content_blocks: (!content_blocks.is_empty()).then_some(content_blocks),
             });
         }
@@ -15241,6 +15326,8 @@ async fn run_subagent(
         duration_ms,
         started_at: Some(started_at),
         from_prior_session: false,
+        idle_ms: None,
+        heartbeat_timeout_ms: None,
     };
     Ok(match budget_failure_reason {
         Some(cause) => budget_partial_result_with_note(
@@ -19236,11 +19323,25 @@ impl SubAgentToolRegistry {
         // bypass where a read-only child could quietly write or shell out.
         if !self.posture_permits_tool(name, Some(&input)) {
             if self.allows_bounded_readonly_bash(name) {
-                return Err(admission_denied(format!(
-                    "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. {guidance}",
-                    role = self.agent_type.as_str(),
-                    guidance = codewhale_execpolicy::command_safety::readonly_command_help()
-                )));
+                // #6015: the same rule text and next steps as the durable
+                // authority and the executor, from the one classifier.
+                let lane =
+                    crate::tools::shell::readonly_enforced_lane_available(self.registry.context());
+                return Err(admission_denied(
+                    match crate::tools::shell::agent_readonly_bash_verdict(&input) {
+                        Err(rejection) => format!(
+                            "{} (tool {name}, Fleet role `{role}`)",
+                            crate::tools::shell::readonly_refusal(&rejection, lane),
+                            role = self.agent_type.as_str(),
+                        ),
+                        Ok(()) => format!(
+                            "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. {guidance}",
+                            role = self.agent_type.as_str(),
+                            guidance =
+                                codewhale_execpolicy::command_safety::readonly_command_help()
+                        ),
+                    },
+                ));
             }
             return Err(admission_denied(format!(
                 "[role.posture.denied] Tool {name} is not permitted for the read-only Fleet role `{role}`. Use an `implement` or `general` role (or `custom` with an explicit allowed_tools list) to mutate the workspace or run shell commands.",
@@ -19586,12 +19687,16 @@ fn carries_network_url(input: &Value) -> bool {
 /// written. It fails closed and names the posture, so the refusal reads as a
 /// contract rather than a malfunction.
 fn reject_network_reaching_input(name: &str, input: &Value) -> Result<()> {
-    let github_shell_read = matches!(name, "bash" | "Bash" | "exec_shell")
+    // Judged per segment, so a gh or npm read inside a pipeline or chain is
+    // still a network read (#6015).
+    let shell_network_read = matches!(name, "bash" | "Bash" | "exec_shell")
         && input
             .get("command")
             .and_then(Value::as_str)
-            .is_some_and(codewhale_execpolicy::command_safety::is_github_readonly_command);
-    if !github_shell_read && !carries_network_url(input) {
+            .is_some_and(|command| {
+                !codewhale_execpolicy::command_safety::readonly_network_reads(command).is_empty()
+            });
+    if !shell_network_read && !carries_network_url(input) {
         return Ok(());
     }
     Err(anyhow!(

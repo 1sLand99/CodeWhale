@@ -1,9 +1,9 @@
-<!-- source: README.md sha256:bbb8bfb61e57 -->
+<!-- source: README.md sha256:ccb7a0b00317 -->
 # Codewhale
 
 Codewhale, seçtiğiniz barındırılan veya yerel bir modeli kullanarak projenizi okuyan, dosyaları düzenleyen, komutları çalıştıran ve yaptığı işi kontrol eden açık kaynaklı bir ajandır. Terminalde tek bir görevle başlayın. Daha büyük bir işte, işin bölümlerini farklı model ve rollere sahip ajanlara verin.
 
-![Terminalde çalışan Codewhale](web/public/codewhale-tui-d7a9a1c.png)
+![Terminalde çalışan Codewhale](web/public/codewhale-tui-5765d80.png)
 
 *v0.10.0 geliştirme derlemesinden terminal önizlemesi.*
 

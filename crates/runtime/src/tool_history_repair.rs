@@ -10,7 +10,10 @@ use std::collections::{HashMap, HashSet};
 use codewhale_models::Role;
 use codewhale_models::{ContentBlock, Message};
 
-const CRASH_REPAIR_CONTENT: &str =
+/// The repository's one spelling for a tool call the process lost while it was
+/// running. The session-facing repair writes it here, and a history rebuilt
+/// from turn records makes the same call say the same thing.
+pub const CRASH_REPAIR_CONTENT: &str =
     "Tool call interrupted by process exit; terminal status: crashed_and_repaired.";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

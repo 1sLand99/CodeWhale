@@ -1101,7 +1101,7 @@ fn zai_gateway_off_and_high_receipts_remain_unavailable() {
 #[test]
 fn kimi_code_high_and_max_work_receipts_preserve_exact_tiers() {
     for (previous, requested) in [
-        (ReasoningEffort::Off, ReasoningEffort::Low),
+        (ReasoningEffort::Auto, ReasoningEffort::Low),
         (ReasoningEffort::High, ReasoningEffort::Max),
     ] {
         let mut app = App::new(test_options(false), &Config::default());
@@ -2823,6 +2823,7 @@ fn new_caches_workspace_skills_for_slash_menu() {
 fn cached_skills_merges_across_candidate_directories() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let workspace = tmp.path().join("workspace");
+    crate::test_support::trust_workspace(&workspace);
 
     // Higher-precedence directory contains a stale empty dir for `foo`
     // (no SKILL.md). This used to shadow the real definition further
@@ -2973,6 +2974,7 @@ fn cached_skills_include_configured_directory() {
 fn cached_skills_preserve_configured_directory_in_codewhale_only_scan() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let workspace = tmp.path().join("workspace");
+    crate::test_support::trust_workspace(&workspace);
 
     let codewhale_skill_dir = workspace
         .join(".codewhale")
@@ -4143,6 +4145,53 @@ fn managed_requirements_ignore_saved_full_access_and_lock_changes() {
             .iter()
             .any(|toast| toast.text.contains("controlled"))
     );
+}
+
+#[test]
+fn sandbox_requirements_prevent_full_access_overrides() {
+    let _env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_path = tmp.path().join("config.toml");
+    let requirements_path = tmp.path().join("requirements.toml");
+    std::fs::write(
+        &requirements_path,
+        "allowed_sandbox_modes = [\"workspace-write\"]\n",
+    )
+    .expect("requirements");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+    let _config_env = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let config = Config {
+        requirements_path: Some(requirements_path.to_string_lossy().into_owned()),
+        ..Config::default()
+    };
+
+    for (settings, cli_yolo) in [
+        ("permission_posture = \"full-access\"\n", false),
+        ("", true),
+        ("default_mode = \"yolo\"\n", false),
+    ] {
+        std::fs::write(tmp.path().join("settings.toml"), settings).expect("settings");
+        let mut options = test_options(cli_yolo);
+        options.workspace = tmp.path().to_path_buf();
+        let mut app = App::new(options, &config);
+
+        assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+        assert!(!app.trust_mode);
+        assert!(!app.yolo);
+        assert!(app.approval_policy_requirements_managed());
+        assert!(!app.cycle_approval_posture());
+        assert_eq!(app.select_yolo_compat(), SettingSelection::Refused);
+        assert!(matches!(
+            crate::core::authority::sandbox_policy_for_turn(
+                app.mode,
+                app.approval_mode,
+                config.sandbox_mode.as_deref(),
+                &app.workspace,
+                crate::core::authority::SandboxNetworkAccess::Restricted,
+            ),
+            crate::sandbox::SandboxPolicy::WorkspaceWrite { .. }
+        ));
+    }
 }
 
 #[test]
@@ -7603,4 +7652,146 @@ fn owned_restore_moves_the_journal_and_matches_the_borrowing_restore() {
         legacy_borrowed.session_journal.entries.len()
     );
     assert_eq!(legacy_owned.api_message_stamps.len(), 2);
+}
+
+/// Walk Ctrl+T for two full laps on a concrete route and assert that every
+/// press changes the effective tier — the value `/status`, the effort status
+/// line, and Work receipts report — not merely the requested label.
+fn assert_every_ctrl_t_press_changes_the_effective_tier(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> Vec<ReasoningEffort> {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = provider;
+    app.auto_model = false;
+    app.active_route_base_url = base_url.to_string();
+    app.model = model.to_string();
+    app.reasoning_effort = ReasoningEffort::Auto;
+    let ladder =
+        crate::tui::model_picker::picker_efforts_for_route(provider, base_url, model, false);
+    let mut effective = app.effective_reasoning_effort_for_active_route(app.reasoning_effort);
+    let mut walked = Vec::new();
+    // Two full laps: the report was about presses after the first lap.
+    for press in 0..ladder.len() * 2 {
+        assert_eq!(app.cycle_effort(), SettingSelection::Changed);
+        let next = app.effective_reasoning_effort_for_active_route(app.reasoning_effort);
+        assert_ne!(
+            next, effective,
+            "{model}: press {press} ({:?}) left the effective tier at {effective:?}",
+            app.reasoning_effort
+        );
+        effective = next;
+        walked.push(app.reasoning_effort);
+    }
+    let mut expected = ladder.clone();
+    expected.rotate_left(1);
+    expected.extend(expected.clone());
+    assert_eq!(walked, expected, "{model} walks the picker ladder");
+    ladder
+}
+
+#[test]
+fn every_ctrl_t_press_changes_the_effective_thinking_tier() {
+    // #6650: Ctrl+T walked rungs that resolved to the tier already in effect,
+    // so presses looked dead.
+    let _catalog = crate::provider_lake::lock_live_snapshot();
+    crate::provider_lake::clear_live_snapshot();
+    for (provider, base_url, model) in [
+        (
+            ApiProvider::Deepseek,
+            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            "deepseek-v4.1-flash",
+        ),
+        (
+            ApiProvider::Deepseek,
+            crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            "deepseek-v4.1",
+        ),
+        (
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+        ),
+        (
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            crate::config::XAI_GROK_4_6_MODEL,
+        ),
+    ] {
+        assert_every_ctrl_t_press_changes_the_effective_tier(provider, base_url, model);
+    }
+}
+
+#[test]
+fn ctrl_t_skips_catalog_rungs_that_resolve_to_an_offered_tier() {
+    // A catalog can publish effort spellings the route collapses: DeepSeek
+    // sends `medium`/`xhigh` as `high`, and Z.ai GLM-5.2 sends `low`/`medium`
+    // as `high`. Each Ctrl+T press must still reach a new effective tier.
+    use ReasoningEffort::{Auto, High, Low, Max, Off};
+    let _catalog = crate::provider_lake::lock_live_snapshot();
+    crate::provider_lake::clear_live_snapshot();
+    let fetched_at = u64::try_from(chrono::Utc::now().timestamp()).expect("timestamp");
+    let offering = |provider: ApiProvider, model: &str, values: &[&str]| {
+        codewhale_config::catalog::CatalogOffering {
+            provider: provider.as_str().to_string(),
+            wire_model_id: model.to_string(),
+            endpoint_key: "chat".to_string(),
+            reasoning_options: vec![serde_json::json!({ "type": "effort", "values": values })],
+            source: codewhale_config::catalog::CatalogSource::Live {
+                base_url_fingerprint: "models-dev-capabilities".to_string(),
+                fetched_at,
+            },
+            ..Default::default()
+        }
+    };
+    crate::provider_lake::set_live_snapshot(
+        codewhale_config::catalog::CatalogSnapshot {
+            offerings: vec![
+                offering(
+                    ApiProvider::Deepseek,
+                    "deepseek-v4.1-flash",
+                    &["low", "medium", "high", "xhigh", "max"],
+                ),
+                offering(
+                    ApiProvider::Zai,
+                    crate::config::ZAI_GLM_5_2_MODEL,
+                    &["off", "low", "medium", "high", "max"],
+                ),
+            ],
+        },
+        crate::provider_lake::LiveSource::ModelsDev,
+    );
+
+    let deepseek = assert_every_ctrl_t_press_changes_the_effective_tier(
+        ApiProvider::Deepseek,
+        crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+        "deepseek-v4.1-flash",
+    );
+    let zai = assert_every_ctrl_t_press_changes_the_effective_tier(
+        ApiProvider::Zai,
+        crate::config::DEFAULT_ZAI_BASE_URL,
+        crate::config::ZAI_GLM_5_2_MODEL,
+    );
+    crate::provider_lake::clear_live_snapshot();
+
+    assert_eq!(deepseek, vec![Auto, Low, High, Max]);
+    assert_eq!(zai, vec![Auto, Off, High, Max]);
+}
+
+#[test]
+fn ctrl_t_moves_past_a_persisted_alias_the_ladder_dropped() {
+    // DeepSeek has no `medium`; it resolves to `high`, so the next press must
+    // reach `max` rather than re-select `high`.
+    let _catalog = crate::provider_lake::lock_live_snapshot();
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string();
+    app.model = "deepseek-v4.1-flash".to_string();
+    app.reasoning_effort = ReasoningEffort::Medium;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
 }

@@ -2696,3 +2696,94 @@ fn canonical_file_mutations_get_legacy_previews_and_scoped_ask_rules() {
         );
     }
 }
+
+#[test]
+fn delegated_work_cards_show_requested_authority_fields() {
+    let long_prompt = "summarise the repository layout and report back ".repeat(4);
+    for (tool, params) in [
+        (
+            "tasks",
+            json!({
+                "action": "create",
+                "prompt": long_prompt,
+                "trust_mode": true,
+                "allow_shell": true,
+                "auto_approve": true,
+                "mode": "operate",
+                "workspace": "/elsewhere"
+            }),
+        ),
+        (
+            "automation",
+            json!({
+                "action": "create",
+                "name": "nightly",
+                "prompt": long_prompt,
+                "rrule": "FREQ=DAILY",
+                "cwds": ["/elsewhere"],
+                "trust_mode": true,
+                "allow_shell": true,
+                "auto_approve": true
+            }),
+        ),
+        (
+            "automation",
+            json!({"action": "update", "automation_id": "a1", "auto_approve": true, "trust_mode": false}),
+        ),
+    ] {
+        let request = ApprovalRequest::new_with_intent(
+            "delegate-1",
+            tool,
+            "Create work",
+            &params,
+            "tool:delegate",
+            None,
+            Path::new("/workspace"),
+        );
+        let details = request.prominent_detail_items(Locale::En);
+        let value = |label: &str| {
+            details
+                .iter()
+                .find(|detail| detail.label == label)
+                .map(|detail| detail.value.clone())
+        };
+        assert_eq!(
+            value("Auto-approve").as_deref(),
+            Some("on"),
+            "{tool} {params}"
+        );
+        assert!(value("Trust mode").is_some(), "{tool} {params}");
+        assert!(
+            request
+                .impacts
+                .iter()
+                .any(|line| line.starts_with("Auto-approve: on")),
+            "{tool}: {:?}",
+            request.impacts
+        );
+        if params.get("allow_shell").is_some() {
+            assert_eq!(value("Trust mode").as_deref(), Some("on"));
+            assert_eq!(value("Shell").as_deref(), Some("on"));
+            assert!(value("Workspace").is_some_and(|dir| dir.contains("/elsewhere")));
+        }
+        let zh = request.prominent_detail_items(Locale::ZhHans);
+        assert!(zh.iter().any(|detail| detail.label == "自动批准"));
+    }
+
+    // Other tools are unchanged.
+    let plain = ApprovalRequest::new_with_intent(
+        "read-1",
+        "read_file",
+        "Read",
+        &json!({"path": "src/main.rs", "trust_mode": true}),
+        "tool:read_file",
+        None,
+        Path::new("/workspace"),
+    );
+    assert!(
+        !plain
+            .prominent_detail_items(Locale::En)
+            .iter()
+            .any(|detail| detail.label == "Trust mode")
+    );
+}

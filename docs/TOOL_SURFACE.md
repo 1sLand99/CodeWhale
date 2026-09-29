@@ -75,7 +75,11 @@ does not mean "unable to research."
 
 The durable `github`, `automation`, and `rlm` action families are also deferred
 by default. `rlm` owns `open`, `eval`, `configure`, and `close` actions for a
-persistent sandboxed Python session. Feature-gated native tools may be added to
+persistent local Python session (a subprocess with a scrubbed environment, not
+an OS sandbox). Inline ```` ```repl ```` fences in a reply run in the same kind of
+kernel only when `code_execution` is on the turn's surface (never in Plan mode),
+only when the fence opens its own line, and only after `code_execution`'s
+approval under the session posture. Feature-gated native tools may be added to
 the active or deferred catalog only when their implementation and host
 dependencies are available.
 

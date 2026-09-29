@@ -371,7 +371,7 @@ pub const SPILLOVER_RECOVERY_HINT: &str = "omitted range recovery:";
 /// write is allowed to fail (see [`publish_legacy_spillover_ownership`]), so
 /// promising retrieval there would just be a fourth dead route; say plainly
 /// that there is no tool call for it and name what does work instead.
-fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> String {
+pub(crate) fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> String {
     match retrieval_ref {
         Some(reference) => format!(
             "{SPILLOVER_RECOVERY_HINT} call retrieve_tool_result with ref=\"{reference}\" \
@@ -582,10 +582,13 @@ fn apply_spillover_inner(
     let mut artifact_path = None;
     if let Some(context) = artifact_context {
         let artifact_id = crate::artifacts::artifact_id_for_tool_call(tool_id);
-        match crate::artifacts::write_session_artifact(
+        // Publish immutably, like adaptive evidence: a turn's artifact
+        // reference names these bytes by digest, so a later call that reuses
+        // the id must fail closed (legacy footer) instead of rewriting them.
+        match crate::artifacts::write_session_artifact_immutable(
             context.session_id,
             &artifact_id,
-            &original_content,
+            original_content.as_bytes(),
         ) {
             Ok((absolute_path, relative_path)) => {
                 let record = crate::artifacts::record_tool_output_artifact(
@@ -621,96 +624,15 @@ fn apply_spillover_inner(
         result.content = truncated_preview(head, tail, &original_content, &path_str, None);
     }
 
-    let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
-    if let Some(obj) = metadata.as_object_mut() {
-        if let Some((absolute_path, relative_path, record)) = artifact_path.as_ref() {
-            obj.insert(
-                "spillover_path".into(),
-                serde_json::Value::String(absolute_path.display().to_string()),
-            );
-            obj.insert(
-                "legacy_spillover_path".into(),
-                serde_json::Value::String(path_str),
-            );
-            obj.insert(
-                "artifact_id".into(),
-                serde_json::Value::String(record.id.clone()),
-            );
-            obj.insert(
-                "artifact_session_id".into(),
-                serde_json::Value::String(record.session_id.clone()),
-            );
-            obj.insert(
-                "artifact_relative_path".into(),
-                serde_json::Value::String(crate::artifacts::format_artifact_relative_path(
-                    relative_path,
-                )),
-            );
-            obj.insert(
-                "artifact_path".into(),
-                serde_json::Value::String(absolute_path.display().to_string()),
-            );
-            obj.insert(
-                "artifact_byte_size".into(),
-                serde_json::Value::Number(serde_json::Number::from(record.byte_size)),
-            );
-            obj.insert(
-                "artifact_preview".into(),
-                serde_json::Value::String(record.preview.clone()),
-            );
-        } else {
-            obj.insert("spillover_path".into(), serde_json::Value::String(path_str));
-        }
+    let obj = metadata_object_mut(result);
+    if let Some((absolute_path, relative_path, record)) = artifact_path.as_ref() {
+        stamp_artifact_metadata(obj, absolute_path, relative_path, record);
+        obj.insert(
+            "legacy_spillover_path".into(),
+            serde_json::Value::String(path_str),
+        );
     } else {
-        // Pre-existing metadata that wasn't a JSON object (rare,
-        // possibly an array). Replace with an object so we can
-        // attach our key without losing prior data — wrap it under
-        // a `_prior` field so callers that introspect can recover.
-        let prior = std::mem::replace(metadata, serde_json::json!({}));
-        if let Some(obj) = metadata.as_object_mut() {
-            obj.insert("_prior".into(), prior);
-            if let Some((absolute_path, relative_path, record)) = artifact_path.as_ref() {
-                obj.insert(
-                    "spillover_path".into(),
-                    serde_json::Value::String(absolute_path.display().to_string()),
-                );
-                obj.insert(
-                    "legacy_spillover_path".into(),
-                    serde_json::Value::String(path.display().to_string()),
-                );
-                obj.insert(
-                    "artifact_id".into(),
-                    serde_json::Value::String(record.id.clone()),
-                );
-                obj.insert(
-                    "artifact_session_id".into(),
-                    serde_json::Value::String(record.session_id.clone()),
-                );
-                obj.insert(
-                    "artifact_relative_path".into(),
-                    serde_json::Value::String(crate::artifacts::format_artifact_relative_path(
-                        relative_path,
-                    )),
-                );
-                obj.insert(
-                    "artifact_path".into(),
-                    serde_json::Value::String(absolute_path.display().to_string()),
-                );
-                obj.insert(
-                    "artifact_byte_size".into(),
-                    serde_json::Value::Number(serde_json::Number::from(record.byte_size)),
-                );
-                obj.insert(
-                    "artifact_preview".into(),
-                    serde_json::Value::String(record.preview.clone()),
-                );
-            } else {
-                obj.insert(
-                    "spillover_path".into(),
-                    serde_json::Value::String(path.display().to_string()),
-                );
-            }
-        }
+        obj.insert("spillover_path".into(), serde_json::Value::String(path_str));
     }
     if let Some(obj) = result
         .metadata
@@ -722,6 +644,14 @@ fn apply_spillover_inner(
             "content_digest".into(),
             serde_json::Value::String(format!("sha256:{digest}")),
         );
+        if artifact_path.is_some() {
+            // Plain hex, the same form the adaptive path and the workspace
+            // read `revision` use; the turn artifact ref carries it verbatim.
+            obj.insert(
+                "artifact_digest".into(),
+                serde_json::Value::String(digest.clone()),
+            );
+        }
         obj.insert(
             "original_byte_count".into(),
             serde_json::Value::Number(serde_json::Number::from(original_content.len() as u64)),
@@ -734,10 +664,244 @@ fn apply_spillover_inner(
             "retained_tail_bytes".into(),
             serde_json::Value::Number(serde_json::Number::from(tail.len() as u64)),
         );
+        obj.insert(
+            "original_line_count".into(),
+            serde_json::Value::Number(serde_json::Number::from(
+                original_content.lines().count() as u64
+            )),
+        );
     }
     artifact_path
         .map(|(absolute_path, _, _)| absolute_path)
         .or(Some(path))
+}
+
+/// The result's metadata as a JSON object, created when absent. Metadata that
+/// is not an object is kept under `_prior` rather than dropped.
+fn metadata_object_mut(result: &mut ToolResult) -> &mut serde_json::Map<String, serde_json::Value> {
+    let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
+    if !metadata.is_object() {
+        let prior = std::mem::replace(metadata, serde_json::json!({}));
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("_prior".into(), prior);
+        }
+    }
+    metadata
+        .as_object_mut()
+        .expect("metadata was just made an object")
+}
+
+/// Stamp the keys the TUI, receipts and `retrieve_tool_result` use to find a
+/// session artifact that holds a tool call's full output.
+fn stamp_artifact_metadata(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    absolute_path: &Path,
+    relative_path: &Path,
+    record: &crate::artifacts::ArtifactRecord,
+) {
+    let absolute = serde_json::Value::String(absolute_path.display().to_string());
+    obj.insert("spillover_path".into(), absolute.clone());
+    obj.insert("artifact_path".into(), absolute);
+    obj.insert("artifact_id".into(), record.id.clone().into());
+    obj.insert(
+        "artifact_session_id".into(),
+        record.session_id.clone().into(),
+    );
+    obj.insert(
+        "artifact_relative_path".into(),
+        crate::artifacts::format_artifact_relative_path(relative_path).into(),
+    );
+    obj.insert("artifact_byte_size".into(), record.byte_size.into());
+    obj.insert("artifact_preview".into(), record.preview.clone().into());
+}
+
+/// Save a tool call's full output as a session artifact before the model's
+/// view of it is cut to the inline budget (#6508).
+///
+/// The result's content is left as it is, so the UI cell still shows it; only
+/// the metadata gains the artifact keys, so the model-context view can name a
+/// ref `retrieve_tool_result` resolves. A result that already has an artifact
+/// (spillover wrote one) is left alone. Returns whether an artifact exists
+/// afterwards. A failed write is logged and reported as `false`; the caller's
+/// footer then says no tool call reaches the rest instead of promising a ref.
+pub(crate) fn preserve_full_output_for_model_context(
+    result: &mut ToolResult,
+    tool_id: &str,
+    tool_name: &str,
+    session_id: &str,
+) -> bool {
+    if result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("artifact_id"))
+        .is_some()
+    {
+        return true;
+    }
+    let artifact_id = crate::artifacts::artifact_id_for_tool_call(tool_id);
+    match crate::artifacts::write_session_artifact(session_id, &artifact_id, &result.content) {
+        Ok((absolute_path, relative_path)) => {
+            let record = crate::artifacts::record_tool_output_artifact(
+                session_id,
+                tool_id,
+                tool_name,
+                relative_path.clone(),
+                &result.content,
+            );
+            let digest = crate::hashing::sha256_hex(result.content.as_bytes());
+            let obj = metadata_object_mut(result);
+            stamp_artifact_metadata(obj, &absolute_path, &relative_path, &record);
+            obj.insert("content_digest".into(), format!("sha256:{digest}").into());
+            true
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "spillover",
+                ?err,
+                tool_id,
+                "could not save full tool output before cutting it for model context"
+            );
+            false
+        }
+    }
+}
+
+/// Bytes reserved beside the footer for the preview's blank lines and the
+/// `…` separator, plus slack for the omitted-size text changing length.
+const PREVIEW_FRAME_BYTES: usize = 32;
+
+/// Footer for a preview whose full output lives at `recovery_path`, or, when
+/// it is `None`, one that says plainly the full output could not be saved.
+fn preview_footer(
+    omitted_bytes: usize,
+    omitted_lines: usize,
+    recovery_path: Option<&str>,
+    retrieval_ref: Option<&str>,
+) -> String {
+    match recovery_path {
+        Some(path) => spillover_preview_footer(omitted_bytes, omitted_lines, path, retrieval_ref),
+        None => format!(
+            "… {} of output omitted ({omitted_lines} lines) — the full output could not be saved; {}",
+            crate::artifacts::format_byte_size(omitted_bytes.try_into().unwrap_or(u64::MAX)),
+            spillover_recovery_instruction(None)
+        ),
+    }
+}
+
+/// Drop the path and preview before sacrificing the retrieval reference.
+/// Budgets smaller than this complete instruction cannot contain a usable
+/// receipt: keep it intact and let the wire's recovery-marker guard preserve it.
+fn compact_recovery_footer(retrieval_ref: Option<&str>) -> String {
+    match retrieval_ref {
+        Some(reference) => {
+            format!("{SPILLOVER_RECOVERY_HINT} retrieve_tool_result ref=\"{reference}\"")
+        }
+        None => format!("{SPILLOVER_RECOVERY_HINT} re-run with narrower output"),
+    }
+}
+
+/// Fit `content` into `budget` characters for the model: nothing changes when
+/// it already fits; otherwise a head (two thirds) and a tail (one third)
+/// around one recovery footer. The cut is measured in bytes, so the result
+/// never exceeds `budget` characters either, unless the budget cannot hold
+/// even a compact recovery instruction (which must remain intact).
+pub(crate) fn fit_to_inline_budget(
+    content: &str,
+    budget: usize,
+    recovery_path: Option<&str>,
+    retrieval_ref: Option<&str>,
+) -> String {
+    if content.chars().count() <= budget {
+        return content.to_string();
+    }
+    let footer = preview_footer(
+        content.len(),
+        content.lines().count(),
+        recovery_path,
+        retrieval_ref,
+    );
+    if footer.len() + PREVIEW_FRAME_BYTES > budget {
+        return compact_recovery_footer(retrieval_ref);
+    }
+    let room = budget.saturating_sub(footer.len() + PREVIEW_FRAME_BYTES);
+    let head_bytes = room * 2 / 3;
+    let (head, tail) = head_tail_windows(content, head_bytes, room - head_bytes);
+    let omitted = content.len().saturating_sub(head.len() + tail.len());
+    let omitted_lines = content[head.len()..content.len() - tail.len()]
+        .lines()
+        .count();
+    format!(
+        "{head}\n\n{}\n\n…\n{tail}",
+        preview_footer(omitted, omitted_lines, recovery_path, retrieval_ref)
+    )
+}
+
+/// Re-fit a spillover preview (head, footer, tail) to `budget` characters.
+///
+/// Spillover already saved the full output, so this writes nothing: it keeps
+/// a shorter head and tail from the preview's own windows (found through the
+/// `retained_head_bytes`/`retained_tail_bytes` metadata spillover stamped) and
+/// re-emits one footer that names the same recovery ref. Returns `None` when
+/// the metadata does not describe this preview, so the caller can fall back.
+pub(crate) fn refit_spilled_preview(
+    preview: &str,
+    metadata: &serde_json::Value,
+    budget: usize,
+    recovery_path: Option<&str>,
+    retrieval_ref: Option<&str>,
+) -> Option<String> {
+    if preview.chars().count() <= budget {
+        return Some(preview.to_string());
+    }
+    let field = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+    };
+    let head_len = field("retained_head_bytes")?;
+    let tail_len = field("retained_tail_bytes")?;
+    let original_len = field("original_byte_count")?;
+    if head_len + tail_len > preview.len()
+        || !preview.is_char_boundary(head_len)
+        || !preview.is_char_boundary(preview.len() - tail_len)
+    {
+        return None;
+    }
+    let head_window = &preview[..head_len];
+    let tail_window = &preview[preview.len() - tail_len..];
+
+    let footer = preview_footer(
+        original_len,
+        field("original_line_count").unwrap_or(0),
+        recovery_path,
+        retrieval_ref,
+    );
+    if footer.len() + PREVIEW_FRAME_BYTES > budget {
+        return Some(compact_recovery_footer(retrieval_ref));
+    }
+    let room = budget.saturating_sub(footer.len() + PREVIEW_FRAME_BYTES);
+    let head_bytes = (room * 2 / 3).min(head_len);
+    let tail_bytes = (room - head_bytes).min(tail_len);
+    let (head, _) = head_tail_windows(head_window, head_bytes, 0);
+    let (_, tail) = head_tail_windows(tail_window, 0, tail_bytes);
+    let omitted = original_len.saturating_sub(head.len() + tail.len());
+    let kept_lines = head.lines().count() + tail.lines().count();
+    let omitted_lines = match field("original_line_count") {
+        Some(total) => total.saturating_sub(kept_lines),
+        // Older spills did not record a line count; count only the lines this
+        // preview can see, which understates rather than invents.
+        None => {
+            head_window[head.len()..].lines().count()
+                + tail_window[..tail_window.len() - tail.len()]
+                    .lines()
+                    .count()
+        }
+    };
+    Some(format!(
+        "{head}\n\n{}\n\n…\n{tail}",
+        preview_footer(omitted, omitted_lines, recovery_path, retrieval_ref)
+    ))
 }
 
 fn apply_adaptive_evidence_inner(
@@ -927,7 +1091,7 @@ fn sanitise_id(id: &str) -> Option<String> {
 /// of `$HOME` because Windows home-dir resolution can ignore environment
 /// overrides and return the runner profile directory.
 #[cfg(test)]
-fn with_test_home<F, R>(home: &Path, f: F) -> R
+pub(crate) fn with_test_home<F, R>(home: &Path, f: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -966,6 +1130,48 @@ where
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn tiny_inline_budgets_keep_the_complete_retrieval_reference() {
+        let content = "你好 output\n".repeat(500);
+        let path = format!(
+            "/very-long-workspace/{}/art_call-1.txt",
+            "nested/".repeat(100)
+        );
+        let reference = "art_12345678-1234-1234-1234-123456789abc";
+        let metadata = serde_json::json!({
+            "retained_head_bytes": 1000,
+            "retained_tail_bytes": 1000,
+            "original_byte_count": content.len(),
+            "original_line_count": content.lines().count(),
+        });
+        let preview = format!(
+            "{}\n\n{}\n\n…\n{}",
+            "h".repeat(1000),
+            spillover_preview_footer(content.len() - 2000, 300, &path, Some(reference)),
+            "t".repeat(1000),
+        );
+        for budget in [120, 160, 200, 1200] {
+            for fitted in [
+                fit_to_inline_budget(&content, budget, Some(&path), Some(reference)),
+                refit_spilled_preview(&preview, &metadata, budget, Some(&path), Some(reference))
+                    .unwrap(),
+            ] {
+                assert!(fitted.len() <= budget, "{budget}: {fitted}");
+                assert!(fitted.contains(&format!("ref=\"{reference}\"")), "{fitted}");
+                assert!(fitted.contains("retrieve_tool_result"), "{fitted}");
+                assert!(fitted.contains(SPILLOVER_RECOVERY_HINT), "{fitted}");
+            }
+        }
+        // Even an impossible allowance must not amputate a reference. The
+        // marker tells the wire backstop to preserve this complete receipt.
+        let fitted = fit_to_inline_budget(&content, 1, Some(&path), Some(reference));
+        assert!(fitted.contains(reference));
+        assert!(fitted.contains(SPILLOVER_RECOVERY_HINT));
+        let unsaved = fit_to_inline_budget(&content, 120, None, None);
+        assert!(unsaved.len() <= 120);
+        assert!(!unsaved.contains("retrieve_tool_result"));
+    }
 
     /// Tests in this module serialize through this guard because they mutate
     /// process-global test storage roots. Without it, cargo's parallel runner
@@ -1756,6 +1962,31 @@ mod tests {
                 "classic lane publishes no adaptive evidence metadata"
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+            // The classic lane names its bytes by digest, like the adaptive
+            // lane, so a turn artifact ref can carry a revision.
+            assert_eq!(
+                metadata["artifact_digest"],
+                crate::hashing::sha256_hex(raw.as_bytes())
+            );
+            let artifact = tmp
+                .path()
+                .join(".codewhale/sessions/session-classic/artifacts/art_call-classic.txt");
+            assert_eq!(std::fs::read_to_string(&artifact).unwrap(), raw);
+
+            // The published handle is immutable: a different payload under
+            // the same call id never rewrites the bytes a ref names.
+            let mut replay = ToolResult::success("other\n".repeat(20_000));
+            apply_spillover_with_artifact(
+                &mut replay,
+                "call-classic",
+                "exec_shell",
+                "session-classic",
+            )
+            .expect("replay still spills to the legacy footer");
+            assert_eq!(std::fs::read_to_string(&artifact).unwrap(), raw);
+            let replay_metadata = replay.metadata.expect("metadata stamped");
+            assert!(replay_metadata.get("artifact_id").is_none());
+            assert!(replay_metadata.get("artifact_digest").is_none());
         });
     }
 }

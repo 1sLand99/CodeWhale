@@ -9264,7 +9264,7 @@ fn telemetry_disclosure_records_presentation_without_acceptance_or_erasing_old_d
                 state.record_telemetry_notice(version, enabled);
             }
             state.save_to(&path).unwrap();
-            SetupState::update_telemetry_at(&path, |latest| {
+            SetupState::update_at(&path, |latest| {
                 latest.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
             })
             .unwrap();
@@ -9288,7 +9288,7 @@ fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("setup_state.json");
     std::fs::write(&path, "not-json").unwrap();
-    assert!(SetupState::update_telemetry_at(&path, |_| {}).is_err());
+    assert!(SetupState::update_at(&path, |_| {}).is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-json");
     SetupState::default().save_to(&path).unwrap();
     let file = std::fs::OpenOptions::new()
@@ -9299,18 +9299,18 @@ fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved
     let mut lock = fd_lock::RwLock::new(file);
     let guard = lock.write().unwrap();
     assert!(
-        SetupState::update_telemetry_at(&path, |state| {
+        SetupState::update_at(&path, |state| {
             state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
         })
         .is_err(),
         "display bookkeeping must never block startup"
     );
     drop(guard);
-    SetupState::update_telemetry_at(&path, |state| {
+    SetupState::update_at(&path, |state| {
         state.record_telemetry_notice("4", false);
     })
     .unwrap();
-    SetupState::update_telemetry_at(&path, |state| {
+    SetupState::update_at(&path, |state| {
         state.record_telemetry_notice_shown(TELEMETRY_NOTICE_VERSION);
     })
     .unwrap();
