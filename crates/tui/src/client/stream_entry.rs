@@ -217,17 +217,41 @@ fn should_retry_error_with_h1(policy: StreamHttpPolicy, err: &anyhow::Error) -> 
         return false;
     }
 
-    if let Some(llm_error) = err.downcast_ref::<LlmError>() {
-        return matches!(llm_error, LlmError::NetworkError(_) | LlmError::Timeout(_));
-    }
+    typed_open_transport_failure(err)
+        .unwrap_or_else(|| should_retry_with_h1(policy, &format!("{err:#}")))
+}
 
-    if let Some(reqwest_error) = err.downcast_ref::<reqwest::Error>() {
-        return reqwest_error.is_connect()
-            || reqwest_error.is_timeout()
-            || reqwest_error.is_request();
-    }
+/// Classify `err` by its types alone, searching the whole context chain: an
+/// adapter's `.context("... request failed")` must not hide the transport
+/// cause (#6711). `Some(true)` for a typed `LlmError::NetworkError`/`Timeout`
+/// or a reqwest connect/timeout/request error that carries no HTTP status;
+/// `Some(false)` for any other typed `LlmError` or reqwest error; `None` when
+/// the chain holds neither type.
+fn typed_open_transport_failure(err: &anyhow::Error) -> Option<bool> {
+    err.chain().find_map(|cause| {
+        if let Some(llm_error) = cause.downcast_ref::<LlmError>() {
+            return Some(matches!(
+                llm_error,
+                LlmError::NetworkError(_) | LlmError::Timeout(_)
+            ));
+        }
+        cause.downcast_ref::<reqwest::Error>().map(|reqwest_error| {
+            reqwest_error.status().is_none()
+                && (reqwest_error.is_connect()
+                    || reqwest_error.is_timeout()
+                    || reqwest_error.is_request())
+        })
+    })
+}
 
-    should_retry_with_h1(policy, &format!("{err:#}"))
+/// Whether a failed stream open is a real transport failure: the request
+/// never received response headers (#6699). Decided by type only: an untyped
+/// error, such as an adapter's `HTTP 500 ...` rejection whose provider body
+/// happens to mention a connection or timeout, is a provider answer and is
+/// never classified as a transport failure here.
+#[must_use]
+pub(crate) fn is_stream_open_transport_failure(err: &anyhow::Error) -> bool {
+    typed_open_transport_failure(err).unwrap_or(false)
 }
 
 /// Preserve provider-semantic failures returned by the H1 attempt. Only a

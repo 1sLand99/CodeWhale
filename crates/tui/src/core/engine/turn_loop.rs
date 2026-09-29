@@ -1929,6 +1929,13 @@ impl Engine {
                     let display_message = self.decorate_auth_error_message(
                         initial_stream_error_user_message(&self.config.locale_tag, &e),
                     );
+                    // Classified from the error's types across its whole
+                    // context chain, before `e` moves into the envelope: an
+                    // adapter's outer context must not hide a connect error,
+                    // and a provider's HTTP rejection must not pass for one
+                    // because its body text mentions a timeout (#6711).
+                    let open_transport_failure =
+                        crate::client::is_stream_open_transport_failure(&e);
                     let mut envelope =
                         crate::error_taxonomy::envelope_for_llm_error(e, message.clone());
                     // #6699: the request never became a stream (connect
@@ -1939,12 +1946,9 @@ impl Engine {
                     // streamed, so there is no fragment to keep or discard,
                     // and no error event is emitted for an attempt that is
                     // retried — an exhausted budget falls through to the
-                    // normal failure below.
-                    if envelope.recoverable
-                        && matches!(
-                            envelope.category,
-                            ErrorCategory::Network | ErrorCategory::Timeout
-                        )
+                    // normal failure below. Only a failure with no response
+                    // headers qualifies; a provider rejection never does.
+                    if open_transport_failure
                         && !self.cancel_token.is_cancelled()
                         && let Some(attempt) = stream_retry_budget.authorize()
                     {
@@ -6881,6 +6885,32 @@ mod stream_timeout_tests {
         );
         // The awaiting-model heartbeat bound stays under the default budget too.
         assert!(awaiting_model_bound(&interactive) < default_budget);
+    }
+
+    /// #6711: one stream open may spend its header wait on the dual client,
+    /// then a second header wait on the HTTP/1.1 fallback, then the first-byte
+    /// wait. The awaiting-model heartbeat must not call that recovery a stall.
+    #[test]
+    fn awaiting_model_bound_covers_the_http1_fallback() {
+        for (open, idle) in [
+            (
+                crate::client::resolve_stream_open_timeout(None),
+                Duration::from_secs(crate::config::DEFAULT_STREAM_CHUNK_TIMEOUT_SECS),
+            ),
+            (Duration::from_secs(300), Duration::from_secs(60)),
+        ] {
+            let config = EngineConfig {
+                stream_open_timeout: open,
+                stream_chunk_timeout: idle,
+                ..EngineConfig::default()
+            };
+            let worst_open = open + open + crate::client::stream_first_byte_timeout(idle);
+            assert!(
+                awaiting_model_bound(&config) > worst_open,
+                "bound {:?} must exceed dual open + HTTP/1.1 fallback + first byte {worst_open:?}",
+                awaiting_model_bound(&config)
+            );
+        }
     }
 
     #[test]

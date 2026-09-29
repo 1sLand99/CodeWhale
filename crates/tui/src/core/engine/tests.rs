@@ -22887,9 +22887,70 @@ struct FlakyNetworkDropModelClient {
     failures: usize,
     terminal_before_drop: bool,
     content_before_drop: bool,
-    /// #6699: fail the request itself, before any stream exists, with the
-    /// typed transport error `open_sse_response` returns on a header stall.
-    open_failure: bool,
+    /// #6699: fail the request itself, before any stream exists, in the
+    /// given shape.
+    open_failure: Option<StreamOpenFailure>,
+}
+
+/// #6699/#6711: how a request fails before any stream exists.
+#[derive(Clone, Copy, Debug)]
+enum StreamOpenFailure {
+    /// The typed transport error `open_sse_response` returns on a header
+    /// stall.
+    HeaderStall,
+    /// A reqwest connect error under the Anthropic adapter's outer context,
+    /// as an HTTP/1.1-pinned open returns it: the outer message names no
+    /// transport cause.
+    WrappedConnectError,
+    /// The Responses adapter shape: the typed retry-layer network error
+    /// under the adapter's outer context.
+    WrappedTypedNetworkError,
+    /// A provider answered with an HTTP rejection whose body mentions a
+    /// connection reset, as the Anthropic adapter reports it (untyped).
+    HttpRejectionMentioningConnection,
+}
+
+impl StreamOpenFailure {
+    async fn error(self) -> anyhow::Error {
+        use anyhow::Context as _;
+        match self {
+            Self::HeaderStall => anyhow::Error::new(crate::llm_client::LlmError::NetworkError(
+                "SSE stream request did not receive response headers after 45s \
+                 (HTTP/2 and HTTP/1.1)."
+                    .to_string(),
+            )),
+            Self::WrappedConnectError => {
+                // A port that was just released refuses the connection.
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                let addr = listener.local_addr().expect("local addr");
+                drop(listener);
+                let client = crate::tls::reqwest_client_builder()
+                    .no_proxy()
+                    .build()
+                    .expect("client");
+                let send = client
+                    .post(format!("http://{addr}/v1/messages"))
+                    .send()
+                    .await;
+                let err = send
+                    .context("Anthropic Messages API request failed")
+                    .expect_err("closed port must refuse the connection");
+                assert_eq!(err.to_string(), "Anthropic Messages API request failed");
+                err
+            }
+            Self::WrappedTypedNetworkError => Err::<(), _>(anyhow::Error::new(
+                crate::llm_client::LlmError::NetworkError(
+                    "Connection failed: error sending request".to_string(),
+                ),
+            ))
+            .context("Responses API request failed")
+            .expect_err("wrapped network error"),
+            Self::HttpRejectionMentioningConnection => anyhow::anyhow!(
+                "Anthropic API error (HTTP 500 Internal Server Error api_error): \
+                 upstream connection reset"
+            ),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -22919,14 +22980,8 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .saturating_add(1);
         if call <= self.failures {
-            if self.open_failure {
-                return Err(anyhow::Error::new(
-                    crate::llm_client::LlmError::NetworkError(
-                        "SSE stream request did not receive response headers after 45s \
-                         (HTTP/2 and HTTP/1.1)."
-                            .to_string(),
-                    ),
-                ));
+            if let Some(open_failure) = self.open_failure {
+                return Err(open_failure.error().await);
             }
             if self.terminal_before_drop {
                 let start_usage = Usage {
@@ -22999,7 +23054,7 @@ async fn run_headless_turn_with_flaky_network(
         failures,
         terminal_before_drop: false,
         content_before_drop: true,
-        open_failure: false,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -23141,7 +23196,7 @@ async fn terminal_diagnostics_count_transparent_stream_requests_without_extra_sn
         failures: 1,
         terminal_before_drop: false,
         content_before_drop: false,
-        open_failure: false,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let (mut engine, handle) = Engine::new_with_model_client(
@@ -23180,6 +23235,7 @@ async fn terminal_diagnostics_count_transparent_stream_requests_without_extra_sn
 async fn run_turn_with_stream_open_failures(
     failures: usize,
     max_resumes: Option<u32>,
+    open_failure: StreamOpenFailure,
 ) -> (
     std::sync::Arc<FlakyNetworkDropModelClient>,
     TurnOutcomeStatus,
@@ -23193,7 +23249,7 @@ async fn run_turn_with_stream_open_failures(
         failures,
         terminal_before_drop: false,
         content_before_drop: false,
-        open_failure: true,
+        open_failure: Some(open_failure),
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let engine_config = EngineConfig {
@@ -23222,7 +23278,7 @@ async fn run_turn_with_stream_open_failures(
 #[tokio::test]
 async fn stream_open_failure_is_retried_through_the_resume_budget() {
     let (model, status, error, terminal, events) =
-        run_turn_with_stream_open_failures(1, None).await;
+        run_turn_with_stream_open_failures(1, None, StreamOpenFailure::HeaderStall).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -23242,7 +23298,7 @@ async fn stream_open_failure_is_retried_through_the_resume_budget() {
 #[tokio::test]
 async fn stream_open_failure_fails_the_turn_once_the_budget_is_spent() {
     let (model, status, error, terminal, events) =
-        run_turn_with_stream_open_failures(usize::MAX, None).await;
+        run_turn_with_stream_open_failures(usize::MAX, None, StreamOpenFailure::HeaderStall).await;
     assert_eq!(status, TurnOutcomeStatus::Failed);
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -23269,7 +23325,8 @@ async fn stream_open_failure_fails_the_turn_once_the_budget_is_spent() {
 #[tokio::test]
 async fn stream_open_failure_honors_a_configured_resume_budget() {
     let (model, status, _error, terminal, _events) =
-        run_turn_with_stream_open_failures(usize::MAX, Some(0)).await;
+        run_turn_with_stream_open_failures(usize::MAX, Some(0), StreamOpenFailure::HeaderStall)
+            .await;
     assert_eq!(status, TurnOutcomeStatus::Failed);
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -23279,6 +23336,59 @@ async fn stream_open_failure_honors_a_configured_resume_budget() {
     assert_eq!(terminal.stream_resumes, 0);
 }
 
+/// #6711: an HTTP/1.1-pinned Anthropic open returns the reqwest connect
+/// error under an outer context that names no transport cause. The retry gate
+/// must read the error chain, not the outer message.
+#[tokio::test]
+async fn stream_open_failure_behind_adapter_context_is_retried() {
+    for open_failure in [
+        StreamOpenFailure::WrappedConnectError,
+        StreamOpenFailure::WrappedTypedNetworkError,
+    ] {
+        let (model, status, error, terminal, _events) =
+            run_turn_with_stream_open_failures(1, None, open_failure).await;
+        assert_eq!(
+            status,
+            TurnOutcomeStatus::Completed,
+            "{open_failure:?}: {error:?}"
+        );
+        assert_eq!(
+            model.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "{open_failure:?}: a wrapped transport failure must be re-issued"
+        );
+        assert_eq!(terminal.stream_resumes, 1, "{open_failure:?}");
+    }
+}
+
+/// #6711: a provider that answered with an HTTP rejection is not an open
+/// failure, even when its body mentions a connection or a timeout. The request
+/// must not be re-issued through the resume budget.
+#[tokio::test]
+async fn stream_open_http_rejection_mentioning_connection_is_not_retried() {
+    let (model, status, _error, terminal, events) = run_turn_with_stream_open_failures(
+        usize::MAX,
+        None,
+        StreamOpenFailure::HttpRejectionMentioningConnection,
+    )
+    .await;
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a provider rejection must fail the turn on the first answer"
+    );
+    assert_eq!(terminal.stream_resumes, 0);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Error { .. }))
+            .count(),
+        1,
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retried() {
     let model = std::sync::Arc::new(FlakyNetworkDropModelClient {
@@ -23286,7 +23396,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
         failures: 1,
         terminal_before_drop: true,
         content_before_drop: true,
-        open_failure: false,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();
@@ -23645,7 +23755,7 @@ async fn run_interactive_turn_with_flaky_network(
         failures,
         terminal_before_drop: false,
         content_before_drop: true,
-        open_failure: false,
+        open_failure: None,
     });
     let client: crate::core::model_client::SharedModelClient = model.clone();
     let config = Config::default();

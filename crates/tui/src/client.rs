@@ -5437,14 +5437,21 @@ mod stream_entry;
 pub(crate) mod system_one;
 
 /// Longest a request may take to open its stream and deliver the first body
-/// byte before the client itself times out (#6184): the header wait plus the
-/// first-byte bound. The engine heartbeat uses it as its awaiting-model bound.
+/// byte before the client itself times out (#6184): the first-byte bound plus
+/// two header waits, because a failed or stalled open on the dual client
+/// retries once on the HTTP/1.1 twin under its own header wait. HTTP retries
+/// inside one open attempt run within that attempt's header wait. The engine
+/// heartbeat uses this as its awaiting-model bound, so it must cover the
+/// fallback or an in-progress recovery reads as a stall (#6711).
 #[must_use]
 pub(crate) fn stream_first_response_bound(open: Duration, idle: Duration) -> Duration {
-    open.saturating_add(stream_entry::first_byte_timeout(idle))
+    open.saturating_mul(2)
+        .saturating_add(stream_entry::first_byte_timeout(idle))
 }
 
-pub(crate) use stream_entry::resolve_stream_open_timeout;
+#[cfg(test)]
+pub(crate) use stream_entry::first_byte_timeout as stream_first_byte_timeout;
+pub(crate) use stream_entry::{is_stream_open_transport_failure, resolve_stream_open_timeout};
 mod wire;
 
 // Retain the crate-visible accounting helpers at the existing client seam.
