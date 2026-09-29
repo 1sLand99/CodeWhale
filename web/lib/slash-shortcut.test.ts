@@ -37,4 +37,25 @@ describe("isSlashShortcut (WCAG 2.1.4 character key shortcut)", () => {
   it("leaves typing in contenteditable content alone", () => {
     expect(isSlashShortcut(key({ target: { tagName: "DIV", isContentEditable: true } }))).toBe(false);
   });
+
+  it("leaves a key an inner widget already handled alone", () => {
+    expect(isSlashShortcut(key({ defaultPrevented: true }))).toBe(false);
+  });
+
+  it.each(["textbox", "searchbox", "combobox", " TextBox "])("leaves typing in a role=%s widget alone", (role) => {
+    const target = { tagName: "DIV", getAttribute: (name: string) => (name === "role" ? role : null) };
+    expect(isSlashShortcut(key({ target }))).toBe(false);
+  });
+
+  it("still fires over a role that is not a text widget", () => {
+    const target = { tagName: "DIV", getAttribute: (name: string) => (name === "role" ? "button" : null) };
+    expect(isSlashShortcut(key({ target }))).toBe(true);
+  });
+
+  it("looks through a shadow root to the element that received the key", () => {
+    const host = { tagName: "MY-EDITOR" };
+    const inner = { tagName: "INPUT" };
+    expect(isSlashShortcut(key({ target: host, composedPath: () => [inner, host] }))).toBe(false);
+    expect(isSlashShortcut(key({ target: host, composedPath: () => [host] }))).toBe(true);
+  });
 });
