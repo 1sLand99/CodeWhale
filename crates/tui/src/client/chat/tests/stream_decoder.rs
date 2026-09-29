@@ -4,7 +4,7 @@
 //! harness (issue #69 tracks that). For #103 we exercise the chunk decoder
 //! directly to verify each "class of stream failure" the engine relies on.
 use super::*;
-use crate::client::wire::{InvalidSseUtf8, SseLineDecoder};
+use crate::client::wire::{SseLineDecoder, SseLineError};
 use codewhale_models::{ContentBlockStart, Delta, StreamEvent};
 
 /// Decode a raw SSE-data JSON chunk into our internal events, mirroring
@@ -61,7 +61,7 @@ fn decode_chunks_with_style(
 
 /// Drive the Chat Completions SSE path with raw byte chunks so tests can
 /// split a multi-byte UTF-8 character across HTTP/2-style DATA boundaries.
-fn decode_sse_byte_chunks(chunks: &[&[u8]]) -> Result<Vec<StreamEvent>, InvalidSseUtf8> {
+fn decode_sse_byte_chunks(chunks: &[&[u8]]) -> Result<Vec<StreamEvent>, SseLineError> {
     struct FrameState {
         line_buf: String,
         content_index: u32,
@@ -512,15 +512,15 @@ fn modelstudio_streams_reasoning_content_as_thinking() {
         );
     }
 
-    // A non-reasoning model id on the same route keeps the old
-    // pass-through semantics (no fabricated Thinking surface).
+    // A model id the catalog does not know still routes the reasoning field
+    // to Thinking (#6501); a model that sends no reasoning field gets none.
     let style = reasoning_stream_style_for_route(
         ApiProvider::ModelstudioTokenPlan,
         crate::config::DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL,
         "qwen3.8-max-lite-unknown",
         None,
     );
-    assert_eq!(style, ReasoningStreamStyle::None);
+    assert_eq!(style, ReasoningStreamStyle::SeparateField);
 }
 
 #[test]
@@ -640,7 +640,80 @@ fn exact_kimi_code_k3_streams_reasoning_content_as_thinking() {
         crate::config::KIMI_CODE_K3_MODEL,
         None,
     );
-    assert_eq!(generic_style, ReasoningStreamStyle::None);
+    assert_eq!(generic_style, ReasoningStreamStyle::SeparateField);
+}
+
+/// #6501 regression: the founder's grok-4.7 (xAI) and mimo-v2.6-pro
+/// (Xiaomi MiMo) sessions persisted the reasoning summary glued to the answer
+/// in one Text block ("...I should help them find large f...Sure, I'd be
+/// happy to help"). Decode that stream shape through the real route style.
+#[test]
+fn issue_6501_reasoning_field_never_leaks_into_answer_text_on_unlisted_routes() {
+    for (provider, base_url, model) in [
+        (
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            "grok-4.7",
+        ),
+        (
+            ApiProvider::XiaomiMimo,
+            "https://token-plan-sgp.xiaomimimo.com/v1",
+            "mimo-v2.7-pro-unreleased",
+        ),
+        (
+            ApiProvider::Openai,
+            "https://gateway.example.test/v1",
+            "some-new-reasoner",
+        ),
+    ] {
+        let style = reasoning_stream_style_for_route(provider, base_url, model, None);
+        assert_eq!(style, ReasoningStreamStyle::SeparateField, "{provider:?}");
+        let events = decode_chunks_with_style(
+            &[
+                r#"{"choices":[{"delta":{"role":"assistant","reasoning_content":"The user wants help finding large files"}}]}"#,
+                r#"{"choices":[{"delta":{"reasoning_content":"..."}}]}"#,
+                r#"{"choices":[{"delta":{"content":"Sure, I'd be happy to help."}}]}"#,
+                r#"{"choices":[{"delta":{"reasoning":"then a tool"}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_shell","arguments":"{}"}}]}}]}"#,
+                r#"{"choices":[{"finish_reason":"tool_calls"}]}"#,
+            ],
+            style,
+        );
+        assert_eq!(
+            thinking_delta_text(&events),
+            "The user wants help finding large files...then a tool",
+            "{provider:?}"
+        );
+        assert_eq!(
+            text_delta_text(&events),
+            "Sure, I'd be happy to help.",
+            "{provider:?}: reasoning must not reach answer text"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ContentBlockStart {
+                    content_block: ContentBlockStart::ToolUse { .. },
+                    ..
+                }
+            )),
+            "{provider:?}: reasoning -> tool call transition must keep the tool call"
+        );
+    }
+
+    // The explicit opt-out keeps the legacy pass-through for gateways that
+    // really stream their answer in `reasoning_content`.
+    let passthrough = decode_chunks_with_style(
+        &[r#"{"choices":[{"delta":{"reasoning_content":"answer via reasoning field"}}]}"#],
+        reasoning_stream_style_for_route(
+            ApiProvider::Openai,
+            "https://gateway.example.test/v1",
+            "some-new-reasoner",
+            Some("none"),
+        ),
+    );
+    assert_eq!(thinking_delta_text(&passthrough), "");
+    assert_eq!(text_delta_text(&passthrough), "answer via reasoning field");
 }
 
 #[test]
@@ -704,7 +777,7 @@ fn reasoning_style_none_keeps_inline_tags_visible_text() {
 fn configured_reasoning_style_overrides_route_default() {
     assert_eq!(
         reasoning_stream_style_for_stream(ApiProvider::Openai, "custom-minimax", None),
-        ReasoningStreamStyle::None
+        ReasoningStreamStyle::SeparateField
     );
     assert_eq!(
         reasoning_stream_style_for_stream(
@@ -1158,7 +1231,7 @@ fn cache_inspect_reports_turn_meta_dedup_metadata() {
 
 #[test]
 fn request_builder_truncates_large_tool_result_for_wire() {
-    let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
+    let long_output = format!("{}{}", "A".repeat(70_000), "Z".repeat(70_000));
     let messages = vec![
         tool_use_message(
             "tool-long",
@@ -1174,20 +1247,92 @@ fn request_builder_truncates_large_tool_result_for_wire() {
     assert!(sent.contains("[TOOL_RESULT_TRUNCATED]"), "got: {sent}");
     assert!(sent.contains("tool_name: shell_command"), "got: {sent}");
     assert!(sent.contains("command_or_query: cargo test"), "got: {sent}");
-    assert!(sent.contains("original_chars: 14000"), "got: {sent}");
+    assert!(sent.contains("original_chars: 140000"), "got: {sent}");
     assert!(sent.contains("sha256:"), "got: {sent}");
     assert!(
         sent.contains("exact_detail: unavailable; no session-owned artifact was recorded"),
         "got: {sent}"
     );
     assert!(!sent.contains("retrieve_tool_result"), "got: {sent}");
-    assert!(sent.contains(&"A".repeat(4_000)), "got: {sent}");
-    assert!(sent.contains(&"Z".repeat(4_000)), "got: {sent}");
+    // The model catalog supplies the window when no explicit route is available.
+    let budget = tool_result_sent_char_budget("deepseek-v4-flash");
+    assert!(budget >= 100_000);
+    let excerpt = budget - TOOL_RESULT_EXCERPT_FRAME_CHARS;
+    let head = excerpt * 2 / 3;
+    assert!(sent.contains(&"A".repeat(head)), "head kept");
+    assert!(sent.contains(&"Z".repeat(excerpt - head)), "tail kept");
     assert!(
-        sent.contains("truncated 6000 chars from middle"),
-        "got: {sent}"
+        sent.contains(&format!(
+            "truncated {} chars from middle",
+            140_000 - excerpt
+        )),
+        "omitted count"
     );
     assert_ne!(sent, long_output);
+}
+
+#[test]
+fn restored_tool_results_obey_the_active_route_budget() {
+    let output = "x".repeat(20_000);
+    let recovery = format!(
+        "{output}\n{}",
+        crate::tools::truncate::SPILLOVER_RECOVERY_HINT
+    );
+    let request = MessageRequest {
+        model: "trinity-mini".into(),
+        messages: vec![
+            tool_use_message("raw", "read_file", json!({"path": "a.rs"})),
+            tool_result_message("raw", &output),
+            tool_use_message("repeat", "read_file", json!({"path": "a.rs"})),
+            tool_result_message("repeat", &output),
+            tool_use_message("saved", "read_file", json!({"path": "b.rs"})),
+            tool_result_message("saved", &recovery),
+        ],
+        max_tokens: 1_024,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        metadata: None,
+        thinking: None,
+        reasoning_effort: None,
+        stream: None,
+        temperature: None,
+        top_p: None,
+    };
+    // The bundled 128K route and an explicit smaller offering both beat
+    // the old unknown-route 100K ceiling. Streaming and blocking share it.
+    for (limits, expected_budget) in [
+        (None, 15_360),
+        (
+            Some(RouteLimits {
+                context_tokens: Some(32_000),
+                ..RouteLimits::default()
+            }),
+            3_840,
+        ),
+    ] {
+        for stream in [false, true] {
+            let wire = build_chat_wire_body(
+                &request,
+                ApiProvider::Arcee,
+                "https://api.arcee.ai/api/v1",
+                stream,
+                limits,
+            )
+            .unwrap();
+            let messages = wire.body["messages"].as_array().unwrap();
+            for index in [0, 1] {
+                let sent = tool_message_content(messages, index);
+                assert!(sent.contains("[TOOL_RESULT_TRUNCATED]"));
+                assert!(sent.chars().count() <= expected_budget);
+                assert!(!sent.contains("<TOOL_RESULT_REF"));
+                assert!(sent.contains("exact_detail: unavailable"));
+            }
+            assert_eq!(tool_message_content(messages, 2), recovery);
+        }
+    }
+    assert!(matches!(&request.messages[1].content[0],
+        ContentBlock::ToolResult { content, .. } if content == &output));
 }
 
 #[test]
@@ -1215,7 +1360,7 @@ fn request_builder_keeps_unowned_extreme_tool_output_bounded_without_false_hint(
         assert!(sent.contains("exact_detail: unavailable"), "got: {sent}");
         assert!(!sent.contains("retrieve_tool_result"), "got: {sent}");
         assert!(
-            sent.chars().count() <= TOOL_RESULT_SENT_CHAR_BUDGET,
+            sent.chars().count() <= tool_result_sent_char_budget("deepseek-v4-flash"),
             "truncated result should stay bounded, sent {} chars",
             sent.chars().count()
         );
@@ -1250,7 +1395,7 @@ fn request_builder_does_not_dedup_short_tool_results_for_wire() {
 fn request_builder_deduplicates_medium_identical_tool_results_to_earlier_message() {
     with_tool_result_sha_spillover_root(|| {
         // 2,000 chars is intentionally above TOOL_RESULT_DEDUP_MIN_CHARS
-        // (1,024) but below TOOL_RESULT_SENT_CHAR_BUDGET (12,000). This
+        // (1,024) but below the wire backstop budget. This
         // verifies the cache-saving path for repeated medium outputs that
         // do not otherwise need truncation.
         let output = "A".repeat(2_000);
@@ -1335,7 +1480,7 @@ fn large_unowned_results_stay_bounded_without_false_retrieval_handles() {
     // session-owned artifact receipt before this provider-wire fallback.
     // If legacy/raw history reaches here, it may be excerpted but must not
     // advertise the process-wide SHA store as retrievable.
-    let big_diff = "D".repeat(20_000);
+    let big_diff = "D".repeat(120_000);
     let sha = sha256_hex(big_diff.as_bytes());
 
     let messages = vec![
@@ -1390,7 +1535,7 @@ fn large_unowned_results_stay_bounded_without_false_retrieval_handles() {
 
 #[test]
 fn tool_result_budget_is_wire_only_and_does_not_mutate_session_message() {
-    let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
+    let long_output = format!("{}{}", "A".repeat(70_000), "Z".repeat(70_000));
     let messages = vec![
         tool_use_message(
             "tool-long",
@@ -1412,7 +1557,7 @@ fn tool_result_budget_is_wire_only_and_does_not_mutate_session_message() {
 
 #[test]
 fn cache_inspect_reports_bounded_unowned_tool_result_metadata() {
-    let long_output = format!("{}{}", "A".repeat(7_000), "Z".repeat(7_000));
+    let long_output = format!("{}{}", "A".repeat(70_000), "Z".repeat(70_000));
     let request = MessageRequest {
         model: "deepseek-v4-flash".to_string(),
         messages: vec![
@@ -1442,7 +1587,7 @@ fn cache_inspect_reports_bounded_unowned_tool_result_metadata() {
 
     assert_eq!(tool_layers.len(), 2);
     for layer in tool_layers {
-        assert_eq!(layer.original_chars, 14_000);
+        assert_eq!(layer.original_chars, 140_000);
         assert!(layer.sent_chars < layer.original_chars);
         assert!(layer.truncated);
         assert!(!layer.deduplicated);

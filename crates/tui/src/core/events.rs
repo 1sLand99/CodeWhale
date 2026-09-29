@@ -149,6 +149,11 @@ pub struct AgentProgressEventMeta {
     /// cannot tell them apart — the producer sets this instead, and UI
     /// consumers rewrite on it rather than sniffing the message (#6290).
     pub routine_wait: bool,
+    /// The child approval id this progress reports on: set while the agent
+    /// waits on a person and on the first progress after that wait ends, so
+    /// hosts can retire the matching card and pending entry by identity
+    /// (approvals C1) instead of by parsing the message.
+    pub approval_id: Option<String>,
 }
 
 impl AgentProgressEventMeta {
@@ -159,6 +164,7 @@ impl AgentProgressEventMeta {
             step: None,
             tool_name: None,
             routine_wait: false,
+            approval_id: None,
         }
     }
 
@@ -177,6 +183,12 @@ impl AgentProgressEventMeta {
     #[must_use]
     pub fn with_tool(mut self, tool_name: impl Into<String>) -> Self {
         self.tool_name = Some(tool_name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_approval_id(mut self, approval_id: impl Into<String>) -> Self {
+        self.approval_id = Some(approval_id.into());
         self
     }
 }
@@ -240,6 +252,19 @@ pub enum Event {
         result: Result<ToolResult, ToolError>,
     },
 
+    /// Trusted operation activity emitted only after dispatch and authority
+    /// gates resolve the underlying operation. The payload deliberately
+    /// excludes tool names, arguments, commands, and results.
+    OperationActivityStarted {
+        span_id: String,
+        activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
+    },
+    OperationActivityCompleted {
+        span_id: String,
+        activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
+        outcome: codewhale_protocol::engine_owner::OwnerOperationOutcome,
+    },
+
     // === Turn Lifecycle ===
     /// A new turn has started (user sent a message)
     TurnStarted {
@@ -254,6 +279,17 @@ pub enum Event {
     /// Delivery remains unknown; this event is emitted before connection setup.
     ToolRequestSnapshot {
         snapshot: crate::tool_inspection::ToolInspectionSnapshot,
+    },
+
+    /// The engine took a workspace snapshot for the running turn: before it
+    /// (`pre_turn`), before one file-modifying tool call (`tool`), after that
+    /// call (`post_tool`, recording hosts only), or after the turn
+    /// (`post_turn`). A host that records these on its turn records owns
+    /// exactly those restore points (see `crate::snapshot::WorkspaceSnapshotRef`).
+    /// With `EngineConfig::record_restore_points` every receipt of a turn
+    /// arrives before its `TurnComplete`.
+    WorkspaceSnapshotTaken {
+        snapshot: crate::snapshot::WorkspaceSnapshotRef,
     },
 
     /// Immutable billing route captured at CodeWhale's pre-permit application
@@ -418,6 +454,10 @@ pub enum Event {
         /// `run.model`, …). `None` for spawn paths that bypass route
         /// resolution (checkpoint resume, engine-internal spawns).
         route_source: Option<String>,
+        /// The name this agent goes by on every surface: its workflow task
+        /// label, dispatch name, or role, resolved once by the engine
+        /// (`subagent_display_name`). Never the raw id.
+        display_name: Option<String>,
     },
 
     /// Sub-agent progress update
@@ -443,6 +483,8 @@ pub enum Event {
         /// Provider-reported child usage from the durable ledger (#6315).
         /// None means the worker has no usage receipt, never zero tokens.
         usage: Option<crate::tools::subagent::AgentRunUsage>,
+        /// Same resolved name as `AgentSpawned::display_name`.
+        display_name: Option<String>,
     },
 
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).
@@ -589,6 +631,15 @@ pub enum Event {
     },
 
     /// Request user decision after sandbox denial
+    // Consumers (TUI, runtime threads, exec agent, protocol parity) handle
+    // this, but the engine never emits it. It stayed "live" only because the
+    // deleted public `rlm::run_rlm_turn` put `Event` in the crate's public
+    // API (#6511). Whether to wire the emitter or drop the elevation flow is
+    // a separate product decision.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no engine emitter yet; tests construct it")
+    )]
     ElevationRequired {
         tool_id: String,
         tool_name: String,
@@ -833,11 +884,31 @@ pub fn status_visibility(message: &str) -> StatusVisibility {
     let approval_wait_row = (message.starts_with("Still waiting for tool approval on `")
         || message.starts_with("Still waiting for user input on `"))
         && message.ends_with("s — the turn is parked here until it is answered");
-    if scheduler_row || continuation_row || agent_resume_row || approval_wait_row {
+    // #6511: a nested sub-RLM's forwarded rounds are the record of model
+    // calls the parent never saw; keep them, collapsed.
+    let nested_rlm_row = message.starts_with(crate::rlm::bridge::NESTED_RLM_STATUS_PREFIX);
+    if scheduler_row || continuation_row || agent_resume_row || approval_wait_row || nested_rlm_row
+    {
         StatusVisibility::Internal
     } else {
         StatusVisibility::User
     }
+}
+
+/// The tool call named by the engine's tool-approval wait heartbeat
+/// ("Still waiting for tool approval on `<id>` after Ns — ..."), if `message`
+/// is one. The runtime uses it to drop a heartbeat for an approval it has
+/// already settled.
+#[must_use]
+pub fn approval_wait_tool_call(message: &str) -> Option<&str> {
+    let message = message.trim();
+    if status_visibility(message) != StatusVisibility::Internal {
+        return None;
+    }
+    message
+        .strip_prefix("Still waiting for tool approval on `")?
+        .rsplit_once("` after ")
+        .map(|(call, _)| call)
 }
 
 /// Which permission gate produced a [`Event::ToolGateDecision`].
@@ -934,7 +1005,7 @@ mod tool_projection_warning_tests {
 
 #[cfg(test)]
 mod status_visibility_tests {
-    use super::{StatusVisibility, status_visibility};
+    use super::{StatusVisibility, approval_wait_tool_call, status_visibility};
 
     #[test]
     fn engine_plumbing_statuses_are_not_user_rows() {
@@ -982,5 +1053,26 @@ mod status_visibility_tests {
             assert_eq!(status_visibility(user), StatusVisibility::User, "{user}");
         }
         assert_eq!(StatusVisibility::Internal.as_str(), "internal");
+    }
+
+    #[test]
+    fn approval_wait_tool_call_names_the_raw_call_id() {
+        assert_eq!(
+            approval_wait_tool_call(
+                "Still waiting for tool approval on `call_00_x|99765c30-c427` after 60s — the turn is parked here until it is answered"
+            ),
+            Some("call_00_x|99765c30-c427")
+        );
+        for not_a_heartbeat in [
+            "Still waiting for user input on `call-2` after 120s — the turn is parked here until it is answered",
+            "Still waiting for tool approval on `call-1` after an unexpected failure",
+            "Continuing — tool results",
+        ] {
+            assert_eq!(
+                approval_wait_tool_call(not_a_heartbeat),
+                None,
+                "{not_a_heartbeat}"
+            );
+        }
     }
 }

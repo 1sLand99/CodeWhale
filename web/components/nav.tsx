@@ -1,46 +1,36 @@
 import Link from "next/link";
-import Image from "next/image";
 import type { Locale } from "@/lib/i18n/config";
 import { getChrome } from "@/lib/i18n/dictionaries";
-import { navLinks, secondaryNavLinks, REPO_URL, APP_LOGIN_URL, APP_SIGNUP_URL } from "@/lib/i18n/links";
-import { fetchRepoStats, formatStars } from "@/lib/github";
-import { getEnv } from "@/lib/kv";
+import { navLinks, secondaryNavLinks, REPO_URL, APP_LOGIN_URL } from "@/lib/i18n/links";
 import { Icon } from "./icon";
 import { LocaleSwitcher } from "./locale-switcher";
 import { MobileMenu } from "./mobile-menu";
 import { NavLinks } from "./nav-links";
 import { ThemeToggle } from "./theme-toggle";
+import { WhalePose } from "./whale-pose";
+import { ArrowLabel } from "./arrow-label";
 
-/** Masthead + primary nav — the Tideline topbar on the web. */
-export async function Nav({ locale = "en" }: { locale?: Locale }) {
+/**
+ * Masthead + primary nav. Like the GPUI titlebar it carries few visible
+ * controls: the whale and the wordmark, four links, quiet icon controls
+ * with accessible names, one identity door (Sign in; the sign-in page
+ * offers account creation) and the one primary action, Install.
+ */
+export function Nav({ locale = "en" }: { locale?: Locale }) {
   const chrome = getChrome(locale);
   const links = navLinks(locale, chrome);
   const moreLinks = secondaryNavLinks(locale, chrome);
   const homeHref = `/${locale}`;
-
-  // Live star count — cached by fetchRepoStats. Falls back to a plain GitHub
-  // label when the API is unreachable at build time.
-  let stars = 0;
-  try {
-    const env = await getEnv();
-    stars = (await fetchRepoStats(env.GITHUB_TOKEN)).stars;
-  } catch {
-    /* keep fallback label */
-  }
 
   return (
     <header className="site-nav paper-nav">
       <div className="site-nav-inner paper-nav-inner">
         <Link href={homeHref} className="site-wordmark paper-wordmark" aria-label={chrome.navHomeAria}>
           <div className="paper-wordmark-text">
-            <Image src="/brand/mark-gradient.svg" width={22} height={22} alt="" className="paper-wordmark-mark" unoptimized />
-            <img
-              className="paper-wordmark-logo"
-              src="/brand/wordmark.svg"
-              alt=""
-              width={142}
-              height={20}
-            />
+            <WhalePose pose="rest" className="paper-wordmark-mark" priority />
+            {/* The wordmark is one ink, drawn through a CSS mask so both
+                appearances re-ink it; the link carries the name. */}
+            <span className="paper-wordmark-logo" aria-hidden="true" />
           </div>
         </Link>
 
@@ -55,35 +45,23 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
             titleLabel={chrome.themeTitle}
           />
           <LocaleSwitcher current={locale} />
-          <Link
-            href={REPO_URL}
-            className="site-github-link paper-star-badge"
-            aria-label={chrome.starsAria}
-          >
-            <Icon name="github" className="brand-mark" />
-            ★ {stars > 0 ? formatStars(stars) : chrome.githubFallback}
+          <Link href={REPO_URL} className="nav-icon-button site-github-link" aria-label="GitHub" title="GitHub">
+            <Icon name="github" className="nav-icon" />
           </Link>
-          <span className="paper-auth" role="group" aria-label={chrome.authGroupAria}>
-            <Link href={APP_LOGIN_URL} className="paper-auth-signin hidden lg:inline-flex" data-usage="login">
-              {chrome.authSignIn}
-            </Link>
-            <Link href={APP_SIGNUP_URL} className="paper-auth-register hidden lg:inline-flex" data-usage="signup">
-              {chrome.authRegister}
-            </Link>
-          </span>
+          <Link href={APP_LOGIN_URL} className="paper-auth-signin hidden lg:inline-flex" data-usage="login">
+            {chrome.authSignIn}
+          </Link>
           <Link
             href={`/${locale}/install`}
-            className="paper-install-cta hidden xl:inline-flex"
+            className="paper-install-cta hidden lg:inline-flex"
           >
-            {chrome.installCta}
+            <ArrowLabel text={chrome.installCta} />
           </Link>
           <MobileMenu
             installHref={`/${locale}/install`}
             installLabel={chrome.installCta}
             signInHref={APP_LOGIN_URL}
             signInLabel={chrome.authSignIn}
-            registerHref={APP_SIGNUP_URL}
-            registerLabel={chrome.authRegister}
             links={links}
             moreLinks={moreLinks}
             openLabel={chrome.menuOpen}

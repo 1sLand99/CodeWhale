@@ -19,7 +19,7 @@ struct Fixture {
 
 impl Fixture {
     async fn finish(&mut self) -> SubAgentResult {
-        tokio::time::timeout(Duration::from_secs(5), self.task.take().unwrap())
+        tokio::time::timeout(Duration::from_secs(30), self.task.take().unwrap())
             .await
             .expect("bounded worker")
             .expect("worker task");
@@ -41,6 +41,10 @@ impl Drop for Fixture {
 }
 
 async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixture {
+    // Only these cases exercise wall/API timeouts. The other cases exercise
+    // budget and report semantics, so leave room for full-suite scheduling.
+    let timeout_case = matches!(mode, "hold" | "timeout" | "work-timeout");
+    let wall_time_secs = if timeout_case { 5 } else { 30 };
     let workspace = tempdir().unwrap();
     fs::write(
         workspace.path().join("README.md"),
@@ -81,6 +85,8 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
                             "tool_calls": [{"id": "must-not-write", "type": "function", "function": {
                                 "name": "write_file", "arguments": "{\"path\":\"report.md\",\"content\":\"must not execute\"}"
                             }}]}, "finish_reason": "tool_calls"})
+                    } else if mode == "truncated" {
+                        json!({"index": 0, "message": {"role": "assistant", "content": "TRUNCATED_REPORT: README evid"}, "finish_reason": "length"})
                     } else {
                         json!({"index": 0, "message": {"role": "assistant", "content":
                             "PARTIAL_REPORT: README evidence identifies missing checksum validation. No report file was produced. Next: implement and verify the checksum check."}, "finish_reason": "stop"})
@@ -100,8 +106,6 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
         axum::serve(listener, app).await.unwrap();
     });
     let config = crate::config::Config {
-        api_key: Some("fixture-key".to_string()),
-        base_url: Some(format!("http://{address}/v1")),
         retry: Some(crate::config::RetryConfig {
             enabled: Some(false),
             max_retries: Some(0),
@@ -110,7 +114,11 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
             exponential_base: Some(1.0),
         }),
         ..Default::default()
-    };
+    }
+    .with_legacy_root(
+        Some("fixture-key".to_string()),
+        Some(format!("http://{address}/v1")),
+    );
     let manager = Arc::new(RwLock::new(
         SubAgentManager::new(workspace.path().to_path_buf(), 4)
             .with_state_path(workspace.path().join(".codewhale/subagents/state.json")),
@@ -118,12 +126,25 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
     let mut spec = make_worker_spec("report-worker", workspace.path().to_path_buf());
     spec.max_steps = max_steps;
     spec.runtime_profile.max_steps = max_steps;
-    spec.runtime_profile.wall_time_secs = Some(5);
-    spec.runtime_profile.wall_deadline_ms = Some(epoch_millis_now() + 5_000);
+    spec.runtime_profile.wall_time_secs = Some(wall_time_secs);
+    spec.runtime_profile.wall_deadline_ms = Some(epoch_millis_now() + wall_time_secs * 1_000);
     if mode == "work-timeout" {
         // A partly consumed original deadline leaves time to persist the
         // missing-coverage receipt after the in-flight call is abandoned.
-        spec.runtime_profile.wall_deadline_ms = Some(epoch_millis_now() + 2_000);
+        //
+        // The hand-back window is the reserve `wall_deadlines` carves off the
+        // hard deadline: `wall_time_secs * 100ms`. The shared 5s budget made
+        // that only 500ms, which had to cover the digest artifact, the
+        // unreported-usage state write, the pre-report checkpoint and the
+        // loopback connect before the report reached the server. On Windows
+        // CI it did not fit, so the report fell back without reaching the
+        // server (2 requests, not 3). A 20s budget reserves 2s. The work
+        // deadline lands 2s in (more headroom than before for the first two
+        // calls), and the step API timeout below is longer than that, so the
+        // in-flight call is still abandoned by wall time, not by a step
+        // timeout.
+        spec.runtime_profile.wall_time_secs = Some(20);
+        spec.runtime_profile.wall_deadline_ms = Some(epoch_millis_now() + 4_000);
     }
     spec.launch_manifest = Some(serde_json::from_value(json!({
         "owner_session": "root", "child_id": "report-worker", "profile": spec.runtime_profile,
@@ -146,8 +167,14 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
     runtime.accept_edits = false;
     runtime.step_api_timeout = if mode == "timeout" {
         Duration::from_millis(100)
-    } else {
+    } else if mode == "work-timeout" {
+        // Past the 2s work deadline, and bounding the held hand-back call
+        // no tighter than the 4s hard deadline already does.
+        Duration::from_secs(5)
+    } else if timeout_case {
         Duration::from_secs(2)
+    } else {
+        Duration::from_secs(10)
     };
     let cancel = runtime.cancel_token.clone();
     let (parent_tx, completions) = mpsc::channel(16);
@@ -188,7 +215,8 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
         fork_context: false,
         started_at: Instant::now(),
         max_steps,
-        wall_time: Duration::from_secs(5),
+        wall_time: Duration::from_secs(wall_time_secs),
+        wall_ceiling_ms: None,
         input_rx,
         launch_gate: None,
         _foreground_child_registration: None,
@@ -271,6 +299,42 @@ async fn budget_handback_turn_consolidates_tool_only_work_and_checks_declared_de
     assert!(completion.payload.contains("budget_exhausted"));
     assert!(completion.payload.contains("deliverable_missing"));
     assert!(fixture.completions.try_recv().is_err());
+}
+
+/// #6536 — the provider truncates the hand-back report. The deterministic
+/// digest recorded before that turn stays the deliverable: in the result
+/// text `agent result` / `agent wait` return, and as a private file.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn budget_handback_truncated_report_leaves_the_digest_as_the_deliverable() {
+    let _retry = crate::retry_status::test_guard();
+    crate::retry_status::clear_rate_limit();
+    let mut fixture = fixture("truncated", 15, 1).await;
+    let result = fixture.finish().await;
+    assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
+    let text = result.result.as_deref().unwrap();
+    assert!(
+        text.contains("RECORDED_FINDING"),
+        "digest is the result: {text}"
+    );
+    assert!(!text.contains("TRUNCATED_REPORT"), "{text}");
+    assert!(text.contains("did not finish"), "{text}");
+    assert!(text.contains("this child's deliverable"), "{text}");
+
+    let state_root = fixture.manager.read().await.state_root.clone();
+    let artifact = checked_subagent_state_path(
+        &state_root,
+        &Path::new(".codewhale/state/subagent-results").join(format!(
+            "{}.md",
+            crate::hashing::sha256_hex(b"report-worker")
+        )),
+    )
+    .unwrap();
+    let saved = fs::read_to_string(&artifact).expect("digest artifact written");
+    assert!(saved.contains("RECORDED_FINDING"), "{saved}");
+    assert!(!saved.contains("TRUNCATED_REPORT"), "{saved}");
+    assert!(text.contains(&artifact.display().to_string()), "{text}");
 }
 
 #[tokio::test]
@@ -661,6 +725,91 @@ async fn cancel_appends_work_preservation_note_once() {
     let scout = manager.write().await.cancel_agent("cancel-scout").unwrap();
     let scout = preserve_cancelled_work(&manager, scout).await;
     assert_eq!(scout.result.as_deref(), Some(CANCELLED_BY_PARENT_RESULT));
+}
+
+/// F4: a Stop cascades to descendants, and each write-scoped descendant
+/// stopped with the parent gets its own receipt; a read-only one does not.
+#[tokio::test]
+async fn cancel_receipts_each_writing_descendant_stopped_with_its_parent() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "--quiet"]);
+    git(root, &["config", "user.name", "Budget test"]);
+    git(root, &["config", "user.email", "budget@example.invalid"]);
+    fs::write(root.join("src.rs"), "baseline\n").unwrap();
+    git(root, &["add", "--", "src.rs"]);
+    git(root, &["commit", "--quiet", "-m", "baseline"]);
+
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(root.to_path_buf(), 4)));
+    for (agent_id, write, parent) in [
+        ("tree-parent", true, None),
+        ("tree-writer", true, Some("tree-parent")),
+        ("tree-scout", false, Some("tree-parent")),
+        ("tree-stranger", true, None),
+    ] {
+        let mut spec = make_worker_spec(agent_id, root.to_path_buf());
+        spec.runtime_profile.permissions.write = write;
+        spec.parent_run_id = parent.map(str::to_string);
+        let mut guard = manager.write().await;
+        guard.register_worker(spec);
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let mut agent = SubAgent::new(
+            agent_id.to_string(),
+            FleetRole::Worker,
+            "work that gets stopped".to_string(),
+            SubAgentAssignment {
+                objective: "edit".to_string(),
+                role: Some("worker".to_string()),
+            },
+            "deepseek-v4-flash".to_string(),
+            None,
+            None,
+            input_tx,
+            root.to_path_buf(),
+            guard.current_session_boot_id.clone(),
+        );
+        agent.task_handle = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }));
+        guard.agents.insert(agent_id.to_string(), agent);
+    }
+    fs::create_dir_all(root.join("scratch")).unwrap();
+    fs::write(root.join("scratch/half-done.rs"), "wip\n").unwrap();
+
+    // The cascade order of `cancel_agent_for_session`: descendants, then the
+    // target. The unrelated writer is stopped too but is not a descendant.
+    let parent = {
+        let mut guard = manager.write().await;
+        for id in ["tree-writer", "tree-scout", "tree-stranger"] {
+            guard.cancel_agent(id).unwrap();
+        }
+        guard.cancel_agent("tree-parent").unwrap()
+    };
+    let parent = preserve_cancelled_work(&manager, parent).await;
+    assert!(
+        parent
+            .result
+            .as_deref()
+            .is_some_and(|text| text.contains("scratch/half-done.rs")),
+        "{:?}",
+        parent.result
+    );
+
+    let guard = manager.read().await;
+    let writer = guard.get_result("tree-writer").unwrap();
+    let writer_text = writer.result.as_deref().unwrap_or_default();
+    assert!(
+        writer_text.starts_with(CANCELLED_BY_PARENT_RESULT),
+        "{writer_text}"
+    );
+    assert!(
+        writer_text.contains("scratch/half-done.rs"),
+        "{writer_text}"
+    );
+    let scout = guard.get_result("tree-scout").unwrap();
+    assert_eq!(scout.result.as_deref(), Some(CANCELLED_BY_PARENT_RESULT));
+    let stranger = guard.get_result("tree-stranger").unwrap();
+    assert_eq!(stranger.result.as_deref(), Some(CANCELLED_BY_PARENT_RESULT));
 }
 
 /// #5529: a budget death must name the work the worker left on disk. The

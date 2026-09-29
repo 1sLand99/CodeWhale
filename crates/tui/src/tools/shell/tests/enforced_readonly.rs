@@ -37,7 +37,10 @@ async fn enforced_readonly_rejects_incompatible_shapes_before_running_anything()
     ] {
         let mut input = json!({"command": "touch should-not-exist", "read_only": true});
         input[key] = value;
-        assert!(!exec_shell_input_agent_readonly(&input), "{input}");
+        assert!(
+            exec_shell_input_agent_readonly_verdict(&input).is_err(),
+            "{input}"
+        );
         let error = BashTool::new("Bash")
             .execute(input, &context)
             .await
@@ -213,7 +216,15 @@ async fn enforced_readonly_native_python_cannot_reach_a_loopback_listener() {
         )
         .await
         .unwrap_err();
-    assert!(!refused.to_string().contains("connected"), "{refused}");
+    // Python includes the submitted source line in its traceback. Only an
+    // actual output line means the script reached the print after connect.
+    assert!(
+        !refused
+            .to_string()
+            .lines()
+            .any(|line| line.trim() == "connected"),
+        "{refused}"
+    );
     assert_eq!(
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock

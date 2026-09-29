@@ -164,6 +164,81 @@ mod recovery {
         history_case(true).await
     }
 
+    /// #6659: an unbound thread (no saved session) keeps one engine session
+    /// id — its own thread id — across its first spawn, an LRU eviction and a
+    /// Runtime restart. That id keys the thread's spill directory
+    /// (`sessions/<id>/artifacts/`), its workspace snapshot tags and its shell
+    /// jobs, so none of them scatter per spawn.
+    #[tokio::test]
+    async fn unbound_thread_keeps_one_engine_session_id_across_respawns() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let workspace = dir.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let manager_cfg = RuntimeThreadManagerConfig {
+            max_active_threads: 1,
+            ..test_manager_config(dir.path().join("runtime"))
+        };
+        let mut manager =
+            RuntimeThreadManager::open(config(), workspace.clone(), manager_cfg.clone())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        assert_eq!(thread.session_id, None, "the thread is unbound");
+        let history: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"hi"}]},
+            {"role":"assistant","content":[{"type":"text","text":"hello"}]}
+        ]))?;
+        manager
+            .seed_thread_from_messages(&thread.id, &history)
+            .await?;
+
+        let engine_session_id = |manager: &RuntimeThreadManager| {
+            let manager = manager.clone();
+            let thread_id = thread.id.clone();
+            async move {
+                anyhow::Ok(
+                    manager
+                        .get_engine(&thread_id)
+                        .await?
+                        .get_session_snapshot()
+                        .await?
+                        .session_id,
+                )
+            }
+        };
+
+        let first = engine_session_id(&manager).await?;
+        assert_eq!(first, thread.id);
+
+        // Loading another thread's engine evicts this one.
+        let other = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        manager.get_engine(&other.id).await?;
+        assert!(!manager.active.lock().await.engines.contains_key(&thread.id));
+        let after_eviction = engine_session_id(&manager).await?;
+        assert_eq!(after_eviction, first, "respawn after eviction");
+
+        close_engines(&manager).await?;
+        drop(manager);
+        manager = RuntimeThreadManager::open(config(), workspace, manager_cfg)?;
+        let after_restart = engine_session_id(&manager).await?;
+        assert_eq!(after_restart, first, "respawn after restart");
+        assert_eq!(
+            manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .thread
+                .session_id,
+            None,
+            "the engine identity does not bind the thread to a saved session"
+        );
+        close_engines(&manager).await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn saved_checkpoint_validation_and_forks_preserve_history() -> Result<()> {
         let _env = crate::test_support::lock_test_env();
@@ -280,28 +355,226 @@ mod recovery {
             }],
         };
         sessions.save_session(&changed)?;
-        assert!(
+        // A rewritten prefix is real divergence. The thread no longer strands
+        // on it (#6144): the dead binding is dropped, kept in a receipt, and
+        // the thread hydrates from its own turns.
+        let from_turns = manager.restore_thread_messages(&thread)?;
+        assert_eq!(
+            from_turns.len(),
             manager
-                .restore_thread_messages(&thread)
-                .unwrap_err()
-                .to_string()
-                .contains("changed after this thread's checkpoint")
+                .reconstruct_messages_from_turns(&manager.store.list_turns_for_thread(&thread.id)?)?
+                .len()
         );
+        let stored = manager.store.load_thread(&thread.id)?;
+        assert_eq!(stored.session_id, None);
+        assert_eq!(stored.saved_session_checkpoint, None);
+        let receipts = std::fs::read_to_string(
+            dir.path()
+                .join("runtime")
+                .join(crate::session_reconcile::THREAD_UNBIND_RECEIPTS_FILE),
+        )?;
+        assert!(receipts.contains("thread_unbound"), "{receipts}");
+        assert!(receipts.contains(&saved.metadata.id), "{receipts}");
         // The source saving new content is precisely what used to break the
         // fork: both threads named this file, so the source's save rewrote the
         // bytes under the fork's checkpoint.
         assert_eq!(manager.restore_thread_messages(&fork)?, messages);
-        assert!(
-            manager
-                .restore_thread_messages(&legacy)
-                .unwrap_err()
-                .to_string()
-                .contains("no verifiable Runtime checkpoint")
-        );
-        assert!(manager.get_engine(&thread.id).await.is_err());
-        assert!(manager.active.lock().await.engines.is_empty());
+        // A legacy link that no longer matches loads from turns, too; it only
+        // unbinds when the stored record still carries that same link.
+        assert!(manager.restore_thread_messages(&legacy).is_ok());
         sessions.save_session(&saved)?;
         assert_eq!(manager.restore_thread_messages(&thread)?, expected);
+        Ok(())
+    }
+
+    fn msg(role: Role, text: &str) -> Message {
+        Message {
+            role,
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        }
+    }
+
+    /// #6144 P4: the checkpoint covers a prefix. The document's own
+    /// conversation appending to it (a TUI autosave of the same id, a later
+    /// PUT) used to strand the thread with "changed after this thread's
+    /// checkpoint"; now the thread keeps exactly its prefix plus its own turns.
+    /// A legacy whole-document checkpoint is migrated on its first read.
+    #[tokio::test]
+    async fn appended_document_keeps_the_thread_on_its_checkpoint_prefix() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let prefix = vec![
+            msg(Role::User, "first"),
+            msg(Role::Assistant, "first answer"),
+        ];
+        manager
+            .seed_thread_from_messages(&thread.id, &prefix)
+            .await?;
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        let mut document = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &prefix,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        sessions.save_session(&document)?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &document)
+                .await?;
+        }
+        let bound = manager.get_thread(&thread.id).await?;
+        assert_eq!(
+            bound
+                .saved_session_checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.messages_len),
+            Some(2)
+        );
+
+        // The document's conversation moves on; so does the thread.
+        document.messages.extend([
+            msg(Role::User, "elsewhere"),
+            msg(Role::Assistant, "elsewhere answer"),
+        ]);
+        sessions.save_session(&document)?;
+        let tail = vec![msg(Role::User, "thread tail")];
+        manager.seed_thread_from_messages(&thread.id, &tail).await?;
+        let mut expected = prefix.clone();
+        expected.extend(tail);
+        assert_eq!(manager.restore_thread_messages(&bound)?, expected);
+
+        // A checkpoint written before `messages_len` fingerprints the whole
+        // document as it was at bind time; the prefix search finds it and the
+        // length is written back.
+        let mut legacy = manager.store.load_thread(&thread.id)?;
+        legacy
+            .saved_session_checkpoint
+            .as_mut()
+            .expect("checkpoint")
+            .messages_len = None;
+        manager.store.save_thread(&legacy)?;
+        assert_eq!(manager.restore_thread_messages(&legacy)?, expected);
+        assert_eq!(
+            manager
+                .store
+                .load_thread(&thread.id)?
+                .saved_session_checkpoint
+                .and_then(|checkpoint| checkpoint.messages_len),
+            Some(2)
+        );
+
+        // P5: the document is deleted. The thread unbinds and loads from turns.
+        sessions.delete_session(&document.metadata.id)?;
+        let orphaned = manager.store.load_thread(&thread.id)?;
+        let from_turns = manager.restore_thread_messages(&orphaned)?;
+        assert_eq!(from_turns.len(), 3, "{from_turns:?}");
+        assert_eq!(manager.store.load_thread(&thread.id)?.session_id, None);
+        Ok(())
+    }
+
+    /// The legacy prefix search must agree with `serde_json`'s own encoding
+    /// of a slice, for every prefix length.
+    #[test]
+    fn checkpoint_prefix_search_matches_slice_fingerprints() -> Result<()> {
+        let messages = vec![
+            msg(Role::User, "a"),
+            msg(Role::Assistant, "b \"quoted\" \u{1F40B}"),
+            msg(Role::User, "c"),
+        ];
+        for len in 0..=messages.len() {
+            let checkpoint = SavedSessionCheckpoint {
+                covered_turn_id: None,
+                messages_sha256: session_messages_sha256(&messages[..len])?,
+                messages_len: None,
+                retained_messages: None,
+            };
+            assert_eq!(checkpoint_prefix_len(&checkpoint, &messages)?, Some(len));
+            let exact = SavedSessionCheckpoint {
+                messages_len: Some(len),
+                ..checkpoint
+            };
+            assert_eq!(checkpoint_prefix_len(&exact, &messages)?, Some(len));
+        }
+        let diverged = SavedSessionCheckpoint {
+            covered_turn_id: None,
+            messages_sha256: session_messages_sha256(&[msg(Role::User, "other")])?,
+            messages_len: Some(1),
+            retained_messages: None,
+        };
+        assert_eq!(checkpoint_prefix_len(&diverged, &messages)?, None);
+        Ok(())
+    }
+
+    /// #6144 P9: a Runtime thread's engine writes under the id its export will
+    /// use, not a fresh random id per load that no document ever names.
+    #[tokio::test]
+    async fn runtime_thread_engine_uses_the_thread_session_id() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let engine = manager.get_engine(&thread.id).await?;
+        let snapshot = engine.get_session_snapshot().await?;
+        assert_eq!(snapshot.session_id, thread_session_id(&thread.id));
+        assert_eq!(thread_session_id(&thread.id), thread_session_id(&thread.id));
+        assert_ne!(
+            thread_session_id(&thread.id),
+            thread_session_id("thr_other")
+        );
+        close_engines(&manager).await?;
+        Ok(())
+    }
+
+    /// #6144 P7: one corrupt thread record no longer fails the whole rail.
+    #[tokio::test]
+    async fn one_corrupt_thread_record_does_not_fail_the_listing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        std::fs::write(
+            dir.path()
+                .join("runtime")
+                .join("threads")
+                .join("thr_torn.json"),
+            b"{\"id\": ",
+        )?;
+        let (threads, skipped) = manager.store.list_threads_lenient()?;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, thread.id);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(manager.store.list_threads()?.len(), 1);
         Ok(())
     }
 
@@ -431,6 +704,924 @@ mod recovery {
         assert!(documents()? > before);
         sessions.load_session(&fork_session_id)?;
         assert_eq!(manager.restore_thread_messages(&fork)?, messages[..2]);
+        Ok(())
+    }
+
+    /// A backtrack over a turn that used a file tool must still find the
+    /// boundary it keeps.
+    ///
+    /// The saved transcript is the model-visible history, so it carries the
+    /// per-turn `<turn_meta>` preamble (rebuilt from runtime facts, never
+    /// recorded on an item) and tool results as the route's compaction left
+    /// them (items keep the raw output). Neither is reproducible from the
+    /// records, so a two-turn conversation whose first turn wrote a file could
+    /// not be cut at all: undo answered "Cannot identify an exact saved-history
+    /// boundary for this backtrack" and left the turn in place — reported from
+    /// the VS Code client on engine 0.10.0, where reverting one file of the
+    /// same conversation worked.
+    #[tokio::test]
+    async fn backtrack_over_a_file_tool_turn_finds_the_saved_history_boundary() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        // A file tool records itself as a `FileChange` item that carries the
+        // call identity — the same shape the transcript's tool_use/tool_result
+        // pair came from.
+        fn tool_metadata(call: &str, name: &str, input: &str) -> Value {
+            json!({
+                "tool_use_id": call,
+                "tool_name": name,
+                "tool_input": input,
+                "tool_result_for": call,
+                "is_error": false,
+            })
+        }
+        let write_call = "call_write_test";
+        let bash_call = "call_bash_test";
+        let write_item = |id: &str, turn: &str, order: i64, path: &str, call: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = TurnItemKind::FileChange;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.detail = Some(format!("Successfully wrote 5 bytes to {path}"));
+            item.metadata = Some(tool_metadata(
+                call,
+                "write",
+                &format!("{{\"path\":\"{path}\",\"content\":\"x\\n\"}}"),
+            ));
+            item
+        };
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+
+        let turn_one = "turn_writes_file";
+        let turn_two = "turn_after";
+        let items = vec![
+            text_item(
+                "item_u1",
+                turn_one,
+                0,
+                TurnItemKind::UserMessage,
+                "write test.txt",
+            ),
+            text_item(
+                "item_r1",
+                turn_one,
+                1,
+                TurnItemKind::AgentReasoning,
+                "I will write it.",
+            ),
+            write_item("item_f1", turn_one, 2, "test.txt", write_call),
+            {
+                let mut item = sample_item(turn_one, "item_t1", TurnItemLifecycleStatus::Completed);
+                item.kind = TurnItemKind::ToolCall;
+                item.started_at = at(3);
+                item.ended_at = item.started_at;
+                // The raw output keeps the newline the route's compaction trims
+                // before the model ever sees it.
+                item.detail = Some("test.txt\n".to_string());
+                item.metadata = Some(tool_metadata(
+                    bash_call,
+                    "bash",
+                    "{\"command\":\"ls -l test.txt\"}",
+                ));
+                item
+            },
+            text_item(
+                "item_a1",
+                turn_one,
+                4,
+                TurnItemKind::AgentMessage,
+                "created test.txt",
+            ),
+            text_item(
+                "item_u2",
+                turn_two,
+                5,
+                TurnItemKind::UserMessage,
+                "write test2.txt",
+            ),
+            write_item("item_f2", turn_two, 6, "test2.txt", "call_write_second"),
+            text_item(
+                "item_a2",
+                turn_two,
+                7,
+                TurnItemKind::AgentMessage,
+                "created test2.txt",
+            ),
+        ];
+        for item in &items {
+            manager.store.save_item(item)?;
+        }
+        for (turn_id, order) in [(turn_one, 0), (turn_two, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_two.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // The model-visible transcript: prompts (each with the per-turn
+        // preamble), the write pair the items cannot reproduce, and the bash
+        // result as the route left it.
+        let transcript: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[
+                {"type":"text","text":"write test.txt"},
+                {"type":"text","text":"<turn_meta>\nCurrent local date: 2026-09-24\n</turn_meta>"}]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"I will write it."},
+                {"type":"tool_use","id":write_call,"name":"write","input":{"path":"test.txt","content":"x\n"}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":write_call,"content":"Successfully wrote 5 bytes to test.txt"}]},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"verify"},
+                {"type":"tool_use","id":bash_call,"name":"bash","input":{"command":"ls -l test.txt"}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":bash_call,"content":"test.txt"}]},
+            {"role":"assistant","content":[
+                {"type":"text","text":"created test.txt"}]},
+            {"role":"user","content":[
+                {"type":"text","text":"write test2.txt"},
+                {"type":"text","text":"<turn_meta>\nCurrent local date: 2026-09-24\n</turn_meta>"}]},
+            {"role":"assistant","content":[
+                {"type":"text","text":"created test2.txt"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &transcript,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        let prepared = manager.prepare_fork_at_user_message(&thread.id, 0).await?;
+        let (_, prefix, _) = prepared
+            .own_session
+            .as_ref()
+            .context("a prepared backtrack carries the prefix it keeps")?;
+        assert_eq!(
+            prefix.as_slice(),
+            &transcript[..6],
+            "the fork keeps exactly the messages before the undone turn"
+        );
+        let (fork, _, _, _) = manager.publish_prepared_fork(prepared).await?;
+        assert_eq!(manager.restore_thread_messages(&fork)?, transcript[..6]);
+
+        // Undoing the second turn back (`depth` 1) keeps nothing: the first
+        // turn's own prompt is the anchor, so the boundary is the first message.
+        let first_turn = manager.prepare_fork_at_user_message(&thread.id, 1).await?;
+        let (_, prefix, _) = first_turn
+            .own_session
+            .as_ref()
+            .context("a prepared backtrack carries the prefix it keeps")?;
+        assert!(prefix.is_empty(), "undoing the first turn keeps no history");
+
+        // A transcript that no longer lines up with the turn records must refuse
+        // rather than cut where it cannot account for the history: the undone
+        // turn's prompt is the anchor here, not a coincidence to match.
+        let mut drifted = transcript.clone();
+        drifted[6] = serde_json::from_value(json!({
+            "role":"user","content":[
+                {"type":"text","text":"a prompt no turn records"},
+                {"type":"text","text":"<turn_meta>\nCurrent local date: 2026-09-24\n</turn_meta>"}]}))?;
+        let drifted_session = crate::session_manager::create_saved_session_with_id_and_mode(
+            saved.metadata.id.clone(),
+            &drifted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&drifted_session)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &drifted_session)
+                .await?;
+        }
+        let error = match manager.prepare_fork_at_user_message(&thread.id, 0).await {
+            Ok(_) => panic!("a drifted transcript must not be cut"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot identify an exact saved-history boundary"),
+            "the refusal names the boundary it could not find: {error}"
+        );
+        Ok(())
+    }
+
+    /// A fork's checkpoint has to describe the document as a reader sees it.
+    ///
+    /// A saved session is repaired on the way out, and `resume_session` writes
+    /// that repair back: tool calls and results are re-paired, and a prefix
+    /// written from turn records can hold a shape the repair changes. A
+    /// fingerprint taken over the written shape then describes bytes no reader
+    /// sees — `thread_holding_session` rejects the fork's own thread, resuming
+    /// the session starts a second one, and that second thread's save leaves
+    /// the first stale, so the branch's next message fails with "Saved session
+    /// … changed after this thread's checkpoint".
+    #[tokio::test]
+    async fn a_fork_fingerprints_the_document_its_readers_see() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        fn tool_metadata(call: &str, name: &str, input: &str) -> Value {
+            json!({
+                "tool_use_id": call,
+                "tool_name": name,
+                "tool_input": input,
+                "tool_result_for": call,
+                "is_error": false,
+            })
+        }
+        let write_call = "call_write_fingerprint";
+        let bash_call = "call_bash_fingerprint";
+        let turn_one = "turn_fingerprint_one";
+        let turn_two = "turn_fingerprint_two";
+
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+        // Two tool calls in one turn: the shapes a reconstruction and the
+        // session repair do not have to agree on.
+        let mut write_item = sample_item(turn_one, "item_f1", TurnItemLifecycleStatus::Completed);
+        write_item.kind = TurnItemKind::FileChange;
+        write_item.started_at = at(2);
+        write_item.ended_at = write_item.started_at;
+        write_item.detail = Some("Successfully wrote 5 bytes to test.txt".to_string());
+        write_item.metadata = Some(tool_metadata(
+            write_call,
+            "write",
+            "{\"path\":\"test.txt\",\"content\":\"x\\n\"}",
+        ));
+        let mut bash_item = sample_item(turn_one, "item_t1", TurnItemLifecycleStatus::Completed);
+        bash_item.kind = TurnItemKind::ToolCall;
+        bash_item.started_at = at(3);
+        bash_item.ended_at = bash_item.started_at;
+        bash_item.detail = Some("test.txt\n".to_string());
+        bash_item.metadata = Some(tool_metadata(
+            bash_call,
+            "bash",
+            "{\"command\":\"ls -l test.txt\"}",
+        ));
+        // A third call whose result never arrived — an interrupted turn. The
+        // records keep the call, and the session repair pairs it on the way
+        // out, so what a reader sees is not what was written.
+        let mut interrupted = sample_item(turn_one, "item_t2", TurnItemLifecycleStatus::Failed);
+        interrupted.kind = TurnItemKind::ToolCall;
+        interrupted.started_at = at(4);
+        interrupted.ended_at = interrupted.started_at;
+        interrupted.summary = "bash (interrupted)".to_string();
+        interrupted.metadata = Some(json!({
+            "tool_use_id": "call_interrupted",
+            "tool_name": "bash",
+            "tool_input": "{\"command\":\"sleep 30\"}",
+        }));
+
+        for item in [
+            text_item(
+                "item_u1",
+                turn_one,
+                0,
+                TurnItemKind::UserMessage,
+                "write test.txt",
+            ),
+            text_item(
+                "item_r1",
+                turn_one,
+                1,
+                TurnItemKind::AgentReasoning,
+                "I will write it.",
+            ),
+            write_item,
+            bash_item,
+            interrupted,
+            text_item(
+                "item_a1",
+                turn_one,
+                5,
+                TurnItemKind::AgentMessage,
+                "created test.txt",
+            ),
+            text_item(
+                "item_u2",
+                turn_two,
+                5,
+                TurnItemKind::UserMessage,
+                "now read it",
+            ),
+            text_item(
+                "item_a2",
+                turn_two,
+                6,
+                TurnItemKind::AgentMessage,
+                "read it",
+            ),
+            text_item(
+                "item_c1",
+                turn_two,
+                7,
+                TurnItemKind::ContextCompaction,
+                "Made room: 1383 → 21 messages",
+            ),
+        ] {
+            manager.store.save_item(&item)?;
+        }
+        for (turn_id, order) in [(turn_one, 0), (turn_two, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_two.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // The compacted source's document: the prompts verbatim, the work
+        // between them summarized away — what a branch rebuilds from the
+        // records instead of slicing.
+        let compacted: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"write test.txt"}]},
+            {"role":"user","content":[{"type":"text","text":"now read it"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &compacted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        // Undo the last turn: the fork keeps the first one, tool calls and all.
+        let (fork, _, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        let session_id = fork
+            .session_id
+            .clone()
+            .context("a published fork owns a session document")?;
+        let checkpoint = fork
+            .saved_session_checkpoint
+            .as_ref()
+            .context("a published fork carries a checkpoint")?;
+
+        // What every reader sees: `resume_session` repairs the document and
+        // writes the repair back, which is the shape the fingerprint must name.
+        let read_back = sessions.resume_session(&session_id)?.session;
+        assert_eq!(
+            checkpoint.messages_sha256,
+            session_messages_sha256(&read_back.messages)?,
+            "the fork's checkpoint must describe the document as readers see it: {:#?}",
+            read_back.messages
+        );
+
+        // And the thread that holds the session is recognised, so opening the
+        // session again reuses it instead of adding a second thread whose save
+        // would leave this one stale.
+        assert_eq!(
+            manager
+                .thread_holding_session(&session_id, &read_back)
+                .map(|held| held.id),
+            Some(fork.id.clone()),
+            "resuming the fork's session must find the fork's own thread"
+        );
+        Ok(())
+    }
+    ///
+    /// Compaction rewrites the model-visible history in place: the prompts stay
+    /// A fork of a *compacted* conversation keeps the whole exchange.
+    ///
+    /// Compaction rewrites the model-visible history in place: the prompts stay
+    /// verbatim, the answers and the tool work around them are summarized into
+    /// the session's system prompt. Slicing that abbreviation into a fork's own
+    /// document claims, through its checkpoint, coverage the document does not
+    /// carry — a client then reads a run of prompts with the agent's answers
+    /// missing, and `restore_thread_messages` cannot rebuild them either,
+    /// because the checkpoint tells it the prefix covers those turns already.
+    ///
+    /// The records keep every item of every turn, so the fork rebuilds the kept
+    /// exchanges instead of copying the summary's view of them.
+    #[tokio::test]
+    async fn fork_of_a_compacted_conversation_keeps_the_agent_output() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+
+        let turn_one = "turn_before_compaction";
+        let turn_two = "turn_of_compaction";
+        for item in [
+            text_item(
+                "item_u1",
+                turn_one,
+                0,
+                TurnItemKind::UserMessage,
+                "write test.txt",
+            ),
+            text_item(
+                "item_a1",
+                turn_one,
+                1,
+                TurnItemKind::AgentMessage,
+                "created test.txt",
+            ),
+            text_item(
+                "item_u2",
+                turn_two,
+                2,
+                TurnItemKind::UserMessage,
+                "write test2.txt",
+            ),
+            text_item(
+                "item_a2",
+                turn_two,
+                3,
+                TurnItemKind::AgentMessage,
+                "created test2.txt",
+            ),
+            text_item(
+                "item_c1",
+                turn_two,
+                4,
+                TurnItemKind::ContextCompaction,
+                "Made room: 1383 → 21 messages",
+            ),
+        ] {
+            manager.store.save_item(&item)?;
+        }
+        for (turn_id, order) in [(turn_one, 0), (turn_two, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_two.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // What the engine persisted once compaction had run: the two prompts
+        // verbatim, and none of the work that happened between them. The
+        // summary itself rides in the session's system prompt, which is why the
+        // saved messages read as a bare list of what was asked.
+        let compacted: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"write test.txt"}]},
+            {"role":"user","content":[{"type":"text","text":"write test2.txt"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &compacted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        // Branch at the last turn, the way the transcript's "continue from
+        // here" row does: the whole conversation is kept, and every bit of it
+        // has to survive into the fork's own document.
+        let (fork, _, _, _) = manager.fork_at_user_turn(&thread.id, turn_two).await?;
+        let fork_session_id = fork
+            .session_id
+            .clone()
+            .context("a published fork owns a session document")?;
+        assert_ne!(fork_session_id, saved.metadata.id);
+        let document = sessions.load_session(&fork_session_id)?;
+        let roles: Vec<&str> = document
+            .messages
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "user", "assistant"],
+            "the fork's document is the exchange, not the {} saved prompts: {:#?}",
+            compacted.len(),
+            document.messages
+        );
+        let restored = manager.restore_thread_messages(&fork)?;
+        assert_eq!(
+            document.messages, restored,
+            "the document a client reads is the conversation the engine restores"
+        );
+        let rendered = serde_json::to_string(&document.messages)?;
+        for answer in ["created test.txt", "created test2.txt"] {
+            assert!(
+                rendered.contains(answer),
+                "the agent's answer {answer:?} survives the fork: {:#?}",
+                document.messages
+            );
+        }
+
+        // A depth-relative cut of the same compacted source — the shape undo
+        // and retry use — keeps the exchange it did not drop, likewise whole.
+        let (undo_fork, _, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        let undo_document = sessions.load_session(
+            undo_fork
+                .session_id
+                .as_deref()
+                .context("a published fork owns a session document")?,
+        )?;
+        let undo_roles: Vec<&str> = undo_document
+            .messages
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(
+            undo_roles,
+            ["user", "assistant"],
+            "a depth-relative cut keeps the first turn's exchange: {:#?}",
+            undo_document.messages
+        );
+        Ok(())
+    }
+
+    /// A tool call whose outcome never reached the turn store — the tool
+    /// failed, so the item carries the failure text and no result item follows
+    /// — used to rebuild as a call with no answer. Two things then went wrong
+    /// on a fork of that conversation: the response *after* the lost call was
+    /// glued into the same assistant message (no result had flushed it), and
+    /// the request-time repair answered the call by inserting a result next to
+    /// a message that now held two responses. DeepSeek's Responses API reads
+    /// that history as `400 No tool output found for tool call …` on every
+    /// turn the fork ran, and the repaired document no longer matched the
+    /// records, so retrying the fork refused with "cannot identify an exact
+    /// saved-history boundary".
+    #[tokio::test]
+    async fn a_rebuilt_turn_answers_a_tool_call_whose_outcome_the_store_lost() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        let base = Utc::now();
+        let at = |seconds: i64| Some(base + chrono::Duration::seconds(seconds));
+
+        let text_item = |id: &str, turn: &str, order: i64, kind: TurnItemKind, text: &str| {
+            let mut item = sample_item(turn, id, TurnItemLifecycleStatus::Completed);
+            item.kind = kind;
+            item.started_at = at(order);
+            item.ended_at = item.started_at;
+            item.summary = text.to_string();
+            item.detail = Some(text.to_string());
+            item
+        };
+
+        // Two responses in one turn: the first asked for a build that the tool
+        // reported as failed without recording a result, the second answered
+        // and ran the tests, which did.
+        let turn_lost = "turn_lost_the_call";
+        let mut lost = sample_item(turn_lost, "item_call_lost", TurnItemLifecycleStatus::Failed);
+        lost.kind = TurnItemKind::ToolCall;
+        lost.started_at = at(2);
+        lost.ended_at = lost.started_at;
+        lost.summary = "bash failed: Failed to execute tool: boom".to_string();
+        lost.detail = Some("Failed to execute tool: boom".to_string());
+        lost.metadata = Some(json!({
+            "tool_use_id": "call_lost",
+            "tool_name": "bash",
+            "tool_input": "{\"command\":\"cargo build\"}",
+        }));
+        let mut kept = sample_item(
+            turn_lost,
+            "item_call_kept",
+            TurnItemLifecycleStatus::Completed,
+        );
+        kept.kind = TurnItemKind::ToolCall;
+        kept.started_at = at(5);
+        kept.ended_at = kept.started_at;
+        kept.summary = "bash: 12 passed".to_string();
+        kept.detail = Some("12 passed".to_string());
+        kept.metadata = Some(json!({
+            "tool_use_id": "call_kept",
+            "tool_result_for": "call_kept",
+            "tool_name": "bash",
+            "tool_input": "{\"command\":\"cargo test\"}",
+        }));
+
+        let turn_after = "turn_of_compaction";
+        for record in [
+            text_item(
+                "item_u1",
+                turn_lost,
+                0,
+                TurnItemKind::UserMessage,
+                "run the build",
+            ),
+            text_item(
+                "item_r1",
+                turn_lost,
+                1,
+                TurnItemKind::AgentReasoning,
+                "the compiler will tell us what is missing",
+            ),
+            lost,
+            text_item(
+                "item_s1",
+                turn_lost,
+                3,
+                TurnItemKind::Status,
+                "Continuing — tool results",
+            ),
+            text_item(
+                "item_r2",
+                turn_lost,
+                4,
+                TurnItemKind::AgentReasoning,
+                "the build failed; the tests still say something",
+            ),
+            kept,
+            text_item(
+                "item_a1",
+                turn_lost,
+                6,
+                TurnItemKind::AgentMessage,
+                "the build failed, the tests passed",
+            ),
+            text_item(
+                "item_u2",
+                turn_after,
+                7,
+                TurnItemKind::UserMessage,
+                "and now the next thing",
+            ),
+            text_item(
+                "item_c1",
+                turn_after,
+                8,
+                TurnItemKind::ContextCompaction,
+                "Made room: 40 → 21 messages",
+            ),
+        ] {
+            manager.store.save_item(&record)?;
+        }
+        for (turn_id, order) in [(turn_lost, 0), (turn_after, 10)] {
+            let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+            turn.started_at = at(order);
+            turn.ended_at = turn.started_at;
+            manager.store.save_turn(&turn)?;
+        }
+        let mut stored = manager.get_thread(&thread.id).await?;
+        stored.latest_turn_id = Some(turn_after.to_string());
+        manager.store.save_thread(&stored)?;
+
+        // The engine's transcript for that conversation once compaction ran:
+        // the prompts verbatim, nothing that happened between them. A cut has
+        // to rebuild the exchange from the records — the path this covers.
+        let compacted: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"run the build"}]},
+            {"role":"user","content":[{"type":"text","text":"and now the next thing"}]}
+        ]))?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &compacted,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+
+        let (fork, _, _, _) = manager.fork_at_user_turn(&thread.id, turn_lost).await?;
+        let fork_session_id = fork
+            .session_id
+            .clone()
+            .context("a published fork owns a session document")?;
+        let document = sessions.load_session(&fork_session_id)?;
+        let shape = |messages: &[Message]| -> Vec<(String, Vec<&'static str>)> {
+            messages
+                .iter()
+                .map(|message| {
+                    let blocks = message
+                        .content
+                        .iter()
+                        .map(|block| match block {
+                            ContentBlock::Text { .. } => "text",
+                            ContentBlock::Thinking { .. } => "thinking",
+                            ContentBlock::ToolUse { .. } => "tool_use",
+                            ContentBlock::ToolResult { .. } => "tool_result",
+                            _ => "other",
+                        })
+                        .collect();
+                    (message.role.as_str().to_string(), blocks)
+                })
+                .collect()
+        };
+        assert_eq!(
+            shape(&document.messages),
+            vec![
+                ("user".to_string(), vec!["text"]),
+                ("assistant".to_string(), vec!["thinking", "tool_use"]),
+                ("user".to_string(), vec!["tool_result"]),
+                ("assistant".to_string(), vec!["thinking", "tool_use"]),
+                ("user".to_string(), vec!["tool_result"]),
+                ("assistant".to_string(), vec!["text"]),
+            ],
+            "each response keeps its own call and its own answer: {:#?}",
+            document.messages
+        );
+        let calls: Vec<&str> = document
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let answers: Vec<(&str, &str)> = document
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => Some((tool_use_id.as_str(), content.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, ["call_lost", "call_kept"]);
+        assert_eq!(
+            answers
+                .iter()
+                .map(|(tool_use_id, _)| *tool_use_id)
+                .collect::<Vec<_>>(),
+            ["call_lost", "call_kept"],
+            "no call is left unanswered: {:#?}",
+            document.messages
+        );
+        assert!(
+            answers[0].1.contains("Failed to execute tool: boom"),
+            "the lost call keeps the failure the turn recorded: {:#?}",
+            answers
+        );
+
+        // Now the fork's own life: the engine loads it with the source's
+        // compaction summary as its system prompt, so the synced history grows
+        // the checkpoint message *before* the fork's first turn, and two turns
+        // follow it. Retrying the fork — a depth-relative cut of its last turn
+        // — walks a document whose middle holds a message no record produced.
+        let mut extended = document.messages.clone();
+        extended.push(crate::compaction::compaction_checkpoint_message(
+            &SystemPrompt::Text(format!(
+                "{} the work so far",
+                crate::compaction::SUMMARY_HEADER
+            )),
+        ));
+        let first_prompt = "and now?";
+        let second_prompt = "keep going";
+        let tail: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":first_prompt}]},
+            {"role":"user","content":[{"type":"text","text":second_prompt}]}
+        ]))?;
+        extended.extend(tail.clone());
+        let mut rebound = sessions.load_session(&fork_session_id)?;
+        rebound.messages = extended;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&rebound)?;
+            manager.seed_thread_from_messages(&fork.id, &tail).await?;
+            manager
+                .set_thread_session_checkpoint(&fork.id, &rebound)
+                .await?;
+        }
+
+        let (undo, _, _, _) = manager.fork_at_user_message(&fork.id, 0).await?;
+        let undo_document = sessions.load_session(
+            undo.session_id
+                .as_deref()
+                .context("a published fork owns a session document")?,
+        )?;
+        assert_eq!(
+            projected_user_texts(&undo_document.messages),
+            ["run the build".to_string(), first_prompt.to_string()],
+            "the cut keeps the exchange and the first post-fork turn, and reads \
+             past the engine's checkpoint: {:#?}",
+            undo_document.messages
+        );
+        assert_eq!(
+            undo_document
+                .messages
+                .iter()
+                .flat_map(|message| message.content.iter())
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["call_lost", "call_kept"],
+            "the successor keeps the answered calls whole: {:#?}",
+            undo_document.messages
+        );
         Ok(())
     }
 
@@ -872,6 +2063,21 @@ const EVENT_PROCESS_HELPER: &str = "runtime_threads::tests::runtime_event_proces
 // a test watchdog, not an expected runtime latency or a customer-facing SLO.
 const TURN_SETTLEMENT_DEADLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Durable record ids carry a full UUID: records live in flat per-kind
+/// directories and a save replaces by id, so a short suffix would let one
+/// thread's record overwrite another's.
+#[test]
+fn runtime_record_ids_carry_a_full_uuid() {
+    let id = runtime_record_id("thr");
+    let suffix = id.strip_prefix("thr_").expect("prefix");
+    assert_eq!(suffix.len(), 32, "{id}");
+    assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()), "{id}");
+    assert_eq!(validated_record_id(&id, "thread id").expect("valid"), id);
+    let ids: std::collections::HashSet<String> =
+        (0..10_000).map(|_| runtime_record_id("item")).collect();
+    assert_eq!(ids.len(), 10_000);
+}
+
 #[test]
 #[ignore = "spawned by real cross-process Runtime event tests"]
 fn runtime_event_process_child_helper() {
@@ -933,24 +2139,26 @@ fn runtime_event_process_child_helper() {
                 .expect("event writer count must be numeric");
             std::fs::write(&signal, b"ready").expect("announce ready event writer");
             wait_for_runtime_event_test_file(&start, "writer start barrier");
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build event writer runtime");
-            runtime.block_on(async {
-                for index in 0..count {
-                    store
-                        .append_event(
-                            &thread_id,
-                            None,
-                            None,
-                            "process.event",
-                            json!({ "worker": worker, "index": index }),
-                        )
-                        .await
-                        .expect("append cross-process Runtime event");
-                }
-            });
+            // The same transaction `append_event` runs, with a lock budget
+            // sized for contention rather than the interactive 5 s default.
+            // The claim here is that sequences never collide across
+            // processes; four writers each fsyncing eight appends on a loaded
+            // CI runner have starved one polling writer past 5 s (macOS and
+            // Windows), which failed the run without any duplicate sequence.
+            // 25 s stays inside the parent's 30 s wait, so a genuinely stuck
+            // lock still fails here with its own message.
+            for index in 0..count {
+                store
+                    .append_event_transaction(
+                        thread_id.clone(),
+                        None,
+                        None,
+                        "process.event".to_string(),
+                        json!({ "worker": worker, "index": index }),
+                        Duration::from_secs(25),
+                    )
+                    .expect("append cross-process Runtime event");
+            }
         }
         "holder" => {
             store
@@ -1183,8 +2391,20 @@ fn test_manager(data_dir: PathBuf) -> Result<RuntimeThreadManager> {
     )
 }
 
+/// Serializes tests that set or read the process-wide approval-timeout
+/// override, so a parallel test never sees another test's value.
+static APPROVAL_TIMEOUT_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_approval_timeout_override() -> std::sync::MutexGuard<'static, ()> {
+    APPROVAL_TIMEOUT_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct ApprovalTimeoutGuard {
     previous_ms: u64,
+    // Dropped after `drop` restores the previous value.
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for ApprovalTimeoutGuard {
@@ -1194,8 +2414,10 @@ impl Drop for ApprovalTimeoutGuard {
 }
 
 fn test_approval_timeout_ms(ms: u64) -> ApprovalTimeoutGuard {
+    let lock = lock_approval_timeout_override();
     ApprovalTimeoutGuard {
         previous_ms: set_test_approval_decision_timeout_ms(ms),
+        _lock: lock,
     }
 }
 
@@ -1304,6 +2526,9 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         item_ids: Vec::new(),
         steer_count: 0,
         agent_mail_message_id: None,
+        artifacts: Vec::new(),
+        workspace: None,
+        workspace_snapshots: Vec::new(),
     }
 }
 
@@ -1534,9 +2759,9 @@ async fn explicit_local_thread_model_does_not_require_an_unrelated_default_catal
     let root = tempfile::tempdir()?;
     let config = Config {
         provider: Some("ollama".into()),
-        base_url: Some("http://127.0.0.1:11497/v1".into()),
         ..Config::default()
-    };
+    }
+    .with_legacy_root(None, Some("http://127.0.0.1:11497/v1".into()));
     let manager = RuntimeThreadManager::open(
         config,
         root.path().to_path_buf(),
@@ -1637,13 +2862,13 @@ async fn named_custom_thread_identity_round_trips_and_fails_closed_when_removed(
 }
 
 #[test]
-fn legacy_literal_custom_thread_resume_requires_and_keeps_root_route() -> Result<()> {
+fn legacy_literal_custom_thread_resumes_on_the_migrated_table() -> Result<()> {
     let config = Config {
         provider: Some("custom".to_string()),
-        base_url: Some("http://127.0.0.1:18180/v1".to_string()),
         default_text_model: Some("legacy-default-model".to_string()),
         ..Config::default()
-    };
+    }
+    .with_legacy_root(None, Some("http://127.0.0.1:18180/v1".to_string()));
     let manager = RuntimeThreadManager::open(
         config.clone(),
         PathBuf::from("."),
@@ -1662,14 +2887,7 @@ fn legacy_literal_custom_thread_resume_requires_and_keeps_root_route() -> Result
         route.config.active_route_base_url(),
         "http://127.0.0.1:18180/v1"
     );
-    assert!(
-        route
-            .config
-            .providers
-            .as_ref()
-            .is_none_or(|providers| !providers.custom.contains_key("custom")),
-        "route resolution must not synthesize an ambiguous [providers.custom] table"
-    );
+    // The top-level route is the `[providers.custom]` table since #6394.
     assert_eq!(
         route
             .config
@@ -1678,7 +2896,7 @@ fn legacy_literal_custom_thread_resume_requires_and_keeps_root_route() -> Result
         crate::config::ProviderIdentity {
             provider: ApiProvider::Custom,
             key: "custom".to_string(),
-            exact_id: None,
+            exact_id: Some("custom".to_string()),
             migrated_legacy_ollama_cloud_route: false,
         }
     );
@@ -1714,20 +2932,20 @@ fn legacy_literal_custom_thread_resume_requires_and_keeps_root_route() -> Result
         .resolved_route_for_thread(&named_config, &restored)
         .expect_err("id-less root record must not migrate to a named table")
         .to_string();
-    assert!(error.contains("root-level"), "{error}");
+    assert!(error.contains("[providers.custom]"), "{error}");
     assert!(error.contains("will not guess or fall back"), "{error}");
 
     Ok(())
 }
 
 #[tokio::test]
-async fn root_custom_thread_and_turn_writers_omit_exact_id() -> Result<()> {
+async fn literal_custom_thread_and_turn_writers_record_the_table_id() -> Result<()> {
     let config = Config {
         provider: Some("custom".to_string()),
-        base_url: Some("http://127.0.0.1:18180/v1".to_string()),
         default_text_model: Some("legacy-root-model".to_string()),
         ..Config::default()
-    };
+    }
+    .with_legacy_root(None, Some("http://127.0.0.1:18180/v1".to_string()));
     let manager = RuntimeThreadManager::open(
         config,
         PathBuf::from("."),
@@ -1739,9 +2957,9 @@ async fn root_custom_thread_and_turn_writers_omit_exact_id() -> Result<()> {
             ..CreateThreadRequest::default()
         })
         .await?;
+    // The literal route is the `[providers.custom]` table since #6394.
     assert_eq!(thread.model_provider.as_deref(), Some("custom"));
-    assert_eq!(thread.model_provider_id, None);
-    assert!(!serde_json::to_string(&thread)?.contains("model_provider_id"));
+    assert_eq!(thread.model_provider_id.as_deref(), Some("custom"));
 
     let mut harness = install_mock_engine(&manager, &thread.id).await;
     let turn = manager
@@ -1754,12 +2972,11 @@ async fn root_custom_thread_and_turn_writers_omit_exact_id() -> Result<()> {
         )
         .await?;
     assert_eq!(turn.effective_provider.as_deref(), Some("custom"));
-    assert_eq!(turn.effective_provider_id, None);
-    assert!(!serde_json::to_string(&turn)?.contains("effective_provider_id"));
+    assert_eq!(turn.effective_provider_id.as_deref(), Some("custom"));
     match harness.rx_op.recv().await {
         Some(Op::SendMessage(TurnSpec { route, .. })) => {
             assert_eq!(route.identity.key, "custom");
-            assert_eq!(route.identity.exact_id, None);
+            assert_eq!(route.identity.exact_id.as_deref(), Some("custom"));
             assert_eq!(
                 route.config.active_route_base_url(),
                 "http://127.0.0.1:18180/v1"
@@ -2575,6 +3792,9 @@ mod turn_operation_lookup {
         })
     }
 
+    // Callers snapshot the manager-owned runtime directory. CODEWHALE_HOME is
+    // process-wide, so unrelated parallel tests can write elsewhere beneath
+    // the temporary root while a read-only operation is being checked.
     fn directory_bytes(
         root: &Path,
     ) -> Result<std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>> {
@@ -2638,13 +3858,13 @@ mod turn_operation_lookup {
             }
             assert_eq!(manager.store.owner_id, owner_id);
             assert!(manager.active.lock().await.engines.is_empty());
-            let before = directory_bytes(temp.path())?;
+            let before = directory_bytes(&runtime_dir)?;
             let observed = manager
                 .lookup_turn_operation(&thread.id, key)?
                 .context("accepted operation must remain available")?;
             assert_eq!(serde_json::to_value(observed)?, expected);
             assert!(manager.active.lock().await.engines.is_empty());
-            assert_eq!(directory_bytes(temp.path())?, before);
+            assert_eq!(directory_bytes(&runtime_dir)?, before);
         }
         Ok(())
     }
@@ -2655,7 +3875,8 @@ mod turn_operation_lookup {
         let _env = crate::test_support::lock_test_env();
         let temp = tempfile::tempdir()?;
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
-        let manager = test_manager(temp.path().join("runtime"))?;
+        let runtime_dir = temp.path().join("runtime");
+        let manager = test_manager(runtime_dir.clone())?;
         let thread = sample_thread("thr_lookup_incomplete");
         let turn = sample_turn(
             &thread.id,
@@ -2667,9 +3888,9 @@ mod turn_operation_lookup {
         let lock_path = manager
             .store
             .turn_operation_lock_path(&binding.operation_key_fingerprint)?;
-        let before = directory_bytes(temp.path())?;
+        let before = directory_bytes(&runtime_dir)?;
         assert!(manager.lookup_turn_operation(&thread.id, key)?.is_none());
-        assert_eq!(directory_bytes(temp.path())?, before);
+        assert_eq!(directory_bytes(&runtime_dir)?, before);
 
         drop(
             manager
@@ -2681,13 +3902,13 @@ mod turn_operation_lookup {
         manager.store.save_thread(&thread)?;
         manager.store.save_turn(&turn)?;
         manager.store.save_turn_operation_binding(&binding)?;
-        let before = directory_bytes(temp.path())?;
+        let before = directory_bytes(&runtime_dir)?;
         assert!(matches!(
             manager.lookup_turn_operation(&thread.id, key),
             Err(Incomplete)
         ));
         assert_eq!(
-            directory_bytes(temp.path())?,
+            directory_bytes(&runtime_dir)?,
             before,
             "lookup cannot recreate a missing lock"
         );
@@ -2698,13 +3919,13 @@ mod turn_operation_lookup {
                 .open_turn_operation_claim_lock(&binding.operation_key_fingerprint)?,
         );
         manager.store.remove_turn(&turn.id)?;
-        let before = directory_bytes(temp.path())?;
+        let before = directory_bytes(&runtime_dir)?;
         assert!(matches!(
             manager.lookup_turn_operation(&thread.id, key),
             Err(Incomplete)
         ));
         assert_eq!(
-            directory_bytes(temp.path())?,
+            directory_bytes(&runtime_dir)?,
             before,
             "lookup cannot recover a torn binding"
         );
@@ -2716,12 +3937,12 @@ mod turn_operation_lookup {
                 .open_turn_operation_claim_lock(&binding.operation_key_fingerprint)?,
         );
         let guard = claim.try_write()?;
-        let before = directory_bytes(temp.path())?;
+        let before = directory_bytes(&runtime_dir)?;
         assert!(matches!(
             manager.lookup_turn_operation(&thread.id, key),
             Err(Incomplete)
         ));
-        assert_eq!(directory_bytes(temp.path())?, before);
+        assert_eq!(directory_bytes(&runtime_dir)?, before);
         drop(guard);
         assert_eq!(
             manager.lookup_turn_operation(&thread.id, key)?.unwrap().id,
@@ -2738,7 +3959,8 @@ mod turn_operation_lookup {
         let _env = crate::test_support::lock_test_env();
         let temp = tempfile::tempdir()?;
         let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
-        let manager = test_manager(temp.path().join("runtime"))?;
+        let runtime_dir = temp.path().join("runtime");
+        let manager = test_manager(runtime_dir.clone())?;
         let thread = sample_thread("thr_lookup_scope");
         let turn = sample_turn(
             &thread.id,
@@ -2787,12 +4009,12 @@ mod turn_operation_lookup {
             write_json_atomic(&binding_path, &candidate_binding)?;
             write_json_atomic(&turn_path, &candidate_turn)?;
             write_json_atomic(&thread_path, &candidate_thread)?;
-            let before = directory_bytes(temp.path())?;
+            let before = directory_bytes(&runtime_dir)?;
             assert!(
                 manager.lookup_turn_operation(&thread.id, key)?.is_none(),
                 "{mismatch}"
             );
-            assert_eq!(directory_bytes(temp.path())?, before, "{mismatch}");
+            assert_eq!(directory_bytes(&runtime_dir)?, before, "{mismatch}");
         }
         manager.store.save_thread(&thread)?;
         manager.store.save_turn(&turn)?;
@@ -3225,7 +4447,7 @@ async fn concurrent_turn_starts_leave_one_claim_and_one_consistent_durable_turn(
 }
 
 #[test]
-fn legacy_custom_thread_stays_on_root_when_literal_table_coexists() -> Result<()> {
+fn legacy_custom_thread_resumes_on_the_literal_table_when_both_exist() -> Result<()> {
     let mut custom = std::collections::HashMap::new();
     custom.insert(
         "custom".to_string(),
@@ -3238,14 +4460,14 @@ fn legacy_custom_thread_stays_on_root_when_literal_table_coexists() -> Result<()
     );
     let config = Config {
         provider: Some("custom".to_string()),
-        base_url: Some("http://127.0.0.1:18181/v1".to_string()),
         default_text_model: Some("legacy-root-model".to_string()),
         providers: Some(crate::config::ProvidersConfig {
             custom,
             ..crate::config::ProvidersConfig::default()
         }),
         ..Config::default()
-    };
+    }
+    .with_legacy_root(None, Some("http://127.0.0.1:18181/v1".to_string()));
     let manager = RuntimeThreadManager::open(
         config.clone(),
         PathBuf::from("."),
@@ -3256,13 +4478,15 @@ fn legacy_custom_thread_stays_on_root_when_literal_table_coexists() -> Result<()
     legacy.model_provider = Some("custom".to_string());
     legacy.model_provider_id = None;
 
+    // Beside the literal table, the older top-level endpoint is DeepSeek's
+    // (#6394): an id-less record resumes on the table like an exact one.
     let root = manager.resolved_route_for_thread(&config, &legacy)?;
     assert_eq!(root.identity.provider, ApiProvider::Custom);
     assert_eq!(root.identity.key, "custom");
-    assert_eq!(root.identity.exact_id, None);
+    assert_eq!(root.identity.exact_id.as_deref(), Some("custom"));
     assert_eq!(
         root.config.active_route_base_url(),
-        "http://127.0.0.1:18181/v1"
+        "http://127.0.0.1:18182/v1"
     );
 
     legacy.model_provider_id = Some("custom".to_string());
@@ -3276,16 +4500,17 @@ fn legacy_custom_thread_stays_on_root_when_literal_table_coexists() -> Result<()
     );
     let root_only = Config {
         provider: Some("custom".to_string()),
-        base_url: Some("http://127.0.0.1:18181/v1".to_string()),
         default_text_model: Some("legacy-root-model".to_string()),
         ..Config::default()
-    };
-    let error = manager
-        .resolved_route_for_thread(&root_only, &legacy)
-        .expect_err("exact literal table thread must not fall back to root")
-        .to_string();
-    assert!(error.contains("[providers.custom]"), "{error}");
-    assert!(error.contains("will not fall back"), "{error}");
+    }
+    .with_legacy_root(None, Some("http://127.0.0.1:18181/v1".to_string()));
+    // A top-level-only literal route became the table, so the exact thread
+    // resumes on it.
+    let resumed = manager.resolved_route_for_thread(&root_only, &legacy)?;
+    assert_eq!(
+        resumed.config.active_route_base_url(),
+        "http://127.0.0.1:18181/v1"
+    );
     Ok(())
 }
 
@@ -3303,14 +4528,14 @@ async fn empty_imported_custom_id_fails_closed_when_root_and_table_coexist() -> 
     );
     let config = Config {
         provider: Some("custom".to_string()),
-        base_url: Some("http://127.0.0.1:18181/v1".to_string()),
         default_text_model: Some("legacy-root-model".to_string()),
         providers: Some(crate::config::ProvidersConfig {
             custom,
             ..crate::config::ProvidersConfig::default()
         }),
         ..Config::default()
-    };
+    }
+    .with_legacy_root(None, Some("http://127.0.0.1:18181/v1".to_string()));
     let manager = RuntimeThreadManager::open(
         config.clone(),
         PathBuf::from("."),
@@ -3407,13 +4632,14 @@ async fn thread_records_and_create_requests_preserve_provider_kind_id_pairing() 
     restored_turn.effective_provider_id = None;
     restored_turn.effective_model = Some("custom-openai-model".to_string());
     manager.store.save_turn(&restored_turn)?;
-    let turn_error = manager
-        .resolved_route_for_thread(&config, &auto_thread)
-        .expect_err("restored built-in turn must not be captured by custom endpoint")
-        .to_string();
-    assert!(
-        turn_error.contains("requires built-in 'openai'"),
-        "{turn_error}"
+    // A restored built-in pick is not the thread's saved provider, so it is
+    // ignored rather than captured: the thread keeps its exact custom route.
+    let ignored = manager.resolved_route_for_thread(&config, &auto_thread)?;
+    assert_eq!(ignored.identity.provider, ApiProvider::Custom);
+    assert_eq!(ignored.identity.key, "openai");
+    assert_eq!(
+        ignored.config.active_route_base_url(),
+        "http://127.0.0.1:18183/v1"
     );
 
     restored_turn.effective_provider = Some("custom".to_string());
@@ -3836,6 +5062,261 @@ async fn create_thread_uses_requested_named_custom_provider_default_model() -> R
         route.config.active_route_base_url(),
         "http://127.0.0.1:18181/v1"
     );
+    Ok(())
+}
+
+fn two_custom_route_config() -> Config {
+    let mut custom = std::collections::HashMap::new();
+    for (name, base_url, model) in [
+        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+    ] {
+        custom.insert(
+            name.to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                ..Default::default()
+            },
+        );
+    }
+    Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn update_thread_switches_provider_and_keeps_the_loaded_engine() -> Result<()> {
+    let config = two_custom_route_config();
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(thread.model, "model-a");
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+
+    // Unknown and blank providers are refused and change nothing.
+    for (kind, id) in [
+        (Some("custom-z"), None),
+        (Some(" "), None),
+        (Some("custom"), Some("custom-z")),
+    ] {
+        let err = manager
+            .update_thread(
+                &thread.id,
+                UpdateThreadRequest {
+                    model_provider: kind.map(str::to_string),
+                    model_provider_id: id.map(str::to_string),
+                    ..UpdateThreadRequest::default()
+                },
+            )
+            .await
+            .expect_err("unresolvable provider must be refused");
+        assert!(!err.to_string().is_empty());
+    }
+    let unchanged = manager.get_thread(&thread.id).await?;
+    assert_eq!(unchanged.model_provider_id.as_deref(), Some("custom-a"));
+    assert_eq!(unchanged.model, "model-a");
+
+    // A route name switches like `/provider custom-b`: the thread takes that
+    // provider's default model.
+    let switched = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                model_provider: Some("custom-b".to_string()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert_eq!(switched.model_provider.as_deref(), Some("custom"));
+    assert_eq!(switched.model_provider_id.as_deref(), Some("custom-b"));
+    assert_eq!(switched.model, "model-b");
+    let route = manager.resolved_route_for_thread(&config, &switched)?;
+    assert_eq!(route.identity.key, "custom-b");
+
+    // The same engine (and so the same conversation) serves the next turn,
+    // now on the new route.
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "after switch".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert_eq!(turn.effective_provider_id.as_deref(), Some("custom-b"));
+    assert_eq!(turn.effective_model.as_deref(), Some("model-b"));
+    match harness.rx_op.recv().await {
+        Some(Op::SendMessage(TurnSpec { route, .. })) => {
+            assert_eq!(route.identity.key, "custom-b");
+            assert_eq!(route.model, "model-b");
+        }
+        other => panic!("expected send on the switched route, got {other:?}"),
+    }
+
+    // The exact-id form with an explicit model, as JSON clients send it.
+    let patch: UpdateThreadRequest = serde_json::from_value(serde_json::json!({
+        "model_provider": "custom",
+        "model_provider_id": "custom-a",
+        "model": "model-a-large"
+    }))?;
+    let back = manager.update_thread(&thread.id, patch).await?;
+    assert_eq!(back.model_provider_id.as_deref(), Some("custom-a"));
+    assert_eq!(back.model, "model-a-large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn start_turn_provider_override_routes_one_turn_only() -> Result<()> {
+    let manager = RuntimeThreadManager::open(
+        two_custom_route_config(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let request: StartTurnRequest = serde_json::from_value(serde_json::json!({
+        "prompt": "one turn on B",
+        "model_provider": "custom",
+        "model_provider_id": "custom-b"
+    }))?;
+    let turn = manager.start_turn(&thread.id, request).await?;
+    assert_eq!(turn.effective_provider.as_deref(), Some("custom"));
+    assert_eq!(turn.effective_provider_id.as_deref(), Some("custom-b"));
+    assert_eq!(turn.effective_model.as_deref(), Some("model-b"));
+    match harness.rx_op.recv().await {
+        Some(Op::SendMessage(TurnSpec { route, .. })) => {
+            assert_eq!(route.identity.key, "custom-b");
+        }
+        other => panic!("expected send on the override route, got {other:?}"),
+    }
+    let saved = manager.get_thread(&thread.id).await?;
+    assert_eq!(saved.model_provider_id.as_deref(), Some("custom-a"));
+    assert_eq!(saved.model, "model-a");
+
+    let err = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "bad".to_string(),
+                model_provider: Some("custom-z".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unknown per-turn provider is refused");
+    assert!(!err.to_string().is_empty());
+    Ok(())
+}
+
+/// `two_custom_route_config` with `custom-a` removed, as a user would after
+/// moving every thread to `custom-b`.
+fn only_custom_b_config() -> Config {
+    let mut config = two_custom_route_config();
+    config.provider = Some("custom-b".to_string());
+    if let Some(providers) = config.providers.as_mut() {
+        providers.custom.remove("custom-a");
+    }
+    config
+}
+
+#[tokio::test]
+async fn auto_thread_follows_a_provider_switch_even_after_the_old_provider_is_removed() -> Result<()>
+{
+    let config = two_custom_route_config();
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: Some("auto".to_string()),
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    // An earlier Auto turn picked a model on custom-a.
+    let mut earlier = sample_turn(&thread.id, "turn_auto_on_a", RuntimeTurnStatus::Completed);
+    earlier.effective_provider = Some("custom".to_string());
+    earlier.effective_provider_id = Some("custom-a".to_string());
+    earlier.effective_model = Some("model-a".to_string());
+    manager.store.save_turn(&earlier)?;
+    let before = manager.resolved_route_for_thread(&config, &thread)?;
+    assert_eq!(before.identity.key, "custom-a");
+    assert_eq!(before.model, "model-a");
+
+    let switched = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                model_provider: Some("custom-b".to_string()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert_eq!(switched.model, "auto");
+    let route = manager.resolved_route_for_thread(&config, &switched)?;
+    assert_eq!(route.identity.key, "custom-b");
+    assert_eq!(route.model, "model-b");
+
+    // The earlier pick names a provider that is gone; the thread still routes
+    // through its saved provider instead of failing on history.
+    let route = manager.resolved_route_for_thread(&only_custom_b_config(), &switched)?;
+    assert_eq!(route.identity.key, "custom-b");
+    assert_eq!(route.model, "model-b");
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_reload_accepts_removing_the_provider_an_idle_thread_switched_away_from()
+-> Result<()> {
+    let manager = RuntimeThreadManager::open(
+        two_custom_route_config(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model_provider: Some("custom-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    // The loaded engine still carries custom-a until its next turn.
+    let _harness = install_mock_engine(&manager, &thread.id).await;
+    manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                model_provider: Some("custom-b".to_string()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    manager.reload_config(only_custom_b_config()).await?;
+    let saved = manager.get_thread(&thread.id).await?;
+    let route = manager.resolved_route_for_thread(&manager.read_config(), &saved)?;
+    assert_eq!(route.identity.key, "custom-b");
     Ok(())
 }
 
@@ -5254,6 +6735,7 @@ fn sample_item(turn_id: &str, item_id: &str, status: TurnItemLifecycleStatus) ->
         detail: None,
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(Utc::now()),
         ended_at: None,
     }
@@ -6112,6 +7594,57 @@ async fn event_replay_is_bounded_and_tail_cursor_skips_only_omitted_history() ->
     Ok(())
 }
 
+#[test]
+fn replay_worker_panic_is_reported_not_treated_as_complete() {
+    let panicked = || -> std::thread::Result<Result<()>> {
+        std::panic::catch_unwind(|| -> Result<()> { panic!("replay parser bug") })
+    };
+
+    // Before the base cursor: the request itself fails (HTTP 500).
+    let (base_tx, mut base_rx) = oneshot::channel();
+    let (batch_tx, mut batch_rx) = mpsc::channel(2);
+    let mut base_tx = Some(base_tx);
+    RuntimeThreadStore::route_replay_outcome(panicked(), &mut base_tx, &batch_tx);
+    drop(batch_tx);
+    let error = base_rx
+        .try_recv()
+        .expect("base cursor waiter must hear the panic")
+        .expect_err("a panic is not a cursor");
+    assert!(
+        error.contains("replay worker panicked: replay parser bug"),
+        "{error}"
+    );
+    assert!(
+        batch_rx.try_recv().is_err(),
+        "pre-cursor failures belong to the request, not the stream"
+    );
+
+    // After the base cursor: the open stream gets an `Err` batch before the
+    // channel closes, so it can never mistake the crash for complete history.
+    let (batch_tx, mut batch_rx) = mpsc::channel(2);
+    let mut base_tx = None;
+    RuntimeThreadStore::route_replay_outcome(panicked(), &mut base_tx, &batch_tx);
+    drop(batch_tx);
+    let error = batch_rx
+        .try_recv()
+        .expect("stream must receive the failure")
+        .expect_err("a panic is not a batch");
+    assert!(error.contains("replay worker panicked"), "{error}");
+    assert!(matches!(
+        batch_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+
+    // A clean finish sends nothing: the closed channel alone means complete.
+    let (batch_tx, mut batch_rx) = mpsc::channel(2);
+    RuntimeThreadStore::route_replay_outcome(Ok(Ok(())), &mut None, &batch_tx);
+    drop(batch_tx);
+    assert!(matches!(
+        batch_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
 #[tokio::test]
 async fn event_reader_ignores_an_unterminated_live_append_tail() -> Result<()> {
     let dir = test_runtime_dir();
@@ -6563,6 +8096,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
+            hook_executor: None,
             client_preflight_required: false,
         },
     );
@@ -6584,6 +8118,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
                 migrated_legacy_ollama_cloud_route: false,
             },
             route_model: DEFAULT_TEXT_MODEL.to_string(),
+            hook_executor: None,
             client_preflight_required: false,
         },
     );
@@ -8286,6 +9821,7 @@ async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -
             for owner in [thread_id.clone(), foreign_id] {
                 let _ = tx_event
                     .send(EngineEvent::AgentSpawned {
+                        display_name: None,
                         owner_session_id: owner.clone(),
                         id: "worker_spawn".into(),
                         prompt: "private prompt".into(),
@@ -8324,6 +9860,8 @@ async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -
                 ] {
                     let _ = tx_event
                         .send(EngineEvent::AgentComplete {
+                            // #6565: hosts name the agent the way the TUI does.
+                            display_name: (id == "worker_completed").then(|| "audit docs".into()),
                             owner_session_id: owner.clone(),
                             id: id.into(),
                             result: "Completed successfully".into(),
@@ -8400,6 +9938,26 @@ async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -
             .unwrap()
             .contains("outcome unconfirmed")
     );
+    assert_eq!(workers[2].payload["agent_name"], "audit docs");
+    assert!(
+        workers[2].payload["item"]["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("Sub-agent audit docs completed")
+    );
+    let notices = manager.list_notices(&thread.id);
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.detail == "audit docs finished"),
+        "{notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.detail == "worker_failed failed"),
+        "{notices:?}"
+    );
     assert!(
         manager
             .events_since(&foreign.id, None)?
@@ -8437,6 +9995,7 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
         if matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             let _ = tx_event
                 .send(EngineEvent::AgentComplete {
+                    display_name: None,
                     owner_session_id: thread_id,
                     id: "stale_agent".to_string(),
                     result: "stale completion".to_string(),
@@ -9233,10 +10792,12 @@ async fn compact_thread_with_real_engine_reaches_terminal_status() -> Result<()>
             // This test intentionally crosses the real-engine boundary. Give
             // client preflight a hermetic credential and closed-loopback URL;
             // the assertion permits the resulting terminal failure.
-            api_key: Some("runtime-thread-test-key".to_string()),
-            base_url: Some("http://127.0.0.1:1/v1".to_string()),
             ..Config::default()
-        },
+        }
+        .with_legacy_root(
+            Some("runtime-thread-test-key".to_string()),
+            Some("http://127.0.0.1:1/v1".to_string()),
+        ),
         PathBuf::from("."),
         test_manager_config(test_runtime_dir()),
     )?;
@@ -13070,6 +14631,117 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
     Ok(())
 }
 
+/// DESKTOP-QA-20260923 bug 1: the engine's 60s "Still waiting for tool
+/// approval" heartbeat is queued while the relay is parked on the external
+/// decision. It must never be sequenced after `approval.decided`, where it
+/// reads as a live claim that the (already answered) call is still waiting.
+#[tokio::test]
+async fn approval_wait_heartbeat_is_never_sequenced_after_the_decision() -> Result<()> {
+    // The timeout test changes a process-wide override to 25 ms. This case
+    // checks heartbeat ordering while a decision is still pending.
+    let _timeout_guard = test_approval_timeout_ms(0);
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "needs approval".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_turn_wait".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    // The Responses client joins call and item ids with `|`.
+    let call_id = "call_00_wait|fc_99765c30";
+    harness
+        .tx_event
+        .send(EngineEvent::ApprovalRequired {
+            approval_key: "wait-key".to_string(),
+            approval_grouping_key: "wait-key".to_string(),
+            id: call_id.to_string(),
+            tool_name: "run_verifiers".to_string(),
+            description: "verifiers".to_string(),
+            input: serde_json::json!({}),
+            intent_summary: None,
+            approval_force_prompt: false,
+        })
+        .await?;
+    let approval_id = await_approval_identity(&manager, &thread.id, call_id).await?;
+
+    // The engine's heartbeat fires while the card is still unanswered.
+    harness
+        .tx_event
+        .send(EngineEvent::Status {
+            message: format!(
+                "Still waiting for tool approval on `{call_id}` after 60s — the turn is parked here until it is answered"
+            ),
+        })
+        .await?;
+    sleep(Duration::from_millis(100)).await;
+
+    assert!(manager.deliver_external_approval(
+        &approval_id,
+        ExternalApprovalDecision::Allow { remember: false },
+    ));
+    assert_eq!(
+        harness.recv_approval_event().await,
+        Some(MockApprovalEvent::Approved {
+            id: call_id.to_string(),
+        })
+    );
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    wait_for_terminal_turn(&manager, &turn.id).await?;
+
+    let events = manager.events_since(&thread.id, None)?;
+    let decided_at = events
+        .iter()
+        .position(|event| event.event == "approval.decided")
+        .context("approval.decided was not emitted")?;
+    let stale: Vec<_> = events[decided_at..]
+        .iter()
+        .filter(|event| {
+            event.payload["item"]["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.starts_with("Still waiting for tool approval"))
+        })
+        .map(|event| (event.seq, event.payload["item"]["detail"].clone()))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "approval-wait heartbeat sequenced after approval.decided: {stale:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn approval_required_external_deny_is_denied() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
@@ -13608,10 +15280,12 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
 
     let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
         .await
-        .context("approval timeout should deny the engine")?;
+        .context("approval timeout should resolve the engine's wait")?;
+    // The engine hears a timeout, not the user's denial, so the model and the
+    // approval receipt both say "timed out" and the budget slot is refunded.
     assert_eq!(
         decision,
-        Some(MockApprovalEvent::Denied {
+        Some(MockApprovalEvent::TimedOut {
             id: "tool_timeout".to_string(),
         })
     );
@@ -15064,6 +16738,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         detail: None,
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(started_at),
         ended_at: Some(started_at + chrono::Duration::seconds(1)),
     };
@@ -15077,6 +16752,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         detail: None,
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(started_at),
         ended_at: None,
     };
@@ -15090,6 +16766,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         detail: None,
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: None,
         ended_at: None,
     };
@@ -15131,6 +16808,9 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         item_ids: vec![completed_item.id.clone(), in_progress_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        artifacts: Vec::new(),
+        workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
     manager.store.save_turn(&TurnRecord {
         max_output_tokens: None,
@@ -15166,6 +16846,9 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         item_ids: vec![queued_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        artifacts: Vec::new(),
+        workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
     drop(manager);
 
@@ -15307,6 +16990,7 @@ fn seed_turns_with_user_messages(
             detail: Some((*text).to_string()),
             metadata: None,
             artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
             started_at: Some(created_at),
             ended_at: Some(created_at),
         })?;
@@ -15320,6 +17004,7 @@ fn seed_turns_with_user_messages(
             detail: Some(format!("reply {offset}")),
             metadata: None,
             artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
             started_at: Some(created_at),
             ended_at: Some(created_at),
         })?;
@@ -15357,6 +17042,9 @@ fn seed_turns_with_user_messages(
             item_ids: vec![user_item_id, asst_item_id],
             steer_count: 0,
             agent_mail_message_id: None,
+            artifacts: Vec::new(),
+            workspace: None,
+            workspace_snapshots: Vec::new(),
         })?;
         turn_ids.push(turn_id);
     }
@@ -15431,6 +17119,178 @@ async fn fork_at_user_message_depth_one_drops_two_turns() -> Result<()> {
         .map(|t| t.input_summary.as_str())
         .collect();
     assert_eq!(summaries, vec!["a", "b"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_at_user_turn_leaves_a_running_turn_alone() -> Result<()> {
+    // A conversation can be branched while it is working: a person watching a
+    // turn go the wrong way should not have to stop it (and lose what it has
+    // already done) before taking a different path. Two things must hold —
+    // the fork is cut at the named turn, and the running turn is untouched and
+    // still running in the thread it belongs to.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: None,
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    let turn_ids =
+        seed_turns_with_user_messages(&manager, &thread.id, &["first", "second", "third"])?;
+
+    // The newest turn is still in flight: its record exists, its answer does not.
+    let mut running = manager
+        .store
+        .list_turns_for_thread(&thread.id)?
+        .into_iter()
+        .find(|turn| turn.id == turn_ids[2])
+        .context("seeded third turn")?;
+    running.status = RuntimeTurnStatus::InProgress;
+    running.ended_at = None;
+    running.usage = None;
+    let running_item_ids = running.item_ids.clone();
+    manager.store.save_turn(&running)?;
+    let source_before = manager.get_thread(&thread.id).await?;
+
+    let (forked, original_text, _, _) = manager.fork_at_user_turn(&thread.id, &turn_ids[1]).await?;
+
+    // The branch keeps the turn it names, and hands back the question the
+    // running turn is answering — that is what a person wants next.
+    assert_eq!(original_text.as_deref(), Some("third"));
+    let forked_turns = manager.store.list_turns_for_thread(&forked.id)?;
+    let summaries: Vec<&str> = forked_turns
+        .iter()
+        .map(|turn| turn.input_summary.as_str())
+        .collect();
+    assert_eq!(summaries, vec!["first", "second"]);
+
+    // The source thread is exactly as it was, including the turn in flight:
+    // forking never interrupts one, it only copies a prefix.
+    let source_turns = manager.store.list_turns_for_thread(&thread.id)?;
+    assert_eq!(source_turns.len(), 3, "the source keeps every turn");
+    let still_running = source_turns
+        .iter()
+        .find(|turn| turn.id == turn_ids[2])
+        .context("the running turn is still there")?;
+    assert_eq!(still_running.status, RuntimeTurnStatus::InProgress);
+    assert_eq!(still_running.item_ids, running_item_ids);
+    assert_eq!(
+        manager.get_thread(&thread.id).await?,
+        source_before,
+        "the source thread's own record is not rewritten by a fork"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_at_user_turn_receipt_skips_a_compaction_turn_after_the_anchor() -> Result<()> {
+    // A manual `/compact` is a turn of its own whose only item is the
+    // compaction: no prompt. Branching at the turn before it must still drop
+    // it (the fork keeps only the anchor and what precedes it), but the
+    // receipt belongs to the next *user* turn — the question that was asked
+    // next — not to the prompt-less compaction that happens to sit between.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: None,
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    let turn_ids =
+        seed_turns_with_user_messages(&manager, &thread.id, &["first", "second", "third"])?;
+    let seeded = manager.store.list_turns_for_thread(&thread.id)?;
+    let anchor = seeded
+        .iter()
+        .find(|turn| turn.id == turn_ids[1])
+        .context("seeded second turn")?;
+
+    // The compaction turn lands between the anchor and the next user turn.
+    let compaction_at = anchor.created_at + chrono::Duration::microseconds(500);
+    let compaction_item_id = "item_compaction_between".to_string();
+    manager.store.save_item(&TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: compaction_item_id.clone(),
+        turn_id: "turn_compaction_between".to_string(),
+        kind: TurnItemKind::ContextCompaction,
+        status: TurnItemLifecycleStatus::Completed,
+        summary: "Context compacted".to_string(),
+        detail: Some("summary of first and second".to_string()),
+        metadata: None,
+        artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
+        started_at: Some(compaction_at),
+        ended_at: Some(compaction_at),
+    })?;
+    let mut compaction_turn = anchor.clone();
+    compaction_turn.id = "turn_compaction_between".to_string();
+    compaction_turn.input_summary = "Context compacted".to_string();
+    compaction_turn.created_at = compaction_at;
+    compaction_turn.started_at = Some(compaction_at);
+    compaction_turn.ended_at = Some(compaction_at);
+    compaction_turn.item_ids = vec![compaction_item_id];
+    manager.store.save_turn(&compaction_turn)?;
+
+    // The next user turn carries its own allowance, which travels with it.
+    let mut next_user_turn = seeded
+        .iter()
+        .find(|turn| turn.id == turn_ids[2])
+        .context("seeded third turn")?
+        .clone();
+    next_user_turn.max_output_tokens = std::num::NonZeroU32::new(4096);
+    next_user_turn.schema_version = OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION;
+    manager.store.save_turn(&next_user_turn)?;
+
+    let order: Vec<String> = manager
+        .store
+        .list_turns_for_thread(&thread.id)?
+        .into_iter()
+        .map(|turn| turn.id)
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            turn_ids[0].clone(),
+            turn_ids[1].clone(),
+            "turn_compaction_between".to_string(),
+            turn_ids[2].clone(),
+        ],
+        "the compaction turn sits right after the anchor"
+    );
+
+    let (forked, original_text, original_images, max_output_tokens) =
+        manager.fork_at_user_turn(&thread.id, &turn_ids[1]).await?;
+
+    assert_eq!(original_text.as_deref(), Some("third"));
+    assert!(original_images.is_empty());
+    assert_eq!(max_output_tokens, std::num::NonZeroU32::new(4096));
+    let summaries: Vec<String> = manager
+        .store
+        .list_turns_for_thread(&forked.id)?
+        .into_iter()
+        .map(|turn| turn.input_summary)
+        .collect();
+    assert_eq!(
+        summaries,
+        vec!["first".to_string(), "second".to_string()],
+        "the fork keeps the anchor and drops the compaction after it"
+    );
     Ok(())
 }
 
@@ -15939,6 +17799,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
         detail: Some("read the readme".to_string()),
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(now),
         ended_at: Some(now),
     };
@@ -15960,6 +17821,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
             "is_error": false,
         })),
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(now),
         ended_at: Some(now),
     };
@@ -15999,6 +17861,9 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
         item_ids: vec![user_item.id.clone(), call_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        artifacts: Vec::new(),
+        workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -16062,6 +17927,7 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
             "tool_input": r#"{"path":"README.md"}"#,
         })),
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(now),
         ended_at: None,
     };
@@ -16100,6 +17966,9 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
         item_ids: vec![call_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        artifacts: Vec::new(),
+        workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -16145,6 +18014,7 @@ fn restart_rebuild_skips_steers_the_engine_never_delivered() -> Result<()> {
         detail: Some(text.to_string()),
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(now),
         ended_at: Some(now),
     };
@@ -16196,6 +18066,9 @@ fn restart_rebuild_skips_steers_the_engine_never_delivered() -> Result<()> {
         item_ids: vec![delivered.id.clone(), dropped.id.clone(), pending.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        artifacts: Vec::new(),
+        workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -16240,6 +18113,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         detail: Some("hello".to_string()),
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(now),
         ended_at: Some(now),
     };
@@ -16253,6 +18127,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         detail: Some("old output".to_string()),
         metadata: None,
         artifact_refs: Vec::new(),
+        artifacts: Vec::new(),
         started_at: Some(now),
         ended_at: Some(now),
     };
@@ -16292,6 +18167,9 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         item_ids: vec![user_item.id.clone(), legacy_tool_item.id.clone()],
         steer_count: 0,
         agent_mail_message_id: None,
+        artifacts: Vec::new(),
+        workspace: None,
+        workspace_snapshots: Vec::new(),
     })?;
 
     let turns = manager.store.list_turns_for_thread(&thread.id)?;
@@ -16476,10 +18354,10 @@ mod runtime_image_inputs {
         let mut config = Config {
             provider: Some("deepseek".into()),
             default_text_model: Some("deepseek-v4-flash-vision-exp".into()),
-            api_key: Some("synthetic-image-fixture-key".into()),
             runtime_chat_isolated: true,
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("synthetic-image-fixture-key".into()), None);
         config.set_provider_model_override(
             ApiProvider::Deepseek,
             Some("deepseek-v4-flash-vision-exp".into()),
@@ -16506,7 +18384,7 @@ mod runtime_image_inputs {
         let good = runtime_image_fixture(17);
         for (prompt, model, image) in [
             ("look", "auto", good.clone()),
-            ("look", "deepseek-v4-flash", good.clone()),
+            ("look", "deepseek-v4-pro", good.clone()),
             ("look", "unknown-image-fixture", good.clone()),
             ("", "deepseek-v4-flash-vision-exp", good.clone()),
             (
@@ -16960,7 +18838,7 @@ mod runtime_image_inputs {
             };
             assert!(manager.start_turn(&fork.id, request.clone()).await.is_err());
             let mut unsupported = request.clone();
-            unsupported.model = Some("deepseek-v4-flash".into());
+            unsupported.model = Some("deepseek-v4-pro".into());
             assert!(
                 manager
                     .start_turn_from_stored_images(&fork.id, unsupported)
@@ -17121,6 +18999,7 @@ async fn notices_raise_from_engine_events_and_clear_on_settle_or_ack() -> Result
     harness
         .tx_event
         .send(EngineEvent::AgentComplete {
+            display_name: None,
             owner_session_id: thread.id.clone(),
             id: "agent_done".to_string(),
             result: "did the thing".to_string(),
@@ -17430,6 +19309,127 @@ async fn shell_policy_uses_explicit_profile_and_actual_thread_workspace() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn unset_thread_shell_takes_the_interactive_default_unless_policy_denies() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let _shell_env = [
+        crate::test_support::EnvVarGuard::remove("CODEWHALE_ALLOW_SHELL"),
+        crate::test_support::EnvVarGuard::remove("DEEPSEEK_ALLOW_SHELL"),
+    ];
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let workspace = dir.path().join("thread-workspace");
+    fs::create_dir(&workspace)?;
+    let config_path = dir.path().join("config.toml");
+    fs::write(&config_path, "[profiles.restricted]\nallow_shell = false\n")?;
+    let manager = test_manager(dir.path().join("runtime"))?;
+    manager.config.write().allow_shell = None;
+
+    // Unset: an app-created conversation gets approval-gated shell.
+    let open = manager
+        .create_thread_with_shell_policy(
+            CreateThreadRequest {
+                workspace: Some(workspace.clone()),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await?;
+    assert!(
+        open.allow_shell,
+        "unset allow_shell takes the interactive default"
+    );
+
+    // An explicit value is still honored exactly.
+    let explicit = manager
+        .create_thread_with_shell_policy(
+            CreateThreadRequest {
+                workspace: Some(workspace.clone()),
+                allow_shell: Some(false),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await?;
+    assert!(!explicit.allow_shell);
+
+    // A profile-sourced setting wins over the default at creation. The host's
+    // merged snapshot is left unset, so `validate_shell_access_policy` reads a
+    // profile, environment or managed source as a denial whatever value that
+    // source sets; this pins the gate, not the value read from the profile.
+    let profile_denied = manager
+        .create_thread_with_shell_policy(
+            CreateThreadRequest {
+                workspace: Some(workspace.clone()),
+                ..Default::default()
+            },
+            Some(&config_path),
+            Some("restricted"),
+        )
+        .await?;
+    assert!(!profile_denied.allow_shell);
+
+    // A managed source likewise denies while the host's merged snapshot is
+    // unset. (With the host snapshot at `Some(true)` it would be allowed;
+    // that is main's existing behavior and not what this test pins.)
+    let managed = dir.path().join("managed.toml");
+    fs::write(&managed, "allow_shell = false\n")?;
+    manager.config.write().managed_config_path = Some(managed.to_string_lossy().into_owned());
+    let managed_denied = manager
+        .create_thread_with_shell_policy(
+            CreateThreadRequest {
+                workspace: Some(workspace.clone()),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await?;
+    assert!(!managed_denied.allow_shell);
+    manager.config.write().managed_config_path = None;
+
+    // A project-local `allow_shell = false` in the thread's own folder wins
+    // even when the host's merged config would allow shell.
+    let project = workspace.join(codewhale_config::CODEWHALE_APP_DIR);
+    fs::create_dir(&project)?;
+    fs::write(project.join("config.toml"), "allow_shell = false\n")?;
+    let project_denied = manager
+        .create_thread_with_shell_policy(
+            CreateThreadRequest {
+                workspace: Some(workspace.clone()),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await?;
+    assert!(!project_denied.allow_shell);
+
+    // An explicit opt-in runs the same check and is refused, exactly as a
+    // PATCH opt-in is, instead of bypassing the project restriction.
+    let refused = manager
+        .create_thread_with_shell_policy(
+            CreateThreadRequest {
+                workspace: Some(workspace.clone()),
+                allow_shell: Some(true),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await
+        .expect_err("explicit allow_shell=true must not bypass a project restriction");
+    assert!(
+        refused
+            .to_string()
+            .contains("shell commands are restricted"),
+        "unexpected error: {refused}"
+    );
+    Ok(())
+}
+
 /// The thread summary's preview is read through `newest_message_text_by_turn`,
 /// so pin the selection rules it depends on: non-message items never win, an
 /// empty trailing message is skipped rather than reported, and a missing
@@ -17655,5 +19655,1449 @@ async fn engine_plumbing_items_are_tagged_internal_and_retry_hints_are_dropped()
             .unwrap_or_else(|| panic!("{tool} item persisted"));
         assert_eq!(visibility(item).as_deref(), Some("internal"), "{tool}");
     }
+    Ok(())
+}
+
+/// #6418: a refused session switch must say *which* guard refused. One case
+/// per `StoreAdoptionRefusal` variant, each built from a real store so the
+/// layout under test is the product's.
+mod adoption_refusal {
+    use super::*;
+    use crate::automation_manager::{AutomationManager, AutomationStatus, CreateAutomationRequest};
+
+    /// Fields drop in declaration order: the env guards restore before the
+    /// env lock releases.
+    struct Fixture {
+        _home: crate::test_support::EnvVarGuard,
+        _runtime: crate::test_support::EnvVarGuard,
+        _legacy: crate::test_support::EnvVarGuard,
+        root: tempfile::TempDir,
+        _env: crate::test_support::TestEnvLock,
+    }
+
+    fn fixture() -> Result<Fixture> {
+        let env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir()?;
+        let home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+        let legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+        Ok(Fixture {
+            root,
+            _env: env,
+            _home: home,
+            _runtime: runtime,
+            _legacy: legacy,
+        })
+    }
+
+    fn opened_binding(
+        fixture: &Fixture,
+        session: &str,
+        scope: &str,
+    ) -> Result<RuntimeStoreBinding> {
+        let data_dir = fixture
+            .root
+            .path()
+            .join("sessions")
+            .join(session)
+            .join("runtime");
+        drop(RuntimeThreadStore::open(data_dir.clone())?);
+        Ok(RuntimeStoreBinding {
+            data_dir,
+            execution_scope: scope.to_string(),
+        })
+    }
+
+    #[test]
+    fn empty_unheld_store_has_no_refusal() -> Result<()> {
+        let fixture = fixture()?;
+        let binding = opened_binding(&fixture, "adoptable", &"0".repeat(64))?;
+        assert_eq!(binding.adoption_refusal()?, None);
+        assert!(binding.is_adoptable_empty_store()?);
+        Ok(())
+    }
+
+    #[test]
+    fn store_outside_the_sessions_dir_is_unconfined() -> Result<()> {
+        let fixture = fixture()?;
+        let data_dir = fixture.root.path().join("elsewhere").join("runtime");
+        drop(RuntimeThreadStore::open(data_dir.clone())?);
+        let binding = RuntimeStoreBinding {
+            data_dir,
+            execution_scope: "0".repeat(64),
+        };
+        assert_eq!(
+            binding.adoption_refusal()?,
+            Some(StoreAdoptionRefusal::Unconfined)
+        );
+        assert!(!binding.is_adoptable_empty_store()?);
+        Ok(())
+    }
+
+    /// A confined path that does not exist reaches `NotADirectory`; a file
+    /// in its place never gets that far — confinement rejects any
+    /// non-directory on the way down as an `Err`, which is still a refusal.
+    #[test]
+    fn missing_confined_store_is_not_a_directory() -> Result<()> {
+        let fixture = fixture()?;
+        let session_dir = fixture.root.path().join("sessions").join("absent");
+        std::fs::create_dir_all(&session_dir)?;
+        let binding = RuntimeStoreBinding {
+            data_dir: session_dir.join("runtime"),
+            execution_scope: "0".repeat(64),
+        };
+        assert_eq!(
+            binding.adoption_refusal()?,
+            Some(StoreAdoptionRefusal::NotADirectory)
+        );
+        assert!(!binding.is_adoptable_empty_store()?);
+
+        std::fs::write(&binding.data_dir, "not a store")?;
+        assert!(
+            binding.adoption_refusal().is_err(),
+            "a file in the store's place fails closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn live_owner_lock_is_held_by_live_process() -> Result<()> {
+        let fixture = fixture()?;
+        let binding = opened_binding(&fixture, "held", &"0".repeat(64))?;
+        let held = RuntimeProcessOwnerLock::acquire(&binding.data_dir)?;
+        assert_eq!(
+            binding.adoption_refusal()?,
+            Some(StoreAdoptionRefusal::HeldByLiveProcess)
+        );
+        assert!(!binding.is_adoptable_empty_store()?);
+        drop(held);
+        assert_eq!(binding.adoption_refusal()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn each_work_dir_is_named_as_durable_work() -> Result<()> {
+        let fixture = fixture()?;
+        let binding = opened_binding(&fixture, "busy", &"0".repeat(64))?;
+        for dir in RUNTIME_STORE_WORK_DIRS {
+            let marker = binding.data_dir.join(dir).join("work.json");
+            std::fs::write(&marker, "{}")?;
+            assert_eq!(
+                binding.adoption_refusal()?,
+                Some(StoreAdoptionRefusal::HasDurableWork { dir }),
+                "{dir} holds work"
+            );
+            assert!(!binding.is_adoptable_empty_store()?);
+            std::fs::remove_file(&marker)?;
+        }
+        // Events appended and since pruned still count, reported as `events`.
+        let state_path = binding.data_dir.join("state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_path)?)?;
+        state["next_seq"] = serde_json::json!(5);
+        std::fs::write(&state_path, serde_json::to_vec(&state)?)?;
+        assert_eq!(
+            binding.adoption_refusal()?,
+            Some(StoreAdoptionRefusal::HasDurableWork { dir: "events" })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn automation_pinned_to_the_scope_refuses() -> Result<()> {
+        let fixture = fixture()?;
+        let scope = "ab".repeat(32);
+        let binding = opened_binding(&fixture, "pinned", &scope)?;
+        let automations = AutomationManager::open(fixture.root.path().join("automations"))?;
+        let created = automations.create_automation(CreateAutomationRequest {
+            name: "scope fixture".into(),
+            prompt: "local fixture only".into(),
+            rrule: "FREQ=HOURLY;INTERVAL=1".into(),
+            cwds: vec![fixture.root.path().into()],
+            model: None,
+            model_provider: None,
+            model_provider_id: None,
+            mode: None,
+            allow_shell: Some(false),
+            trust_mode: Some(false),
+            auto_approve: Some(false),
+            delivery_mode: None,
+            status: Some(AutomationStatus::Paused),
+        })?;
+        automations.edit_automation(&created.id, |record| {
+            let mut record =
+                record.ok_or_else(|| anyhow::anyhow!("fresh automation must exist"))?;
+            record.execution_scope = Some(scope.clone());
+            Ok(Some(record))
+        })?;
+        assert_eq!(
+            binding.adoption_refusal()?,
+            Some(StoreAdoptionRefusal::ScopePinnedAutomation)
+        );
+        assert!(!binding.is_adoptable_empty_store()?);
+        Ok(())
+    }
+
+    fn set_aside_destination(fixture: &Fixture, name: &str) -> std::path::PathBuf {
+        fixture
+            .root
+            .path()
+            .join("sessions")
+            .join(".set-aside")
+            .join("run")
+            .join(name)
+    }
+
+    /// #6144: a set-aside holds the store's lock for the whole move and
+    /// never unlinks the lock file. An opener that takes the store's lock in
+    /// the gap after the held lock file has been moved out gets a fresh lock
+    /// on a fresh store at the old path, and it is that store's only owner:
+    /// a second opener is refused, and the moved store's lock is not held.
+    #[test]
+    fn opener_in_the_set_aside_gap_is_the_only_owner() -> Result<()> {
+        let fixture = fixture()?;
+        let binding = opened_binding(&fixture, "gap", &"0".repeat(64))?;
+        let source = binding.data_dir.clone();
+        let destination = set_aside_destination(&fixture, "gap");
+        let held = binding.try_hold()?.expect("unheld store");
+
+        let gap_owner = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = gap_owner.clone();
+        let gap_source = source.clone();
+        set_owner_lock_test_hook(OwnerLockTestPoint::LockFileMoved, move || {
+            *slot.borrow_mut() = Some(RuntimeProcessOwnerLock::acquire(&gap_source));
+        });
+        held.move_to(&destination)?;
+        let gap_owner = gap_owner
+            .borrow_mut()
+            .take()
+            .expect("the gap hook ran")
+            .expect("the gap opener takes the lock at the old path");
+
+        assert!(destination.join("state.json").is_file(), "store data moved");
+        assert!(
+            destination.join(RUNTIME_PROCESS_OWNER_LOCK_FILE).is_file(),
+            "the held lock file moved with the store instead of being unlinked"
+        );
+        assert!(
+            source.join(RUNTIME_PROCESS_OWNER_LOCK_FILE).is_file(),
+            "the gap opener's store is left in place"
+        );
+
+        let second = RuntimeProcessOwnerLock::acquire(&source);
+        assert!(
+            second.is_err(),
+            "a second opener must not also own the store"
+        );
+        assert!(binding.try_hold()?.is_none());
+        assert!(binding.has_live_holder()?);
+        assert!(
+            RuntimeProcessOwnerLock::try_acquire_file(
+                &destination.join(RUNTIME_PROCESS_OWNER_LOCK_FILE),
+                false,
+            )?
+            .is_some(),
+            "the moved store's lock is released, not held by the gap opener"
+        );
+
+        drop(gap_owner);
+        assert!(RuntimeProcessOwnerLock::acquire(&source).is_ok());
+        Ok(())
+    }
+
+    /// #6144: an opener that opened the lock file before a set-aside moved
+    /// it, and locked it after, holds the moved file. It must notice and
+    /// lock the store at its own path instead, or a later opener would
+    /// create a fresh lock file there and both would own that store.
+    #[test]
+    fn opener_that_locks_a_moved_lock_file_reopens_its_path() -> Result<()> {
+        let fixture = fixture()?;
+        let binding = opened_binding(&fixture, "raced", &"0".repeat(64))?;
+        let source = binding.data_dir.clone();
+        let destination = set_aside_destination(&fixture, "raced");
+
+        let mover_binding = binding.clone();
+        let mover_destination = destination.clone();
+        set_owner_lock_test_hook(OwnerLockTestPoint::LockFileOpened, move || {
+            mover_binding
+                .try_hold()
+                .expect("hold")
+                .expect("the opener has not locked yet")
+                .move_to(&mover_destination)
+                .expect("set aside while the opener sits between open and lock");
+        });
+        let owner = RuntimeProcessOwnerLock::acquire(&source)?;
+        assert!(destination.join("state.json").is_file(), "the move ran");
+
+        assert!(
+            RuntimeProcessOwnerLock::acquire(&source).is_err(),
+            "the opener owns the store at its path, so a second opener is refused"
+        );
+        assert!(binding.has_live_holder()?);
+        assert!(
+            RuntimeProcessOwnerLock::try_acquire_file(
+                &destination.join(RUNTIME_PROCESS_OWNER_LOCK_FILE),
+                false,
+            )?
+            .is_some(),
+            "the opener let go of the moved store's lock"
+        );
+        drop(owner);
+        Ok(())
+    }
+}
+
+/// The exact-prefix search a fork's alignment runs, in one pass.
+///
+/// It replaces a rebuild-per-prefix search that was quadratic in the
+/// transcript (measured at ~9 s on a 5 MB session), so what it must keep is
+/// the *answer*: the first prefix whose projection is the kept one, and no
+/// match at all when the transcript drifted.
+#[test]
+fn exact_prefix_boundary_finds_the_first_matching_prefix() {
+    let user = |text: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    };
+    let messages = vec![user("first"), user("second"), user("third")];
+    let projection = |messages: &[Message]| session_recovery_projection(messages);
+
+    // A boundary in the middle: the kept projection names the first two turns.
+    assert_eq!(
+        exact_prefix_boundary(&messages, &projection(&messages[..2])),
+        Some(2)
+    );
+    // Every message, and none of them.
+    assert_eq!(
+        exact_prefix_boundary(&messages, &projection(&messages)),
+        Some(3)
+    );
+    assert_eq!(exact_prefix_boundary(&messages, &[]), Some(0));
+    // A prefix the transcript cannot produce is no match, not a neighbour.
+    assert_eq!(
+        exact_prefix_boundary(&messages, &projection(&[user("other")])),
+        None
+    );
+    // A projection that runs past the end of the transcript is no match either.
+    let mut longer = projection(&messages);
+    longer.push(serde_json::json!(["user", "beyond"]));
+    assert_eq!(exact_prefix_boundary(&messages, &longer), None);
+}
+
+#[test]
+fn saved_history_boundary_refuses_until_every_kept_prompt_is_seen() {
+    let user = |text: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    };
+    let kept = vec!["first".to_string(), "second".to_string()];
+
+    // The kept prompts in order, then the undone turn's prompt: cut there.
+    let messages = vec![user("first"), user("second"), user("undo me")];
+    assert_eq!(saved_history_boundary(&messages, &kept, "undo me"), Some(2));
+
+    // "second" never appears: matching "undo me" early would drop a kept turn.
+    let drifted = vec![user("first"), user("undo me"), user("second")];
+    assert_eq!(saved_history_boundary(&drifted, &kept, "undo me"), None);
+
+    // A repeated prompt stays aligned with the records.
+    let repeated = vec![user("same"), user("same")];
+    assert_eq!(
+        saved_history_boundary(&repeated, &["same".to_string()], "same"),
+        Some(1)
+    );
+}
+
+/// The engine installs a compaction checkpoint into a synced history, and no
+/// turn record reproduces one: the compaction ran in the engine, between
+/// records. A fork of a compacted source keeps the summary in its system
+/// prompt, so the engine writes that checkpoint into the fork's own document
+/// on its first load — and `/undo`, retry and fork-again then run these walks
+/// over it. It is the engine's message, not a turn's prompt, so it must not
+/// read as a kept prompt the records never saw.
+#[test]
+fn a_compaction_checkpoint_is_not_a_kept_prompt() {
+    let user = |text: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+    };
+    let checkpoint = crate::compaction::compaction_checkpoint_message(&SystemPrompt::Text(
+        format!("{} the work so far", crate::compaction::SUMMARY_HEADER),
+    ));
+    assert!(
+        crate::compaction::is_wire_compaction_checkpoint_message(&checkpoint),
+        "the fixture is the engine's own checkpoint message"
+    );
+    let messages = vec![user("first"), checkpoint, user("undo me")];
+    assert_eq!(
+        saved_history_boundary(&messages, &["first".to_string()], "undo me"),
+        Some(2)
+    );
+    assert_eq!(
+        exact_prefix_boundary(
+            &messages,
+            &session_recovery_projection(&[user("first"), user("undo me")])
+        ),
+        Some(3)
+    );
+}
+
+/// The decision a rebuild makes about a call the turn store left unanswered:
+/// which outcome the item itself holds, and which calls it must leave alone.
+#[test]
+fn a_lost_call_is_answered_only_where_its_own_outcome_is_known() {
+    let item = |status: TurnItemLifecycleStatus, detail: Option<&str>| {
+        let mut item = sample_item("turn_lost", "item_call", status);
+        item.kind = TurnItemKind::ToolCall;
+        item.summary = "bash failed: no output".to_string();
+        item.detail = detail.map(str::to_string);
+        item
+    };
+    let none = HashSet::new();
+
+    // A failure keeps the text the tool reported, and falls back to the
+    // item's summary when the record holds no detail of its own.
+    assert_eq!(
+        unanswered_call_result(
+            &item(
+                TurnItemLifecycleStatus::Failed,
+                Some("Failed to execute tool: boom")
+            ),
+            "call-1",
+            "bash",
+            &none
+        ),
+        Some("Failed to execute tool: boom".to_string())
+    );
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "call-1",
+            "bash",
+            &none
+        ),
+        Some("bash failed: no output".to_string())
+    );
+
+    // A call the process never finished says so in the repository's one
+    // spelling, whichever way it was left behind.
+    for status in [
+        TurnItemLifecycleStatus::Interrupted,
+        TurnItemLifecycleStatus::Canceled,
+    ] {
+        assert_eq!(
+            unanswered_call_result(&item(status, None), "call-1", "bash", &none),
+            Some(crate::tool_history_repair::CRASH_REPAIR_CONTENT.to_string()),
+            "{status:?} is terminal: no result is coming"
+        );
+    }
+
+    // The engine is still waiting for a running call; a completed one already
+    // has its result; a queued one was never delivered. A snapshot without a
+    // call identity is not rebuilt at all, so answering it would leave the
+    // result on its own.
+    for status in [
+        TurnItemLifecycleStatus::InProgress,
+        TurnItemLifecycleStatus::Queued,
+        TurnItemLifecycleStatus::Completed,
+    ] {
+        assert_eq!(
+            unanswered_call_result(&item(status, None), "call-1", "bash", &none),
+            None,
+            "{status:?} is not a lost outcome"
+        );
+    }
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "call-1",
+            "",
+            &none
+        ),
+        None,
+        "a call the rebuild would not emit is not answered"
+    );
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "",
+            "bash",
+            &none
+        ),
+        None
+    );
+
+    // A result the turn records on its own item is that call's answer.
+    let recorded: HashSet<String> = ["call-1".to_string()].into_iter().collect();
+    assert_eq!(
+        unanswered_call_result(
+            &item(TurnItemLifecycleStatus::Failed, None),
+            "call-1",
+            "bash",
+            &recorded
+        ),
+        None
+    );
+}
+
+/// #6522 review: `/resume`, `/load` and launch warm the canonical sessions
+/// root on a blocking thread, so the confinement predicate that follows on
+/// the UI runtime is served from the cache instead of resolving a path.
+#[cfg(unix)]
+#[tokio::test]
+async fn canonical_sessions_root_is_resolved_off_the_ui_runtime_and_cached() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let real_home = root.path().join("real-home");
+    std::fs::create_dir_all(&real_home)?;
+    let home = root.path().join("linked-home");
+    std::os::unix::fs::symlink(&real_home, &home)?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let sessions = codewhale_config::resolve_state_dir("sessions")?;
+    std::fs::create_dir_all(&sessions)?;
+
+    assert_eq!(cached_canonical_sessions_root(&sessions), None);
+    prepare_canonical_sessions_root().await;
+    let cached = cached_canonical_sessions_root(&sessions).expect("warmed");
+    assert_eq!(cached, sessions.canonicalize()?);
+    assert_ne!(cached, sessions, "the fixture spells the root two ways");
+    Ok(())
+}
+
+/// B1: a credential a tool printed is masked in the durable tool item (and
+/// the event log built from it) on Runtime API threads, as it is in the
+/// engine transcript.
+#[tokio::test]
+async fn runtime_receipts_mask_configured_secrets() -> Result<()> {
+    const TOKEN: &str = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij";
+    const EXACT: &str = "abcdefghijklmnopqrst";
+    let manager = test_manager(test_runtime_dir())?;
+    manager.config.write().sandbox_api_key = Some(EXACT.to_string());
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            trust_mode: Some(true),
+            auto_approve: Some(true),
+            ..Default::default()
+        })
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "print the auth file".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: turn.id.clone(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallStarted {
+            id: "tool-cat-auth".to_string(),
+            name: "exec_command".to_string(),
+            input: json!({"cmd": "cat auth.json"}),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool-cat-auth".to_string(),
+            name: "exec_command".to_string(),
+            // Real `exec_shell` metadata shape: the summaries carry the
+            // first stdout line, here compact JSON as `jq -c` prints it.
+            result: Ok(crate::tools::spec::ToolResult::success(format!(
+                "{{\n  \"access_token\": \"{TOKEN}\",\n  \"note\": \"keep me {EXACT}\"\n}}\n"
+            ))
+            .with_metadata(json!({
+                "exit_code": 0,
+                "summary": format!("{{\"tokens\":{{\"access_token\":\"{TOKEN}\"}}}}"),
+                "stdout_summary": format!("{{\"tokens\":{{\"access_token\":\"{TOKEN}\"}}}}"),
+                "stderr_summary": format!("export OPENAI_API_KEY={TOKEN}"),
+                "stdout_len": 120,
+                "nested": {"output": [EXACT]},
+                "api_key": "tiny",
+            }))),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallStarted {
+            id: "tool-error".into(),
+            name: "exec_command".into(),
+            input: json!({"cmd": "false"}),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool-error".into(),
+            name: "exec_command".into(),
+            result: Err(crate::tools::spec::ToolError::execution_failed(format!(
+                "failed with {EXACT}"
+            ))),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    wait_for_terminal_turn(&manager, &turn.id).await?;
+
+    let items = manager.store.list_items_for_turn(&turn.id)?;
+    let tool_item = items
+        .iter()
+        .find(|item| {
+            item.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("keep me"))
+        })
+        .context("the tool item keeps its ordinary output")?;
+    let stored = serde_json::to_string(tool_item)?;
+    assert!(!stored.contains(TOKEN), "{stored}");
+    assert!(
+        !serde_json::to_string(&items)?.contains(EXACT),
+        "exact configured secret survived in a receipt"
+    );
+    let metadata = tool_item.metadata.as_ref().context("tool metadata kept")?;
+    assert_eq!(metadata["stdout_len"], 120, "ordinary metadata survives");
+    assert_eq!(metadata["exit_code"], 0);
+    assert_eq!(metadata["api_key"], codewhale_config::persistence::REDACTED);
+    let events = serde_json::to_string(&manager.events_since(&thread.id, None)?)?;
+    assert!(!events.contains(TOKEN), "the event log holds no live token");
+    assert!(
+        !events.contains(EXACT),
+        "the event log holds no exact configured secret"
+    );
+    Ok(())
+}
+
+/// B3: Runtime API approvals (GPUI, web) follow the one approval clock,
+/// `[approval] timeout_seconds`. Unset, nothing denies on the user's behalf;
+/// `[tools] user_input_timeout_seconds` no longer bounds approvals.
+#[test]
+fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Result<()> {
+    let _override = lock_approval_timeout_override();
+    let manager = test_manager(test_runtime_dir())?;
+    assert_eq!(manager.approval_decision_timeout(), None);
+
+    let mut config = Config {
+        tools: Some(crate::config::ToolsConfig {
+            user_input_timeout_seconds: Some(300),
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    assert_eq!(
+        manager.approval_decision_timeout(),
+        None,
+        "the question clock does not bound approvals"
+    );
+
+    config.approval = Some(crate::config::ApprovalConfig {
+        timeout_seconds: Some(45),
+        ..Default::default()
+    });
+    let manager = RuntimeThreadManager::open(
+        config,
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    assert_eq!(
+        manager.approval_decision_timeout(),
+        Some(Duration::from_secs(45))
+    );
+    Ok(())
+}
+
+/// B4: a Runtime thread's tool completion fires `tool_call_after`, and a
+/// failed call also fires `on_error`, through the thread's executor.
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_tool_completion_fires_after_and_error_hooks() -> Result<()> {
+    use crate::hooks::{Hook, HookEvent, HooksConfig};
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("hooks.log");
+    let append = |label: &str| {
+        format!(
+            "printf '%s %s %s\\n' {label} \"$CODEWHALE_TOOL_CALL_ID\" \"$DEEPSEEK_TOOL_SUCCESS\" >> {}",
+            log.display()
+        )
+    };
+    let manager = test_manager(test_runtime_dir())?;
+    let config = Config {
+        hooks: Some(HooksConfig {
+            hooks: vec![
+                Hook::new(HookEvent::ToolCallAfter, &append("after")),
+                Hook::new(HookEvent::OnError, &append("error")),
+            ],
+            enabled: true,
+            ..HooksConfig::default()
+        }),
+        ..Config::default()
+    };
+    let hooks = manager.hook_executor_for_workspace(&config, dir.path(), None);
+    fire_runtime_tool_completion_hooks(
+        &hooks,
+        "thr_1",
+        "call-ok",
+        "exec_command",
+        &Ok(crate::tools::spec::ToolResult::success("fine")),
+    );
+    fire_runtime_tool_completion_hooks(
+        &hooks,
+        "thr_1",
+        "call-bad",
+        "exec_command",
+        &Ok(crate::tools::spec::ToolResult::error("exit 1")),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.lines().count() >= 3 || Instant::now() >= deadline {
+            break text;
+        }
+        sleep(Duration::from_millis(20)).await;
+    };
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        vec![
+            "after call-bad false",
+            "after call-ok true",
+            "error call-bad false"
+        ],
+        "{text}"
+    );
+    Ok(())
+}
+
+/// A completed file-tool call carries typed artifact refs on its durable item
+/// and on the live `item.completed` payload; the legacy `artifact_refs`
+/// projection holds only the workspace paths, and a spill yields a
+/// tool-output ref.
+#[tokio::test]
+async fn tool_completion_items_carry_typed_artifact_refs() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let workspace = dir.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let manager = test_manager(dir.path().join("runtime"))?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            auto_approve: Some(true),
+            trust_mode: Some(true),
+            ..Default::default()
+        })
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "write things".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+    let digest = crate::hashing::sha256_hex(b"# out\n");
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: turn.id.clone(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    for (call, name) in [("call_write", "apply_patch"), ("call_shell", "exec_shell")] {
+        harness
+            .tx_event
+            .send(EngineEvent::ToolCallStarted {
+                id: call.to_string(),
+                name: name.to_string(),
+                input: json!({}),
+            })
+            .await?;
+    }
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "call_write".to_string(),
+            name: "apply_patch".to_string(),
+            result: Ok(
+                crate::tools::spec::ToolResult::success("ok").with_metadata(json!({
+                    "mutation": {
+                        "files": [
+                            { "path": "out.md", "outcome": "created", "size": 6, "sha256": digest },
+                            { "path": "old.md", "outcome": "deleted" },
+                            { "path": "../escape.md", "outcome": "created" }
+                        ],
+                        "renames": []
+                    }
+                })),
+            ),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "call_shell".to_string(),
+            name: "exec_shell".to_string(),
+            // A failed call's large output spills too.
+            result: Ok(
+                crate::tools::spec::ToolResult::error("boom").with_metadata(json!({
+                    "artifact_id": "art_call_shell",
+                    "artifact_session_id": "engine-session",
+                    "artifact_relative_path": "artifacts/art_call_shell.txt",
+                    "artifact_byte_size": 6,
+                    "artifact_digest": digest,
+                })),
+            ),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let turn = wait_for_terminal_turn(&manager, &turn.id).await?;
+
+    let items = turn
+        .item_ids
+        .iter()
+        .map(|id| manager.store.load_item(id))
+        .collect::<Result<Vec<_>>>()?;
+    let write = items
+        .iter()
+        .find(|item| {
+            item.metadata
+                .as_ref()
+                .is_some_and(|m| m["tool_use_id"] == "call_write")
+        })
+        .expect("write item");
+    assert_eq!(
+        write
+            .artifacts
+            .iter()
+            .map(|r| (r.path.as_str(), r.change))
+            .collect::<Vec<_>>(),
+        [
+            ("out.md", Some(turn_artifacts::FileChangeKind::Created)),
+            ("old.md", Some(turn_artifacts::FileChangeKind::Deleted)),
+        ]
+    );
+    assert_eq!(
+        write.artifacts[0].revision.as_deref(),
+        Some(digest.as_str())
+    );
+    assert_eq!(
+        write.artifacts[0].item_id.as_deref(),
+        Some(write.id.as_str())
+    );
+    assert_eq!(write.artifact_refs, vec![PathBuf::from("out.md")]);
+
+    let shell = items
+        .iter()
+        .find(|item| {
+            item.metadata
+                .as_ref()
+                .is_some_and(|m| m["tool_use_id"] == "call_shell")
+        })
+        .expect("shell item");
+    assert_eq!(shell.status, TurnItemLifecycleStatus::Failed);
+    assert_eq!(shell.artifacts.len(), 1);
+    assert_eq!(
+        shell.artifacts[0].kind,
+        turn_artifacts::TurnArtifactKind::ToolOutput
+    );
+    assert_eq!(
+        shell.artifacts[0].session_id.as_deref(),
+        Some("engine-session")
+    );
+    assert!(
+        shell.artifact_refs.is_empty(),
+        "spill paths are not workspace paths"
+    );
+
+    // The live item events carry the same refs.
+    let events = manager.events_since(&thread.id, None)?;
+    let live = events
+        .iter()
+        .find(|event| {
+            event.event == "item.completed" && event.item_id.as_deref() == Some(write.id.as_str())
+        })
+        .expect("write item.completed");
+    assert_eq!(live.payload["item"]["artifacts"][0]["path"], "out.md");
+    assert_eq!(live.payload["item"]["artifact_refs"], json!(["out.md"]));
+    Ok(())
+}
+
+struct WorkspaceTurnFixture {
+    _env: crate::test_support::TestEnvLock,
+    _home: crate::test_support::EnvVarGuard,
+    dir: tempfile::TempDir,
+    workspace: PathBuf,
+    manager: RuntimeThreadManager,
+    thread: ThreadRecord,
+}
+
+async fn workspace_turn_fixture() -> Result<WorkspaceTurnFixture> {
+    let env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path().join("home"));
+    let workspace = dir.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("README.md"), "fixture\n")?;
+    let manager = test_manager(dir.path().join("runtime"))?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            auto_approve: Some(true),
+            trust_mode: Some(true),
+            ..Default::default()
+        })
+        .await?;
+    Ok(WorkspaceTurnFixture {
+        _env: env,
+        _home: home,
+        dir,
+        workspace,
+        manager,
+        thread,
+    })
+}
+
+/// Take one real restore point in the fixture workspace, tagged the way a
+/// Runtime engine tags it (the thread's own id, #6621).
+fn fixture_restore_point(
+    fixture: &WorkspaceTurnFixture,
+    kind: crate::snapshot::WorkspaceSnapshotKind,
+    label: &str,
+    tool_call_id: Option<&str>,
+) -> Result<crate::snapshot::WorkspaceSnapshotRef> {
+    let (taken, _) = crate::core::turn::restore_point_snapshot(
+        &fixture.workspace,
+        label,
+        0,
+        Some(&fixture.thread.id),
+        None,
+    )
+    .ok_or_else(|| anyhow!("snapshot {label} failed"))?;
+    Ok(crate::snapshot::WorkspaceSnapshotRef::new(
+        kind,
+        &taken,
+        &fixture.thread.id,
+        tool_call_id,
+    ))
+}
+
+/// Which restore points the scripted engine reports for the turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScriptedSnapshots {
+    /// `pre_turn`, `tool` (before `call_patch`) and `post_turn`.
+    All,
+    /// Only `pre_turn`: the closing snapshot failed and reported nothing.
+    PreTurnOnly,
+    /// None: snapshots off, gated, or failed.
+    None,
+}
+
+/// Drive one scripted turn: a file-tool write with its receipt, a shell-style
+/// write with none, the engine's restore-point receipts (all before
+/// TurnComplete, as a recording host gets them) and TurnComplete. Returns the
+/// terminal turn and the receipts sent.
+async fn run_workspace_turn(
+    fixture: &WorkspaceTurnFixture,
+    scripted: ScriptedSnapshots,
+) -> Result<(TurnRecord, Vec<crate::snapshot::WorkspaceSnapshotRef>)> {
+    use crate::snapshot::WorkspaceSnapshotKind;
+    let manager = &fixture.manager;
+    let mut harness = install_mock_engine(manager, &fixture.thread.id).await;
+    let turn = manager
+        .start_turn(
+            &fixture.thread.id,
+            StartTurnRequest {
+                prompt: "build the page".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine-turn".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    let mut sent = Vec::new();
+    if scripted != ScriptedSnapshots::None {
+        let pre =
+            fixture_restore_point(fixture, WorkspaceSnapshotKind::PreTurn, "pre-turn:1", None)?;
+        harness
+            .tx_event
+            .send(EngineEvent::WorkspaceSnapshotTaken {
+                snapshot: pre.clone(),
+            })
+            .await?;
+        sent.push(pre);
+    }
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallStarted {
+            id: "call_patch".to_string(),
+            name: "apply_patch".to_string(),
+            input: json!({}),
+        })
+        .await?;
+    if scripted == ScriptedSnapshots::All {
+        let tool = fixture_restore_point(
+            fixture,
+            WorkspaceSnapshotKind::Tool,
+            "tool:call_patch",
+            Some("call_patch"),
+        )?;
+        harness
+            .tx_event
+            .send(EngineEvent::WorkspaceSnapshotTaken {
+                snapshot: tool.clone(),
+            })
+            .await?;
+        sent.push(tool);
+    }
+    fs::write(fixture.workspace.join("notes.md"), "# notes\n")?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "call_patch".to_string(),
+            name: "apply_patch".to_string(),
+            result: Ok(
+                crate::tools::spec::ToolResult::success("ok").with_metadata(json!({
+                    "mutation": { "files": [{
+                        "path": "notes.md", "outcome": "created", "size": 8,
+                        "sha256": crate::hashing::sha256_hex(b"# notes\n"),
+                    }], "renames": [] }
+                })),
+            ),
+        })
+        .await?;
+    // A shell command's write: no receipt reaches the runtime.
+    fs::write(fixture.workspace.join("out.md"), "shell output\n")?;
+    if scripted == ScriptedSnapshots::All {
+        let post = fixture_restore_point(
+            fixture,
+            WorkspaceSnapshotKind::PostTurn,
+            "post-turn:1",
+            None,
+        )?;
+        harness
+            .tx_event
+            .send(EngineEvent::WorkspaceSnapshotTaken {
+                snapshot: post.clone(),
+            })
+            .await?;
+        sent.push(post);
+    }
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    Ok((wait_for_terminal_turn(manager, &turn.id).await?, sent))
+}
+
+async fn wait_for_turn_workspace(
+    manager: &RuntimeThreadManager,
+    turn_id: &str,
+    state: TurnWorkspaceState,
+) -> Result<TurnRecord> {
+    let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
+    loop {
+        let turn = manager.store.load_turn(turn_id)?;
+        if turn.workspace.as_ref().map(|w| w.state) == Some(state) {
+            return Ok(turn);
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "turn {turn_id} never reached {state:?}: {:?}",
+                turn.workspace
+            );
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The workspace delta between the pre/post-turn restore points recorded on
+/// the turn settles into the turn aggregate: a shell-written file appears
+/// with its revision next to the tool-written one, every restore point a ref
+/// advertises is one recorded on the thread's own turn (#6621),
+/// `turn.artifacts` is published, and the list route serves it only for the
+/// owning thread.
+#[tokio::test]
+async fn turn_workspace_delta_settles_shell_writes_into_the_aggregate() -> Result<()> {
+    let fixture = workspace_turn_fixture().await?;
+    let (turn, receipts) = run_workspace_turn(&fixture, ScriptedSnapshots::All).await?;
+    let [pre, tool, post] = receipts.as_slice() else {
+        bail!("three receipts: {receipts:?}");
+    };
+    // The receipts are the turn's own restore points.
+    assert_eq!(turn.workspace_snapshots, receipts);
+
+    let turn =
+        wait_for_turn_workspace(&fixture.manager, &turn.id, TurnWorkspaceState::Settled).await?;
+    let workspace = turn.workspace.clone().unwrap();
+    assert_eq!(
+        workspace.pre_turn_snapshot_id.as_deref(),
+        Some(pre.tree_id.as_str())
+    );
+    assert_eq!(
+        workspace.post_turn_snapshot_id.as_deref(),
+        Some(post.tree_id.as_str())
+    );
+    let shell = turn
+        .artifacts
+        .iter()
+        .find(|r| r.path == "out.md")
+        .expect("shell-written file is reported");
+    assert_eq!(
+        shell.source,
+        turn_artifacts::TurnArtifactSource::WorkspaceChangedDuringTurn
+    );
+    assert_eq!(shell.change, Some(turn_artifacts::FileChangeKind::Created));
+    assert_eq!(
+        shell.revision.as_deref(),
+        Some(crate::hashing::sha256_hex(b"shell output\n").as_str())
+    );
+    assert_eq!(shell.size, Some(13));
+    // The thread owns the turn's pre-turn restore point, so file-revert
+    // accepts it for a shell-written file, bound session or not.
+    assert_eq!(
+        shell.restore_snapshot_id.as_deref(),
+        Some(pre.tree_id.as_str())
+    );
+    let notes = turn
+        .artifacts
+        .iter()
+        .find(|r| r.path == "notes.md")
+        .unwrap();
+    assert_eq!(
+        notes.source,
+        turn_artifacts::TurnArtifactSource::ToolMutation
+    );
+    assert_eq!(notes.tool_call_id.as_deref(), Some("call_patch"));
+    assert_eq!(
+        notes.restore_snapshot_id.as_deref(),
+        Some(pre.tree_id.as_str())
+    );
+    // The item names its own call's `tool` restore point.
+    let patch_item = turn
+        .item_ids
+        .iter()
+        .map(|id| fixture.manager.store.load_item(id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .find(|item| !item.artifacts.is_empty())
+        .expect("patch item");
+    assert_eq!(
+        patch_item.artifacts[0].restore_snapshot_id.as_deref(),
+        Some(tool.tree_id.as_str())
+    );
+
+    // The settled turn is saved before `turn.artifacts` is emitted, so the
+    // event can trail the state this test just observed.
+    let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
+    let events = loop {
+        let events = fixture.manager.events_since(&fixture.thread.id, None)?;
+        if events.iter().any(|event| event.event == "turn.artifacts") {
+            break events;
+        }
+        if Instant::now() >= deadline {
+            bail!("turn.artifacts was never published");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+    let published = events
+        .iter()
+        .find(|event| event.event == "turn.artifacts")
+        .expect("turn.artifacts published");
+    assert_eq!(published.turn_id.as_deref(), Some(turn.id.as_str()));
+    assert_eq!(published.payload["workspace"]["state"], "settled");
+    let completed = events
+        .iter()
+        .find(|event| event.event == "turn.completed")
+        .expect("turn.completed");
+    assert_eq!(completed.payload["turn"]["workspace"]["state"], "pending");
+
+    let view = fixture
+        .manager
+        .turn_artifacts(&fixture.thread.id, &turn.id)
+        .await?
+        .expect("owning thread sees the turn");
+    assert_eq!(view.artifacts, turn.artifacts);
+    let other = fixture
+        .manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(fixture.workspace.clone()),
+            ..Default::default()
+        })
+        .await?;
+    assert!(
+        fixture
+            .manager
+            .turn_artifacts(&other.id, &turn.id)
+            .await?
+            .is_none(),
+        "a turn is served only through its own thread"
+    );
+    assert!(
+        fixture
+            .manager
+            .turn_artifacts(&fixture.thread.id, "turn_missing")
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+/// Snapshots off: the turn still lists what its tool receipts recorded, and
+/// says plainly why there is no workspace delta. A turn that recorded no
+/// restore point with snapshots on says it captured none; one whose closing
+/// snapshot failed keeps its pre-turn restore point and says so.
+#[tokio::test]
+async fn a_turn_without_its_snapshot_pair_keeps_the_item_aggregate_with_a_reason() -> Result<()> {
+    let fixture = workspace_turn_fixture().await?;
+    let (turn, _) = run_workspace_turn(&fixture, ScriptedSnapshots::None).await?;
+    let workspace = turn.workspace.clone().expect("workspace accounting");
+    assert_eq!(workspace.state, TurnWorkspaceState::Unavailable);
+    assert_eq!(workspace.reason, Some(TurnWorkspaceReason::NotCaptured));
+    assert_eq!(
+        turn.artifacts
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>(),
+        ["notes.md"]
+    );
+    assert_eq!(turn.artifacts[0].restore_snapshot_id, None);
+
+    let (turn, receipts) = run_workspace_turn(&fixture, ScriptedSnapshots::PreTurnOnly).await?;
+    let workspace = turn.workspace.clone().expect("workspace accounting");
+    assert_eq!(workspace.state, TurnWorkspaceState::Unavailable);
+    assert_eq!(workspace.reason, Some(TurnWorkspaceReason::SnapshotFailed));
+    assert_eq!(
+        workspace.pre_turn_snapshot_id.as_deref(),
+        Some(receipts[0].tree_id.as_str())
+    );
+
+    fixture.manager.config.write().snapshots = Some(crate::config::SnapshotsConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    let (turn, _) = run_workspace_turn(&fixture, ScriptedSnapshots::None).await?;
+    let workspace = turn.workspace.clone().expect("workspace accounting");
+    assert_eq!(
+        workspace.reason,
+        Some(TurnWorkspaceReason::SnapshotsDisabled)
+    );
+    assert_eq!(turn.artifacts.len(), 1);
+    Ok(())
+}
+
+/// A turn left `pending` by a stopped Runtime is reconciled on startup to
+/// `runtime_restarted`, keeping its item-derived refs, never re-guessed.
+#[tokio::test]
+async fn a_pending_turn_workspace_is_reconciled_on_restart() -> Result<()> {
+    let fixture = workspace_turn_fixture().await?;
+    let mut turn = sample_turn(
+        &fixture.thread.id,
+        "turn_pending_ws",
+        RuntimeTurnStatus::Completed,
+    );
+    turn.ended_at = Some(Utc::now());
+    let pre = "0123456789abcdef0123456789abcdef01234567".to_string();
+    turn.workspace = Some(TurnWorkspaceArtifacts::pending(pre.clone()));
+    turn.artifacts = vec![TurnArtifactRef {
+        id: "art_call".into(),
+        kind: TurnArtifactKind::ToolOutput,
+        path: "artifacts/art_call.txt".into(),
+        change: None,
+        previous_path: None,
+        size: Some(1),
+        revision: None,
+        content_type: None,
+        session_id: Some("s".into()),
+        item_id: None,
+        tool_call_id: None,
+        tool_name: None,
+        source: turn_artifacts::TurnArtifactSource::ToolOutputSpill,
+        restore_snapshot_id: None,
+        recorded_at: Utc::now(),
+    }];
+    fixture.manager.store.save_turn(&turn)?;
+    let data_dir = fixture.dir.path().join("runtime");
+    let WorkspaceTurnFixture {
+        _env,
+        _home,
+        dir,
+        manager,
+        ..
+    } = fixture;
+    drop(manager);
+    let reopened = test_manager(data_dir)?;
+    let turn = reopened.store.load_turn("turn_pending_ws")?;
+    let workspace = turn.workspace.expect("workspace kept");
+    assert_eq!(workspace.state, TurnWorkspaceState::Unavailable);
+    assert_eq!(
+        workspace.reason,
+        Some(TurnWorkspaceReason::RuntimeRestarted)
+    );
+    assert_eq!(
+        workspace.pre_turn_snapshot_id.as_deref(),
+        Some(pre.as_str())
+    );
+    assert_eq!(turn.artifacts.len(), 1);
+    drop(dir);
+    Ok(())
+}
+/// #6582: a Runtime API `bash` completion hands the command's exit code and
+/// status to `tool_call_after` and `on_error`, as the TUI does. The runtime
+/// path used to pass `None`; and a failing command, which `bash` reports as a
+/// `ToolError`, reached hooks with no exit code on either surface.
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_shell_completion_delivers_exit_code_and_status_to_hooks() -> Result<()> {
+    use crate::hooks::{Hook, HookEvent, HooksConfig};
+    use crate::tools::spec::ToolSpec;
+    let dir = tempfile::tempdir()?;
+    let after_log = dir.path().join("after.log");
+    let error_log = dir.path().join("error.log");
+    let script = |path: &std::path::Path| {
+        format!(
+            "printf '%s %s %s %s\\n' \"$CODEWHALE_TOOL_CALL_ID\" \"${{DEEPSEEK_TOOL_EXIT_CODE-unset}}\" \"${{DEEPSEEK_TOOL_STATUS-unset}}\" \"$DEEPSEEK_TOOL_SUCCESS\" >> {}",
+            path.display()
+        )
+    };
+    let manager = test_manager(test_runtime_dir())?;
+    let config = Config {
+        hooks: Some(HooksConfig {
+            hooks: vec![
+                Hook::new(HookEvent::ToolCallAfter, &script(&after_log)),
+                Hook::new(HookEvent::OnError, &script(&error_log)),
+            ],
+            enabled: true,
+            ..HooksConfig::default()
+        }),
+        ..Config::default()
+    };
+    let hooks = manager.hook_executor_for_workspace(&config, dir.path(), None);
+    let context = crate::tools::spec::ToolContext::new(dir.path());
+    let cases = [
+        ("call-exit-0", json!({"command": "exit 0"})),
+        ("call-exit-1", json!({"command": "exit 1"})),
+        (
+            "call-exit-127",
+            json!({"command": "codewhale-no-such-command-6582"}),
+        ),
+        (
+            "call-timeout",
+            json!({"command": "sleep 5", "timeout": 0.2}),
+        ),
+    ];
+    for (id, input) in cases {
+        let result = crate::tools::shell::LowercaseBashTool
+            .execute(input, &context)
+            .await;
+        fire_runtime_tool_completion_hooks(&hooks, "thr_1", id, "bash", &result);
+    }
+    let read_lines = |path: &std::path::Path| {
+        let mut lines = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        lines.sort();
+        lines
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (after, errors) = loop {
+        let after = read_lines(&after_log);
+        let errors = read_lines(&error_log);
+        if (after.len() >= 4 && errors.len() >= 3) || Instant::now() >= deadline {
+            break (after, errors);
+        }
+        sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        after,
+        vec![
+            "call-exit-0 0 completed true",
+            "call-exit-1 1 failed false",
+            "call-exit-127 127 failed false",
+            "call-timeout unset timed_out false",
+        ]
+    );
+    assert_eq!(
+        errors,
+        vec![
+            "call-exit-1 1 failed false",
+            "call-exit-127 127 failed false",
+            "call-timeout unset timed_out false",
+        ]
+    );
     Ok(())
 }

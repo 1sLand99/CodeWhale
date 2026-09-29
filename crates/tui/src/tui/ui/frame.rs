@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::tui::infoline::{InfoLine, InfoSegment, InfoSegmentId, infoline_hitboxes};
-use codewhale_models::Role;
 
 /// Context window percentage for the metrics line's reading — the same
 /// snapshot the posture bar's ≥80% microcopy reads, so the two can never
@@ -298,14 +297,10 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
         ));
     }
     if let Some(tokens) = output_tokens(app) {
-        let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
-        let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
-        let cache_total = hit + miss;
-        if shows(StatusItem::Cache) && cache_total > 0 {
-            let cache_pct = (hit * 100 + cache_total / 2)
-                .checked_div(cache_total)
-                .and_then(|pct| u8::try_from(pct).ok())
-                .unwrap_or(100);
+        if shows(StatusItem::Cache)
+            && let Some(cache_pct) =
+                crate::tui::session_metrics::snapshot_from_app(app).cache_hit_percent
+        {
             segments.push(InfoSegment::new(
                 InfoSegmentId::Cache,
                 "cache",
@@ -322,14 +317,10 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
             ));
         }
     } else {
-        let hit = u64::from(app.session.displayed_total_cache_hit_tokens());
-        let miss = u64::from(app.session.displayed_total_cache_miss_tokens());
-        let cache_total = hit + miss;
-        if shows(StatusItem::Cache) && cache_total > 0 {
-            let cache_pct = (hit * 100 + cache_total / 2)
-                .checked_div(cache_total)
-                .and_then(|pct| u8::try_from(pct).ok())
-                .unwrap_or(100);
+        if shows(StatusItem::Cache)
+            && let Some(cache_pct) =
+                crate::tui::session_metrics::snapshot_from_app(app).cache_hit_percent
+        {
             segments.push(InfoSegment::new(
                 InfoSegmentId::Cache,
                 "cache",
@@ -525,6 +516,41 @@ fn render_info_row(
     interaction_hitboxes
 }
 
+/// Paint the workbar: live runs first (in start order), then settled ones,
+/// each with the runtime's count of follow-ups queued on its busy agents.
+fn render_workbar(f: &mut Frame, app: &App, area: Rect) {
+    let queued_for = |panel: &crate::tui::widgets::workflow_panel::WorkflowPanel| {
+        panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .filter(|row| row.status.is_running())
+            .filter_map(|row| app.agent_queued_follow_ups.get(&row.task_id))
+            .sum::<usize>()
+    };
+    let (live, settled): (Vec<_>, Vec<_>) = app
+        .workflow_runs
+        .iter()
+        .partition(|panel| panel.lifecycle.is_running());
+    let runs: Vec<crate::tui::widgets::workbar::WorkbarRun<'_>> = live
+        .into_iter()
+        .chain(settled)
+        .map(|panel| crate::tui::widgets::workbar::WorkbarRun {
+            panel,
+            queued: queued_for(panel),
+        })
+        .collect();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default();
+    let buf = f.buffer_mut();
+    Block::default()
+        .style(Style::default().bg(app.ui_theme.footer_bg))
+        .render(area, buf);
+    crate::tui::widgets::workbar::render(area, buf, &runs, now_ms, &app.ui_theme, app.ui_locale);
+}
+
 /// Register the chrome that already answers a click, so it also answers the
 /// pointer.
 ///
@@ -553,7 +579,8 @@ fn register_clickable_chrome_for_hover(app: &App) {
             MessageId::KbCloseMenu,
         ),
         (
-            app.viewport.last_workflow_panel_area,
+            // A workbar row opens `/workflows`.
+            app.viewport.last_workbar_area,
             MessageId::CmdWorkflowDescription,
         ),
     ];
@@ -968,6 +995,9 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
             .snapshots_config()
             .max_workspace_gb
             .saturating_mul(1024 * 1024 * 1024),
+        // The TUI records no snapshot receipts; its post-turn snapshot stays
+        // off the input path (#234).
+        record_restore_points: false,
         lsp_config: config
             .lsp
             .clone()
@@ -1018,6 +1048,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         search_provider: config.search_provider(),
         search_api_key: config.search.as_ref().and_then(|s| s.api_key.clone()),
         search_base_url: config.search.as_ref().and_then(|s| s.base_url.clone()),
+        search_native: config.search_native(),
         tools_always_load: config.tools_always_load(),
         user_input_limits: config.user_input_limits(),
         user_input_timeout: config.user_input_timeout(),
@@ -1209,20 +1240,13 @@ pub(crate) fn build_session_snapshot(
     // "the TUI holds the authoritative copy", which is exactly the condition
     // the conflict protects. A session that has never been snapshotted has no
     // in-memory state to lose, so leaving it unclaimed is correct, not a gap.
-    crate::session_manager::set_live_session(Some(&session.metadata.id));
+    manager.claim_live_session(&session.metadata.id);
     Ok(session)
 }
 
-/// Strip ANSI control codes / non-printable bytes from a streaming
-/// text chunk. `pub(super)` because `tui::notifications` consumes it
-/// from `crate::tui::ui` for its per-turn message composition.
-pub(crate) fn sanitize_stream_chunk(chunk: &str) -> String {
-    // Keep printable characters and common whitespace; drop control bytes.
-    chunk
-        .chars()
-        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
-        .collect()
-}
+/// The stream sanitizer lives with the other output sanitizers in
+/// `codewhale-secrets`; the event loop reaches it through this module.
+pub(crate) use codewhale_secrets::sanitize::sanitize_stream_chunk;
 
 /// Ensure an in-flight streaming Assistant cell exists in history and return
 /// its index. Thinking cells go through `streaming_thinking::ensure_active_entry`
@@ -1329,57 +1353,6 @@ pub(crate) fn commit_streaming_display_tick(
     updated
 }
 
-pub(crate) fn live_tool_receipt_messages(
-    app: &App,
-    id: &str,
-    raw: &str,
-    success: bool,
-) -> Vec<Message> {
-    let mut messages = Vec::with_capacity(2);
-    if let Some(tool_use_msg) = app.api_messages.iter().rev().find(|message| {
-        message.content.iter().any(|block| {
-            matches!(block, ContentBlock::ToolUse { id: tool_use_id, ..} if tool_use_id == id)
-        })
-    }) {
-        messages.push(tool_use_msg.clone());
-    }
-    messages.push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: id.to_string(),
-            content: raw.to_string(),
-            is_error: Some(!success),
-            content_blocks: None,
-        }],
-    });
-    messages
-}
-
-pub(crate) fn compact_live_tool_receipt(
-    messages: Vec<Message>,
-    artifacts: Vec<crate::artifacts::ArtifactRecord>,
-    raw: String,
-) -> Option<String> {
-    let (compacted, _) =
-        crate::tool_output_receipts::compact_messages_for_persistence(&messages, &artifacts);
-    let content = compacted
-        .last()
-        .and_then(|message| message.content.first())
-        .and_then(|block| match block {
-            ContentBlock::ToolResult { content, .. } => Some(content),
-            _ => None,
-        })?;
-    if content != &raw && live_tool_content_is_receipt(content) {
-        Some(content.clone())
-    } else {
-        None
-    }
-}
-
-pub(crate) fn live_tool_content_is_receipt(content: &str) -> bool {
-    content.trim_start().starts_with("[TOOL_OUTPUT_RECEIPT]")
-}
-
 /// Build the pending-input preview widget from current `App` state.
 ///
 /// v0.6.6 (#122) wires the live buckets:
@@ -1427,6 +1400,7 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
         .iter()
         .map(|m| m.display.clone())
         .collect();
+    preview.pending_approvals = crate::tui::pending_requests::footer_rows(app);
     preview.editing_queued_message = app.queued_draft.as_ref().map(|draft| {
         if app.input.trim().is_empty() {
             draft.display.clone()
@@ -1597,18 +1571,14 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // flight" (one owner per fact), and nothing sits between the transcript
     // and the composer that is not a queued draft or an expanded panel.
 
-    // WorkflowPanel unified activity surface (#4121). Expanded while running
-    // (interactive drill-in above the composer); when collapsed the panel
-    // takes no rows — its persistent status lives in the top status bar as a
-    // header chip instead (#5040). Zero height when no panel.
-    let desired_workflow_panel_height = if mini {
+    // The workbar (#4121): one row per workflow run, directly under the
+    // posture bar, so live progress sits beside the controls that act on it
+    // and never between the transcript and the composer. Zero rows when no
+    // run is showing.
+    let desired_workbar_height = if mini {
         0
     } else {
-        app.workflow_panel
-            .as_ref()
-            .filter(|panel| panel.expanded)
-            .map(|panel| panel.desired_height(shell_area.width))
-            .unwrap_or(0)
+        crate::tui::widgets::workbar::desired_rows(app.workflow_runs.len())
     };
     let plugin_cta_height = if mini && !mini_cfg.keep_input {
         0
@@ -1628,8 +1598,8 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // up to three compact rows at the release floor.
     let preview_cap = if size.height >= 20 { 4 } else { 3 };
     let preview_height = desired_preview_height.min(auxiliary_budget.min(preview_cap));
-    let workflow_panel_height =
-        desired_workflow_panel_height.min(auxiliary_budget.saturating_sub(preview_height));
+    let workbar_height =
+        desired_workbar_height.min(auxiliary_budget.saturating_sub(preview_height));
 
     // Two pinned rows bracket the composer from below (SHELL-DESIGN-20260901
     // §2.0 item 3, §2.3b): the posture bar — permission · mode · live counts
@@ -1660,19 +1630,21 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         .constraints([
             Constraint::Length(strip_above_height), // Tasks + To-do above transcript (`top`)
             Constraint::Min(1),                     // Chat area
-            Constraint::Length(workflow_panel_height), // Workflow panel (#4121)
             Constraint::Length(preview_height),     // Pending input preview (0 if empty)
             Constraint::Length(plugin_cta_height),  // Live plugin CTA (0 unless matched)
             Constraint::Length(composer_height),    // Composer
             Constraint::Length(footer_height),      // Posture bar
+            Constraint::Length(workbar_height),     // Workbar: one row per workflow run
             Constraint::Length(info_height),        // Metrics line
             Constraint::Length(strip_below_height), // Roster + To-do under the chrome (`bottom`)
         ])
         .split(body_area);
     let strip_slot = if strip_below { 8 } else { 0 };
-    let plugin_cta_slot = 4;
-    let composer_slot = 5;
-    let footer_slot = 6;
+    let preview_slot = 2;
+    let plugin_cta_slot = 3;
+    let composer_slot = 4;
+    let footer_slot = 5;
+    let workbar_slot = 6;
     let info_slot = 7;
 
     if matches!(
@@ -1797,30 +1769,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         }
     }
 
-    // Workflow panel between chat and pending-input preview (#4121).
-    if workflow_panel_height > 0 {
-        if let Some(panel) = app.workflow_panel.as_ref() {
-            let area = body_chunks[2];
-            app.viewport.last_workflow_panel_area = Some(area);
-            app.viewport.last_workflow_cancel_area =
-                panel.cancel_hint_span(area.width).map(|(start, end)| Rect {
-                    x: area.x.saturating_add(start),
-                    y: area.y,
-                    width: end.saturating_sub(start),
-                    height: 1,
-                });
-            let buf = f.buffer_mut();
-            panel.render(area, buf);
-        }
-    } else {
-        app.viewport.last_workflow_panel_area = None;
-        app.viewport.last_workflow_cancel_area = None;
-    }
-
     // Render pending-input preview (queued/steered messages, if any).
     if preview_height > 0 {
         let buf = f.buffer_mut();
-        pending_preview.render(body_chunks[3], buf);
+        pending_preview.render(body_chunks[preview_slot], buf);
     }
 
     if plugin_cta_height > 0 {
@@ -1917,6 +1869,14 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         register_footer_count_targets(app, &facts, &count_rects);
     }
 
+    if workbar_height > 0 {
+        let area = body_chunks[workbar_slot];
+        render_workbar(f, app, area);
+        app.viewport.last_workbar_area = Some(area);
+    } else {
+        app.viewport.last_workbar_area = None;
+    }
+
     // The metrics line sits directly under the posture bar: model · ctx ·
     // cost · ttft · tok/s · ↓ tokens, with the help hint pinned right.
     let mut info_interactions = InfoLineInteractionHitboxes::default();
@@ -1950,8 +1910,11 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             column.paint_matching(side_area, f.buffer_mut(), app.ui_theme.surface_bg);
         }
         column.paint_matching(work_chat_area, f.buffer_mut(), app.ui_theme.surface_bg);
-        column.paint_matching(body_chunks[2], f.buffer_mut(), app.ui_theme.surface_bg);
-        column.paint_matching(body_chunks[3], f.buffer_mut(), app.ui_theme.surface_bg);
+        column.paint_matching(
+            body_chunks[preview_slot],
+            f.buffer_mut(),
+            app.ui_theme.surface_bg,
+        );
         if plugin_cta_height > 0 {
             column.paint_matching(
                 body_chunks[plugin_cta_slot],
@@ -1967,6 +1930,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         if footer_height > 0 {
             column.paint_matching(
                 body_chunks[footer_slot],
+                f.buffer_mut(),
+                app.ui_theme.footer_bg,
+            );
+        }
+        if workbar_height > 0 {
+            column.paint_matching(
+                body_chunks[workbar_slot],
                 f.buffer_mut(),
                 app.ui_theme.footer_bg,
             );
@@ -1989,6 +1959,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         }
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);
+        // Any view on the stack owns the keyboard and paints over the
+        // composer, and no view draws its own text caret, so the composer's
+        // caret must not surface through the modal (#6545).
+        return None;
     }
 
     cursor_pos
@@ -2199,6 +2173,19 @@ pub(crate) fn context_usage_snapshot(app: &App) -> Option<(i64, u32, f64)> {
 }
 
 pub(crate) fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(i64, u32, f64)> {
+    // Before a conversation starts, the assembled startup prompt alone is not
+    // conversation usage, and compacting an empty session cannot reclaim it.
+    // A submitted first turn has started the conversation even before the
+    // engine mirrors its messages back, and so has any provider usage; those
+    // keep the real pressure reading.
+    let conversation_started =
+        !app.api_messages.is_empty() || app.is_loading || count_user_history_cells(app) > 0;
+    if !conversation_started
+        && app.session.last_prompt_tokens.unwrap_or(0) == 0
+        && app.last_billed_input_tokens.unwrap_or(0) == 0
+    {
+        return Some((0, max, 0.0));
+    }
     let max_i64 = i64::from(max);
     let reported = app
         .session
@@ -2225,6 +2212,12 @@ pub(crate) fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(
     // fallback when no estimate is available (e.g., immediately after a
     // session restore before the api_messages are populated).
     let used = match (estimated, reported) {
+        // No messages yet (a restore before the projection lands): the
+        // estimate is only the system prompt, so the reported prompt is the
+        // better reading and must not be dropped to ~0%.
+        (Some(estimated), Some(reported)) if app.api_messages.is_empty() => {
+            estimated.max(reported).min(max_i64)
+        }
         (Some(estimated), _) => estimated.min(max_i64),
         (None, Some(reported)) => reported.min(max_i64),
         (None, None) => return None,
@@ -2519,6 +2512,40 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol().to_string())
             .collect::<String>()
+    }
+
+    #[test]
+    fn footer_keeps_reasoning_label_for_every_effort_tier() {
+        use crate::reasoning_preference::ReasoningEffort;
+
+        let mut app = app_with_context_percent(1);
+        app.api_provider = crate::config::ApiProvider::Openai;
+        app.active_route_base_url = "https://api.openai.com/v1".to_string();
+        app.model = "gpt-5.6".to_string();
+        app.auto_model = false;
+        app.ui_locale = codewhale_localization::Locale::En;
+
+        let mut missing = Vec::new();
+        for effort in [
+            ReasoningEffort::Off,
+            ReasoningEffort::Minimal,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Ultra,
+            ReasoningEffort::Auto,
+            ReasoningEffort::Max,
+        ] {
+            app.reasoning_effort = effort;
+            let label = app.reasoning_effort_display_label();
+            assert!(!label.is_empty(), "{effort:?} must have a label");
+            let row = metrics_row(&app, 80);
+            if !row.contains(&format!("thinking: {label}")) {
+                missing.push(format!("{effort:?}: {row:?}"));
+            }
+        }
+        assert!(missing.is_empty(), "missing footer labels: {missing:#?}");
     }
 
     /// The reading used to go silent below 50% fullness, which is most of a

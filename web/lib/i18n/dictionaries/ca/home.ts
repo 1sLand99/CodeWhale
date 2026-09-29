@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand} et proporciona agents que poden crear programari, treballar amb els teus fitxers i convertir les tasques repetitives en fluxos de treball reutilitzables. Digues-los què vols aconseguir i tria els models allotjats o locals adequats per a la feina, amb la llibertat de canviar de proveïdor sobre la marxa.",
   getCodewhale: "Obtenir Codewhale",
+  heroInstallAria: "Ordre d'instal·lació",
   exploreProduct: "Explorar el producte",
   shotPreview: "Vista prèvia del terminal",
   shotBuild: "build de desenvolupament v{version}",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "Estat de la versió no disponible",
   currentSource: "Font",
   sourceCandidate: "Sense publicar",
-  providerRoutes: "{count} proveïdors",
   publishedRelease: "publicada",
   figcaptionSourceCandidate: "sense publicar",
   chapterTerminal: "El teu terminal",
@@ -63,7 +63,7 @@ export const home: HomeDict = {
     "Un cop hagis instal·lat Codewhale i connectat un model, pots descriure la teva primera tasca al terminal i afegir un Fleet quan vulguis repartir la feina entre diversos agents.",
   startGuideLink: "Llegeix la guia d’inici",
   startVocabularyLink: "Consulta el vocabulari del producte",
-  chapterAccount: "Obtenir Codewhale",
+  chapterAvailability: "On funciona",
   availabilityHeading: "On pots fer servir Codewhale",
   availabilityLede:
     "Ja pots fer servir Codewhale al teu terminal mentre desenvolupem l’aplicació web, l’aplicació d’escriptori i els ordinadors al núvol.",

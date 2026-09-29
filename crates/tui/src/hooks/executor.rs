@@ -12,24 +12,17 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
+use crate::process_tree::ProcessTree;
 #[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
+use crate::process_tree::windows_io_error;
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 #[cfg(windows)]
-use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
-};
-#[cfg(windows)]
 use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
-#[cfg(windows)]
-use windows::core::PCWSTR;
 
 /// Context passed to hooks via environment variables
 #[derive(Debug, Clone, Default)]
@@ -49,6 +42,11 @@ pub struct HookContext {
     /// (`0xC0000005`) is a real value `exec_shell` reports, and narrowing it
     /// to `i32` used to discard exactly the failures a hook most wants to see.
     pub tool_exit_code: Option<i64>,
+    /// How a process-backed tool ended (`completed`, `failed`, `timed_out`,
+    /// `killed`, `running`), when it reported one. A timed-out or killed
+    /// command usually has no exit code, so this is how a hook tells it apart
+    /// from a tool that reported nothing.
+    pub tool_status: Option<String>,
     /// Whether tool succeeded
     pub tool_success: Option<bool>,
     /// Current mode
@@ -102,6 +100,22 @@ impl HookContext {
         self.tool_success = Some(success);
         self.tool_exit_code = exit_code;
         self
+    }
+
+    /// Record a settled tool call: its text, success flag, and — when the
+    /// tool reported them, on success or failure — its exit code and status.
+    /// The TUI and Runtime API completion hooks both build their context here.
+    pub fn with_tool_outcome(
+        self,
+        result: &Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
+    ) -> Self {
+        let (text, success) = match result {
+            Ok(output) => (output.content.clone(), output.success),
+            Err(error) => (error.to_string(), false),
+        };
+        let mut context = self.with_tool_result(&text, success, reported_tool_exit_code(result));
+        context.tool_status = reported_tool_status(result).map(str::to_string);
+        context
     }
 
     pub fn with_mode(mut self, mode: &str) -> Self {
@@ -207,6 +221,9 @@ impl HookContext {
         }
         if let Some(success) = self.tool_success {
             env.insert("DEEPSEEK_TOOL_SUCCESS".to_string(), success.to_string());
+        }
+        if let Some(ref status) = self.tool_status {
+            env.insert("DEEPSEEK_TOOL_STATUS".to_string(), status.clone());
         }
         if let Some(ref mode) = self.mode {
             env.insert("DEEPSEEK_MODE".to_string(), mode.clone());
@@ -898,141 +915,21 @@ pub struct TurnEndPayloadInput<'a> {
     pub queued_message_count: usize,
 }
 
-/// Owns the process tree created for one hook invocation.
-///
-/// Hooks run through a shell, so killing only the immediate `sh`/`cmd.exe`
-/// child can leave the actual hook runtime alive. Unix hooks get their own
-/// process group and Windows hooks are attached to a kill-on-close Job Object.
-/// Dropping this guard after the shell exits also closes inherited stdout and
-/// stderr pipes held by any lingering descendants.
-struct HookProcessTree {
-    #[cfg(unix)]
-    pgid: libc::pid_t,
+/// Kill a hook's whole process tree (see [`crate::process_tree`]): hooks run
+/// through a shell, so killing only the immediate `sh`/`cmd.exe` child can
+/// leave the actual hook runtime alive. Falls back to `taskkill /T` on Windows
+/// and to the immediate child everywhere.
+fn terminate_tree(process_tree: &ProcessTree, child: &mut Child) {
+    let result = process_tree.kill();
     #[cfg(windows)]
-    job: WindowsHookJob,
-}
-
-impl HookProcessTree {
-    fn attach(child: &Child) -> std::io::Result<Self> {
-        #[cfg(unix)]
-        {
-            Ok(Self {
-                pgid: child.id() as libc::pid_t,
-            })
-        }
-
-        #[cfg(windows)]
-        {
-            Ok(Self {
-                job: WindowsHookJob::attach(child)?,
-            })
-        }
-
-        #[cfg(not(any(unix, windows)))]
-        {
-            Ok(Self {})
-        }
+    let result = result.or_else(|_| kill_windows_process_tree(child.id()));
+    if let Err(error) = result {
+        tracing::warn!(
+            ?error,
+            "failed to terminate hook process tree; killing immediate child"
+        );
+        let _ = child.kill();
     }
-
-    fn terminate(&self, child: &mut Child) {
-        #[cfg(unix)]
-        {
-            // SAFETY: kill(2) dereferences no pointers.
-            let result = unsafe { libc::kill(-self.pgid, libc::SIGKILL) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    tracing::warn!(?error, "failed to terminate hook process group");
-                    let _ = child.kill();
-                }
-            }
-        }
-
-        #[cfg(windows)]
-        {
-            let result = self
-                .job
-                .terminate()
-                .or_else(|_| kill_windows_process_tree(child.id()));
-            if let Err(error) = result {
-                tracing::warn!(
-                    ?error,
-                    "failed to terminate hook process tree; killing immediate child"
-                );
-                let _ = child.kill();
-            }
-        }
-
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = child.kill();
-        }
-    }
-}
-
-impl Drop for HookProcessTree {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        // SAFETY: kill(2) dereferences no pointers.
-        unsafe {
-            // The shell may have exited while one of its descendants still
-            // holds a captured pipe. Reaping the process group keeps hook
-            // lifetimes bounded and lets the reader threads finish.
-            let _ = libc::kill(-self.pgid, libc::SIGKILL);
-        }
-        // On Windows, dropping WindowsHookJob closes a Job Object configured
-        // with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
-    }
-}
-
-#[cfg(windows)]
-struct WindowsHookJob {
-    handle: HANDLE,
-}
-
-#[cfg(windows)]
-impl WindowsHookJob {
-    fn attach(child: &Child) -> std::io::Result<Self> {
-        // SAFETY: returned handle is owned by the new wrapper.
-        let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()).map_err(windows_io_error)? };
-        let job = Self { handle };
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-        // SAFETY: `limits` is live with matching size; both handles are live.
-        unsafe {
-            SetInformationJobObject(
-                job.handle,
-                JobObjectExtendedLimitInformation,
-                &limits as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-            .map_err(windows_io_error)?;
-            AssignProcessToJobObject(job.handle, HANDLE(child.as_raw_handle()))
-                .map_err(windows_io_error)?;
-        }
-        Ok(job)
-    }
-
-    fn terminate(&self) -> std::io::Result<()> {
-        // SAFETY: `self.handle` is a live owned job handle.
-        unsafe { TerminateJobObject(self.handle, 1).map_err(windows_io_error) }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WindowsHookJob {
-    fn drop(&mut self) {
-        // SAFETY: `self.handle` is owned here; Drop runs once.
-        unsafe {
-            let _ = CloseHandle(self.handle);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn windows_io_error(error: windows::core::Error) -> std::io::Error {
-    std::io::Error::other(error)
 }
 
 #[cfg(windows)]
@@ -1130,9 +1027,9 @@ fn kill_and_reap_immediate_child(child: &mut Child, timeout: Duration) -> bool {
 /// resolved interpreter path, and the OS message: the caller turns them into a
 /// user-visible "hook could not answer" receipt, and on Windows a raw spawn
 /// error echoes the whole command line back. The detail is logged instead.
-fn spawn_hook_child(command: &mut Command) -> std::io::Result<(Child, HookProcessTree)> {
+fn spawn_hook_child(command: &mut Command) -> std::io::Result<(Child, ProcessTree)> {
     let mut child = command.spawn()?;
-    let process_tree = match HookProcessTree::attach(&child) {
+    let process_tree = match ProcessTree::attach(&child) {
         Ok(process_tree) => process_tree,
         Err(error) => {
             // Windows hooks are created suspended, so a containment failure
@@ -1622,6 +1519,12 @@ impl HookExecutor {
     /// hooks without reaching for `cat ~/.deepseek/config.toml`.
     pub fn config(&self) -> &HooksConfig {
         &self.config
+    }
+
+    /// The workspace hooks run in unless a hook names its own directory.
+    #[must_use]
+    pub fn default_working_dir(&self) -> &std::path::Path {
+        &self.default_working_dir
     }
 
     pub fn session_id(&self) -> &str {
@@ -2612,9 +2515,9 @@ const WINDOWS_TASKKILL_TIMEOUT: Duration = Duration::from_secs(2);
 fn terminate_and_reap(
     hook_name: Option<&str>,
     child: &mut Child,
-    process_tree: HookProcessTree,
+    process_tree: ProcessTree,
 ) -> bool {
-    process_tree.terminate(child);
+    terminate_tree(&process_tree, child);
     // Drop before the wait, not after: on Windows this closes the Job Object
     // and is itself a kill, and on Unix it re-signals the group. Waiting first
     // would delay the very thing meant to make the wait short.
@@ -3077,6 +2980,60 @@ fn parse_env_lines(stdout: &str) -> HashMap<String, String> {
     out
 }
 
+/// Metadata a settled tool call reported, whether it succeeded or failed.
+///
+/// `bash` reports a nonzero exit, timeout, or kill as an error, so the error
+/// carries the metadata then; reading only `Ok` results lost the exit code of
+/// every failing command.
+fn reported_tool_metadata(
+    result: &Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
+) -> Option<&serde_json::Value> {
+    match result {
+        Ok(output) => output.metadata.as_ref(),
+        Err(error) => error.metadata(),
+    }
+}
+
+/// Read how a process-backed tool ended, for `DEEPSEEK_TOOL_STATUS`.
+///
+/// Only the shell statuses the tools record count; anything else stays `None`
+/// rather than passing an arbitrary metadata string into a hook's environment.
+fn reported_tool_status(
+    result: &Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
+) -> Option<&'static str> {
+    match reported_tool_metadata(result)?.get("status")?.as_str()? {
+        "Completed" => Some("completed"),
+        "Failed" => Some("failed"),
+        "TimedOut" => Some("timed_out"),
+        "Killed" => Some("killed"),
+        "Running" => Some("running"),
+        _ => None,
+    }
+}
+
+/// Read the process exit code a tool reported, when it reported one.
+///
+/// The one source for `DEEPSEEK_TOOL_EXIT_CODE`: the TUI and the Runtime API
+/// thread path both reach it through [`HookContext::with_tool_outcome`].
+///
+/// Only process-backed tools (`exec_shell`, `bash`, task runners) carry one,
+/// on a successful result or a failed one, and only a real, integer-valued
+/// `exit_code` counts. Everything else stays `None` so
+/// an `exit_code` condition never matches on a fabricated value.
+/// Reported as `i64`, not `i32`: a Windows crash code such as `3221225477`
+/// (`0xC0000005`) is a real value the shell tool records in its metadata, and
+/// narrowing it dropped exactly those codes — the hook saw no exit code at all
+/// for the crashes it most wanted to catch.
+fn reported_tool_exit_code(
+    result: &Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
+) -> Option<i64> {
+    let code = reported_tool_metadata(result)?.get("exit_code")?;
+    if code.is_null() {
+        return None;
+    }
+    code.as_i64()
+}
+
 // === Unit Tests ===
 
 #[cfg(test)]
@@ -3090,6 +3047,90 @@ mod tests {
         let guard = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", config_path);
         crate::config::save_workspace_trust(workspace).expect("save workspace trust");
         guard
+    }
+
+    /// #455 — `exit_code` conditions must only ever see a real, reported exit
+    /// code. `tool_call_after` used to hard-code `None`, which made every
+    /// `{ type = "exit_code" }` condition permanently unmatchable.
+    #[test]
+    fn reported_tool_exit_code_reads_only_real_metadata_codes() {
+        use crate::tools::spec::{ToolError, ToolResult};
+
+        let with_code = Ok(ToolResult {
+            content: "boom".to_string(),
+            success: false,
+            metadata: Some(serde_json::json!({ "exit_code": 127 })),
+        });
+        assert_eq!(reported_tool_exit_code(&with_code), Some(127));
+
+        // Zero is a real code, not a missing one.
+        let zero = Ok(ToolResult {
+            content: "ok".to_string(),
+            success: true,
+            metadata: Some(serde_json::json!({ "exit_code": 0 })),
+        });
+        assert_eq!(reported_tool_exit_code(&zero), Some(0));
+
+        // Tools that report no exit code stay `None` — never synthesized from
+        // the success flag.
+        let no_metadata = Ok(ToolResult::error("failed"));
+        assert_eq!(reported_tool_exit_code(&no_metadata), None);
+
+        let null_code = Ok(ToolResult {
+            content: String::new(),
+            success: true,
+            metadata: Some(serde_json::json!({ "exit_code": serde_json::Value::Null })),
+        });
+        assert_eq!(reported_tool_exit_code(&null_code), None);
+
+        let wrong_type = Ok(ToolResult {
+            content: String::new(),
+            success: false,
+            metadata: Some(serde_json::json!({ "exit_code": "127" })),
+        });
+        assert_eq!(reported_tool_exit_code(&wrong_type), None);
+
+        // A Windows crash code does not fit in an `i32`, but it is a real code
+        // and a hook scoped to it must be able to see it.
+        let windows_crash = Ok(ToolResult {
+            content: String::new(),
+            success: false,
+            metadata: Some(serde_json::json!({ "exit_code": 3_221_225_477_i64 })),
+        });
+        assert_eq!(reported_tool_exit_code(&windows_crash), Some(3_221_225_477));
+
+        // A transport-level tool error has no metadata at all.
+        let errored: Result<ToolResult, ToolError> =
+            Err(ToolError::execution_failed("no such tool"));
+        assert_eq!(reported_tool_exit_code(&errored), None);
+        assert_eq!(reported_tool_status(&errored), None);
+
+        // A failed command reported as an error still carries its code and
+        // status.
+        let failed_command: Result<ToolResult, ToolError> =
+            Err(ToolError::execution_failed_with_metadata(
+                "Command exited with code 127",
+                serde_json::json!({ "exit_code": 127, "status": "Failed" }),
+            ));
+        assert_eq!(reported_tool_exit_code(&failed_command), Some(127));
+        assert_eq!(reported_tool_status(&failed_command), Some("failed"));
+
+        // A timeout has a status but no exit code; the code is not invented.
+        let timed_out: Result<ToolResult, ToolError> =
+            Err(ToolError::execution_failed_with_metadata(
+                "Command timed out after 1 seconds",
+                serde_json::json!({ "exit_code": null, "status": "TimedOut" }),
+            ));
+        assert_eq!(reported_tool_exit_code(&timed_out), None);
+        assert_eq!(reported_tool_status(&timed_out), Some("timed_out"));
+
+        // An unknown status string is not passed through.
+        let odd_status = Ok(ToolResult {
+            content: String::new(),
+            success: true,
+            metadata: Some(serde_json::json!({ "status": "$(boom)" })),
+        });
+        assert_eq!(reported_tool_status(&odd_status), None);
     }
 
     #[test]

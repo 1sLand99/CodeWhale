@@ -6036,7 +6036,7 @@ async fn legacy_sse_session_expiry_is_marked_stale() {
 }
 
 #[tokio::test]
-async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
+async fn legacy_sse_closed_stream_reports_unknown_outcome_and_reconnects_without_replay() {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -6081,7 +6081,12 @@ async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
         (headers, json)
     }
 
+    // A concurrent proxy fixture changes process-wide HTTP_PROXY/NO_PROXY.
+    // Hold the environment guard before the loopback guard, as other MCP
+    // tests do, so this server is always reached directly.
+    let _env = crate::test_support::lock_test_env();
     let _lock = lock_mcp_loopback_tests().await;
+    let _no_proxy = crate::test_support::EnvVarGuard::set("NO_PROXY", "*");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let active_sse = Arc::new(Mutex::new(None::<mpsc::UnboundedSender<Option<String>>>));
@@ -6239,11 +6244,24 @@ async fn legacy_sse_closed_stream_reconnects_and_retries_tool_call() {
     );
     let mut pool = McpPool::new(cfg);
 
+    // The server received the call and then closed the stream: it may have
+    // run the tool, so the call must fail as unknown instead of replaying.
+    let err = pool
+        .call_tool("mcp_dephy_search", serde_json::json!({ "query": "dephy" }))
+        .await
+        .expect_err("a call whose transport closed mid-flight must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(tool_call_count.load(AtomicOrdering::SeqCst), 1);
+    assert!(!success_seen.load(AtomicOrdering::SeqCst));
+
+    // The dead connection was dropped, so the next call reconnects.
     let result = pool
         .call_tool("mcp_dephy_search", serde_json::json!({ "query": "dephy" }))
         .await
         .unwrap();
-
     assert_eq!(
         result,
         serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
@@ -8344,22 +8362,307 @@ async fn manual_retry_clears_supervision_marks() {
     assert!(!pool.supervised_parked.contains("alpha"));
 }
 
-/// #6187: tool-call retry covers a dead pipe/socket, not just stale sessions.
+/// #6187: a dead pipe/socket rebuilds the connection, not just a stale
+/// session. Only a refused session id proves the server never ran the
+/// request, so only that class may replay a tool call.
 #[test]
-fn retriable_call_error_covers_closed_transports() {
-    use super::wire::is_retriable_mcp_call_error;
-    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "MCP session expired"
-    )));
-    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "connection reset by peer"
-    )));
-    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "Stdio transport closed"
-    )));
-    assert!(!is_retriable_mcp_call_error(&anyhow::anyhow!(
-        "tool returned an application error"
-    )));
+fn connection_lost_covers_closed_transports_but_only_rejected_sessions_replay() {
+    use super::wire::{
+        McpSessionRejected, is_mcp_connection_lost_error, is_mcp_session_rejected_error,
+    };
+    for rejected in [
+        "MCP session expired (transport=sse endpoint=x status=400 Bad Request): session invalid",
+        "MCP Streamable HTTP session expired; retry with a new session required (404)",
+    ] {
+        let err = anyhow::Error::from(McpSessionRejected(rejected.to_string()))
+            .context("MCP method 'tools/call' failed");
+        assert!(is_mcp_connection_lost_error(&err), "{rejected}");
+        assert!(is_mcp_session_rejected_error(&err), "{rejected}");
+        // The same words without the transport's type are not a refusal:
+        // a JSON-RPC error answering the request can carry them.
+        let text_only = anyhow::anyhow!("{rejected}");
+        assert!(is_mcp_connection_lost_error(&text_only), "{rejected}");
+        assert!(!is_mcp_session_rejected_error(&text_only), "{rejected}");
+    }
+    for ambiguous in [
+        "MCP session expired: {\"code\":-32000,\"message\":\"session invalid\"}",
+        "connection reset by peer",
+        "Stdio transport closed",
+        "Stdio transport closed (exit status: 1)\nsession invalid",
+        "SSE transport closed",
+        "MCP SSE POST send failed (transport=sse endpoint=x): connection closed",
+    ] {
+        let err = anyhow::anyhow!("{ambiguous}");
+        assert!(is_mcp_connection_lost_error(&err), "{ambiguous}");
+        assert!(!is_mcp_session_rejected_error(&err), "{ambiguous}");
+    }
+    let app = anyhow::anyhow!("tool returned an application error");
+    assert!(!is_mcp_connection_lost_error(&app));
+    assert!(!is_mcp_session_rejected_error(&app));
+}
+
+/// A stdio server that logs every `tools/call` it receives to `$CALL_LOG`,
+/// so a test can count how many times the tool really ran. `$FIRST_CALL`
+/// picks what happens to the first call after it has run: `exit` kills the
+/// child before replying, `session-error` answers it with a JSON-RPC error
+/// whose text mentions an invalid session.
+#[cfg(unix)]
+const COUNTING_STDIO_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+    id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    case "$line" in
+        *'"method":"notifications/'*)
+            ;;
+        *'"method":"initialize"'*)
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"counter","version":"1.0.0"},"capabilities":{"tools":{}}}}\n' "$id"
+            ;;
+        *'"method":"tools/list"'*)
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"tools":[{"name":"act","inputSchema":{"type":"object"}}]}}\n' "$id"
+            ;;
+        *'"method":"tools/call"'*)
+            echo call >> "$CALL_LOG"
+            if [ "$(wc -l < "$CALL_LOG")" -eq 1 ]; then
+                case "$FIRST_CALL" in
+                    exit) exit 0 ;;
+                    session-error)
+                        printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32000,"message":"session invalid"}}\n' "$id"
+                        continue
+                        ;;
+                esac
+            fi
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"content":[{"type":"text","text":"ok"}]}}\n' "$id"
+            ;;
+        *)
+            [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
+            ;;
+    esac
+done
+"#;
+
+#[cfg(unix)]
+fn counting_stdio_pool(dir: &Path, first_call: &str) -> (McpPool, PathBuf) {
+    let script = dir.join("server.sh");
+    fs::write(&script, COUNTING_STDIO_SERVER).unwrap();
+    let call_log = dir.join("calls.log");
+    let mut server = test_server_config();
+    server.command = Some("sh".to_string());
+    server.args = vec![script.to_string_lossy().into_owned()];
+    server.env.insert(
+        "CALL_LOG".to_string(),
+        call_log.to_string_lossy().into_owned(),
+    );
+    server
+        .env
+        .insert("FIRST_CALL".to_string(), first_call.to_string());
+    server.connect_timeout = Some(10);
+    server.execute_timeout = Some(10);
+    let mut cfg = McpConfig::default();
+    cfg.servers.insert("counter".to_string(), server);
+    (McpPool::new(cfg), call_log)
+}
+
+#[cfg(unix)]
+fn server_call_count(call_log: &Path) -> usize {
+    fs::read_to_string(call_log)
+        .map(|log| log.lines().count())
+        .unwrap_or(0)
+}
+
+/// A stdio child that dies after reading `tools/call` may have run it: the
+/// call fails as unknown, runs once, and the next call gets a fresh child.
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_child_exit_during_tool_call_is_not_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut pool, call_log) = counting_stdio_pool(dir.path(), "exit");
+
+    let err = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect_err("a call whose child exited mid-flight must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(server_call_count(&call_log), 1);
+
+    let result = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect("the next call reconnects");
+    assert_eq!(
+        result,
+        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+    );
+    assert_eq!(server_call_count(&call_log), 2);
+}
+
+/// A JSON-RPC error answering the call id means the server processed the
+/// request, even when its text mentions an invalid session: the tool may
+/// have acted before failing, so the call is not sent again.
+#[cfg(unix)]
+#[tokio::test]
+async fn json_rpc_session_error_on_tool_call_is_not_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut pool, call_log) = counting_stdio_pool(dir.path(), "session-error");
+
+    let err = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect_err("a session error answering the call must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(server_call_count(&call_log), 1);
+
+    let result = pool
+        .call_tool("mcp_counter_act", serde_json::json!({}))
+        .await
+        .expect("the next call reconnects");
+    assert_eq!(
+        result,
+        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+    );
+    assert_eq!(server_call_count(&call_log), 2);
+}
+
+/// A Streamable HTTP server that reads the whole `tools/call` POST and then
+/// drops the connection may have run it: the call runs once and the next
+/// call succeeds on a rebuilt connection.
+#[tokio::test]
+async fn streamable_http_reset_after_tool_call_post_is_not_replayed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let _lock = lock_mcp_loopback_tests().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let server_tool_calls = Arc::clone(&tool_calls);
+
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let tool_calls = Arc::clone(&server_tool_calls);
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                let header_end = loop {
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+                if headers.starts_with("GET ") {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let request_json: serde_json::Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                let method = request_json["method"].as_str().unwrap_or("");
+                let Some(id) = request_json.get("id").cloned() else {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 202 Accepted\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                };
+                let result = match method {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"tools": {}}
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{ "name": "act", "inputSchema": {"type": "object"} }]
+                    }),
+                    "tools/call" => {
+                        // The tool runs, then the connection drops before
+                        // any reply is written.
+                        if tool_calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                            drop(socket);
+                            return;
+                        }
+                        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let body =
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    let mut server_config = test_server_config();
+    server_config.command = None;
+    server_config.url = Some(format!("http://{addr}/mcp"));
+    server_config.connect_timeout = Some(10);
+    server_config.execute_timeout = Some(10);
+    let mut cfg = McpConfig::default();
+    cfg.servers.insert("remote".to_string(), server_config);
+    let mut pool = McpPool::new(cfg);
+
+    let err = pool
+        .call_tool("mcp_remote_act", serde_json::json!({}))
+        .await
+        .expect_err("a call whose connection dropped mid-flight must not be replayed");
+    assert!(
+        format!("{err:#}").contains("outcome unknown, not retried"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 1);
+
+    let result = pool
+        .call_tool("mcp_remote_act", serde_json::json!({}))
+        .await
+        .expect("the next call reconnects");
+    assert_eq!(
+        result,
+        serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] })
+    );
+    assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 2);
+
+    server.abort();
 }
 
 // Executed both as an ordinary no-op test and as an isolated OS-process worker.
@@ -8550,4 +8853,118 @@ fn only_a_reviewed_plugin_read_only_hint_relaxes_approval() {
     let bare: McpTool = serde_json::from_value(serde_json::json!({"name": "echo"}))
         .expect("unannotated tool parses");
     assert_eq!(approval_hint_for(&bare, true), None);
+}
+
+fn stdio_server(args: Vec<String>) -> McpServerConfig {
+    serde_json::from_value(serde_json::json!({ "command": "node", "args": args }))
+        .expect("stdio server config")
+}
+
+#[test]
+fn user_server_launching_the_computer_use_bundle_is_recognized() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bundle = dir
+        .path()
+        .join("Codewhale Computer Use.app/Contents/Resources/plugin");
+    std::fs::create_dir_all(bundle.join("mcp")).expect("bundle dirs");
+    std::fs::write(bundle.join("mcp/server.mjs"), "").expect("server");
+    std::fs::write(bundle.join("plugin.json"), r#"{"name": "computer-use"}"#).expect("manifest");
+    let script = bundle.join("mcp/server.mjs").to_string_lossy().to_string();
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec![script.clone()])),
+        Some(script)
+    );
+
+    // Another plugin's server with the same layout is not a duplicate.
+    let other = dir.path().join("other-plugin");
+    std::fs::create_dir_all(other.join("mcp")).expect("other dirs");
+    std::fs::write(other.join("plugin.json"), r#"{"name": "browser-tools"}"#).expect("manifest");
+    let other_script = other.join("mcp/server.mjs").to_string_lossy().to_string();
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec![other_script])),
+        None
+    );
+
+    // Without a readable manifest the bundle's path shape still counts.
+    let shaped = "/opt/computer-use/mcp/server.mjs".to_string();
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec![shaped.clone()])),
+        Some(shaped)
+    );
+    assert_eq!(
+        launches_computer_use_plugin(&stdio_server(vec!["/opt/tools/mcp/server.mjs".to_string()])),
+        None
+    );
+}
+
+#[test]
+fn computer_use_duplicate_warning_needs_the_builtin_bundle_enabled() {
+    // A user entry alone (no enabled built-in bundle) is never flagged.
+    let mut config = McpConfig::default();
+    config.servers.insert(
+        "codewhale-cu".to_string(),
+        stdio_server(vec!["/opt/computer-use/mcp/server.mjs".to_string()]),
+    );
+    assert!(duplicate_computer_use_servers(&config).is_empty());
+}
+
+#[test]
+fn computer_use_duplicate_warning_names_user_copies_of_the_enabled_bundle() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plugin_base = dir.path().join("plugins/computer-use");
+    fs::create_dir_all(plugin_base.join("mcp")).expect("plugin dirs");
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"computer-use\"\nversion = \"1.0.0\"\n",
+    )
+    .expect("plugin manifest");
+    let (_, authority) = active_plugin_fixture(&plugin_base);
+    let mut builtin = stdio_server(vec![
+        plugin_base
+            .join("mcp/server.mjs")
+            .to_string_lossy()
+            .to_string(),
+    ]);
+    builtin.reviewed_plugin = Some(
+        ReviewedPluginMcpSource::from_authority(
+            authority,
+            None,
+            Arc::new(crate::plugins::HostEnvironment::default()),
+        )
+        .expect("reviewed source"),
+    );
+
+    let mut config = McpConfig::default();
+    config
+        .servers
+        .insert("plugin-computer-use".to_string(), builtin);
+    config.servers.insert(
+        "codewhale-cu".to_string(),
+        stdio_server(vec!["/opt/computer-use/mcp/server.mjs".to_string()]),
+    );
+    config.servers.insert(
+        "browser-tools".to_string(),
+        stdio_server(vec!["/opt/tools/mcp/server.mjs".to_string()]),
+    );
+    let mut disabled_copy = stdio_server(vec!["/srv/computer_use/mcp/server.mjs".to_string()]);
+    disabled_copy.enabled = false;
+    config.servers.insert("old-cu".to_string(), disabled_copy);
+
+    // Only the enabled user copy is named, with the argument that gave it
+    // away; the bundle itself, other plugins and disabled entries are not.
+    assert_eq!(
+        duplicate_computer_use_servers(&config),
+        vec![(
+            "codewhale-cu".to_string(),
+            "/opt/computer-use/mcp/server.mjs".to_string()
+        )]
+    );
+
+    // Disabling the built-in bundle removes the warning.
+    config
+        .servers
+        .get_mut("plugin-computer-use")
+        .expect("bundle entry")
+        .enabled = false;
+    assert!(duplicate_computer_use_servers(&config).is_empty());
 }

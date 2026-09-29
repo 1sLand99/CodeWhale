@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "runtimeVersion": "0.10.0",
+  "runtimeVersion": "0.10.1",
   "routes": [
     {
       "id": "anthropic",
@@ -1224,6 +1224,9 @@
         {
           "id": "grok-4.6",
           "default": true
+        },
+        {
+          "id": "grok-4.7"
         }
       ],
       "transport": "chat-completions"

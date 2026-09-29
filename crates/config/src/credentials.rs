@@ -42,12 +42,13 @@ pub fn provider_slot(provider: ProviderKind) -> &'static str {
 /// Remove any plaintext `api_key` left in the config for `provider`.
 pub fn clear_provider_api_key_from_config(store: &mut ConfigStore, provider: ProviderKind) {
     store.config.providers.for_provider_mut(provider).api_key = None;
-    if provider == ProviderKind::Deepseek {
-        store.config.api_key = None;
-    }
 }
 
 /// Plaintext-free metadata that accompanies a saved key.
+///
+/// Saving a credential never writes a model: every provider resolves an
+/// unset model to its own default, and model choice belongs to the
+/// model/config commands.
 pub fn prepare_provider_api_key_metadata(store: &mut ConfigStore, provider: ProviderKind) {
     store.config.auth_mode = Some("api_key".to_string());
     let provider_config = store.config.providers.for_provider_mut(provider);
@@ -55,17 +56,6 @@ pub fn prepare_provider_api_key_metadata(store: &mut ConfigStore, provider: Prov
     provider_config.external_credentials = None;
     if provider == ProviderKind::Xai {
         provider_config.oauth_credential_generation = None;
-    }
-    if provider == ProviderKind::Deepseek && store.config.default_text_model.is_none() {
-        store.config.default_text_model = Some(
-            store
-                .config
-                .providers
-                .deepseek
-                .model
-                .clone()
-                .unwrap_or_else(|| "deepseek-v4-pro".to_string()),
-        );
     }
 }
 
@@ -80,6 +70,10 @@ pub fn set_provider_api_key(
     provider: ProviderKind,
     api_key: &str,
 ) -> Result<bool> {
+    // #6528: strip pasted invisible characters and whitespace in one place.
+    let api_key = codewhale_secrets::normalize_api_key(api_key);
+    anyhow::ensure!(!api_key.is_empty(), "Refusing to save an empty API key.");
+    let api_key = api_key.as_str();
     if provider == ProviderKind::Xai {
         return crate::with_xai_oauth_revocation_transaction(|| {
             set_provider_api_key_unlocked(store, secrets, provider, api_key)

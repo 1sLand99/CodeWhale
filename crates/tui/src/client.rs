@@ -20,9 +20,11 @@ use tokio::sync::{
 };
 
 use codewhale_config::catalog::{
-    CatalogOffering, CatalogRefreshError, CatalogSnapshot, CatalogSource, CatalogStatus,
-    ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
+    CatalogOffering, CatalogRefreshError, CatalogSource, ProviderCatalogDelta,
+    base_url_fingerprint, now_unix,
 };
+#[cfg(test)]
+use codewhale_config::catalog::{CatalogSnapshot, CatalogStatus, ProviderCatalogCache};
 use codewhale_config::provider::WireFormat;
 use codewhale_config::route::{
     LogicalModelRef, ReadyRouteCandidate, RouteLimits, RouteRequest, RouteResolver,
@@ -274,6 +276,9 @@ pub struct CodewhaleClient {
     /// stream-header fallback when H2 stalls. Same auth and headers.
     pub(super) http1_client: reqwest::Client,
     api_key: String,
+    /// Where `api_key` came from (secret store slot, config file, env var
+    /// name, CLI, OAuth, …), named in authentication errors (#6528).
+    api_key_source: String,
     /// Exact configured credential values removed from model-bound tool
     /// results. Structural redaction handles config/JSON assignments, while
     /// this list closes the gap for bare provider tokens with no recognizable
@@ -557,6 +562,22 @@ fn mark_recovery_probe_if_due(health: &mut ConnectionHealth, now: Instant) -> bo
     true
 }
 
+/// The one command that replaces a rejected key, by where it came from.
+fn auth_fix_hint(route: &str, key_source: &str) -> String {
+    if key_source.starts_with("--api-key") {
+        "pass a valid --api-key".to_string()
+    } else if let Some(rest) = key_source.strip_prefix("env var ")
+        && rest.contains("api_key_env")
+    {
+        let name = rest.split_whitespace().next().unwrap_or(rest);
+        format!("set {name} to a valid key")
+    } else if key_source.contains("OAuth") || key_source.contains("login") {
+        format!("sign in again for {route}")
+    } else {
+        format!("codewhale auth set --provider {route}")
+    }
+}
+
 fn buffer_pool() -> &'static StdMutex<Vec<Vec<u8>>> {
     static POOL: OnceLock<StdMutex<Vec<Vec<u8>>>> = OnceLock::new();
     POOL.get_or_init(|| StdMutex::new(Vec::new()))
@@ -589,6 +610,7 @@ impl Clone for CodewhaleClient {
             models_http_client: self.models_http_client.clone(),
             http1_client: self.http1_client.clone(),
             api_key: self.api_key.clone(),
+            api_key_source: self.api_key_source.clone(),
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
             catalog_error_secret_values: Arc::clone(&self.catalog_error_secret_values),
             model_bound_masking: self.model_bound_masking,
@@ -686,10 +708,12 @@ fn push_file_backed_model_bound_secrets(values: &mut Vec<String>) {
     }
 }
 
-fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -> Vec<String> {
+pub(crate) fn configured_model_bound_secret_values(
+    config: &Config,
+    active_api_key: &str,
+) -> Vec<String> {
     let mut values = Vec::new();
     push_model_bound_secret(&mut values, Some(active_api_key));
-    push_model_bound_secret(&mut values, config.api_key.as_deref());
     push_model_bound_secret(&mut values, config.sandbox_api_key.as_deref());
     push_model_bound_secret(
         &mut values,
@@ -760,6 +784,13 @@ fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -
         }
     }
 
+    // The decision router's TypeSafe key is no chat provider's key; its env
+    // form must still never reach a model. (`for_decision_route` adds the key
+    // from every source to its own client.)
+    if let Ok(value) = std::env::var(system_one::TYPESAFE_API_KEY_ENV) {
+        push_model_bound_secret(&mut values, Some(&value));
+    }
+
     push_file_backed_model_bound_secrets(&mut values);
 
     // Replace longer values first in case one credential happens to contain
@@ -820,7 +851,7 @@ fn request_query_secret_values(url: &reqwest::Url) -> Vec<String> {
     values
 }
 
-fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
+pub(crate) fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
     let mut redacted = text.to_string();
     for secret in exact_secret_values {
         redacted = redacted.replace(secret, codewhale_config::persistence::REDACTED);
@@ -829,6 +860,32 @@ fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String
     // are masked here; key-only hits (`password: credentials?.password`) stay
     // byte-exact. Logs and previews keep the broad key-based scrubber.
     codewhale_config::persistence::redact_model_bound_secrets(&redacted)
+}
+
+pub(crate) fn redact_json_model_bound_text(
+    value: &serde_json::Value,
+    secrets: &[String],
+) -> serde_json::Value {
+    fn mask_exact_values(value: &mut serde_json::Value, secrets: &[String]) {
+        match value {
+            serde_json::Value::String(text) => *text = redact_model_bound_text(text, secrets),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    mask_exact_values(value, secrets);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values_mut() {
+                    mask_exact_values(value, secrets);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Preserve sensitive-key masking and the existing recursion-depth bound.
+    let mut redacted = codewhale_config::persistence::redact_json_model_bound_secrets(value);
+    mask_exact_values(&mut redacted, secrets);
+    redacted
 }
 
 // === Helpers ===
@@ -1491,27 +1548,31 @@ impl CodewhaleClient {
         if api_provider == ApiProvider::OpencodeGo {
             validate_route(api_provider, &default_model).map_err(anyhow::Error::msg)?;
         }
-        let (api_key, codex_account_id) = if api_provider == ApiProvider::OpenaiCodex {
-            // The official endpoint requires Codex OAuth credentials. A custom
-            // endpoint prefers its own configured key, but an explicit
-            // `OPENAI_CODEX_ACCESS_TOKEN` still wins (`codex_credentials`
-            // checks env before enforcing the official-endpoint consent
-            // grant), so existing token-plus-custom-base-url setups keep
-            // working. Only when no env token exists does the custom endpoint
-            // fall back to the generic provider-scoped key resolver.
-            match config.codex_credentials() {
-                Ok(credentials) => (credentials.access_token, credentials.account_id),
-                Err(error) => {
-                    if config.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex) {
-                        (config.active_route_api_key()?, None)
-                    } else {
-                        return Err(error);
+        let ((api_key, api_key_source), codex_account_id) =
+            if api_provider == ApiProvider::OpenaiCodex {
+                // The official endpoint requires Codex OAuth credentials. A custom
+                // endpoint prefers its own configured key, but an explicit
+                // `OPENAI_CODEX_ACCESS_TOKEN` still wins (`codex_credentials`
+                // checks env before enforcing the official-endpoint consent
+                // grant), so existing token-plus-custom-base-url setups keep
+                // working. Only when no env token exists does the custom endpoint
+                // fall back to the generic provider-scoped key resolver.
+                match config.codex_credentials() {
+                    Ok(credentials) => (
+                        (credentials.access_token, "Codex OAuth login".to_string()),
+                        credentials.account_id,
+                    ),
+                    Err(error) => {
+                        if config.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex) {
+                            (config.active_route_api_key_with_source()?, None)
+                        } else {
+                            return Err(error);
+                        }
                     }
                 }
-            }
-        } else {
-            (config.active_route_api_key()?, None)
-        };
+            } else {
+                (config.active_route_api_key_with_source()?, None)
+            };
         let model_bound_secret_values =
             Arc::new(configured_model_bound_secret_values(config, &api_key));
         // The opt-out is effective only after an explicit startup confirmation;
@@ -1616,6 +1677,7 @@ impl CodewhaleClient {
             models_http_client,
             http1_client,
             api_key,
+            api_key_source,
             model_bound_secret_values,
             catalog_error_secret_values,
             model_bound_masking,
@@ -1645,6 +1707,47 @@ impl CodewhaleClient {
             reasoning_stream_style,
             stream_idle_timeout,
         })
+    }
+
+    /// Map a failed HTTP response, naming the route, host and key source on
+    /// authentication and unknown-model failures (#6528) so a rejected key
+    /// explains which credential was sent where and how to replace it.
+    fn http_error_with_route_context(
+        &self,
+        status: u16,
+        body: &str,
+        retry_after: Option<Duration>,
+    ) -> LlmError {
+        let route = if self.provider_identity.is_empty() {
+            self.api_provider.as_str()
+        } else {
+            self.provider_identity.as_str()
+        };
+        let error = match status {
+            401 | 403 => LlmError::from_http_response_with_auth_context(
+                status,
+                body,
+                Some(
+                    crate::llm_client::AuthenticationErrorContext::from_parts(
+                        Some(route),
+                        Some(&self.base_url),
+                        None,
+                        Some(&self.api_key_source),
+                        Some(&self.api_key),
+                    )
+                    .with_fix(auth_fix_hint(route, &self.api_key_source)),
+                ),
+            ),
+            _ => LlmError::from_http_response_with_retry_after(status, body, retry_after),
+        };
+        match error {
+            LlmError::ModelError(message) => LlmError::ModelError(format!(
+                "{message} (provider route: {route}, host: {}; run `codewhale model resolve` or /model to pick a model this route serves)",
+                crate::llm_client::base_url_authority(&self.base_url)
+                    .unwrap_or_else(|| redact_url_for_display(&self.base_url))
+            )),
+            other => other,
+        }
     }
 
     /// Transport destination for Chat Completions requests.
@@ -1724,6 +1827,18 @@ impl CodewhaleClient {
     /// routing summaries.
     pub(crate) fn redact_model_bound_text(&self, text: &str) -> String {
         redact_model_bound_text(text, &self.model_bound_secret_values)
+    }
+
+    /// Redact tool output as it enters the transcript. Same masking as the
+    /// request boundary, including the confirmed `[redaction] model_bound`
+    /// opt-out: a user who chose to let the model see file bytes verbatim
+    /// keeps that, and everyone else never stores a live credential.
+    pub(crate) fn redact_tool_output_for_transcript(&self, text: &str) -> String {
+        if self.model_bound_masking {
+            redact_model_bound_text(text, &self.model_bound_secret_values)
+        } else {
+            text.to_string()
+        }
     }
 
     /// Alternate models share this client's frozen endpoint and declarations.
@@ -2045,13 +2160,43 @@ fn build_default_headers(
     // identify the app, never the user, and a user-configured header of the
     // same name below still wins (the extra-header loop overwrites).
     if api_provider == ApiProvider::Openrouter {
+        // `HTTP-Referer` is the only required header: it is the app's unique
+        // identifier, and without it OpenRouter creates no app page at all.
         headers.insert(
             HeaderName::from_static("http-referer"),
             HeaderValue::from_static("https://codewhale.net"),
         );
+        // `X-OpenRouter-Title` is the current display-name header. `X-Title`
+        // is only kept for backwards compatibility — OpenRouter still honours
+        // it, and a base-URL override can point this provider at an
+        // OpenRouter-compatible gateway that knows the old name and not the
+        // new one. Two bytes of redundancy is cheaper than losing attribution.
+        //
+        // Both names carry one display title. A user who configures either
+        // one (a fork, say, setting only the legacy `X-Title`) must control
+        // the name on both, or the default left on the other header would
+        // silently override theirs on OpenRouter.
+        let user_title = |wanted: &str| {
+            extra_headers.iter().find_map(|(name, value)| {
+                let value = value.trim();
+                (name.trim().eq_ignore_ascii_case(wanted) && !value.is_empty()).then_some(value)
+            })
+        };
+        let title = HeaderValue::from_str(
+            user_title("x-openrouter-title")
+                .or_else(|| user_title("x-title"))
+                .unwrap_or("Codewhale"),
+        )?;
+        headers.insert(HeaderName::from_static("x-openrouter-title"), title.clone());
+        headers.insert(HeaderName::from_static("x-title"), title);
+        // Marketplace categories, at most two per request. These place the app
+        // under Coding → CLI Agents and Productivity → Personal Agents on
+        // openrouter.ai/apps, which is how the rankings page groups entries.
+        // Unrecognised values are dropped silently, so these must stay exactly
+        // as OpenRouter spells them.
         headers.insert(
-            HeaderName::from_static("x-title"),
-            HeaderValue::from_static("Codewhale"),
+            HeaderName::from_static("x-openrouter-categories"),
+            HeaderValue::from_static("cli-agent,personal-agent"),
         );
     }
     // OpenCode Go / OpenCode Zen gateways (https://opencode.ai/docs/go/)
@@ -2468,6 +2613,7 @@ impl CodewhaleClient {
                     chat_shape_provider,
                     &self.base_url,
                     stream,
+                    request_route_limits,
                 )?;
                 if let Some(model) = &declared_wire_model {
                     wire.model.clone_from(model);
@@ -2649,6 +2795,29 @@ impl CodewhaleClient {
         .with_openrouter_vendor(self.openrouter_vendor.as_deref())
     }
 
+    /// The operator-declared `[[custom_models]]` rate for `model` on this
+    /// client's exact endpoint, frozen at `dispatched_at`. Every dispatch
+    /// boundary (background envelopes and main interactive turns alike) asks
+    /// this before the provider lake, so a declared rate is honored the same
+    /// way on each (#6690).
+    #[must_use]
+    pub(crate) fn configured_pricing_quote_at(
+        &self,
+        provider: ApiProvider,
+        provider_identity: &str,
+        model: &str,
+        dispatched_at: u64,
+    ) -> Option<crate::provider_catalog_live::ProviderLivePricingQuote> {
+        crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
+            &self.configured_models,
+            provider,
+            provider_identity,
+            model,
+            &self.base_url,
+            dispatched_at,
+        )
+    }
+
     /// Capture the immutable, redacted route envelope at the caller's
     /// application-dispatch/admission time. This is not proof of network
     /// delivery or provider invoice-time pricing. The wire model is normalized
@@ -2665,23 +2834,23 @@ impl CodewhaleClient {
         let provider_live_pricing = u64::try_from(dispatched_at.timestamp())
             .ok()
             .and_then(|at| {
-                crate::provider_catalog_live::configured_dispatch_pricing_quote_at(
-                    &self.configured_models,
-                    self.api_provider,
-                    &self.provider_identity,
-                    &model,
-                    &self.base_url,
-                    at,
-                )
-                .or_else(|| {
-                    crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                crate::provider_catalog_live::declared_or_catalog_quote(
+                    self.configured_pricing_quote_at(
                         self.api_provider,
                         &self.provider_identity,
                         &model,
-                        &self.base_url,
                         at,
-                    )
-                })
+                    ),
+                    || {
+                        crate::provider_catalog_live::fresh_dispatch_pricing_quote_at(
+                            self.api_provider,
+                            &self.provider_identity,
+                            &model,
+                            &self.base_url,
+                            at,
+                        )
+                    },
+                )
             });
         crate::cost_status::EffectiveRouteEnvelope {
             openrouter_vendor: self.openrouter_vendor.clone(),
@@ -3046,12 +3215,26 @@ impl CodewhaleClient {
             if or_models.is_empty() {
                 return Err(CatalogRefreshError::EmptyList);
             }
-            or_models
+            // A row with an unreadable or implausible price is skipped and
+            // counted, not allowed to fail every other row (#6690).
+            let offerings: Vec<_> = or_models
                 .iter()
-                .map(|item| {
-                    openrouter_to_catalog_offering(item, &provider, &fingerprint, fetched_at)
+                .filter_map(|item| {
+                    openrouter_to_catalog_offering(item, &provider, &fingerprint, fetched_at).ok()
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect();
+            let skipped = or_models.len() - offerings.len();
+            if skipped > 0 {
+                tracing::warn!(
+                    skipped,
+                    listed = or_models.len(),
+                    "skipped OpenRouter model rows with invalid pricing"
+                );
+            }
+            if offerings.is_empty() {
+                return Err(CatalogRefreshError::InvalidResponse);
+            }
+            offerings
         } else if self.catalog_endpoint_is_baseten() {
             let baseten_models = parse_baseten_models_response(&body)?;
             if baseten_models.is_empty() {
@@ -3112,6 +3295,7 @@ impl CodewhaleClient {
                 .into_iter()
                 .map(|model| CatalogOffering {
                     cost_source: None,
+                    modalities_source: None,
                     provider: provider.clone(),
                     endpoint_key: if self.api_provider == ApiProvider::OpencodeGo {
                         codewhale_config::opencode_go_endpoint_key(&model.id)
@@ -3168,6 +3352,7 @@ impl CodewhaleClient {
     /// success or a typed failure (#3385). Returns the resulting status so the UI
     /// can surface a visible "fresh / failed(reason)" chip without inspecting the
     /// cache internals. A failed refresh preserves any previously cached rows.
+    #[cfg(test)]
     pub async fn refresh_catalog_cache(
         &self,
         cache: &mut ProviderCatalogCache,
@@ -3553,11 +3738,7 @@ impl CodewhaleClient {
                     let retry_after = extract_retry_after(response.headers());
                     let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
                     let body = self.disclosed_http_error_body(disclosure, status.as_u16(), &raw);
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
+                    Err(self.http_error_with_route_context(status.as_u16(), &body, retry_after))
                 }
             },
             Some(Box::new(|err, attempt, delay| {
@@ -3634,11 +3815,7 @@ impl CodewhaleClient {
                     let retry_after = extract_retry_after(response.headers());
                     let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
                     let body = self.disclosed_http_error_body(disclosure, status.as_u16(), &raw);
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
+                    Err(self.http_error_with_route_context(status.as_u16(), &body, retry_after))
                 }
             },
             Some(Box::new(|err, attempt, delay| {
@@ -3881,9 +4058,14 @@ struct ModelsListResponse {
     data: Vec<ModelListItem>,
 }
 
+/// The list envelope is validated as a whole; each row is decoded on its own
+/// so one malformed row cannot fail the entire roster (#6690). Rows stay raw
+/// text rather than `serde_json::Value`: a `Value` map keeps the last of a
+/// duplicated key, which would silently accept an ambiguous row (two `id`s,
+/// two `pricing.prompt`s) instead of skipping it as malformed.
 #[derive(Debug, Deserialize)]
 struct OpenRouterModelsResponse {
-    data: Vec<OpenRouterModelItem>,
+    data: Vec<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4178,6 +4360,7 @@ fn codewhale_catalog_offerings_from_body(
         };
         offerings.push(CatalogOffering {
             cost_source: None,
+            modalities_source: None,
             provider: provider.to_string(),
             wire_model_id: id,
             canonical_model: None,
@@ -4229,6 +4412,7 @@ fn named_gateway_catalog_offerings_from_body(
             if let Some(matched) = same_provider_match {
                 CatalogOffering {
                     cost_source: Some(matched.pricing_source().clone()),
+                    modalities_source: Some(matched.modalities_source().clone()),
                     provider: provider.to_string(),
                     wire_model_id: model.id,
                     canonical_model: matched.canonical_model.clone(),
@@ -4251,6 +4435,7 @@ fn named_gateway_catalog_offerings_from_body(
             } else {
                 CatalogOffering {
                     cost_source: None,
+                    modalities_source: None,
                     provider: provider.to_string(),
                     wire_model_id: model.id,
                     canonical_model: None,
@@ -4282,12 +4467,43 @@ fn parse_openrouter_models_response(
 ) -> Result<Vec<OpenRouterModelItem>, CatalogRefreshError> {
     let parsed: OpenRouterModelsResponse =
         serde_json::from_str(payload).map_err(|_| CatalogRefreshError::InvalidResponse)?;
+    let listed = parsed.data.len();
     let mut seen = std::collections::HashSet::new();
-    let models: Vec<_> = parsed
-        .data
-        .into_iter()
-        .filter(|item| seen.insert(item.id.clone()))
-        .collect();
+    let mut malformed = 0usize;
+    let mut models = Vec::with_capacity(listed);
+    for row in parsed.data {
+        // `~`-prefixed ids (`~deepseek/deepseek-pro-latest`) are OpenRouter's
+        // moving "latest" aliases, not billing identities, so they are dropped
+        // silently. Any other row that does not decode or carries an id the
+        // catalog cannot hold is skipped and counted: one such row used to
+        // fail the whole roster closed, so no OpenRouter route could ever be
+        // priced from the lake (#6690).
+        let Ok(item) = serde_json::from_str::<OpenRouterModelItem>(row.get()) else {
+            malformed += 1;
+            continue;
+        };
+        if item.id.starts_with('~') {
+            continue;
+        }
+        if !crate::provider_lake::valid_catalog_model_id(&item.id) {
+            malformed += 1;
+            continue;
+        }
+        if seen.insert(item.id.clone()) {
+            models.push(item);
+        }
+    }
+    if malformed > 0 {
+        tracing::warn!(
+            malformed,
+            listed,
+            "skipped malformed OpenRouter model rows in the catalog refresh"
+        );
+    }
+    // Rows were listed but not one survived: the response is not a roster.
+    if models.is_empty() && malformed > 0 {
+        return Err(CatalogRefreshError::InvalidResponse);
+    }
     Ok(models)
 }
 
@@ -4503,6 +4719,7 @@ fn baseten_to_catalog_offering(
 
     Ok(CatalogOffering {
         cost_source: None,
+        modalities_source: None,
         provider: provider.to_string(),
         wire_model_id: item.id.clone(),
         canonical_model: None,
@@ -4526,6 +4743,7 @@ fn baseten_to_catalog_offering(
     })
 }
 
+#[cfg(test)]
 fn publish_provider_lake_scope(cache: &ProviderCatalogCache, provider: &str, fingerprint: &str) {
     // Publish fresh *and* stale/prior rows so pickers keep live catalog coverage
     // after TTL expiry or a failed refresh (#4139). Exact replacement is
@@ -4571,30 +4789,45 @@ fn openrouter_to_catalog_offering(
 
     let cost = if let Some(p) = item.pricing.as_ref() {
         // OpenRouter quotes per-token USD strings; ModelsDevCost is per million.
+        // Its routers (`openrouter/auto`, `openrouter/fusion`, ...) publish
+        // `"-1"`: the price depends on the model the router picks. A negative
+        // price therefore means "no fixed rate" for the whole row, never a
+        // partial one.
         let parse_price = |value: &Option<String>| -> Result<Option<f64>, CatalogRefreshError> {
             value
                 .as_ref()
                 .map(|value| {
-                    let parsed = value
+                    value
                         .trim()
                         .parse::<f64>()
                         .ok()
-                        .filter(|value| value.is_finite() && *value >= 0.0)
-                        .ok_or(CatalogRefreshError::InvalidResponse)?;
-                    checked_per_token_to_per_million(parsed)
+                        .filter(|value| value.is_finite())
+                        .ok_or(CatalogRefreshError::InvalidResponse)
                 })
                 .transpose()
         };
-        let cost = ModelsDevCost {
-            input: parse_price(&p.prompt)?,
-            output: parse_price(&p.completion)?,
-            cache_read: parse_price(&p.input_cache_read)?,
-            cache_write: parse_price(&p.input_cache_write)?,
-        };
-        if !codewhale_config::pricing::catalog_cost_is_valid(&cost) {
-            return Err(CatalogRefreshError::InvalidResponse);
+        let raw = [
+            parse_price(&p.prompt)?,
+            parse_price(&p.completion)?,
+            parse_price(&p.input_cache_read)?,
+            parse_price(&p.input_cache_write)?,
+        ];
+        if raw.iter().flatten().any(|price| *price < 0.0) {
+            None
+        } else {
+            let per_million =
+                |price: Option<f64>| price.map(checked_per_token_to_per_million).transpose();
+            let cost = ModelsDevCost {
+                input: per_million(raw[0])?,
+                output: per_million(raw[1])?,
+                cache_read: per_million(raw[2])?,
+                cache_write: per_million(raw[3])?,
+            };
+            if !codewhale_config::pricing::catalog_cost_is_valid(&cost) {
+                return Err(CatalogRefreshError::InvalidResponse);
+            }
+            Some(cost)
         }
-        Some(cost)
     } else {
         None
     };
@@ -4640,6 +4873,7 @@ fn openrouter_to_catalog_offering(
 
     Ok(CatalogOffering {
         cost_source: None,
+        modalities_source: None,
         provider: provider.to_string(),
         wire_model_id: item.id.clone(),
         canonical_model: None,
@@ -4658,6 +4892,38 @@ fn openrouter_to_catalog_offering(
             base_url_fingerprint: base_url_fingerprint.to_string(),
             fetched_at,
         },
+    })
+}
+
+/// The rate a main interactive turn freezes at its dispatch boundary (#6690).
+/// An operator-declared `[[custom_models]]` rate wins, exactly as on the
+/// background envelope path; `client` must be installed on the endpoint this
+/// turn dispatches to, so a declaration never leaks onto another endpoint. A
+/// declaration with no rates yields to the catalog price for that endpoint.
+pub(crate) fn main_turn_pricing_quote_at(
+    client: Option<&CodewhaleClient>,
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: &str,
+    endpoint_fingerprint: &str,
+    dispatched_at: u64,
+) -> Option<crate::provider_catalog_live::ProviderLivePricingQuote> {
+    let declared = client
+        .filter(|client| {
+            crate::cost_status::endpoint_fingerprint(client.base_url()).as_deref()
+                == Some(endpoint_fingerprint)
+        })
+        .and_then(|client| {
+            client.configured_pricing_quote_at(provider, provider_identity, model, dispatched_at)
+        });
+    crate::provider_catalog_live::declared_or_catalog_quote(declared, || {
+        crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
+            provider,
+            provider_identity,
+            model,
+            endpoint_fingerprint,
+            dispatched_at,
+        )
     })
 }
 
@@ -5156,6 +5422,7 @@ mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+pub(crate) mod system_one;
 
 /// Longest a request may take to open its stream and deliver the first body
 /// byte before the client itself times out (#6184): the header wait plus the
@@ -5240,7 +5507,7 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// OpenRouter app attribution: the two headers that put an app on
+    /// OpenRouter app attribution: the headers that put an app on
     /// openrouter.ai's rankings are sent for OpenRouter routes only, and a
     /// user-configured header of the same name wins.
     #[test]
@@ -5262,6 +5529,22 @@ mod tests {
             headers.get("x-title").and_then(|v| v.to_str().ok()),
             Some("Codewhale")
         );
+        // The current display-name header, alongside the legacy one.
+        assert_eq!(
+            headers
+                .get("x-openrouter-title")
+                .and_then(|v| v.to_str().ok()),
+            Some("Codewhale")
+        );
+        // Marketplace categories must match OpenRouter's spelling exactly:
+        // unrecognised values are dropped silently, so a typo here is
+        // invisible in production and only shows up as a missing listing.
+        assert_eq!(
+            headers
+                .get("x-openrouter-categories")
+                .and_then(|v| v.to_str().ok()),
+            Some("cli-agent,personal-agent")
+        );
 
         // Attribution identifies this app to OpenRouter's rankings and has
         // no business on any other route, whichever provider that is.
@@ -5282,7 +5565,9 @@ mod tests {
             )
             .expect("headers");
             assert!(
-                other.get("http-referer").is_none() && other.get("x-title").is_none(),
+                other.get("http-referer").is_none()
+                    && other.get("x-title").is_none()
+                    && other.get("x-openrouter-title").is_none(),
                 "{provider:?} must not receive OpenRouter attribution headers"
             );
         }
@@ -5296,10 +5581,34 @@ mod tests {
             false,
         )
         .expect("headers");
-        assert_eq!(
-            overridden.get("x-title").and_then(|v| v.to_str().ok()),
-            Some("My Fork")
-        );
+        // A user title on the legacy header alone must follow onto the
+        // current one, or OpenRouter would still show "Codewhale".
+        for name in ["x-title", "x-openrouter-title"] {
+            assert_eq!(
+                overridden.get(name).and_then(|v| v.to_str().ok()),
+                Some("My Fork"),
+                "{name} must carry the user's title"
+            );
+        }
+
+        // And the other way round: setting only the current header also
+        // renames the legacy one, so the two never disagree.
+        let current_only = build_default_headers(
+            "sk-or-key",
+            &HashMap::from([("X-OpenRouter-Title".to_string(), "My Fork".to_string())]),
+            ApiProvider::Openrouter,
+            "https://openrouter.ai/api/v1",
+            WireFormat::ChatCompletions,
+            false,
+        )
+        .expect("headers");
+        for name in ["x-title", "x-openrouter-title"] {
+            assert_eq!(
+                current_only.get(name).and_then(|v| v.to_str().ok()),
+                Some("My Fork"),
+                "{name} must carry the user's title"
+            );
+        }
     }
 
     #[test]
@@ -5432,11 +5741,17 @@ mod tests {
             })
             .to_string();
             let items = parse_openrouter_models_response(&openrouter).expect("OpenRouter shape");
-            assert_eq!(
-                openrouter_to_catalog_offering(&items[0], "openrouter", "fp", 1).unwrap_err(),
-                CatalogRefreshError::InvalidResponse,
-                "OpenRouter must reject {invalid:?}"
-            );
+            let offering = openrouter_to_catalog_offering(&items[0], "openrouter", "fp", 1);
+            if invalid.starts_with('-') {
+                // OpenRouter's negative sentinel means "no fixed rate" (#6690).
+                assert_eq!(offering.expect("variable-price row").cost, None);
+            } else {
+                assert_eq!(
+                    offering.unwrap_err(),
+                    CatalogRefreshError::InvalidResponse,
+                    "OpenRouter must reject {invalid:?}"
+                );
+            }
 
             let baseten = json!({
                 "data": [{
@@ -5656,13 +5971,17 @@ mod tests {
         route_base_url: &str,
         transport_base_url: String,
     ) -> CodewhaleClient {
-        let mut client = CodewhaleClient::new(&Config {
-            provider: Some("deepseek".to_string()),
-            api_key: Some("deepseek-request-boundary-key".to_string()),
-            base_url: Some(route_base_url.to_string()),
-            default_text_model: Some("deepseek-v4-pro".to_string()),
-            ..Config::default()
-        })
+        let mut client = CodewhaleClient::new(
+            &Config {
+                provider: Some("deepseek".to_string()),
+                default_text_model: Some("deepseek-v4-pro".to_string()),
+                ..Config::default()
+            }
+            .with_legacy_root(
+                Some("deepseek-request-boundary-key".to_string()),
+                Some(route_base_url.to_string()),
+            ),
+        )
         .expect("DeepSeek request-boundary client");
         client.test_chat_transport_base_url = Some(transport_base_url);
         client
@@ -5966,6 +6285,104 @@ mod tests {
         let path = requests[0].url.path().to_string();
         let body = serde_json::from_slice(&requests[0].body).expect("captured request JSON");
         (path, body)
+    }
+
+    /// #6540: the compaction summary is the parent turn plus one trailing
+    /// user instruction. Rendered through the production wire builders, its
+    /// prompt must be byte-for-byte the parent's prompt followed by that one
+    /// item, with the same model, system/instructions, tools and reasoning
+    /// controls — otherwise the provider cache misses the whole history.
+    #[test]
+    fn compaction_summary_request_extends_the_parent_turn_prompt_bytes() {
+        fn text(role: Role, text: &str) -> Message {
+            Message {
+                role,
+                content: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                    cache_control: None,
+                }],
+            }
+        }
+        fn assert_extends(label: &str, parent: &Value, summary: &Value) {
+            let parent_items = parent.as_array().expect("parent prompt items");
+            let summary_items = summary.as_array().expect("summary prompt items");
+            assert_eq!(summary_items.len(), parent_items.len() + 1, "{label}");
+            let parent_bytes = serde_json::to_string(parent).expect("serialize parent");
+            let summary_bytes = serde_json::to_string(summary).expect("serialize summary");
+            let open_prefix = parent_bytes.strip_suffix(']').expect("JSON array");
+            assert!(
+                summary_bytes.starts_with(open_prefix),
+                "{label}: summary prompt diverges from the parent prefix"
+            );
+        }
+
+        let model = "deepseek-v4-pro";
+        let history = vec![
+            text(Role::User, "fix the failing session_store test"),
+            text(Role::Assistant, "Reading the test first."),
+            text(Role::User, "keep the branch name"),
+        ];
+        let system = SystemPrompt::Text("pinned system prompt".to_string());
+        let tools = vec![test_tool("read"), test_tool("bash")];
+        let effort = "high";
+        let parent = codewhale_core::request::prepare_primary_turn_request(
+            codewhale_core::request::PrimaryTurnRequest {
+                model: model.to_string(),
+                messages: history.clone(),
+                max_tokens: 64_000,
+                system: Some(system.clone()),
+                tools: Some(tools.clone()),
+                tool_choice: Some(json!({"type": "auto"})),
+                reasoning_effort: Some(effort.to_string()),
+            },
+        );
+        let config = crate::compaction::CompactionConfig {
+            model: model.to_string(),
+            ..Default::default()
+        };
+        let mut summary_history = history;
+        summary_history.push(text(Role::User, "write the handoff summary"));
+        let summary = crate::compaction::compaction_summary_request(
+            summary_history,
+            &config,
+            Some(&system),
+            Some(&tools),
+            Some(effort),
+            8_192,
+        );
+
+        // Chat Completions: system and history share one `messages` array.
+        let client = deepseek_request_boundary_client(
+            "https://api.deepseek.com/v1",
+            "http://127.0.0.1:9".into(),
+        );
+        let parent_body = client
+            .prepare_outbound_request(parent.clone(), true)
+            .expect("parent prepares")
+            .body;
+        let summary_body = client
+            .prepare_outbound_request(summary.clone(), false)
+            .expect("summary prepares")
+            .body;
+        assert_extends("chat", &parent_body["messages"], &summary_body["messages"]);
+        for key in ["model", "tools", "reasoning_effort", "thinking"] {
+            assert_eq!(parent_body.get(key), summary_body.get(key), "chat {key}");
+        }
+
+        // Responses (the Codex route where the 0% hit was recorded).
+        let parent_body =
+            responses::build_responses_body_for_provider(&parent, ApiProvider::OpenaiCodex);
+        let summary_body =
+            responses::build_responses_body_for_provider(&summary, ApiProvider::OpenaiCodex);
+        assert_extends("responses", &parent_body["input"], &summary_body["input"]);
+        for key in ["model", "instructions", "tools", "reasoning", "include"] {
+            assert_eq!(
+                parent_body.get(key),
+                summary_body.get(key),
+                "responses {key}"
+            );
+        }
+        assert!(parent_body.get("reasoning").is_some());
     }
 
     #[tokio::test]
@@ -7475,6 +7892,42 @@ mod tests {
         );
     }
 
+    /// #6528 — a rejected key names the route, host, key source and the
+    /// command that replaces it; an unknown model names the route and host.
+    #[test]
+    fn auth_and_unknown_model_errors_name_route_host_and_key_source() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(ProvidersConfig {
+                openrouter: ProviderConfig {
+                    api_key: Some("or-rejected-key-1234567890".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let client = CodewhaleClient::new(&config).expect("openrouter client");
+        let auth = client
+            .http_error_with_route_context(401, "Invalid API key", None)
+            .to_string();
+        assert!(auth.contains("provider: openrouter"), "{auth}");
+        assert!(auth.contains("openrouter.ai"), "{auth}");
+        assert!(auth.contains("key source: config file"), "{auth}");
+        assert!(
+            auth.contains("fix: codewhale auth set --provider openrouter"),
+            "{auth}"
+        );
+        assert!(!auth.contains("or-rejected-key-1234567890"), "{auth}");
+
+        let model = client
+            .http_error_with_route_context(404, "model not found: nope", None)
+            .to_string();
+        assert!(model.contains("provider route: openrouter"), "{model}");
+        assert!(model.contains("host: openrouter.ai"), "{model}");
+    }
+
     fn concentrate_client(server: &MockServer, model: &str) -> CodewhaleClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = Config {
@@ -8315,42 +8768,44 @@ mod tests {
 
     fn client_with_config_secret_sentinels() -> CodewhaleClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        CodewhaleClient::new(&Config {
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                arcee: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[1].to_string()),
-                    ..ProviderConfig::default()
-                },
-                moonshot: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[2].to_string()),
-                    ..ProviderConfig::default()
-                },
-                openrouter: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[3].to_string()),
-                    ..ProviderConfig::default()
-                },
-                together: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[4].to_string()),
-                    ..ProviderConfig::default()
-                },
-                xiaomi_mimo: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[5].to_string()),
-                    ..ProviderConfig::default()
-                },
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                sakana: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[7].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        })
+        CodewhaleClient::new(
+            &Config {
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    arcee: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[1].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    moonshot: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[2].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    openrouter: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[3].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    together: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[4].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    xiaomi_mimo: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[5].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    sakana: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[7].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with secret sentinels")
     }
 
@@ -8536,22 +8991,24 @@ mod tests {
         )
         .expect("record opt-out confirmation");
 
-        let client = CodewhaleClient::new(&Config {
-            loaded_config_path: Some(codewhale_home.join("config.toml")),
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            redaction: Some(codewhale_config::redaction::RedactionToml {
-                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                loaded_config_path: Some(codewhale_home.join("config.toml")),
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                redaction: Some(codewhale_config::redaction::RedactionToml {
+                    model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with confirmed opt-out");
 
         let tool_output = format!(
@@ -8632,21 +9089,23 @@ mod tests {
         let _codewhale_home =
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
 
-        let client = CodewhaleClient::new(&Config {
-            provider: Some("zai".to_string()),
-            api_key: Some(CONFIG_SECRET_SENTINELS[0].to_string()),
-            providers: Some(ProvidersConfig {
-                zai: ProviderConfig {
-                    api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
-                    ..ProviderConfig::default()
-                },
-                ..ProvidersConfig::default()
-            }),
-            redaction: Some(codewhale_config::redaction::RedactionToml {
-                model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                provider: Some("zai".to_string()),
+                providers: Some(ProvidersConfig {
+                    zai: ProviderConfig {
+                        api_key: Some(CONFIG_SECRET_SENTINELS[6].to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                redaction: Some(codewhale_config::redaction::RedactionToml {
+                    model_bound: Some(codewhale_config::redaction::ModelBoundMasking::Disabled),
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some(CONFIG_SECRET_SENTINELS[0].to_string()), None),
+        )
         .expect("client with unconfirmed opt-out request");
 
         let secret = CONFIG_SECRET_SENTINELS[0];
@@ -9495,18 +9954,20 @@ mod tests {
 
     #[test]
     fn client_stream_idle_timeout_uses_tui_config() {
-        let client = CodewhaleClient::new(&Config {
-            api_key: Some("sk-test".to_string()),
-            tui: Some(crate::config::TuiConfig {
-                stream_chunk_timeout_secs: Some(777),
-                max_model_steps: None,
-                turn_wall_clock_secs: None,
-                stream_max_content_mb: None,
-                stream_max_duration_secs: None,
-                ..crate::config::TuiConfig::default()
-            }),
-            ..Config::default()
-        })
+        let client = CodewhaleClient::new(
+            &Config {
+                tui: Some(crate::config::TuiConfig {
+                    stream_chunk_timeout_secs: Some(777),
+                    max_model_steps: None,
+                    turn_wall_clock_secs: None,
+                    stream_max_content_mb: None,
+                    stream_max_duration_secs: None,
+                    ..crate::config::TuiConfig::default()
+                }),
+                ..Config::default()
+            }
+            .with_legacy_root(Some("sk-test".to_string()), None),
+        )
         .expect("client");
 
         assert_eq!(client.stream_idle_timeout, Duration::from_secs(777));
@@ -12416,6 +12877,75 @@ mod tests {
         }
     }
 
+    /// #6690: rows shaped like the live OpenRouter roster. A `~` "latest"
+    /// alias, a router's `"-1"` variable price, an undecodable row and an id
+    /// the catalog cannot hold each used to fail the whole refresh closed
+    /// (`invalid_response`), so the lake never went fresh and no OpenRouter
+    /// turn could be priced. Each now costs only its own row.
+    #[tokio::test]
+    async fn fetch_catalog_delta_skips_openrouter_latest_aliases_and_keeps_prices() {
+        let server = MockServer::start().await;
+        mount_models_json(
+            &server,
+            200,
+            json!({"data": [
+                {"id": "~deepseek/deepseek-pro-latest",
+                 "pricing": {"prompt": "0.0000002523", "completion": "0.0000035",
+                             "input_cache_read": "0.0000002518"}},
+                {"id": "openrouter/auto", "context_length": 2000000,
+                 "pricing": {"prompt": "-1", "completion": "-1"},
+                 "top_provider": {"context_length": null, "max_completion_tokens": null}},
+                {"id": "synthetic/malformed-row", "context_length": "very long",
+                 "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+                {"id": "synthetic/unreadable-price",
+                 "pricing": {"prompt": "not-a-number", "completion": "0.000002"}},
+                {"id": "synthetic/bad id"},
+                {"id": "deepseek/deepseek-v4-pro", "context_length": 1048576,
+                 "pricing": {"prompt": "0.00000095526", "completion": "0.00000191052",
+                             "input_cache_read": "0.000000079605"},
+                 "top_provider": {"context_length": 1024000, "max_completion_tokens": 384000}}
+            ]}),
+        )
+        .await;
+        let client = openrouter_client_for(&server);
+
+        let delta = client
+            .fetch_catalog_delta()
+            .await
+            .expect("a bad row must not fail the whole roster");
+        let ids: Vec<&str> = delta
+            .offerings
+            .iter()
+            .map(|offering| offering.wire_model_id.as_str())
+            .collect();
+        assert_eq!(ids, ["openrouter/auto", "deepseek/deepseek-v4-pro"]);
+        assert_eq!(delta.offerings[0].cost, None, "router price is variable");
+        let cost = delta.offerings[1].cost.as_ref().expect("served price");
+        let close = |got: Option<f64>, want: f64| got.is_some_and(|got| (got - want).abs() < 1e-9);
+        assert!(close(cost.input, 0.95526), "{cost:?}");
+        assert!(close(cost.output, 1.91052), "{cost:?}");
+        assert!(close(cost.cache_read, 0.079605), "{cost:?}");
+        assert_eq!(cost.cache_write, None);
+
+        // Only structurally invalid responses still fail the refresh.
+        for body in [
+            json!({"data": {"id": "deepseek/deepseek-v4-pro"}}),
+            json!({"models": []}),
+            json!({"data": [{"name": "no id"}, {"id": "synthetic/bad id"}]}),
+        ] {
+            let server = MockServer::start().await;
+            mount_models_json(&server, 200, body.clone()).await;
+            assert_eq!(
+                openrouter_client_for(&server)
+                    .fetch_catalog_delta()
+                    .await
+                    .expect_err("structurally invalid roster"),
+                CatalogRefreshError::InvalidResponse,
+                "{body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn fetch_catalog_scenario() {
         // Scenario consolidation of: fetch_catalog_delta_maps_http_statuses_to_typed_errors, fetch_catalog_delta_maps_invalid_json_and_empty_list
@@ -13240,11 +13770,10 @@ mod tests {
     ) -> (Config, crate::route_runtime::ResolvedRuntimeRoute) {
         let config = Config {
             provider: Some("deepseek".to_string()),
-            api_key: Some("ds-test".to_string()),
-            base_url: Some(base_url.to_string()),
             default_text_model: Some(model.to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("ds-test".to_string()), Some(base_url.to_string()));
         let route = crate::route_runtime::resolve_runtime_route(
             &config,
             ApiProvider::Deepseek,
@@ -13294,11 +13823,13 @@ mod tests {
     fn route_cap_test_client(wire_format: WireFormat, limits: RouteLimits) -> CodewhaleClient {
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("route-cap-test".to_string()),
-            base_url: Some("https://route-cap.example/v1".to_string()),
             default_text_model: Some("DeepSeek-V4-Flash".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("route-cap-test".to_string()),
+            Some("https://route-cap.example/v1".to_string()),
+        );
         CodewhaleClient::from_parts(
             "https://route-cap.example/v1".to_string(),
             "DeepSeek-V4-Flash".to_string(),
@@ -13589,11 +14120,10 @@ mod tests {
         let base_url = format!("{}/v1", server.uri());
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("fim-cap-test".to_string()),
-            base_url: Some(base_url.clone()),
             default_text_model: Some("local-fim".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("fim-cap-test".to_string()), Some(base_url.clone()));
         let client = CodewhaleClient::from_parts(
             base_url,
             "local-fim".to_string(),
@@ -13748,11 +14278,13 @@ mod tests {
 
         let config = Config {
             provider: Some("deepseek".to_string()),
-            api_key: Some("ds-test".to_string()),
-            base_url: Some("https://api.deepseek.com".to_string()),
             default_text_model: Some(model.to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            Some("ds-test".to_string()),
+            Some("https://api.deepseek.com".to_string()),
+        );
         let client = CodewhaleClient::from_candidate(&config, &candidate)
             .expect("client binds exact synthetic catalog offering");
         assert!(

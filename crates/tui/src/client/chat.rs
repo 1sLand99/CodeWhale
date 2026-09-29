@@ -16,10 +16,9 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
-    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
-    wire_model_for_provider_route,
+    is_exact_zai_chat_route, is_exact_zai_forced_thinking_route, is_exact_zai_tiered_effort_route,
+    is_kimi_code_membership_model, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -46,6 +45,7 @@ use super::{
     apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
     release_stream_buffer, system_to_instructions, to_api_tool_name,
 };
+use codewhale_config::route::RouteLimits;
 use codewhale_models::Role;
 
 fn apply_provider_token_limit(
@@ -93,22 +93,25 @@ fn apply_openai_reasoning_effort(
     body["reasoning_effort"] = json!(effort);
 }
 
-fn apply_xai_grok_4_6_reasoning_effort(
+/// xAI's first-party `reasoning_effort` ladder, driven by the bundled
+/// catalog row for the exact model id: a row that documents an `effort`
+/// option gets the field (`xhigh` only where the row lists it — grok-4.7 and
+/// grok-4.6 do, grok-4.5 maps it to `high`); a row without one (grok-4.3,
+/// grok-build) or no row at all sends nothing. Grok reasoning cannot be
+/// disabled, so `off` is sent as the documented default `high`
+/// (<https://docs.x.ai/docs/guides/reasoning>).
+fn apply_xai_grok_reasoning_effort(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
     model: &str,
     effort: Option<&str>,
 ) {
-    if !(is_exact_xai_grok_4_6_route(provider, base_url, model)
-        || (provider == ApiProvider::Xai
-            && codewhale_config::provider::is_exact_xai_platform_route(
-                codewhale_config::ProviderKind::Xai,
-                base_url,
-            )
-            && model
-                .trim()
-                .eq_ignore_ascii_case(crate::config::XAI_GROK_4_5_MODEL)))
+    if provider != ApiProvider::Xai
+        || !codewhale_config::provider::is_exact_xai_platform_route(
+            codewhale_config::ProviderKind::Xai,
+            base_url,
+        )
     {
         return;
     }
@@ -116,11 +119,23 @@ fn apply_xai_grok_4_6_reasoning_effort(
         return;
     };
     let model = model.trim().to_ascii_lowercase();
-    let supports_xhigh = model == crate::config::XAI_GROK_4_6_MODEL;
-    let supports_effort = supports_xhigh || model == crate::config::XAI_GROK_4_5_MODEL;
-    if !supports_effort {
+    // The bundled row with Codewhale's corrections applied (#6396): the raw
+    // seed row carries Models.dev's ladder, which lists an effort control for
+    // grok-4.3 that xAI does not document.
+    let Some(row) =
+        crate::provider_lake::bundled_catalog_offering_for_model(ApiProvider::Xai, &model)
+    else {
         return;
-    }
+    };
+    let Some(documented) = row
+        .reasoning_options
+        .iter()
+        .find(|option| option["type"] == "effort")
+        .and_then(|option| option["values"].as_array())
+    else {
+        return;
+    };
+    let supports_xhigh = documented.iter().any(|value| value == "xhigh");
     let wire_effort = match effort.trim().to_ascii_lowercase().as_str() {
         "auto" | "automatic" | "" => return,
         "off" | "disabled" | "none" | "false" | "high" => "high",
@@ -579,7 +594,7 @@ pub(super) fn apply_route_reasoning_controls(
     apply_minimax_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_inkling_reasoning_effort(body, provider, model, effort);
     apply_openai_reasoning_effort(body, provider, model, effort);
-    apply_xai_grok_4_6_reasoning_effort(body, provider, base_url, model, effort);
+    apply_xai_grok_reasoning_effort(body, provider, base_url, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
@@ -1115,9 +1130,13 @@ pub(crate) fn build_chat_wire_body(
     provider: ApiProvider,
     base_url: &str,
     stream: bool,
+    route_limits: Option<RouteLimits>,
 ) -> Result<ChatWireBody> {
-    let messages =
-        build_chat_messages_for_request_and_provider_and_route(request, provider, base_url);
+    let messages = PromptBuilder::for_request(request).build_for_provider_and_route(
+        provider,
+        base_url,
+        route_limits,
+    );
     let model = {
         let wire = wire_model_for_provider_route(provider, base_url, &request.model);
         codewhale_models::effective_muse_wire_id(&wire).to_string()
@@ -1711,7 +1730,7 @@ pub(super) fn build_chat_messages(
     build_chat_messages_with_reasoning(
         system,
         messages,
-        model,
+        tool_result_sent_char_budget(model),
         should_replay_reasoning_content(model, None),
         false,
     )
@@ -1736,12 +1755,13 @@ pub(super) fn build_chat_messages_for_request_and_provider(
 /// Code K3 is deliberately narrower: the bare `k3` model owns reasoning
 /// replay only on its official membership-plan endpoint, so callers that have
 /// a concrete base URL must retain it through prompt construction.
+#[cfg(test)]
 pub(super) fn build_chat_messages_for_request_and_provider_and_route(
     request: &MessageRequest,
     provider: ApiProvider,
     base_url: &str,
 ) -> Vec<Value> {
-    PromptBuilder::for_request(request).build_for_provider_and_route(provider, base_url)
+    PromptBuilder::for_request(request).build_for_provider_and_route(provider, base_url, None)
 }
 
 pub(crate) fn inspect_prompt_for_request(request: &MessageRequest) -> PromptInspection {
@@ -1776,17 +1796,26 @@ impl<'a> PromptBuilder<'a> {
         build_chat_messages_with_reasoning(
             self.system,
             self.messages,
-            self.model,
+            tool_result_sent_char_budget(self.model),
             should_replay_reasoning_content(self.model, self.reasoning_effort),
             false,
         )
     }
 
-    fn build_for_provider_and_route(self, provider: ApiProvider, base_url: &str) -> Vec<Value> {
+    fn build_for_provider_and_route(
+        self,
+        provider: ApiProvider,
+        base_url: &str,
+        route_limits: Option<RouteLimits>,
+    ) -> Vec<Value> {
         let mut messages = build_chat_messages_with_reasoning(
             self.system,
             self.messages,
-            self.model,
+            crate::route_budget::route_inline_char_budget_for_route(
+                provider,
+                self.model,
+                route_limits,
+            ),
             should_replay_reasoning_content_for_provider_on_route(
                 provider,
                 base_url,
@@ -1827,7 +1856,7 @@ impl<'a> PromptBuilder<'a> {
         let messages = build_chat_messages_with_reasoning(
             self.system,
             self.messages,
-            self.model,
+            tool_result_sent_char_budget(self.model),
             should_replay_reasoning_content(self.model, self.reasoning_effort),
             true,
         );
@@ -1968,15 +1997,17 @@ fn push_text_part(parts: &mut Vec<Value>, text: &str) {
 
 pub(crate) const CACHE_WARMUP_USER_TAIL: &str = "请只回复 OK";
 pub(crate) const CACHE_WARMUP_MAX_TOKENS: u32 = 8;
-const TOOL_RESULT_SENT_CHAR_BUDGET: usize = 12_000;
-
-fn tool_result_sent_char_budget() -> usize {
-    crate::tools::large_output_router::WorkshopConfig::active_tool_result_max_bytes()
-        .map(|bytes| bytes.clamp(TOOL_RESULT_SENT_CHAR_BUDGET, 2 * 1024 * 1024))
-        .unwrap_or(TOOL_RESULT_SENT_CHAR_BUDGET)
+/// Wire backstop for tool results (#6508). The engine already fits every
+/// result it gives the model to the route's inline budget, and marks any cut
+/// with a recovery footer. This pass only catches history that never went
+/// through the engine (legacy or restored raw results). Model-only inspection
+/// uses the catalog window; outbound requests pass their resolved route budget.
+/// Results with an engine recovery footer remain intact.
+fn tool_result_sent_char_budget(model: &str) -> usize {
+    crate::route_budget::route_inline_char_budget(codewhale_models::context_window_for_model(model))
 }
-const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
-const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
+/// Characters of an excerpted wire result spent on its labelled header.
+const TOOL_RESULT_EXCERPT_FRAME_CHARS: usize = 1_024;
 /// Tool results shorter than this stay inline even when repeated. The
 /// extra prompt bytes are cheaper than adding an earlier-message reference
 /// for tiny command outputs.
@@ -2484,6 +2515,7 @@ fn compact_tool_result_for_wire(
     input: &Value,
     content: &str,
     message_label: &str,
+    sent_budget: usize,
     seen_tool_results: &mut HashMap<String, SeenToolResult>,
 ) -> WireToolResult {
     let original_chars = content.chars().count();
@@ -2492,7 +2524,6 @@ fn compact_tool_result_for_wire(
     // Only medium, non-mutation results can point back to a full earlier
     // message in this one request. Oversized results are already excerpts, so
     // a back-reference would falsely imply the exact bytes remain available.
-    let sent_budget = tool_result_sent_char_budget();
     let dedup_eligible = (TOOL_RESULT_DEDUP_MIN_CHARS..=sent_budget).contains(&original_chars)
         && !is_mutation_tool(tool_name);
 
@@ -2548,8 +2579,10 @@ fn compact_tool_result_for_wire(
         };
     }
 
-    let head = first_chars(content, TOOL_RESULT_HEAD_CHARS);
-    let tail = last_chars(content, TOOL_RESULT_TAIL_CHARS);
+    let excerpt_chars = sent_budget.saturating_sub(TOOL_RESULT_EXCERPT_FRAME_CHARS);
+    let head_chars = excerpt_chars * 2 / 3;
+    let head = first_chars(content, head_chars);
+    let tail = last_chars(content, excerpt_chars - head_chars);
     let kept = head.chars().count() + tail.chars().count();
     let omitted = original_chars.saturating_sub(kept);
     let compacted = format!(
@@ -2649,7 +2682,7 @@ fn merge_adjacent_user_content(previous: Value, current: Value) -> Value {
 fn build_chat_messages_with_reasoning(
     system: Option<&SystemPrompt>,
     messages: &[Message],
-    _model: &str,
+    tool_result_budget: usize,
     include_reasoning: bool,
     include_tool_budget_metadata: bool,
 ) -> Vec<Value> {
@@ -2970,6 +3003,7 @@ fn build_chat_messages_with_reasoning(
                             &tool_info.input,
                             &content,
                             &message_label,
+                            tool_result_budget,
                             &mut seen_tool_results,
                         );
                         let mut tool_msg = json!({
@@ -3478,6 +3512,14 @@ fn should_replay_reasoning_content_for_provider_on_route(
         return true;
     }
 
+    // Xiaomi MiMo's API requires the assistant `reasoning_content` back on
+    // tool-call turns (omitting it is a 400), for every MiMo chat model, not
+    // only the ids the offline catalog marks as reasoning (#6501). A turn
+    // that produced no reasoning replays nothing.
+    if provider == ApiProvider::XiaomiMimo {
+        return true;
+    }
+
     if is_exact_mistral_chat_route(provider, base_url)
         && mistral_model_has_adjustable_reasoning(model)
     {
@@ -3496,77 +3538,11 @@ fn should_replay_reasoning_content_for_provider_on_route(
     model_supports_reasoning(model)
 }
 
-/// Should the SSE parser treat incoming `reasoning_content` deltas as thinking
-/// (vs. inlining them as answer text)?
-///
-/// DeepSeek-family models are classified on any provider because their API
-/// requires `reasoning_content` replay on later turns (#1739 / #1694). Other
-/// known reasoning-capable large models are classified only on providers whose
-/// streaming shape exposes reasoning fields, so `reasoning`/`reasoning_content`
-/// deltas become Thinking cells instead of leaking as normal answer text.
+/// Test shorthand: does this route surface `reasoning_content` /
+/// `reasoning` / `reasoning_details` deltas as Thinking by default?
 #[cfg(test)]
 fn is_reasoning_model_for_stream(provider: ApiProvider, model: &str) -> bool {
-    is_reasoning_model_for_stream_on_route(provider, "", model)
-}
-
-/// Route-aware stream classification for providers that share model names.
-fn is_reasoning_model_for_stream_on_route(
-    provider: ApiProvider,
-    base_url: &str,
-    model: &str,
-) -> bool {
-    if is_exact_kimi_code_k3_route(provider, base_url, model)
-        || is_exact_direct_moonshot_k3_route(provider, base_url, model)
-    {
-        return true;
-    }
-
-    if is_exact_modelstudio_chat_route(provider, base_url)
-        && (modelstudio_model_is_thinking_only(model)
-            || modelstudio_model_supports_preserve_thinking(model))
-    {
-        return true;
-    }
-
-    if requires_reasoning_content(model) {
-        return true;
-    }
-
-    // Model Studio's OpenAI-compatible endpoints (Token Plan / Coding Plan)
-    // stream hybrid-model reasoning as `delta.reasoning_content` (DashScope
-    // dialect) whenever thinking is on — and for the qwen3.x families thinking
-    // is on by server default. Surface those deltas as Thinking instead of
-    // inlining them into the answer text. `reasoning_content` is deliberately
-    // NOT replayed back on later turns (the provider is absent from
-    // `provider_accepts_reasoning_content`): DashScope does not require the
-    // reasoning field in request history.
-    if matches!(
-        provider,
-        ApiProvider::ModelstudioTokenPlan
-            | ApiProvider::ModelstudioTokenPlanAnthropic
-            | ApiProvider::ModelstudioCodingPlan
-            | ApiProvider::ModelstudioCodingPlanAnthropic
-    ) && model_supports_reasoning(model)
-    {
-        return true;
-    }
-
-    // ModelScope's OpenAI-compatible inference API streams hybrid-model
-    // reasoning as `delta.reasoning_content` (the DashScope dialect) for the
-    // Qwen and ZhipuAI families, whose model ids carry a `qwen/` or
-    // `zhipuai/` namespace prefix. Surface those deltas as Thinking instead
-    // of inlining them into the answer text. As with Model Studio above,
-    // `reasoning_content` is deliberately NOT replayed back on later turns:
-    // the provider is absent from `provider_accepts_reasoning_content`, and
-    // the DashScope dialect does not require the reasoning field in history.
-    if provider == ApiProvider::Modelscope {
-        let lower = model.to_ascii_lowercase();
-        if lower.starts_with("qwen/") || lower.starts_with("zhipuai/") {
-            return true;
-        }
-    }
-
-    provider_accepts_reasoning_content(provider) && model_supports_reasoning(model)
+    reasoning_stream_style_for_stream(provider, model, None) == ReasoningStreamStyle::SeparateField
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3604,11 +3580,20 @@ fn reasoning_stream_style_for_route(
             "Ignoring unrecognized reasoning_stream_style `{configured}`; expected separate_field, inline_tags, or none"
         ));
     }
-    if is_reasoning_model_for_stream_on_route(provider, base_url, model) {
-        ReasoningStreamStyle::SeparateField
-    } else {
-        ReasoningStreamStyle::None
-    }
+    // #6501: the dedicated reasoning fields are reasoning on every
+    // Chat Completions route that sends them (DeepSeek, xAI, Xiaomi MiMo,
+    // Kimi, GLM, MiniMax, DashScope, vLLM/SGLang reasoning parsers, OpenRouter,
+    // Ollama, ...), and the non-streaming parser already treats them that way
+    // unconditionally. Gating the stream on a provider allowlist AND a
+    // per-model catalog row meant every unlisted provider (xAI, StepFun,
+    // Together, Ollama, the Codewhale gateway, ...) and every model id newer
+    // than the offline catalog (grok-4.7, a fresh MiMo id) rendered its
+    // reasoning as answer prose. Surfacing a field that never arrives costs
+    // nothing; a gateway that really puts its answer in `reasoning_content`
+    // opts out with `reasoning_stream_style = "none"`. Replay of reasoning in
+    // request history stays separately gated by
+    // `should_replay_reasoning_content_for_provider_on_route`.
+    ReasoningStreamStyle::SeparateField
 }
 
 fn parse_reasoning_stream_style(value: &str) -> Option<ReasoningStreamStyle> {
@@ -4937,9 +4922,9 @@ mod alias_thinking_detection_tests {
         apply_inkling_reasoning_effort, apply_kimi_code_fixed_sampling,
         apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
         apply_provider_token_limit, apply_route_reasoning_controls, is_reasoning_model_for_stream,
-        is_reasoning_model_for_stream_on_route, provider_accepts_reasoning_content,
-        reasoning_stream_style_for_route, requires_reasoning_content,
-        should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
+        provider_accepts_reasoning_content, reasoning_stream_style_for_route,
+        requires_reasoning_content, should_replay_reasoning_content,
+        should_replay_reasoning_content_for_provider,
         should_replay_reasoning_content_for_provider_on_route,
     };
     use crate::config::ApiProvider;
@@ -5544,11 +5529,6 @@ mod alias_thinking_detection_tests {
             crate::config::KIMI_CODE_K3_MODEL,
             Some("high"),
         ));
-        assert!(is_reasoning_model_for_stream_on_route(
-            ApiProvider::Moonshot,
-            kimi_code,
-            crate::config::KIMI_CODE_K3_MODEL,
-        ));
         assert_eq!(
             reasoning_stream_style_for_route(
                 ApiProvider::Moonshot,
@@ -5565,11 +5545,9 @@ mod alias_thinking_detection_tests {
             crate::config::KIMI_CODE_K3_MODEL,
             Some("high"),
         ));
-        assert!(!is_reasoning_model_for_stream_on_route(
-            ApiProvider::Moonshot,
-            direct_moonshot,
-            crate::config::KIMI_CODE_K3_MODEL,
-        ));
+        // Display is not replay: a reasoning field that arrives on the
+        // neighboring route still renders as Thinking (#6501), while the
+        // replay contract above stays scoped to the exact membership route.
         assert_eq!(
             reasoning_stream_style_for_route(
                 ApiProvider::Moonshot,
@@ -5577,7 +5555,7 @@ mod alias_thinking_detection_tests {
                 crate::config::KIMI_CODE_K3_MODEL,
                 None,
             ),
-            ReasoningStreamStyle::None
+            ReasoningStreamStyle::SeparateField
         );
         assert!(
             should_replay_reasoning_content_for_provider_on_route(
@@ -5686,24 +5664,49 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
-    fn grok_46_uses_exact_first_party_reasoning_effort_ladder() {
-        for (requested, expected) in [
-            ("off", "high"),
-            ("low", "low"),
-            ("medium", "medium"),
-            ("high", "high"),
-            ("xhigh", "xhigh"),
-            ("max", "xhigh"),
+    fn grok_47_and_46_use_exact_first_party_reasoning_effort_ladder() {
+        // Both catalog rows document low/medium/high/xhigh; reasoning cannot
+        // be disabled, so `off` is the documented default `high`.
+        for model in [
+            crate::config::XAI_GROK_4_7_MODEL,
+            crate::config::XAI_GROK_4_6_MODEL,
         ] {
+            for (requested, expected) in [
+                ("off", "high"),
+                ("low", "low"),
+                ("medium", "medium"),
+                ("high", "high"),
+                ("xhigh", "xhigh"),
+                ("max", "xhigh"),
+            ] {
+                let mut body = json!({});
+                apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Xai,
+                    crate::config::DEFAULT_XAI_BASE_URL,
+                    model,
+                    Some(requested),
+                );
+                assert_eq!(
+                    body,
+                    json!({ "reasoning_effort": expected }),
+                    "{model} {requested}"
+                );
+            }
+        }
+
+        // A row without a documented effort option (grok-4.3) and an id the
+        // catalog does not know send nothing.
+        for model in [crate::config::XAI_GROK_4_3_MODEL, "grok-9-unknown"] {
             let mut body = json!({});
             apply_route_reasoning_controls(
                 &mut body,
                 ApiProvider::Xai,
                 crate::config::DEFAULT_XAI_BASE_URL,
-                crate::config::XAI_GROK_4_6_MODEL,
-                Some(requested),
+                model,
+                Some("medium"),
             );
-            assert_eq!(body, json!({ "reasoning_effort": expected }), "{requested}");
+            assert_eq!(body, json!({}), "{model}");
         }
 
         let mut provider_default = json!({});
@@ -6225,10 +6228,6 @@ mod alias_thinking_detection_tests {
                     !should_replay_reasoning_content_for_provider(provider, model, None),
                     "{provider:?} {model}"
                 );
-                assert!(
-                    !is_reasoning_model_for_stream(provider, model),
-                    "stream classification must fail closed too: {provider:?} {model}"
-                );
             }
         }
     }
@@ -6477,39 +6476,67 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
-    fn stream_does_not_classify_generic_model_as_reasoning() {
-        // #1542 no-regression guard: a genuine non-DeepSeek model on the
-        // openai provider must NOT be treated as a reasoning model, so the
-        // parser keeps inlining any `reasoning_content` it emits as text.
-        assert!(!is_reasoning_model_for_stream(
-            ApiProvider::Openai,
-            "qwen3-coder"
-        ));
-        assert!(!is_reasoning_model_for_stream(
-            ApiProvider::Openai,
-            "claude-sonnet-4-6"
-        ));
-        // Non-DeepSeek model on a reasoning-aware provider is also unchanged.
-        assert!(!is_reasoning_model_for_stream(
-            ApiProvider::Deepseek,
-            "qwen3-coder"
+    fn stream_surfaces_reasoning_fields_on_every_unconfigured_route() {
+        // #6501: grok-4.7 on xAI and a MiMo id newer than the offline catalog
+        // streamed their reasoning as answer prose because the stream gate
+        // required a provider allowlist AND a catalog row. The reasoning
+        // fields are reasoning on every route that sends them; only an
+        // explicit `reasoning_stream_style = "none"` restores pass-through.
+        for (provider, model) in [
+            (ApiProvider::Xai, "grok-4.7"),
+            (ApiProvider::Xai, "grok-4.6"),
+            (ApiProvider::XiaomiMimo, "mimo-v2.7-pro-unreleased"),
+            (ApiProvider::XiaomiMimo, "mimo-v2.6-pro"),
+            (ApiProvider::Openai, "qwen3-coder"),
+            (ApiProvider::Deepseek, "qwen3-coder"),
+            (ApiProvider::Stepfun, "step-3.5"),
+            (ApiProvider::Together, "any/model"),
+            (ApiProvider::Ollama, "gpt-oss:20b"),
+            (ApiProvider::Codewhale, "grok-4.7"),
+        ] {
+            assert!(
+                is_reasoning_model_for_stream(provider, model),
+                "{provider:?} {model} must surface reasoning fields as Thinking"
+            );
+        }
+        assert_eq!(
+            super::reasoning_stream_style_for_stream(ApiProvider::Xai, "grok-4.7", Some("none")),
+            ReasoningStreamStyle::None,
+            "an explicit route override still wins"
+        );
+    }
+
+    #[test]
+    fn xiaomi_mimo_replays_reasoning_for_every_model_id() {
+        // #6501: MiMo returns 400 when a tool-call turn omits the assistant
+        // `reasoning_content`, including ids newer than the offline catalog.
+        for model in ["mimo-v2.5-pro", "mimo-v2.6-pro", "mimo-v2.7-pro-unreleased"] {
+            assert!(
+                should_replay_reasoning_content_for_provider(ApiProvider::XiaomiMimo, model, None),
+                "{model}"
+            );
+        }
+        assert!(!should_replay_reasoning_content_for_provider(
+            ApiProvider::XiaomiMimo,
+            "mimo-v2.6-pro",
+            Some("off"),
         ));
     }
 
     #[test]
-    fn stream_classification_matches_replay_predicate() {
-        // The streaming classifier and the replay predicate must agree on
-        // model identity, or stream parsing and message sanitisation disagree
-        // about where reasoning tokens live. Effort=None isolates the
-        // model/provider dimension shared by both.
-        for model in ["deepseek-v4-pro", "deepseek-reasoner", "qwen3-coder"] {
-            for provider in [ApiProvider::Openai, ApiProvider::Deepseek] {
-                assert_eq!(
-                    is_reasoning_model_for_stream(provider, model),
-                    should_replay_reasoning_content_for_provider(provider, model, None),
-                    "stream vs replay disagree for {model} on {provider:?}"
-                );
-            }
+    fn stream_display_does_not_authorize_reasoning_replay() {
+        // #1542 stays fixed: rendering a reasoning delta as Thinking must not
+        // make a provider that rejects `reasoning_content` receive it back.
+        for (provider, model) in [
+            (ApiProvider::Openai, "qwen3-coder"),
+            (ApiProvider::Openai, "claude-sonnet-4-6"),
+            (ApiProvider::Xai, "grok-4.7"),
+        ] {
+            assert!(is_reasoning_model_for_stream(provider, model));
+            assert!(
+                !should_replay_reasoning_content_for_provider(provider, model, None),
+                "{provider:?} {model}"
+            );
         }
     }
 }
@@ -6595,7 +6622,7 @@ mod image_block_wire_tests {
         assert_eq!(later_wire[6]["content"], "What happened next?");
 
         let restored = crate::compaction::restore_compaction_checkpoint(
-            crate::runtime_handoff::project_messages_for_restore(&messages),
+            crate::runtime_handoff::project_owned_messages_for_restore(messages.clone()),
             Some(&summary),
         );
         let restored_wire = build_chat_messages(None, &restored, "gpt-4o");
@@ -6615,25 +6642,39 @@ mod image_block_wire_tests {
 
     #[test]
     fn quoted_compaction_marker_does_not_reorder_user_wire_messages() {
+        // The current marker, and the legacy one older sessions still carry.
+        for marker in [
+            crate::compaction::COMPACTION_SUMMARY_MARKER,
+            crate::compaction::LEGACY_V2_COMPACTION_SUMMARY_MARKER,
+        ] {
+            let quote = format!("Please explain: {marker}");
+            let messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[{"type":"text","text":"First question"}]},
+                {"role":"assistant","content":[{"type":"text","text":"First answer"}]},
+                {"role":"user","content":[{"type":"text","text":quote}]},
+                {"role":"assistant","content":[{"type":"text","text":"It introduces a summary."}]},
+                {"role":"user","content":[{"type":"text","text":"Follow-up question"}]}
+            ]))
+            .unwrap();
+            let wire = build_chat_messages(None, &messages, "gpt-4o");
+            let roles: Vec<&str> = wire
+                .iter()
+                .map(|message| message["role"].as_str().unwrap())
+                .collect();
+            assert_eq!(roles, ["user", "assistant", "user", "assistant", "user"]);
+            assert_eq!(wire[0]["content"], "First question");
+            assert_eq!(wire[2]["content"], quote);
+            assert_eq!(wire[4]["content"], "Follow-up question");
+        }
         let messages: Vec<Message> = serde_json::from_value(serde_json::json!([
             {"role":"user","content":[{"type":"text","text":"First question"}]},
             {"role":"assistant","content":[{"type":"text","text":"First answer"}]},
-            {"role":"user","content":[{"type":"text","text":"Please explain: Another language model started to solve this problem"}]},
+            {"role":"user","content":[{"type":"text","text":"placeholder"}]},
             {"role":"assistant","content":[{"type":"text","text":"It introduces a summary."}]},
             {"role":"user","content":[{"type":"text","text":"Follow-up question"}]}
-        ])).unwrap();
-        let wire = build_chat_messages(None, &messages, "gpt-4o");
-        let roles: Vec<&str> = wire
-            .iter()
-            .map(|message| message["role"].as_str().unwrap())
-            .collect();
-        assert_eq!(roles, ["user", "assistant", "user", "assistant", "user"]);
-        assert_eq!(wire[0]["content"], "First question");
-        assert_eq!(
-            wire[2]["content"],
-            "Please explain: Another language model started to solve this problem"
-        );
-        assert_eq!(wire[4]["content"], "Follow-up question");
+        ]))
+        .unwrap();
+        let roles = ["user", "assistant", "user", "assistant", "user"];
 
         let quoted_exact_header = crate::compaction::build_compaction_summary_block_text(
             "This text was pasted by a user",
@@ -6807,6 +6848,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
 
@@ -6848,6 +6890,7 @@ mod image_block_wire_tests {
             ApiProvider::Deepseek,
             "https://api.deepseek.com/beta",
             false,
+            None,
         )
         .expect("DeepSeek vision wire body");
 
@@ -6886,6 +6929,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
 
@@ -6934,6 +6978,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
         let messages = body.body["messages"].as_array().expect("messages");
@@ -7015,6 +7060,7 @@ mod image_block_wire_tests {
             ApiProvider::Openai,
             "https://api.openai.com/v1",
             false,
+            None,
         )
         .expect("wire body");
         let messages = body.body["messages"].as_array().expect("messages");
@@ -7436,7 +7482,7 @@ mod mistral_reasoning_tests {
                 "mistral-medium-latest",
                 None,
             ),
-            ReasoningStreamStyle::None
+            ReasoningStreamStyle::SeparateField
         );
     }
 
@@ -7575,6 +7621,7 @@ mod mistral_reasoning_tests {
             ApiProvider::Mistral,
             crate::config::DEFAULT_MISTRAL_BASE_URL,
             true,
+            None,
         )
         .expect("Mistral stream wire body");
         let assistant = &wire.body["messages"][0];
@@ -7822,6 +7869,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             false,
+            None,
         )
         .err()
         .expect("missing signature must fail closed before transport");
@@ -7844,6 +7892,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             false,
+            None,
         )
         .err()
         .expect("a models/-prefixed thinking id must fail closed like its bare spelling");
@@ -7864,6 +7913,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             false,
+            None,
         )
         .expect("flash-lite replay must not require a signature");
     }
@@ -7899,6 +7949,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             "https://gateway.example.com/v1",
             false,
+            None,
         )
         .expect("non-official Google base URL must not require signatures");
         let messages = build_chat_messages_for_request_and_provider_and_route(
@@ -7962,7 +8013,7 @@ mod google_thought_signature_tests {
             ] {
                 let mut request = google_request_with_signed_tool(Some("SIG-abc123"));
                 request.reasoning_effort = effort.map(str::to_string);
-                let body = build_chat_wire_body(&request, provider, base_url, true)
+                let body = build_chat_wire_body(&request, provider, base_url, true, None)
                     .expect("signed replay builds on a signature-bearing route");
                 let assistant = body.body["messages"]
                     .as_array()
@@ -7991,6 +8042,7 @@ mod google_thought_signature_tests {
             ApiProvider::Custom,
             "https://generativelanguage.googleapis.com/v1beta/openai",
             false,
+            None,
         )
         .err()
         .expect("missing signature must fail closed before transport");
@@ -8062,6 +8114,7 @@ mod google_thought_signature_tests {
                         provider,
                         DEFAULT_GOOGLE_BASE_URL,
                         streaming,
+                        None,
                     )
                     .expect("valid signed Google request");
                     assert_eq!(
@@ -8081,9 +8134,14 @@ mod google_thought_signature_tests {
     fn google_reasoning_control_does_not_rewrite_other_endpoints() {
         for provider in [ApiProvider::Google, ApiProvider::Custom] {
             let request = google_request_with_signed_tool(Some("SIG"));
-            let wire =
-                build_chat_wire_body(&request, provider, "https://gateway.example.com/v1", false)
-                    .expect("valid gateway request");
+            let wire = build_chat_wire_body(
+                &request,
+                provider,
+                "https://gateway.example.com/v1",
+                false,
+                None,
+            )
+            .expect("valid gateway request");
             assert!(wire.body.get("reasoning_effort").is_none());
             assert!(wire.body.get("google").is_none());
             assert!(wire.body.get("extra_body").is_none());
@@ -8201,8 +8259,9 @@ mod google_thought_signature_tests {
         let recovery = manager
             .recover_session_for_resume(&id)
             .expect("recover session for resume");
-        let restored =
-            crate::runtime_handoff::project_messages_for_restore(&recovery.session.messages);
+        let restored = crate::runtime_handoff::project_owned_messages_for_restore(
+            recovery.session.messages.clone(),
+        );
         (recovery, restored, on_disk)
     }
 
@@ -8254,9 +8313,14 @@ mod google_thought_signature_tests {
                 "https://generativelanguage.googleapis.com/v1beta/openai",
             ),
         ] {
-            let body =
-                build_chat_wire_body(&request_from(restored.clone()), provider, base_url, true)
-                    .expect("a resumed signed history must build, not fail closed");
+            let body = build_chat_wire_body(
+                &request_from(restored.clone()),
+                provider,
+                base_url,
+                true,
+                None,
+            )
+            .expect("a resumed signed history must build, not fail closed");
             assert_eq!(
                 replayed_signature(&body.body).as_deref(),
                 Some("SIG-abc123"),
@@ -8297,6 +8361,7 @@ mod google_thought_signature_tests {
             ApiProvider::Google,
             DEFAULT_GOOGLE_BASE_URL,
             true,
+            None,
         )
         .expect("a crash-repaired signed history must build, not fail closed");
         assert_eq!(

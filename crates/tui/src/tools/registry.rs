@@ -143,9 +143,8 @@ impl ToolRegistry {
             && let Some(router) = ctx.large_output_router.as_ref()
         {
             use crate::tools::large_output_router::EvidenceRouting;
-            let raw_bypass = input.get("raw").and_then(|v| v.as_bool()).unwrap_or(false);
             let (estimated_routing, estimated_tokens, threshold) =
-                router.evidence_routing(name, result, raw_bypass);
+                router.evidence_routing(name, result);
             let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
             if let Some(object) = metadata.as_object_mut() {
                 // A tool that self-bounds its output behind its own
@@ -416,8 +415,8 @@ impl ToolRegistry {
     /// Load and register plugin tools from a directory.
     ///
     /// Each script with valid frontmatter (`# name:`, `# description:`, etc.)
-    /// becomes a registered `ScriptPluginTool`. Tools whose name matches an
-    /// already-registered tool will overwrite it.
+    /// becomes a registered `ScriptPluginTool`. Name collisions are refused;
+    /// replacing a registered tool requires an explicit config override.
     pub fn load_plugins(&mut self, plugin_dir: &Path) {
         if !plugin_dir.exists() {
             tracing::debug!(
@@ -427,9 +426,19 @@ impl ToolRegistry {
             return;
         }
         let plugins = crate::tools::plugin::load_plugin_tools(plugin_dir);
-        let count = plugins.len();
+        let mut count = 0;
         for tool in plugins {
+            if let Some(previous) = self.get(tool.name()) {
+                tracing::error!(
+                    previous_origin = ?previous.registration_origin(),
+                    plugin_origin = ?tool.registration_origin(),
+                    "Cannot load plugin tool '{}': name is already registered; use an explicit tool override",
+                    crate::safe_label::SafeLabel::identifier(tool.name())
+                );
+                continue;
+            }
             self.register(tool);
+            count += 1;
         }
         if count > 0 {
             tracing::info!(
@@ -540,42 +549,53 @@ pub(crate) fn enforce_tool_authority(
     }
     let capabilities = tool.capabilities();
     if matches!(name, "bash" | "Bash" | "exec_shell") {
-        // Numeric sed inspection already has an execution-time read-only
-        // grammar. Reuse it here without promoting the broader child shell
-        // surface (including pipelines/network reads) into machine authority,
-        // or changing the parent's parallel/approval classification (#6015).
-        let bounded_sed = context.shell_policy == crate::worker_profile::ShellPolicy::ReadOnly
-            && input
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(|command| {
-                    command.split_whitespace().next() == Some("sed") && !command.contains('|')
-                })
-            && super::shell::agent_readonly_bash_input(input);
-        if tool.is_read_only_for(input) || bounded_sed {
-            if authority.shell != crate::tools::spec::ToolShellAuthority::ReadOnly {
-                return Err(ToolError::permission_denied(format!(
+        // One authority (#6015): a durable worker's shell is judged by the
+        // same agent read-only grammar and input normalization as in-session
+        // agents (`agent_readonly_bash_verdict`), and `BashTool::execute`
+        // applies it again under the clamped `ShellPolicy::ReadOnly`. The
+        // parent's parallel/approval classification (`is_read_only_for`) is
+        // not an authority here.
+        let verdict = super::shell::agent_readonly_bash_verdict(input);
+        if authority.shell != crate::tools::spec::ToolShellAuthority::ReadOnly {
+            return Err(ToolError::permission_denied(if verdict.is_ok() {
+                format!(
                     "worker '{}' cannot run {name}: its machine-readable authority envelope does not grant read-only shell access",
                     authority.owner
-                )));
-            }
-            let networked_read = input
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(codewhale_execpolicy::command_safety::is_github_readonly_command);
-            if networked_read && authority.network_access != Some(true) {
-                return Err(ToolError::permission_denied(format!(
-                    "worker '{}' cannot use read-only GitHub CLI access: its machine-readable authority envelope does not grant network access",
-                    authority.owner
-                )));
-            }
-            return Ok(());
+                )
+            } else {
+                format!(
+                    "worker '{}' cannot run {name}: arbitrary command execution is outside its machine-readable authority envelope. {}",
+                    authority.owner,
+                    codewhale_execpolicy::command_safety::readonly_command_help()
+                )
+            }));
         }
-        return Err(ToolError::permission_denied(format!(
-            "worker '{}' cannot run {name}: arbitrary command execution is outside its machine-readable authority envelope. {}",
-            authority.owner,
-            codewhale_execpolicy::command_safety::readonly_command_help()
-        )));
+        if let Err(rejection) = verdict {
+            return Err(ToolError::permission_denied(format!(
+                "worker '{}' cannot run {name}: {}",
+                authority.owner,
+                super::shell::readonly_refusal(
+                    &rejection,
+                    super::shell::readonly_enforced_lane_available(context)
+                )
+            )));
+        }
+        let hosts = input
+            .get("command")
+            .and_then(Value::as_str)
+            .map(codewhale_execpolicy::command_safety::readonly_network_reads)
+            .unwrap_or_default()
+            .into_iter()
+            .map(codewhale_execpolicy::command_safety::NetworkRead::host)
+            .collect::<Vec<_>>();
+        if !hosts.is_empty() && authority.network_access != Some(true) {
+            return Err(ToolError::permission_denied(format!(
+                "worker '{}' cannot use read-only network access to {}: its machine-readable authority envelope does not grant network access",
+                authority.owner,
+                hosts.join(", ")
+            )));
+        }
+        return Ok(());
     }
     if name == "Run" {
         if bounded_verifier {
@@ -778,7 +798,7 @@ impl ToolRegistryBuilder {
 
     /// Include only read-only file tools (read, list).
     #[must_use]
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     pub fn with_read_only_file_tools(self) -> Self {
         use super::file::{ListDirTool, ReadFileTool};
         use super::file_tool::FileTool;
@@ -1449,8 +1469,17 @@ impl ToolRegistryBuilder {
     /// Build the registry with the given context.
     #[must_use]
     pub fn build(self, context: ToolContext) -> ToolRegistry {
+        // A route known to be text-only cannot see what `read_media` returns,
+        // so it is not offered there (`image_ocr` remains for text in images).
+        let blind = context.route_capabilities.image_input
+            == codewhale_config::route::CapabilityState::Unsupported;
         let mut registry = ToolRegistry::new(context);
-        registry.register_all(self.tools);
+        registry.register_all(
+            self.tools
+                .into_iter()
+                .filter(|tool| !(blind && tool.name() == "read_media"))
+                .collect(),
+        );
         registry
     }
 }

@@ -132,6 +132,9 @@ pub(crate) fn complete_provider_picker_onboarding(app: &mut App, provider: ApiPr
     };
     app.onboarding_provider = provider;
     app.onboarding_needs_api_key = false;
+    // The route now has its key, so a later local-Ollama probe must not treat
+    // this session as still recovering from a missing one.
+    app.onboarding_missing_key_recovery = false;
     app.api_key_env_only = false;
     app.offline_mode = false;
     onboarding::advance_onboarding_after_provider(app);
@@ -621,6 +624,20 @@ pub(crate) async fn switch_provider(
         previous_api_key_env_only: app.api_key_env_only,
     });
 
+    // A session-local switch keeps the same ownership rule the persisted
+    // writers apply (`reconcile_root_model_aliases`): the root alias the
+    // outgoing route was using moves onto that route's own leaf, so coming
+    // back lands on it instead of the catalog default. Every failure path
+    // below restores `previous_config`.
+    if let Some((outgoing, value)) = config
+        .active_provider_identity(target)
+        .ok()
+        .and_then(|incoming| config.root_model_alias_owned_by_outgoing(&incoming))
+    {
+        config.set_provider_model_override(outgoing.provider, Some(value));
+        config.default_text_model = None;
+    }
+
     let resolved_route = match resolve_runtime_route(config, target, model_override.as_deref()) {
         Ok(route) => route,
         Err(reason) => {
@@ -702,6 +719,15 @@ pub(crate) async fn switch_provider(
         || previous_identity != target_identity
         || previous_model != new_model;
     app.set_provider_identity_record(target_identity_record);
+    // Launch computed "needs a key" for the launch provider. A switch to a
+    // route that has its credential answers that, even when the user left the
+    // picker with Esc first; otherwise the stale flag keeps the info line on
+    // "model not connected" and keeps local-Ollama adoption armed against the
+    // provider the user just chose. An auth-failure rollback restores it.
+    app.onboarding_needs_api_key = !crate::config::has_api_key(config);
+    if !app.onboarding_needs_api_key {
+        app.onboarding_missing_key_recovery = false;
+    }
     app.billing_presentation = crate::route_billing::for_route(config, target);
     app.max_subagents = config
         .max_subagents_for_provider(target)
@@ -719,8 +745,8 @@ pub(crate) async fn switch_provider(
     if model_override.is_some() {
         app.provider_models
             .insert(target_identity.clone(), new_model.clone());
-        app.enable_provider_model(&target_identity, &new_model);
     }
+    app.note_route_used(&target_identity, &new_model);
     app.update_model_compaction_budget();
     if cache_scope_changed {
         app.clear_model_scoped_telemetry();
@@ -763,12 +789,19 @@ pub(crate) async fn switch_provider(
     app.note_session_route_change(&target_identity, &new_model);
     let persist_warning: Option<String> = None;
 
-    let mut switch_summary = format!(
-        "Provider switched: {} → {}",
-        previous_identity, target_identity,
-    );
+    // Re-selecting the same provider (the usual first-run key entry) is a
+    // connection, not a switch: "deepseek → deepseek" read as a glitch (#6566).
+    let mut switch_summary = if previous_identity == target_identity {
+        format!("Connected: {target_identity}")
+    } else {
+        format!("Provider switched: {previous_identity} → {target_identity}")
+    };
     switch_summary.push(char::from(10));
-    switch_summary.push_str(&format!("Model: {previous_model} → {new_model}"));
+    if previous_model == new_model {
+        switch_summary.push_str(&format!("Model: {new_model}"));
+    } else {
+        switch_summary.push_str(&format!("Model: {previous_model} → {new_model}"));
+    }
     switch_summary.push(char::from(10));
     switch_summary.push_str(&format!("Endpoint: {new_endpoint}"));
     if let Some(ref warning) = persist_warning {
@@ -1016,17 +1049,12 @@ pub(crate) fn mcp_import_apply(
 }
 
 pub(crate) fn clear_active_provider_api_key_from_memory(app: &App, config: &mut Config) {
-    let active_identity = app.provider_identity_for_persistence();
-    let clears_legacy_root = matches!(
-        app.api_provider,
-        ApiProvider::Deepseek | ApiProvider::DeepseekCN
-    ) || (app.api_provider == ApiProvider::Custom
-        && active_identity == ApiProvider::Custom.as_str()
-        && config.uses_legacy_literal_custom_route());
-    if clears_legacy_root {
-        config.api_key = None;
-    }
     config.set_provider_api_key_override(app.api_provider, None);
+    // DeepSeek-CN reads DeepSeek's key (they used to share the top-level key,
+    // #6394), so clearing it clears that shared key too, as on disk.
+    if app.api_provider == ApiProvider::DeepseekCN {
+        config.set_provider_api_key_override(ApiProvider::Deepseek, None);
+    }
     if app.api_provider == ApiProvider::Xai {
         let entry = config.provider_config_for_mut(ApiProvider::Xai);
         entry.auth_mode = None;

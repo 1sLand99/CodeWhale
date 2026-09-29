@@ -1793,7 +1793,7 @@ impl GenericToolCell {
 
         // #4038 / #4122: purpose-built workflow run card (compact in live,
         // expanded in transcript) shared with the WorkflowPanel state machine.
-        if let Some(lines) = self.try_render_as_workflow(width, low_motion, mode) {
+        if let Some(lines) = self.try_render_as_workflow(width, low_motion, mode, locale) {
             return lines;
         }
 
@@ -2018,16 +2018,19 @@ impl GenericToolCell {
         ))
     }
 
-    /// Render the `workflow` tool via the shared WorkflowPanel history-card
-    /// renderer (#4122). Live mode stays compact (lifecycle, children, phases,
-    /// failures, elapsed); transcript mode expands phase/child summaries,
-    /// artifact/transcript links, final result, and failure details.
-    /// Status-list payloads keep a multi-run summary card.
+    /// Render the `workflow` tool as the transcript's two lines per run
+    /// (#4122): the call that launched it is one `started` line naming the
+    /// run, and the card `App::announce_settled_workflows` writes when the run
+    /// settles is one finish line — state, agents, elapsed, tokens — with the
+    /// result or reason under it. Live progress is the workbar's, not the
+    /// transcript's. Transcript mode expands the finish card's phase/child
+    /// detail. Status-list payloads keep a multi-run summary card.
     fn try_render_as_workflow(
         &self,
         width: u16,
         low_motion: bool,
         mode: RenderMode,
+        locale: Locale,
     ) -> Option<Vec<Line<'static>>> {
         if self.name != "workflow" {
             return None;
@@ -2088,41 +2091,68 @@ impl GenericToolCell {
         }
 
         use crate::tui::widgets::workflow_panel::{WorkflowHistoryExtras, WorkflowPanel};
-        let panel = WorkflowPanel::from_run_json(&value)?;
-        // Prefer the panel's lifecycle-aware status label when the tool cell
-        // is still marked running but the snapshot already terminal (or vice
-        // versa during live streaming).
-        let header_status = match panel.lifecycle {
-            crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Failed
-            | crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Cancelled => {
-                ToolStatus::Failed
-            }
+        let mut panel = WorkflowPanel::from_run_json(&value)?;
+        panel.locale = locale;
+        let finish_card = value
+            .get("transcript_line")
+            .and_then(serde_json::Value::as_str)
+            == Some("finished");
+        // A foreground `run` card returns the settled record itself, so it
+        // carries its own finish; a detached start is finished by the card
+        // `App::announce_settled_workflows` writes later.
+        let owns_finish =
+            finish_card || (self.status != ToolStatus::Running && panel.lifecycle.is_terminal());
+        if !finish_card {
+            // The start line: the run's name. Its progress lives in the
+            // workbar, never here.
+            let name = panel.label.split_whitespace().collect::<Vec<_>>().join(" ");
+            lines.push(render_tool_header_with_family_and_summary(
+                family,
+                Some(name.as_str()),
+                codewhale_localization::tr(
+                    locale,
+                    codewhale_localization::MessageId::WorkflowLineStarted,
+                )
+                .as_ref(),
+                if owns_finish {
+                    ToolStatus::Success
+                } else {
+                    self.status
+                },
+                None,
+                low_motion,
+            ));
+        }
+        let finish = owns_finish.then(|| panel.finish_line()).flatten();
+        let Some((state, facts, detail)) = finish else {
+            return Some(wrap_card_rail(lines, self.status));
+        };
+        let finish_status = match panel.lifecycle {
             crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Succeeded => {
                 ToolStatus::Success
             }
             crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Degraded => {
                 ToolStatus::Warning
             }
-            crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Pending
-            | crate::tui::widgets::workflow_panel::WorkflowPanelLifecycle::Running => {
-                if self.status == ToolStatus::Failed {
-                    ToolStatus::Failed
-                } else if self.status == ToolStatus::Success {
-                    ToolStatus::Success
-                } else {
-                    ToolStatus::Running
-                }
-            }
+            _ => ToolStatus::Failed,
         };
-        let summary = panel.history_header_summary(usize::from(width).saturating_sub(18));
         lines.push(render_tool_header_with_family_and_summary(
             family,
-            Some(summary.as_str()),
-            tool_status_label(header_status),
-            header_status,
+            Some(facts.as_str()),
+            &state,
+            finish_status,
             None,
             low_motion,
         ));
+        if let Some(detail) = detail {
+            let room = usize::from(width).saturating_sub(4).max(8);
+            lines.extend(render_card_detail_line(
+                None,
+                &crate::tui::ui_text::truncate_line_to_width(&detail, room),
+                tool_value_style(),
+                width,
+            ));
+        }
         let expanded = matches!(mode, RenderMode::Transcript);
         if expanded {
             let extras = WorkflowHistoryExtras {
@@ -2152,7 +2182,7 @@ impl GenericToolCell {
                 ));
             }
         }
-        Some(wrap_card_rail(lines, self.status))
+        Some(wrap_card_rail(lines, finish_status))
     }
 }
 
@@ -2973,26 +3003,71 @@ fn tool_value_style() -> Style {
 /// Returns the first match rather than every match: a click is one request to
 /// open one file.
 pub(crate) fn first_file_line_reference(text: &str, workspace: &Path) -> Option<(PathBuf, u32)> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some((before, after)) = trimmed.rsplit_once(':') else {
-            continue;
-        };
-        if after.is_empty() || !after.chars().all(|c| c.is_ascii_digit()) {
-            continue;
+    text.lines()
+        .find_map(|line| file_line_reference(line, workspace))
+}
+
+/// The first `path:line` on one line of text that names a file inside the
+/// workspace, as `(absolute path, line)`.
+///
+/// Accepts the forms tools and models print: `src/a.rs:12`, `src/a.rs:12:5`,
+/// `--> src/a.rs:12:5` (rustc), `` `src/a.rs:12` `` and a reference inside a
+/// sentence or brackets. The text is model output, so it is not trusted to
+/// name a file: every candidate goes through [`workspace_file`], which
+/// refuses `..`, absolute paths outside the workspace and links.
+pub(crate) fn file_line_reference(line: &str, workspace: &Path) -> Option<(PathBuf, u32)> {
+    line.split_whitespace().find_map(|token| {
+        // Leading `.` stays: `./src/a.rs` is relative, not `/src/a.rs`.
+        let token = token
+            .trim_start_matches(['`', '\'', '"', '(', '[', '<'])
+            .trim_end_matches(['`', '\'', '"', ')', ']', '>', ',', ';', '.']);
+        let (path_str, line_no) = split_path_line(token)?;
+        if !looks_like_file_path(path_str) {
+            return None;
         }
-        let path_str = before.trim();
-        if path_str.is_empty() || !looks_like_file_path(path_str) {
-            continue;
+        let path_str = path_str.strip_prefix("./").unwrap_or(path_str);
+        workspace_file(workspace, path_str).map(|absolute| (absolute, line_no))
+    })
+}
+
+/// The regular file `raw` names inside `workspace`, as
+/// `workspace.join(relative)`, or `None`.
+///
+/// [`crate::snapshot::workspace_relative_path`] checks only the text, and
+/// `is_file()` follows links, so a link inside the workspace (`vendor -> /`,
+/// `notes.md -> ~/.ssh/config`) used to pass. Each part below the workspace
+/// is read with `symlink_metadata` and a link is refused, as
+/// `runtime_api::workspace::confined_directory` does, and the resolved path
+/// must still sit under the resolved workspace. Callers that act later check
+/// again at that point: this is a check at one moment, not a lock.
+pub(crate) fn workspace_file(workspace: &Path, raw: &str) -> Option<PathBuf> {
+    let relative = crate::snapshot::workspace_relative_path(workspace, raw)?;
+    let mut path = workspace.to_path_buf();
+    let mut is_file = false;
+    for component in relative.components() {
+        path.push(component);
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if crate::plugins::metadata_is_link_or_reparse(&metadata) {
+            return None;
         }
-        let abs_path = if Path::new(path_str).is_absolute() {
-            PathBuf::from(path_str)
-        } else {
-            workspace.join(path_str)
-        };
-        if abs_path.is_file() {
-            return Some((abs_path, after.parse().unwrap_or(1)));
+        is_file = metadata.is_file();
+    }
+    let resolved_workspace = workspace.canonicalize().ok()?;
+    let inside = path.canonicalize().ok()?.starts_with(&resolved_workspace);
+    (is_file && inside).then_some(path)
+}
+
+/// Split `path:N`, `path:N:C` or `path:N:text` at the first all-digit
+/// segment after the path. Earlier colons stay in the path (`C:\x.rs:3`).
+fn split_path_line(token: &str) -> Option<(&str, u32)> {
+    let mut offset = 0;
+    for (index, part) in token.split(':').enumerate() {
+        if index > 0 && !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) {
+            let path = token[..offset].strip_suffix(':')?;
+            let line = part.parse().ok().filter(|line| *line > 0)?;
+            return (!path.is_empty()).then_some((path, line));
         }
+        offset += part.len() + 1;
     }
     None
 }

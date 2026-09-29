@@ -12,6 +12,11 @@ use codewhale_models::{ContentBlock, Message};
 use ignore::WalkBuilder;
 use std::io;
 
+// Split out so the integration harness can `#[path]`-include it with
+// `skills/install.rs`, which reads registry downloads through it.
+mod response_body;
+pub use response_body::read_response_body_capped;
+
 /// A writer that counts bytes written without storing them.
 pub(crate) struct CountingWriter {
     count: usize,
@@ -40,6 +45,27 @@ impl io::Write for CountingWriter {
 
 const LOG_FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const LOG_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Compact token-count label for a model's context or output window:
+/// `1M`, `1.05M`, `262K`, `500`. Shared by the model picker and the fleet
+/// capability badges. Not the same scale as `agent_roster::format_tokens`
+/// (`1.2k`), which labels usage rather than window size.
+pub(crate) fn format_context_window(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        if tokens.is_multiple_of(1_000_000) {
+            format!("{}M", tokens / 1_000_000)
+        } else {
+            format!("{:.2}M", tokens as f64 / 1_000_000.0)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+        }
+    } else if tokens >= 1_000 {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
 
 /// Return a stable, non-reversible log label for an identifier.
 ///
@@ -384,6 +410,71 @@ fn write_atomic_with_permissions(
     contents: &[u8],
     #[cfg_attr(not(unix), allow(unused_variables))] permission_policy: AtomicWritePermissions,
 ) -> std::io::Result<()> {
+    write_atomic_scoped(path, contents, permission_policy, AtomicWriteScope::Single)
+}
+
+/// Whether one write also pays its directory's costs, or a batch pays them
+/// once for the whole set — see [`write_atomic_batch`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtomicWriteScope {
+    /// Sweep this directory for stale temp files and fsync it: what a single
+    /// write should do, and what every caller of `write_atomic` gets.
+    Single,
+    /// Leave both to the caller. Used only by [`write_atomic_batch`].
+    Batch,
+}
+
+/// Write many files, and pay each directory's costs once.
+///
+/// Every [`write_atomic`] call sweeps its directory for stale temp files and
+/// fsyncs that directory, which is exactly right for one record at a time. A
+/// caller publishing a thousand records into one directory pays that thousand
+/// times, though, and the sweep is the same answer every time: scanning a
+/// store directory of tens of thousands of entries per file is minutes of work
+/// that buys nothing (measured: 22 ms per item write, 34 s for one fork's
+/// clone).
+///
+/// The batch sweeps each directory once, writes every file with the same
+/// atomic replace and per-file data sync, and fsyncs each directory once at
+/// the end. Per-file durability is unchanged; only the per-file directory work
+/// is hoisted out of the loop.
+///
+/// Ordering is still the caller's job: a batch that publishes a graph of
+/// records must write its commit record last, as the single-write callers do.
+pub fn write_atomic_batch(files: &[(PathBuf, Vec<u8>)]) -> std::io::Result<()> {
+    let mut parents: Vec<&Path> = Vec::new();
+    for (path, _) in files {
+        if let Some(parent) = path.parent()
+            && !parents.contains(&parent)
+        {
+            parents.push(parent);
+        }
+    }
+    for parent in &parents {
+        if is_codewhale_owned_state_dir(parent) {
+            sweep_stale_atomic_write_temps(parent);
+        }
+    }
+    for (path, contents) in files {
+        write_atomic_scoped(
+            path,
+            contents,
+            AtomicWritePermissions::Private,
+            AtomicWriteScope::Batch,
+        )?;
+    }
+    for parent in &parents {
+        sync_directory(parent);
+    }
+    Ok(())
+}
+
+fn write_atomic_scoped(
+    path: &Path,
+    contents: &[u8],
+    #[cfg_attr(not(unix), allow(unused_variables))] permission_policy: AtomicWritePermissions,
+    scope: AtomicWriteScope,
+) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -431,7 +522,9 @@ fn write_atomic_with_permissions(
     // Reclaim our own strays before adding another (see the function docs).
     // Private permission policy is also used for user-chosen destinations
     // such as `/save <path>`; only sweep Codewhale-owned state/config dirs.
-    if permission_policy == AtomicWritePermissions::Private && is_codewhale_owned_state_dir(parent)
+    if permission_policy == AtomicWritePermissions::Private
+        && scope == AtomicWriteScope::Single
+        && is_codewhale_owned_state_dir(parent)
     {
         sweep_stale_atomic_write_temps(parent);
     }
@@ -475,11 +568,20 @@ fn write_atomic_with_permissions(
     // itself durable — otherwise a power loss right after the rename can lose
     // it even though the file data was synced, silently dropping a
     // crash-recovery checkpoint. Best-effort: not all platforms permit
-    // opening a directory for sync, so a failure here is not fatal.
+    // opening a directory for sync, so a failure here is not fatal. A batch
+    // hoists this to one sync per directory (see `write_atomic_batch`).
+    if scope == AtomicWriteScope::Single {
+        sync_directory(parent);
+    }
+    Ok(())
+}
+
+/// Best-effort directory sync: not all platforms permit opening a directory
+/// for sync, so a failure here is never fatal.
+fn sync_directory(parent: &Path) {
     if let Ok(dir) = std::fs::File::open(parent) {
         let _ = dir.sync_all();
     }
-    Ok(())
 }
 
 /// True when `dir` is under `$CODEWHALE_HOME` / `~/.codewhale`, or the ambient
@@ -595,7 +697,7 @@ pub fn flush_and_sync(writer: &mut std::io::BufWriter<std::fs::File>) -> std::io
 /// Dispatches to the platform-appropriate opener:
 /// - macOS: `open`
 /// - Linux / BSD: `xdg-open`
-/// - Windows: `cmd /C start ""`
+/// - Windows: `rundll32 url.dll,FileProtocolHandler`
 /// - Other: returns an error.
 ///
 /// This is the single entry point for URL opening — every call site in
@@ -636,10 +738,12 @@ fn browser_open_command(url: &str) -> Result<Command> {
         Ok(command)
     }
 
+    // Not `cmd /C start`: cmd.exe would parse `&`, `|`, `^` and `%` inside
+    // the URL. The protocol handler receives it as data.
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", url]);
+        let mut cmd = Command::new("rundll32");
+        cmd.args(["url.dll,FileProtocolHandler", url]);
         Ok(cmd)
     }
 
@@ -999,6 +1103,54 @@ mod atomic_write_tests {
         assert!(path.exists());
         let read = fs::read_to_string(&path).expect("read");
         assert_eq!(read.as_bytes(), content);
+    }
+
+    /// A batch writes every file, and pays the directory's hygiene once.
+    ///
+    /// The per-file path sweeps the directory for stale temp files and fsyncs
+    /// it on every call; a fork publishing hundreds of cloned items paid that
+    /// hundreds of times (22 ms of directory scan each, 34 s for one fork).
+    /// What must not change: every file lands with its content, a stray temp
+    /// file is still reclaimed, and none of ours is left behind.
+    #[test]
+    fn write_atomic_batch_writes_every_file_and_sweeps_the_directory() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let (product, _guards) = seal_product_home(tmp.path());
+
+        let stray = product.join(".tmpCCCCCC");
+        std::fs::write(&stray, b"stranded by a SIGKILL").expect("write stray");
+        age_past_the_threshold(&stray);
+
+        let files: Vec<(PathBuf, Vec<u8>)> = (0..5)
+            .map(|index| {
+                (
+                    product.join(format!("item_{index}.json")),
+                    format!("{{\"index\":{index}}}").into_bytes(),
+                )
+            })
+            .collect();
+        super::write_atomic_batch(&files).expect("batch write");
+
+        for (path, contents) in &files {
+            assert_eq!(
+                std::fs::read(path).expect("read back"),
+                *contents,
+                "{}",
+                path.display()
+            );
+        }
+        assert!(
+            !stray.exists(),
+            "the batch sweeps the directory it writes into"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(&product)
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| super::is_stray_atomic_write_temp_name(name))
+            .collect();
+        assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
     }
 
     #[test]
@@ -1763,13 +1915,24 @@ mod project_mapping_tests {
 
         #[cfg(target_os = "windows")]
         {
-            assert_eq!(command.get_program(), "cmd");
+            assert_eq!(command.get_program(), "rundll32");
             assert_eq!(
                 command
                     .get_args()
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect::<Vec<_>>(),
-                vec!["/C", "start", "", "https://example.com"]
+                vec!["url.dll,FileProtocolHandler", "https://example.com"]
+            );
+            // Shell metacharacters stay inside the single URL argument.
+            let url = "https://example.com/?a=1&b=2|x^y%PATH%";
+            let command = super::browser_open_command(url).expect("command");
+            assert_eq!(command.get_program(), "rundll32");
+            assert_eq!(
+                command
+                    .get_args()
+                    .last()
+                    .map(|arg| arg.to_string_lossy().into_owned()),
+                Some(url.to_string())
             );
         }
     }

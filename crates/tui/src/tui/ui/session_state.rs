@@ -750,10 +750,7 @@ pub(crate) fn restore_message_submit_denial(
     app.dispatch_in_flight = false;
     match recovery {
         DispatchRecovery::Immediate | DispatchRecovery::Initial => {
-            app.input.clone_from(&message.display);
-            app.cursor_position = app.input.chars().count();
-            app.active_skill = message.skill_instruction;
-            app.active_skill_provenance = message.skill_provenance;
+            app.restore_unsent_message(message);
         }
         DispatchRecovery::Draft => {
             restore_queued_or_draft_message(app, recovery, message);
@@ -902,31 +899,57 @@ pub(crate) async fn switch_workspace(
     app.status_message = Some(format!("Workspace: {}", workspace.display()));
 }
 
-/// Auth / missing-key failures: keep the transcript user bubble and clear the
-/// composer (the turn was submitted). Surface the error without "restored to
-/// composer" — the echo already owns the text.
-pub(crate) fn keep_failed_immediate_submit_echo(
-    app: &mut App,
-    message: QueuedMessage,
-    error: &str,
-) {
+/// A message submitted with no usable key (#6566). Nothing reached a model:
+/// the caller has already rolled back the optimistic echo, so the text goes
+/// back into the composer — not lost, and sent once when the person presses
+/// Enter after connecting, not doubled. One transcript line says what
+/// happened and the provider picker opens.
+///
+/// A new user never chose a provider, so the line does not name the built-in
+/// default's key or print its help page. A returning user whose saved route
+/// lost its key also gets the one command that saves it.
+pub(crate) fn keep_unsent_message_for_connect(app: &mut App, message: QueuedMessage, error: &str) {
     tracing::warn!(
         error = %error,
-        "immediate user message dispatch failed auth; keeping transcript echo"
+        "user message not sent: no usable credential; restored to composer"
     );
-    // Composer stays empty — HistoryCell::User already holds the turn.
-    let _ = message;
-    // U1: a keyless first message must leave a visible, durable recovery,
-    // not only a footer status the next config acknowledgement can replace.
-    // Say what happened once in the transcript and open the provider picker,
-    // as a rejected environment key already does.
-    app.add_message(HistoryCell::System {
-        content: "No model connected, so this message was not sent. Choose a provider, then send it again."
-            .to_string(),
-    });
+    app.restore_unsent_message(message);
+
+    let new_user = app.onboarding_had_provider_step;
+    let mut content = app.tr(MessageId::DispatchNotSentNoModel).into_owned();
+    if !new_user
+        && let Some(save) = error
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("codewhale auth set"))
+    {
+        content.push('\n');
+        content.push_str(
+            &app.tr(MessageId::DispatchNotSentSaveKey)
+                .replace("{command}", save),
+        );
+    }
+    app.add_message(HistoryCell::System { content });
     app.onboarding_needs_api_key = true;
+    // From the composer, the saved route is the one missing its key: this is
+    // missing-key recovery, as after `/logout`, so Esc returns to the
+    // composer. A first-run launch with an initial prompt is still in
+    // onboarding and keeps its remaining steps (Esc walks back as before).
+    if app.onboarding == OnboardingState::None {
+        app.onboarding_missing_key_recovery = true;
+        app.onboarding_provider = app.api_provider;
+    }
     app.onboarding = OnboardingState::Provider;
-    let status = format!("Message not sent ({error})");
+    // The footer keeps the provider's full message for a returning user; a
+    // new user's footer says only that no model is connected.
+    let reason = if new_user {
+        app.tr(MessageId::LaunchNoModelConnected).into_owned()
+    } else {
+        error.to_string()
+    };
+    let status = app
+        .tr(MessageId::DispatchNotSentStatus)
+        .replace("{reason}", &reason);
     app.status_message = Some(status.clone());
     app.set_sticky_status(
         status,
@@ -934,6 +957,24 @@ pub(crate) fn keep_failed_immediate_submit_echo(
         Some(App::STICKY_ERROR_TTL_MS),
     );
     app.needs_redraw = true;
+}
+
+/// The engine reported this turn's message as never sent: a key rejected
+/// before any model output (#6566). Take the message back, and its bubble
+/// out of the live transcript when nothing has landed after it, so sending it
+/// again shows it once. `None` when no dispatched message is on record.
+pub(crate) fn take_back_unsent_submission(app: &mut App) -> Option<QueuedMessage> {
+    let submission = app.unanswered_submission.take()?;
+    let cell = submission.history_cell;
+    let bubble_is_last = cell + 1 == app.history.len()
+        && matches!(
+            &app.history[cell],
+            HistoryCell::User { content } if content == &submission.message.display
+        );
+    if bubble_is_last {
+        app.truncate_history_to(cell);
+    }
+    Some(submission.message)
 }
 
 pub(crate) fn restore_failed_immediate_submit(
@@ -1066,13 +1107,10 @@ pub(crate) fn mirror_saved_api_key_in_config(
     provider: ApiProvider,
     api_key: String,
 ) {
+    // DeepSeek's key is saved to `[providers.deepseek]`, which DeepSeek-CN
+    // also reads (#6394).
     if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-        config.api_key = Some(api_key);
-        config.auth_mode = Some("api_key".to_string());
-        return;
-    }
-    if provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route() {
-        config.api_key = Some(api_key);
+        config.set_provider_api_key_override(ApiProvider::Deepseek, Some(api_key));
         config.auth_mode = Some("api_key".to_string());
         return;
     }
@@ -1453,9 +1491,10 @@ mod launch_resume_tests {
         );
     }
 
-    /// U1: a keyless first message leaves one durable transcript line, opens
-    /// the provider picker, and a later routine acknowledgement ("Auto-
-    /// compaction enabled") does not wipe the error from the footer.
+    /// U1 / #6566: a keyless first message goes back into the composer, leaves
+    /// one durable transcript line, opens the provider picker, and a later
+    /// routine acknowledgement ("Auto-compaction enabled") does not wipe the
+    /// error from the footer.
     #[test]
     fn keyless_submit_leaves_a_durable_recovery_that_config_acks_cannot_erase() {
         let dir = tempfile::tempdir().unwrap();
@@ -1463,26 +1502,69 @@ mod launch_resume_tests {
             crate::test_support::test_tui_options(dir.path()),
             &Config::default(),
         );
+        app.onboarding_had_provider_step = true;
         let cells_before = app.history.len();
-        keep_failed_immediate_submit_echo(
+        keep_unsent_message_for_connect(
             &mut app,
             crate::tui::app::QueuedMessage::new("hello".to_string(), None),
             "DeepSeek API key not found",
         );
+        assert_eq!(app.input, "hello", "the unsent message is not lost");
         assert_eq!(app.history.len(), cells_before + 1);
-        assert!(matches!(
-            app.history.last(),
-            Some(HistoryCell::System { content }) if content.starts_with("No model connected")
-        ));
+        let Some(HistoryCell::System { content }) = app.history.last() else {
+            panic!("keyless submit must leave a transcript line");
+        };
+        assert!(content.starts_with("No model is connected"), "{content}");
+        // A new user never chose DeepSeek; the line must not blame its key.
+        assert!(!content.contains("DeepSeek"), "{content}");
         assert_eq!(app.onboarding, OnboardingState::Provider);
         assert!(app.onboarding_needs_api_key);
 
-        app.status_message = Some("Auto-compaction enabled".to_string());
+        app.status_message = Some("Make room automatically: on".to_string());
         let shown = app
             .active_status_toast(crate::tui::underwater::ShellPhase::Idle)
             .expect("footer notice");
         assert_eq!(shown.level, StatusToastLevel::Error);
         assert!(shown.text.contains("Message not sent"), "{}", shown.text);
+        assert!(!shown.text.contains("DeepSeek"), "{}", shown.text);
+    }
+
+    /// A returning user's line names the command that saves the missing key,
+    /// and Esc from the picker it opens returns to the composer with the
+    /// message still there, not to the welcome screen.
+    #[test]
+    fn keyless_submit_names_the_key_and_esc_returns_to_the_composer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        app.onboarding = OnboardingState::None;
+        app.onboarding_missing_key_recovery = false;
+        app.onboarding_had_provider_step = false;
+        keep_unsent_message_for_connect(
+            &mut app,
+            crate::tui::app::QueuedMessage::new("hello".to_string(), None),
+            "DeepSeek API key not found.\n\n 1. Get a key:  https://platform.deepseek.com/api_keys\n 2. Save it (works in every folder, no OS prompts):\n        codewhale auth set --provider deepseek\n\n Alternatives:\n   • export DEEPSEEK_API_KEY=<your-key>. Failed to configure provider route deepseek / deepseek-flash.",
+        );
+        let Some(HistoryCell::System { content }) = app.history.last() else {
+            panic!("keyless submit must leave a transcript line");
+        };
+        assert!(
+            content.contains("codewhale auth set --provider deepseek"),
+            "{content}"
+        );
+        assert!(content.contains("F3"), "{content}");
+        // The footer keeps the full help page; the transcript keeps two facts.
+        assert!(!content.contains("Alternatives"), "{content}");
+        assert!(!content.contains("Failed to configure"), "{content}");
+        assert!(app.onboarding_missing_key_recovery);
+        assert!(app.onboarding_recovers_configured_route());
+
+        back_from_provider_onboarding(&mut app);
+        assert_eq!(app.onboarding, OnboardingState::None);
+        assert!(app.onboarding_needs_api_key);
+        assert_eq!(app.input, "hello");
     }
 
     /// The prominent new-session entry begins a fresh session in place.

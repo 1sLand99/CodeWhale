@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand} のエージェントは、ソフトウェアを開発し、ファイルを扱い、繰り返し行う作業を再利用できるワークフローにまとめられます。達成したいことを伝えて仕事に合うホスト型またはローカルのモデルを選び、必要に応じてプロバイダーを自由に切り替えながら作業を進めてください。",
   getCodewhale: "Codewhale を入手",
+  heroInstallAria: "インストールコマンド",
   exploreProduct: "製品を見る",
   shotPreview: "ターミナルのプレビュー",
   shotBuild: "v{version} 開発ビルド",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "リリース情報を取得できません",
   currentSource: "ソース",
   sourceCandidate: "未リリース",
-  providerRoutes: "{count} プロバイダー",
   publishedRelease: "リリース済み",
   figcaptionSourceCandidate: "未リリース",
   chapterTerminal: "あなたのターミナル",
@@ -60,7 +60,7 @@ export const home: HomeDict = {
   startLede: "Codewhale をインストールしてモデルを接続したら、ターミナルで最初の作業を伝え、複数のエージェントに分担してほしくなったときに Fleet を追加できます。",
   startGuideLink: "はじめかたガイドを読む",
   startVocabularyLink: "製品用語を見る",
-  chapterAccount: "Codewhale を入手",
+  chapterAvailability: "動作環境",
   availabilityHeading: "Codewhale を使える場所",
   availabilityLede: "Codewhale は今すぐターミナルで使え、Web アプリ、デスクトップアプリ、クラウドコンピューターも現在開発しています。",
   availability: [

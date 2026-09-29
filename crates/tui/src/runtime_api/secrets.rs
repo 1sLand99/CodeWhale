@@ -327,15 +327,8 @@ pub(super) async fn set_provider_key(
                 entry.oauth_credential_generation = None;
             }
         }
-        if provider_owned == ApiProvider::Deepseek {
-            config.api_key = None;
-            if config.default_text_model.is_none() {
-                config.default_text_model = config
-                    .provider_config_for(ApiProvider::Deepseek)
-                    .and_then(|entry| entry.model.clone())
-                    .or_else(|| Some("deepseek-v4-pro".to_string()));
-            }
-        }
+        // No model is mirrored: saving a key never changes which model runs
+        // (see `prepare_provider_api_key_metadata`).
     }
 
     let credential_state: ProviderCredentialState =
@@ -533,9 +526,6 @@ pub(super) async fn clear_provider_key(
             entry.auth_mode = None;
             entry.external_credentials = None;
             entry.oauth_credential_generation = None;
-        }
-        if provider == ApiProvider::Deepseek {
-            config.api_key = None;
         }
     }
 

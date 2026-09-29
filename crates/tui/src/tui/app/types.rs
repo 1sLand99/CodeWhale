@@ -284,6 +284,16 @@ pub struct QueuedMessage {
     pub history_echoed: bool,
 }
 
+/// The message the current turn was dispatched with, and the transcript cell
+/// that shows it. When the engine reports the turn was never sent (a key
+/// rejected before any model output), this is what goes back in the composer,
+/// skill included, and the bubble that comes out of the transcript (#6566).
+#[derive(Debug, Clone)]
+pub struct UnansweredSubmission {
+    pub message: QueuedMessage,
+    pub history_cell: usize,
+}
+
 /// A steer handed to the engine that the engine has not yet recorded.
 ///
 /// Live-only, and deliberately not in `api_messages`: `EngineHandle::steer`
@@ -375,11 +385,15 @@ pub struct TaskPanelEntry {
     pub current_tool: Option<String>,
     pub role: Option<String>,
     pub files_touched: u32,
+    /// A finished shell's exit code. `None` while running, and for durable
+    /// tasks.
+    pub exit_code: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskPanelEntryKind {
     Background,
+    Shell,
 }
 
 impl QueuedMessage {
@@ -509,6 +523,10 @@ impl ScreenMode {
 /// Actions emitted by the UI event loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
+    SetWorkspaceTrust {
+        trusted: bool,
+        save: bool,
+    },
     Quit,
     #[allow(dead_code)] // For explicit /load command
     LoadSession(PathBuf),
@@ -675,6 +693,11 @@ pub enum AppAction {
         content: String,
         command: String,
     },
+    /// Router setup (`/router`, `/model router`, #6525): open the view, test a
+    /// preset with one routing call, or save one to `[auto.router]`.
+    RouterSetup {
+        request: crate::tui::views::router_setup::RouterRequest,
+    },
     /// Live remaining-credit lookup for prepaid providers (`/balance`).
     FetchBalance,
     FetchModels,
@@ -759,11 +782,10 @@ pub enum AppAction {
     /// action; handled in the UI event loop where the live `Config` supplies
     /// provider credentials.
     VoiceCapture,
-    /// Export and share the current session as a web URL.
+    /// Upload an already-rendered, redacted session page as a secret gist.
+    /// Emitted only by `/share confirm`.
     ShareSession {
-        history_len: usize,
-        model: String,
-        mode: String,
+        html: String,
     },
 }
 

@@ -34,10 +34,9 @@ mod composer_history;
 mod composer_stash;
 pub mod computer_meter;
 mod config;
+pub mod config_keys;
 mod config_persistence;
-mod context_budget;
 mod context_report;
-mod continual_harness;
 mod core;
 mod cost_status;
 mod credentials;
@@ -46,50 +45,46 @@ pub mod dispatch_runner;
 mod doctor;
 mod doctor_fix;
 mod dsh_credentials;
-mod elapsed;
 mod error_taxonomy;
 mod eval;
+mod extension_host;
 mod external_credentials;
-mod fast_hash;
 mod features;
 mod fleet;
-mod goal_loop;
-mod hashing;
+mod fs_confined;
 mod hooks;
 mod image_attach;
 mod import_claude;
 mod integrations;
 mod lane_control;
 mod llm_client;
-mod llm_response_cache;
 mod local_ollama;
 mod logging;
 mod lsp;
 mod mcp;
 mod mcp_server;
-mod media_originals;
-mod model_context;
 mod model_inventory;
 mod model_profile;
 mod model_registry;
+mod model_relevance;
 mod model_routing;
 mod models_dev_live;
-mod native_memory;
 mod network_policy;
+mod notify;
 mod oauth;
 mod operate;
 mod plugins;
 mod pricing;
+mod process_tree;
 mod project_context;
 mod project_context_cache;
-mod prompt_zones;
 mod prompts;
 mod provider_catalog_live;
 mod provider_lake;
 mod provider_readiness;
 mod purge;
 pub mod reasoning_preference;
-mod regex_cache;
+mod receipts;
 mod remote_control;
 mod remote_setup;
 pub mod repl;
@@ -97,7 +92,6 @@ mod repo_law;
 mod request_manifest;
 mod request_tuning;
 mod resource_telemetry;
-mod retry_status;
 pub mod rlm;
 mod route_billing;
 mod route_budget;
@@ -110,7 +104,6 @@ mod runtime_handoff;
 mod runtime_log;
 mod runtime_policy;
 mod runtime_threads;
-mod safe_label;
 mod sandbox;
 mod scorecard;
 mod session_diagnostics;
@@ -126,13 +119,12 @@ mod session_export;
 mod session_manager;
 mod session_peek;
 mod session_projection;
+mod session_reconcile;
 mod session_resume;
-pub mod session_tree;
+mod session_secret_scrub;
 mod settings;
 mod shell_dispatcher;
-mod skill_state;
 mod skills;
-mod sleep_guard;
 mod snapshot;
 mod startup_trace;
 mod task_manager;
@@ -142,8 +134,17 @@ mod test_support;
 // TLS bootstrap and platform client builders live in codewhale-release;
 // `crate::tls::*` keeps resolving for every caller.
 use codewhale_release::tls;
+// Runtime split path alias: modules that moved to `crates/runtime` keep
+// resolving as `crate::<module>` inside this crate. One block, no per-item
+// re-exports; the split deletes it by rewriting these paths to
+// `codewhale_runtime::` (docs/design/TUI_DECONSTRUCTION.md).
+use codewhale_runtime::{
+    context_budget, continual_harness, elapsed, fast_hash, goal_loop, hashing, host_terminal,
+    llm_response_cache, media_originals, model_context, native_memory, prompt_zones, regex_cache,
+    retry_status, safe_label, session_tree, skill_state, sleep_guard, tool_history_repair,
+    workspace_discovery,
+};
 mod todo_snapshot;
-mod tool_history_repair;
 mod tool_inspection;
 mod tool_output_receipts;
 mod tools;
@@ -154,10 +155,10 @@ pub use tui::ambient_life::pet_sim as pet;
 mod turn_route_plan;
 mod utils;
 mod vision;
+mod voice;
 mod work_graph;
 mod worker_profile;
 mod working_set;
-mod workspace_discovery;
 mod workspace_trust;
 
 use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS, effective_home_dir};
@@ -301,6 +302,24 @@ enum Commands {
         #[command(subcommand)]
         command: Option<SessionsCommand>,
     },
+    /// Show what a session did: files changed, commands run, web and MCP
+    /// calls, agents, approvals, and failures, read from its saved record
+    #[command(visible_alias = "receipt")]
+    Receipts {
+        /// Session id or unique prefix, or a Runtime thread id (thr_...).
+        /// Omit it (or pass --last) for the most recently updated one.
+        #[arg(value_name = "SESSION_ID")]
+        id: Option<String>,
+        /// Use the most recently updated session or thread
+        #[arg(long, conflicts_with = "id")]
+        last: bool,
+        /// Limit to one turn: a thread's turn id, or a session's turn number
+        #[arg(long, value_name = "TURN")]
+        turn: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "md")]
+        format: receipts::ReceiptFormat,
+    },
     /// Create default AGENTS.md in current directory
     Init,
     /// Sign in to your Codewhale account (use the `codewhale` CLI).
@@ -398,6 +417,14 @@ enum SessionsCommand {
         #[arg(short, long)]
         search: Option<String>,
     },
+    /// Mask credentials that older builds stored in saved sessions' tool
+    /// output. Reports what it would change unless `--apply` is given. Run it
+    /// while no Codewhale session is open.
+    ScrubSecrets {
+        /// Rewrite the affected session files (default: report only)
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+    },
     /// Export a session as a full-fidelity tar.xz archive (complete context:
     /// system prompt, messages, tool calls and results, plus artifacts)
     Export {
@@ -426,9 +453,14 @@ Examples:
   codewhale exec --auto \"list crates/ with ls\"
   codewhale exec --auto --output-format stream-json \"fix the failing test\"
 
-Plain `codewhale exec` is a one-shot model response. Use `--auto` for
-non-interactive agent-with-tools execution. `--auto` does not change the
-sandbox posture or elevate a denied tool. Use `--sandbox danger-full-access`
+Plain `codewhale exec` is a one-shot model response: one Engine turn with the
+same system prompt as every other run, and no tools. Use `--auto` for
+non-interactive agent-with-tools execution. Tools are offered only with
+`--auto`, `--yolo`, `--allowed-tools`, or when resuming a session; limits such
+as `--max-turns`, `--disallowed-tools` or `--sandbox`, and the output format,
+never add tools. A reply cut off at the provider's output limit is continued
+in the same turn, at most 8 model steps unless `--max-turns` says otherwise.
+`--auto` does not change the sandbox posture or elevate a denied tool. Use `--sandbox danger-full-access`
 or `--allow-sandbox-elevation` to explicitly authorize sandbox elevation.
 ")]
 struct ExecArgs {
@@ -502,10 +534,15 @@ struct ExecArgs {
     /// operator hooks.
     #[arg(long, default_value_t = false)]
     hooks: bool,
-    /// Prompt to send to the model
+    /// Read the prompt from a file (`-` reads stdin) instead of argv, for
+    /// prompts past the OS per-argument limit (~128 KiB on Linux).
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+    prompt_file: Option<PathBuf>,
+    /// Prompt to send to the model. Taken literally, including a lone `-`;
+    /// use `--prompt-file -` to read stdin.
     #[arg(
         value_name = "PROMPT",
-        required = true,
+        required_unless_present = "prompt_file",
         trailing_var_arg = true,
         allow_hyphen_values = true
     )]
@@ -597,6 +634,46 @@ fn shell_only_exec_allowed_tools() -> Vec<String> {
         .iter()
         .map(|name| (*name).to_string())
         .collect()
+}
+
+/// #6510: whether an `exec` run is offered tools. Plain exec is one Engine
+/// turn with no tools; only a flag that grants tool authority opens a
+/// surface: `--auto`/`--yolo`, an explicit `--allowed-tools` list, a Fleet
+/// authority envelope, or the launcher's tool-surface env. A resumed session
+/// keeps its surface, because its history can carry tool calls and results
+/// that a zero-tool request cannot replay.
+///
+/// Limits (`--max-turns`, `--max-tool-calls`, `--disallowed-tools`,
+/// `--sandbox`, `--allow-sandbox-elevation`), prompt and hook opt-ins
+/// (`--append-system-prompt`, `--hooks`) and the output format never grant
+/// tools. They used to, so `exec --max-turns 1 "hi"` silently became a
+/// tool-using agent.
+fn exec_grants_tool_surface(
+    args: &ExecArgs,
+    yolo: bool,
+    resuming: bool,
+    env_tool_surface: bool,
+) -> bool {
+    args.auto
+        || yolo
+        || resuming
+        || args.allowed_tools.is_some()
+        || args.tool_authority_json.is_some()
+        || env_tool_surface
+}
+
+/// Flags that only shape a tool surface, passed on a run that has none.
+fn exec_tool_flags_without_grant(args: &ExecArgs) -> Vec<&'static str> {
+    [
+        (args.max_tool_calls.is_some(), "--max-tool-calls"),
+        (args.disallowed_tools.is_some(), "--disallowed-tools"),
+        (args.sandbox.is_some(), "--sandbox"),
+        (args.allow_sandbox_elevation, "--allow-sandbox-elevation"),
+        (args.hooks, "--hooks"),
+    ]
+    .into_iter()
+    .filter_map(|(passed, flag)| passed.then_some(flag))
+    .collect()
 }
 
 fn resolve_exec_allowed_tools(
@@ -763,9 +840,16 @@ enum FleetAlertAdapterArg {
 /// terminated-by-signal exit (no code, no terminal restore, no `session_end`).
 /// After this function returns, the signals are armed.
 fn spawn_signal_cleanup_task() {
-    let signals = TerminatingSignals::register();
+    let mut signals = TerminatingSignals::register();
     tokio::spawn(async move {
         let exit_code = signals.wait().await;
+        // A serving Runtime API gets a bounded window to end its open event
+        // streams with a typed `stream.end`, so clients can tell a Runtime
+        // that stopped from a dropped connection. A second signal skips it.
+        tokio::select! {
+            () = runtime_api::drain_for_signal_exit() => {}
+            _ = signals.wait() => {}
+        }
         // If we get here a fatal signal arrived. Restore the terminal
         // and exit. A second signal during cleanup re-enters this
         // path and aborts via `std::process::exit` directly.
@@ -859,7 +943,7 @@ impl TerminatingSignals {
     /// Resolve with 128 + signal number for whichever arrives first. The
     /// fallback never-resolving future keeps `select!` well-typed when a
     /// stream failed to register.
-    async fn wait(mut self) -> i32 {
+    async fn wait(&mut self) -> i32 {
         tokio::select! {
             _ = async { match self.sigint.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 130,
             _ = async { match self.sigterm.as_mut() { Some(s) => { s.recv().await; }, None => std::future::pending::<()>().await, } } => 143,
@@ -884,7 +968,7 @@ impl TerminatingSignals {
         }
     }
 
-    async fn wait(mut self) -> i32 {
+    async fn wait(&mut self) -> i32 {
         match self.ctrl_c.as_mut() {
             Some(s) => {
                 s.recv().await;
@@ -897,6 +981,45 @@ impl TerminatingSignals {
 
 fn join_prompt_parts(parts: &[String]) -> String {
     parts.join(" ")
+}
+
+/// Maximum bytes accepted for an exec prompt read from `--prompt-file` or
+/// stdin. Far past argv's per-argument ceiling; the model's context window
+/// stays the real limit (#6688).
+const MAX_EXEC_PROMPT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The effective exec prompt: argv words, or the body of `--prompt-file`
+/// (`-` = stdin). A positional `-` stays literal text: raw-prompt callers
+/// such as cloud dispatch pass a job prompt verbatim as argv. Runs before
+/// any model call so a missing or empty source fails loudly (#6688).
+fn resolve_exec_prompt(args: &ExecArgs) -> Result<String> {
+    let Some(path) = &args.prompt_file else {
+        return Ok(join_prompt_parts(&args.prompt));
+    };
+    let prompt = if path.as_os_str() == "-" {
+        if args.parent_death_watch {
+            bail!("--parent-death-watch owns stdin; pass the prompt with --prompt-file <PATH>");
+        }
+        let stdin = io::stdin();
+        if stdin.is_terminal() {
+            bail!("--prompt-file - reads stdin, but stdin is a terminal; pipe the prompt in.");
+        }
+        read_capped_text(stdin.lock(), MAX_EXEC_PROMPT_BYTES, "exec prompt on stdin")?
+    } else {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("failed to open --prompt-file {}", path.display()))?;
+        read_capped_text(file, MAX_EXEC_PROMPT_BYTES, "--prompt-file")
+            .with_context(|| format!("failed to read --prompt-file {}", path.display()))?
+    };
+    if prompt.trim().is_empty() {
+        let source = if path.as_os_str() == "-" {
+            "stdin".to_string()
+        } else {
+            path.display().to_string()
+        };
+        bail!("exec prompt from {source} is empty");
+    }
+    Ok(prompt)
 }
 
 fn resolve_exec_model(config: &Config, explicit_model: Option<&str>) -> String {
@@ -1138,6 +1261,17 @@ struct DoctorArgs {
     /// Apply the planned repairs without prompting (requires --fix)
     #[arg(long, default_value_t = false, requires = "fix")]
     yes: bool,
+    /// Repair the saved-session store now: re-index recoverable sessions,
+    /// unbind dead thread links, set aside (never delete) what nothing uses
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json"]
+    )]
+    repair_sessions: bool,
+    /// With --repair-sessions: report what would be repaired, change nothing
+    #[arg(long, default_value_t = false, requires = "repair_sessions")]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1726,6 +1860,10 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     startup_trace::mark_process_start();
     configure_windows_console_utf8();
     install_rustls_crypto_provider();
+    // The TUI is the terminal host for every mode this binary runs
+    // (interactive, exec, serve): runtime code reaches raw mode and
+    // notification delivery only through this port.
+    crate::tui::ui::install_host_terminal();
 
     // ── Process hardening (#2183) ─────────────────────────────────────────
     // MUST run before Tokio is booted and before any threads are spawned.
@@ -1969,7 +2107,8 @@ fn diagnostic_worker_count(command: Option<&Commands>) -> Option<usize> {
             Commands::Doctor(_)
             | Commands::Eval(_)
             | Commands::SessionDiagnostics(_)
-            | Commands::Sessions { .. },
+            | Commands::Sessions { .. }
+            | Commands::Receipts { .. },
         ) => true,
         // Only the read-only status report; mutating setup keeps defaults.
         Some(Commands::Setup(args)) => args.status,
@@ -2027,7 +2166,12 @@ fn telemetry_session_source(command: Option<&Commands>) -> codewhale_telemetry::
 fn telemetry_command_is_read_only(command: Option<&Commands>) -> bool {
     matches!(
         command,
-        Some(Commands::Doctor(_) | Commands::SessionDiagnostics(_) | Commands::Sessions { .. })
+        Some(
+            Commands::Doctor(_)
+                | Commands::SessionDiagnostics(_)
+                | Commands::Sessions { .. }
+                | Commands::Receipts { .. }
+        )
     ) || matches!(command, Some(Commands::Setup(args)) if args.status)
 }
 
@@ -2244,6 +2388,9 @@ async fn run_async_main_dispatch(
                     }
                 };
                 let workspace = resolve_workspace(&cli);
+                if args.repair_sessions {
+                    return run_doctor_repair_sessions(args.dry_run);
+                }
                 if args.context_json {
                     run_doctor_context_json(&config, &workspace)
                 } else if args.json {
@@ -2265,6 +2412,7 @@ async fn run_async_main_dispatch(
                         &config,
                         &workspace,
                         cli.config.as_deref(),
+                        effective_config_profile(&cli).as_deref(),
                         probes,
                         plugin_registry.as_ref(),
                     )
@@ -2302,6 +2450,14 @@ async fn run_async_main_dispatch(
             } => match command {
                 None => list_sessions(limit, search),
                 Some(SessionsCommand::List { limit, search }) => list_sessions(limit, search),
+                Some(SessionsCommand::ScrubSecrets { apply }) => {
+                    run_sessions_scrub_secrets(
+                        apply,
+                        cli.config.clone(),
+                        effective_config_profile(&cli),
+                    )
+                    .await
+                }
                 Some(SessionsCommand::Export {
                     id,
                     output,
@@ -2312,6 +2468,16 @@ async fn run_async_main_dispatch(
                     run_sessions_export(&id, output.as_deref(), skip_artifacts, compression, force)
                 }
             },
+            Commands::Receipts {
+                id,
+                last,
+                turn,
+                format,
+            } => receipts::run_receipts_command(
+                if last { None } else { id.as_deref() },
+                turn.as_deref(),
+                format,
+            ),
             Commands::Init => init_project(),
             Commands::Login { api_key } => run_login(api_key),
             Commands::Logout => run_logout(),
@@ -2346,23 +2512,25 @@ async fn run_async_main_dispatch(
                     let _ = parse_sandbox_policy(sandbox, true, Vec::new(), false, false)?;
                     config.sandbox_mode = Some(sandbox.to_ascii_lowercase());
                 }
-                // Honour CODEWHALE_BASE_URL / DEEPSEEK_BASE_URL forwarded by
-                // the CLI dispatcher from --base-url.
+                // Honour CODEWHALE_BASE_URL (forwarded by the CLI dispatcher
+                // from --base-url) or the user-set legacy DEEPSEEK_BASE_URL.
                 if let Ok(env_url) = std::env::var("CODEWHALE_BASE_URL")
                     .or_else(|_| std::env::var("DEEPSEEK_BASE_URL"))
                 {
                     let trimmed = env_url.trim();
                     if !trimmed.is_empty() {
-                        config.base_url = Some(trimmed.to_string());
+                        let provider = config.api_provider();
+                        config.set_provider_base_url_override(provider, Some(trimmed.to_string()));
                     }
                 }
                 // Honour `--provider` (#4093): a Fleet worker whose profile pins
                 // a provider launches on that provider even when the parent
                 // session is on another one. This sets ONLY the non-secret
                 // provider identity (`config.provider`); credentials/base URL
-                // still resolve from the worker's own env/config, and for a
-                // non-DeepSeek provider the legacy root `base_url` above is
-                // ignored by `active_route_base_url()`. Must precede model
+                // still resolve from the worker's own env/config, and the
+                // endpoint above stays in the previously active provider's
+                // own table, so a different pinned provider never reads it.
+                // Must precede model
                 // resolution so an `auto`/default model resolves to the
                 // overridden provider's default.
                 let explicit_provider = args
@@ -2383,7 +2551,7 @@ async fn run_async_main_dispatch(
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
                 initialize_cloud_facts(&config);
-                let prompt = join_prompt_parts(&args.prompt);
+                let prompt = resolve_exec_prompt(&args)?;
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
                 validate_exec_tool_authority_resume(
                     args.tool_authority_json.as_deref(),
@@ -2442,21 +2610,17 @@ async fn run_async_main_dispatch(
                 // `config.yolo`), not as a CLI flag. Honour either source.
                 let yolo = cli.yolo || config.yolo.unwrap_or(false);
                 let env_tool_surface = exec_tool_surface_from_env();
-                let needs_engine = args.auto
-                    || yolo
-                    || resume_session_id.is_some()
-                    || args.output_format == ExecOutputFormat::StreamJson
-                    || args.max_turns.is_some()
-                    || args.max_tool_calls.is_some()
-                    || args.allowed_tools.is_some()
-                    || args.disallowed_tools.is_some()
-                    || args.append_system_prompt.is_some()
-                    || args.tool_authority_json.is_some()
-                    || args.hooks
-                    || args.sandbox.is_some()
-                    || args.allow_sandbox_elevation
-                    || env_tool_surface.is_some();
-                if needs_engine {
+                // #6510: every exec runs on the Engine — one turn loop, one
+                // prompt authority (BASE_PROMPT, AGENTS.md, skills). Without
+                // a tool grant the run is a one-shot answer on a zero-tool
+                // surface.
+                let tool_surface_requested = exec_grants_tool_surface(
+                    &args,
+                    yolo,
+                    resume_session_id.is_some(),
+                    env_tool_surface.is_some(),
+                );
+                {
                     if args.parent_death_watch {
                         spawn_parent_death_watch();
                     }
@@ -2466,9 +2630,27 @@ async fn run_async_main_dispatch(
                         |value| value.clamp(1, MAX_SUBAGENTS),
                     );
                     let auto_mode = args.auto || yolo;
-                    let max_turns = exec_max_steps(args.max_turns);
-                    let allowed_tools =
-                        resolve_exec_allowed_tools(args.allowed_tools.as_deref(), env_tool_surface);
+                    // A zero-tool run only spends model steps on output-limit
+                    // continuations; without `--max-turns` those would run to
+                    // the turn wall clock, so it gets a small default ceiling.
+                    let max_turns = exec_max_steps(
+                        args.max_turns
+                            .or((!tool_surface_requested).then_some(ONE_SHOT_DEFAULT_MAX_STEPS)),
+                    );
+                    if !tool_surface_requested {
+                        let ignored = exec_tool_flags_without_grant(&args);
+                        if !ignored.is_empty() {
+                            eprintln!(
+                                "codewhale exec: {} only apply to tools, and this run offers none; add --auto or --allowed-tools to run with tools.",
+                                ignored.join(", ")
+                            );
+                        }
+                    }
+                    let allowed_tools = if tool_surface_requested {
+                        resolve_exec_allowed_tools(args.allowed_tools.as_deref(), env_tool_surface)
+                    } else {
+                        Some(Vec::new())
+                    };
                     let disallowed_tools = args
                         .disallowed_tools
                         .as_deref()
@@ -2495,12 +2677,9 @@ async fn run_async_main_dispatch(
                         args.tool_authority_json.clone(),
                         args.hooks,
                         std::sync::Arc::clone(&plugin_registry),
+                        !tool_surface_requested,
                     )
                     .await
-                } else if args.json {
-                    run_one_shot_json(&config, &model, &prompt, force_configured_route).await
-                } else {
-                    run_one_shot(&config, &model, &prompt, force_configured_route).await
                 }
             }
             Commands::Fleet(args) => {
@@ -4106,14 +4285,12 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
     let provider_config_key_kind = provider_config
         .and_then(|entry| entry.api_key.as_deref())
         .map(crate::config::classify_config_api_key_value);
-    let root_key_applies = matches!(
-        provider,
-        crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
-    ) || (provider == crate::config::ApiProvider::Custom
-        && config.uses_legacy_literal_custom_route());
-    let root_key_kind = root_key_applies
-        .then_some(config.api_key.as_deref())
+    // DeepSeek-CN shares `[providers.deepseek]`'s key (the two identities
+    // used to share the top-level `api_key`, #6394).
+    let root_key_kind = (provider == crate::config::ApiProvider::DeepseekCN)
+        .then(|| config.provider_config_for(crate::config::ApiProvider::Deepseek))
         .flatten()
+        .and_then(|entry| entry.api_key.as_deref())
         .map(crate::config::classify_config_api_key_value);
 
     if matches!(
@@ -4481,6 +4658,7 @@ async fn run_doctor(
     config: &Config,
     workspace: &Path,
     config_path_override: Option<&Path>,
+    profile: Option<&str>,
     probes: crate::doctor::DoctorProbeRequest,
     plugins: &crate::plugins::PluginRegistry,
 ) {
@@ -4550,6 +4728,24 @@ async fn run_doctor(
                 );
             }
         }
+        // Legacy top-level `base_url` / `api_key` (#6394): which moves the
+        // file still has pending, which pair disagrees and which side is in
+        // use. Sources only, never values.
+        for note in &config.legacy_root.notes {
+            let pending = !matches!(
+                note,
+                codewhale_config::legacy_root::LegacyRootNote::Conflict { .. }
+            );
+            println!(
+                "  {} {note}{}",
+                "!".truecolor(sky_r, sky_g, sky_b),
+                if pending {
+                    " (read that way already; `codewhale config migrate` updates the file)"
+                } else {
+                    ""
+                }
+            );
+        }
     } else {
         println!(
             "  {} config.toml not found at {} (using defaults/env)",
@@ -4572,6 +4768,16 @@ async fn run_doctor(
     for line in crate::doctor::secret_backend_human_lines(&secret_backend) {
         println!("  · {line}");
     }
+
+    println!();
+    println!("{}", "Sessions:".bold());
+    println!(
+        "  · {}",
+        crate::session_reconcile::last_run(&doctor_paths.sessions).map_or_else(
+            || "no session repair has run yet (it runs at launch; `codewhale doctor --repair-sessions` runs it now)".to_string(),
+            |summary| summary.doctor_detail()
+        )
+    );
 
     // State root (v0.8.44)
     println!();
@@ -4610,6 +4816,11 @@ async fn run_doctor(
         (aqua_r, aqua_g, aqua_b),
         (sky_r, sky_g, sky_b),
     );
+    print_doctor_stored_secrets_report(
+        config_path_override.map(Path::to_path_buf),
+        profile.map(str::to_owned),
+    )
+    .await;
 
     let (setup_state, setup_source) = doctor_setup_state(config, workspace);
     print_doctor_setup_report(
@@ -4637,11 +4848,7 @@ async fn run_doctor(
                 crate::config::classify_config_api_key_value(key)
                     == crate::config::ConfigApiKeyValueKind::Literal
             })
-        }) || (matches!(provider, crate::config::ApiProvider::Deepseek)
-            && config.api_key.as_deref().is_some_and(|key| {
-                crate::config::classify_config_api_key_value(key)
-                    == crate::config::ConfigApiKeyValueKind::Literal
-            }));
+        });
         let env_source_declared = provider_config
             .and_then(|entry| entry.api_key_env.as_deref())
             .is_some_and(|name| !name.trim().is_empty());
@@ -4913,6 +5120,7 @@ async fn run_doctor(
                 "·".dimmed(),
                 cfg.servers.len()
             );
+            let duplicate_computer_use = crate::mcp::duplicate_computer_use_servers(&cfg);
             for (name, server) in &cfg.servers {
                 let status = doctor_check_mcp_server(server);
                 let icon = match &status {
@@ -4946,6 +5154,13 @@ async fn run_doctor(
                         "      process/protocol/backend: not checked; `codewhale mcp validate` explicitly starts and initializes configured servers"
                     );
                 }
+            }
+            for (name, _) in &duplicate_computer_use {
+                println!(
+                    "  {} {}",
+                    "!".truecolor(sky_r, sky_g, sky_b),
+                    duplicate_computer_use_warning(name).trim_start()
+                );
             }
             if probes.should_probe_mcp() {
                 println!();
@@ -5295,12 +5510,12 @@ async fn run_doctor(
         None => {
             println!("  {} pandoc: not found (optional)", "·".dimmed(),);
             println!(
-                "    pandoc_convert tool is NOT advertised to the model. Install pandoc to enable:"
+                "    pandoc_convert tool is NOT advertised to the model. Install pandoc 2.15+ to enable:"
             );
             match std::env::consts::OS {
                 "macos" => println!("      brew install pandoc"),
                 "linux" => println!(
-                    "      sudo apt install pandoc    (Debian/Ubuntu) — or your distro's equivalent"
+                    "      release package from pandoc.org/installing.html (distro packages may predate 2.15)"
                 ),
                 "windows" => {
                     println!("      winget install JohnMacFarlane.Pandoc")
@@ -5457,14 +5672,16 @@ async fn run_doctor(
 /// is the setup lane's own verdict; doctor never probes credential values to
 /// decide it.
 fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
-    // NeedsAction means a route is named but no credential is confirmed for
-    // it, which is still "no provider set up" from where the user sits.
+    // NeedsAction means a named route needs repair (missing credentials or a
+    // failed check). Configured routes can be used without a prior probe.
     // `first_run_ready` accepts NeedsAction (a failed key still reaches the
     // wizard's ready screen), so check the provider first: finished setup
-    // with an unconfirmed key is not "Ready".
-    let provider_verified = state.status(codewhale_config::SetupStep::ProviderModel)
-        == codewhale_config::StepStatus::Verified;
-    if !provider_verified {
+    // with a route needing repair is not "Ready".
+    let provider_configured = matches!(
+        state.status(codewhale_config::SetupStep::ProviderModel),
+        codewhale_config::StepStatus::Configured | codewhale_config::StepStatus::Verified
+    );
+    if !provider_configured {
         "Not ready: no model provider set up → run /provider in Codewhale, or `codewhale setup`."
     } else if state.first_run_ready() {
         "Ready: setup is complete."
@@ -6521,6 +6738,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let mut config_members = 0usize;
     let mut personal_members = 0usize;
     let mut workspace_members = 0usize;
+    let mut claude_members = 0usize;
     for member in roster.members() {
         match member.origin {
             crate::fleet::roster::ProfileOrigin::BuiltIn => built_in_members += 1,
@@ -6528,10 +6746,12 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             crate::fleet::roster::ProfileOrigin::Config => config_members += 1,
             crate::fleet::roster::ProfileOrigin::Personal => personal_members += 1,
             crate::fleet::roster::ProfileOrigin::Workspace => workspace_members += 1,
+            crate::fleet::roster::ProfileOrigin::ClaudeCode => claude_members += 1,
         }
     }
     let roster_members = roster.members().len();
-    let custom_members = plugin_members + config_members + personal_members + workspace_members;
+    let custom_members =
+        plugin_members + config_members + personal_members + workspace_members + claude_members;
     let roster_ready = roster.load_error().is_none() && roster_members > 0;
     let runtime_ready =
         subagents_enabled && max_subagents > 0 && launch_concurrency > 0 && max_spawn_depth > 0;
@@ -6589,6 +6809,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             "config": config_members,
             "personal": personal_members,
             "workspace": workspace_members,
+            "claude": claude_members,
             "custom": custom_members,
             "starter_roster_available": built_in_members > 0,
             "readiness_rule": "built-in starter roster or custom roster",
@@ -7004,6 +7225,7 @@ fn setup_status_id(status: codewhale_config::StepStatus) -> &'static str {
         codewhale_config::StepStatus::Optional => "optional",
         codewhale_config::StepStatus::Deferred => "deferred",
         codewhale_config::StepStatus::InProgress => "in_progress",
+        codewhale_config::StepStatus::Configured => "configured",
         codewhale_config::StepStatus::Verified => "verified",
         codewhale_config::StepStatus::NeedsAction => "needs_action",
         codewhale_config::StepStatus::Failed => "failed",
@@ -7050,6 +7272,28 @@ fn runtime_posture_source_id(source: codewhale_config::RuntimePostureSource) -> 
 /// Emit a bounded, secret-redacted JSON failure when configuration cannot be
 /// loaded or validated. Invalid configuration must not be forced through the
 /// normal doctor report because its route/capability facts would be misleading.
+/// `codewhale doctor --repair-sessions [--dry-run]` (#6144).
+fn run_doctor_repair_sessions(dry_run: bool) -> Result<()> {
+    let manager = session_manager::SessionManager::default_location()?;
+    let summary = crate::session_reconcile::reconcile(
+        &manager,
+        &crate::session_reconcile::ReconcileOptions {
+            dry_run,
+            ..Default::default()
+        },
+    )?;
+    let report = serde_json::to_string_pretty(&summary)?;
+    if summary.skipped_concurrent {
+        println!("Another Codewhale process is repairing the session store; try again shortly.");
+    } else if dry_run {
+        println!("Session repair (dry run — nothing changed):");
+    } else {
+        println!("Session repair:");
+    }
+    println!("{report}");
+    Ok(())
+}
+
 fn run_doctor_json_config_error(error: &anyhow::Error) -> Result<()> {
     let safe_message = error
         .downcast_ref::<crate::config::SafeConfigDiagnostic>()
@@ -7205,6 +7449,9 @@ fn run_doctor_json(
         "version": env!("CARGO_PKG_VERSION"),
         "config_path": config_path.display().to_string(),
         "config_present": config_path.exists(),
+        "sessions": {
+            "last_repair": crate::session_reconcile::last_run(&doctor_paths.sessions),
+        },
         "paths": doctor_paths,
         "secret_backend": secret_backend,
         "workspace": workspace.display().to_string(),
@@ -7474,11 +7721,7 @@ fn doctor_provider_config_table(config: &Config, provider: crate::config::ApiPro
     if provider != crate::config::ApiProvider::Custom {
         return provider_config_table_key(provider).to_string();
     }
-    if config.uses_legacy_literal_custom_route() {
-        "root (legacy literal custom)".to_string()
-    } else {
-        format!("providers.{}", config.provider_identity_for(provider))
-    }
+    format!("providers.{}", config.provider_identity_for(provider))
 }
 
 fn doctor_provider_source(config: &Config) -> &'static str {
@@ -8106,6 +8349,161 @@ fn sessions_resume_command() -> &'static str {
     "codewhale resume"
 }
 
+/// Newest files per category (sessions/checkpoints and Runtime receipts) inspected;
+/// `codewhale sessions scrub-secrets` covers every file.
+const DOCTOR_SECRET_SCAN_FILES: usize = 50;
+
+/// B1 finding: sessions written before tool output was redacted at the
+/// transcript boundary can still hold live credentials. Report, never
+/// rewrite — scrubbing is the explicit `scrub-secrets` command. Doctor is a
+/// read-only diagnostic, so this resolves the sessions directory with the
+/// read-path resolver: it never creates the home or migrates a legacy tree.
+async fn print_doctor_stored_secrets_report(config_path: Option<PathBuf>, profile: Option<String>) {
+    use colored::Colorize;
+
+    let scan = tokio::task::spawn_blocking(move || -> Result<_> {
+        let sessions_dir = codewhale_config::resolve_state_dir("sessions")?;
+        let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+            task_manager::default_tasks_dir(),
+        );
+        let mut unreadable = Vec::new();
+        let files =
+            session_secret_scrub::session_files(&sessions_dir, &runtime.data_dir, &mut unreadable);
+        let total = files.len();
+        let checked = session_secret_scrub::doctor_files(files, DOCTOR_SECRET_SCAN_FILES);
+        let secrets = session_secret_scrub::configured_secrets(config_path, profile.as_deref())?;
+        let mut report = session_secret_scrub::scrub_files(&checked, None, &secrets)?;
+        report.unreadable.extend(unreadable);
+        Ok((report, total))
+    })
+    .await;
+    println!();
+    println!("{}", "Stored Sessions:".bold());
+    match scan {
+        Ok(Ok((report, total))) => println!("{}", doctor_stored_secrets_summary(&report, total)),
+        _ => println!("  ! stored credential scan could not be completed"),
+    }
+}
+
+fn doctor_stored_secrets_summary(
+    report: &session_secret_scrub::ScrubReport,
+    total: usize,
+) -> String {
+    let scope = if total > report.files_scanned {
+        format!(
+            "{} of {total}; newest up to {DOCTOR_SECRET_SCAN_FILES} per category: sessions/checkpoints and Runtime receipts",
+            report.files_scanned
+        )
+    } else {
+        format!("{total}")
+    };
+    let mut lines = Vec::new();
+    if report.flagged_files.is_empty() && report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ✓ no credentials found in stored tool output ({scope} files)"
+        ));
+    }
+    if !report.flagged_files.is_empty() {
+        lines.push(format!(
+            "  ✗ {} files hold credentials in stored tool output ({scope} checked)",
+            report.flagged_files.len()
+        ));
+        lines.push(format!(
+            "    fix: `{}` to review, then `--apply` to mask them; rotate any exposed credential",
+            session_secret_scrub::SCRUB_COMMAND
+        ));
+    }
+    if !report.unreadable.is_empty() {
+        lines.push(format!(
+            "  ! scan incomplete: {} files or directories could not be read or parsed ({scope} checked)",
+            report.unreadable.len()
+        ));
+        for path in &report.unreadable {
+            lines.push(format!("    {}", path.display()));
+        }
+    }
+    lines.join("\n")
+}
+
+async fn run_sessions_scrub_secrets(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<String>,
+) -> Result<()> {
+    #[cfg(test)]
+    let ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(ticket);
+        run_sessions_scrub_secrets_blocking(apply, config_path, profile.as_deref())
+    })
+    .await?
+}
+
+fn run_sessions_scrub_secrets_blocking(
+    apply: bool,
+    config_path: Option<PathBuf>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let manager = session_manager::SessionManager::default_location()?;
+    let runtime = runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+        task_manager::default_tasks_dir(),
+    );
+    let mut unreadable = Vec::new();
+    let files = session_secret_scrub::session_files(
+        manager.sessions_dir(),
+        &runtime.data_dir,
+        &mut unreadable,
+    );
+    let secrets = session_secret_scrub::configured_secrets(config_path, profile)?;
+    let mut report =
+        session_secret_scrub::scrub_files(&files, apply.then_some(&manager), &secrets)?;
+    report.unreadable.extend(unreadable);
+    let affected = report.flagged_files.len();
+    if affected == 0 && report.unreadable.is_empty() && report.busy.is_empty() {
+        println!(
+            "No stored credentials found in tool output across {} files.",
+            report.files_scanned
+        );
+    } else if affected > 0 {
+        let verb = if apply { "Scrubbed" } else { "Found" };
+        println!(
+            "{verb} {} credential-bearing tool results in {affected} of {} session files:",
+            report.flagged_tool_results, report.files_scanned
+        );
+        for path in &report.flagged_files {
+            println!("  {}", path.display());
+        }
+        if !apply {
+            println!(
+                "Re-run with `{} --apply` to mask them (close open Codewhale sessions first). \
+                 Rotate any credential that was exposed: redaction cannot un-leak it.",
+                session_secret_scrub::SCRUB_COMMAND
+            );
+        }
+    }
+    if !report.unreadable.is_empty() {
+        println!(
+            "{} files or directories could not be read or parsed and were left untouched.",
+            report.unreadable.len()
+        );
+        for path in &report.unreadable {
+            println!("  {}", path.display());
+        }
+    }
+    if !report.busy.is_empty() {
+        println!(
+            "{} credential-bearing Runtime files were skipped because their stores are active. Close the session or Runtime server and re-run `{} --apply`:",
+            report.busy.len(),
+            session_secret_scrub::SCRUB_COMMAND
+        );
+        for path in &report.busy {
+            println!("  {}", path.display());
+        }
+    }
+    Ok(())
+}
+
 fn list_sessions(limit: usize, search: Option<String>) -> Result<()> {
     use codewhale_palette as palette;
     use colored::Colorize;
@@ -8329,7 +8727,28 @@ fn load_structural_config_from_cli(cli: &Cli) -> Result<Config> {
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
+    install_extension_host_boot_config(&config);
     Ok(config)
+}
+
+/// Select the plugin activation policy (v3, or v4 with the experimental
+/// extension host) and the host's Node override, once per process, before
+/// any plugin discovery. Later config reloads never flip either.
+fn install_extension_host_boot_config(config: &Config) {
+    let enabled = config
+        .features()
+        .enabled(crate::features::Feature::ExtensionHost);
+    crate::plugins::activation::install_extension_host_policy(enabled);
+    if enabled {
+        crate::extension_host::configure(crate::extension_host::ExtensionHostOptions {
+            node_override: config
+                .extension_host
+                .as_ref()
+                .and_then(|table| table.node.as_deref())
+                .map(|node| PathBuf::from(shellexpand::tilde(node).as_ref())),
+            root: None,
+        });
+    }
 }
 
 fn effective_config_profile(cli: &Cli) -> Option<String> {
@@ -8349,6 +8768,7 @@ fn load_config_from_cli_with_effective_profile(cli: &Cli) -> Result<(Config, Opt
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
+    install_extension_host_boot_config(&config);
     // Install the foreign-instruction opt-in before anything can load project
     // context. This is the single funnel every runtime goes through — TUI,
     // exec, ACP, and the app-server passthrough all resolve config here — so
@@ -8697,23 +9117,16 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
         })
         .transpose()?;
     let review_workspace = std::env::current_dir()?;
-    let (prompts, system) = if let (Some((number, view)), Some(plan)) = (&pr_view, &pr_plan) {
-        (
-            crate::tools::review::build_pr_review_prompts(*number, view, plan, &review_workspace)
-                .await?,
-            SystemPrompt::Text(crate::tools::review::review_system_prompt().to_string()),
-        )
+    // #6510: one review prompt authority. Plain diffs and PRs both ask for
+    // the structured review contract; a plain diff renders it locally.
+    let system = SystemPrompt::Text(crate::tools::review::review_system_prompt().to_string());
+    let prompts = if let (Some((number, view)), Some(plan)) = (&pr_view, &pr_plan) {
+        crate::tools::review::build_pr_review_prompts(*number, view, plan, &review_workspace)
+            .await?
     } else {
-        (
-            vec![format!(
-                "Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."
-            )],
-            SystemPrompt::Text(
-                "You are a senior code reviewer. Focus on bugs, risks, behavioral regressions, and missing tests. \
-Provide findings ordered by severity with file references, then open questions, then a brief summary."
-                    .to_string(),
-            ),
-        )
+        vec![format!(
+            "Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."
+        )]
     };
     let model = resolve_review_model(config, args.model.as_deref());
     let route_input = prompts
@@ -8864,7 +9277,12 @@ Provide findings ordered by severity with file references, then open questions, 
         output = content;
         (Some(review), Some(coverage))
     } else {
-        (None, None)
+        // A plain diff is structured when the model kept the JSON contract;
+        // otherwise its prose is the report, exactly as before.
+        (
+            crate::tools::review::ReviewOutput::from_structured_str(&output),
+            None,
+        )
     };
     let finalized = (|| -> Result<_> {
         if let Some((number, view)) = &pr_view {
@@ -8967,13 +9385,13 @@ Provide findings ordered by severity with file references, then open questions, 
             .expect("structured output exists for PR reviews");
         println!(
             "{}",
-            render_pr_review_markdown(*number, view, review, args.post)
+            render_review_markdown(review, args.post.then_some((*number, view)))
         );
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
     } else {
-        println!("{output}");
+        println!("{}", plain_diff_review_report(structured.as_ref(), &output));
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
@@ -9665,13 +10083,26 @@ fn plan_inline_review_comments(
     plan
 }
 
-/// Render a structured review as the markdown body printed for — and, with
-/// `--post`, attached to — a pull-request review.
-fn render_pr_review_markdown(
-    number: u32,
-    view: &GhPullRequest,
+/// The local report for a plain-diff review (#6510). The diff is reviewed
+/// under the one structured review prompt; when the model kept the JSON
+/// contract the report is rendered Markdown, otherwise its prose is printed
+/// verbatim, as before.
+fn plain_diff_review_report(
+    structured: Option<&crate::tools::review::ReviewOutput>,
+    output: &str,
+) -> String {
+    structured.map_or_else(
+        || output.to_string(),
+        |review| render_review_markdown(review, None),
+    )
+}
+
+/// Render a structured review as Markdown. `posted` names the PR the body is
+/// being published to; `None` is the local report (plain diffs and unposted
+/// PR reviews), where suggestion fences stay live.
+fn render_review_markdown(
     review: &crate::tools::review::ReviewOutput,
-    posted: bool,
+    posted: Option<(u32, &GhPullRequest)>,
 ) -> String {
     let mut body = String::new();
     body.push_str("## Codewhale review\n\n");
@@ -9735,7 +10166,11 @@ fn render_pr_review_markdown(
                 .filter(|replacement| !replacement.trim().is_empty())
             {
                 let fence = suggestion_fence(replacement);
-                let info = if posted { "text" } else { "suggestion" };
+                let info = if posted.is_some() {
+                    "text"
+                } else {
+                    "suggestion"
+                };
                 body.push_str(&format!("\n  {fence}{info}\n"));
                 for line in replacement.split('\n') {
                     body.push_str(&format!("  {line}\n"));
@@ -9750,7 +10185,7 @@ fn render_pr_review_markdown(
         body.push_str(review.overall_assessment.trim());
         body.push_str("\n\n");
     }
-    if posted {
+    if let Some((number, view)) = posted {
         body.push_str(&format!(
             "---\n*Advisory review by Codewhale (`codewhale review --pr {number} --post`, \
              head `{head}`). Line-specific findings are also posted as inline review \
@@ -9840,7 +10275,7 @@ fn post_pr_review(
     if let Some(receipt) = plan.receipt() {
         eprintln!("{receipt}");
     }
-    let body = render_pr_review_markdown(number, view, review, true);
+    let body = render_review_markdown(review, Some((number, view)));
     run_gh_post_pr_review(
         &repo_name,
         number,
@@ -9914,7 +10349,8 @@ fn collect_diff(
         let mut cmd = crate::dependencies::Git::review_command(workspace)?;
         // Review repository content without executing its diff drivers.
         cmd.current_dir(workspace)
-            .args(["diff", "--no-ext-diff", "--no-textconv"]);
+            .arg("diff")
+            .args(crate::dependencies::Git::REVIEW_DIFF_ARGS);
         if args.staged {
             cmd.arg("--cached");
         }
@@ -10012,14 +10448,26 @@ fn read_patch_from_stdin() -> Result<String> {
     if stdin.is_terminal() {
         bail!("No patch file provided and stdin is empty.");
     }
+    read_capped_text(stdin.lock(), MAX_STDIN_PATCH_BYTES, "patch on stdin")
+}
+
+/// Read UTF-8 text, refusing more than `limit` bytes with a message that
+/// names the limit in bytes.
+fn read_capped_text(reader: impl Read, limit: u64, what: &str) -> Result<String> {
     let mut buffer = String::new();
-    stdin
-        .take(MAX_STDIN_PATCH_BYTES + 1)
-        .read_to_string(&mut buffer)?;
-    if buffer.len() as u64 > MAX_STDIN_PATCH_BYTES {
-        bail!("patch on stdin exceeds the 16 MiB limit");
+    reader.take(limit + 1).read_to_string(&mut buffer)?;
+    if buffer.len() as u64 > limit {
+        bail!("{what} exceeds the {limit}-byte limit");
     }
     Ok(buffer)
+}
+
+/// Warning for a user MCP server that duplicates the enabled built-in
+/// Computer Use bundle. Advisory: the entry is never removed.
+fn duplicate_computer_use_warning(name: &str) -> String {
+    format!(
+        "  warning: `{name}` launches the same Computer Use plugin as the enabled built-in computer-use bundle; every Computer Use tool is advertised twice (~2.5k extra tokens per request) with separate consent state. Remove or disable `{name}` in mcp.json, or disable the built-in bundle, to keep one."
+    )
 }
 
 async fn run_mcp_command(
@@ -10067,6 +10515,7 @@ async fn run_mcp_command(
                 return Ok(());
             }
             println!("MCP servers ({}):", cfg.servers.len());
+            let duplicate_computer_use = crate::mcp::duplicate_computer_use_servers(&cfg);
             for (name, server) in cfg.servers {
                 let status = if server.enabled && !server.disabled {
                     "enabled"
@@ -10104,6 +10553,9 @@ async fn run_mcp_command(
                 };
                 let required = if server.required { " required" } else { "" };
                 println!("  - {name} [{status}{required}{auth}] {cmd_str}");
+            }
+            for (name, _) in &duplicate_computer_use {
+                println!("{}", duplicate_computer_use_warning(name));
             }
             Ok(())
         }
@@ -11118,6 +11570,9 @@ fn merge_project_config_with_approval_baseline(
         "mcp_config_path",
         "mcp_oauth_callback_port",
         "mcp_oauth_callback_url",
+        // The auto-approved `note` tool appends to `notes_path`, so a
+        // project value would be a write target the user never reviewed.
+        "notes_path",
     ];
     for key in DENY_AT_PROJECT_SCOPE {
         if table.contains_key(*key) {
@@ -11130,7 +11585,7 @@ fn merge_project_config_with_approval_baseline(
     }
 
     // String fields a project may legitimately override (model,
-    // approval/sandbox tightening, notes path, reasoning effort).
+    // approval/sandbox tightening, reasoning effort).
     if !config.environment_model_applied
         && let Some(model) = table.get("model").and_then(toml::Value::as_str)
         && !model.is_empty()
@@ -11139,15 +11594,10 @@ fn merge_project_config_with_approval_baseline(
         config.set_provider_model_override(config.api_provider(), Some(model.to_string()));
         config.remembered_selection_scope = Some(false);
     }
-    for (key, field) in [
-        ("reasoning_effort", &mut config.reasoning_effort),
-        ("notes_path", &mut config.notes_path),
-    ] {
-        if let Some(v) = table.get(key).and_then(toml::Value::as_str)
-            && !v.is_empty()
-        {
-            *field = Some(v.to_string());
-        }
+    if let Some(v) = table.get("reasoning_effort").and_then(toml::Value::as_str)
+        && !v.is_empty()
+    {
+        config.reasoning_effort = Some(v.to_string());
     }
 
     if let Some(v) = table.get("approval_policy").and_then(toml::Value::as_str)
@@ -11804,164 +12254,6 @@ fn should_force_configured_exec_route(
     resuming || explicit_provider.is_some() || explicit_model.is_none()
 }
 
-async fn run_one_shot(
-    config: &Config,
-    model: &str,
-    prompt: &str,
-    force_configured_route: bool,
-) -> Result<()> {
-    use crate::client::CodewhaleClient;
-    use codewhale_models::{
-        ContentBlock, Message, MessageRequest, is_incomplete_stop_reason, stop_reason_detail,
-    };
-
-    let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
-    let execution_config = config_for_cli_route(config, &route);
-    let client = CodewhaleClient::new(&execution_config)?;
-    let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &route.model, effort)
-    });
-    let model = route.model;
-    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
-
-    let request = MessageRequest {
-        model,
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: prompt.to_string(),
-                cache_control: None,
-            }],
-        }],
-        max_tokens: client.effective_max_output_tokens(&request_route.model),
-        system: None,
-        tools: None,
-        tool_choice: None,
-        metadata: None,
-        thinking: None,
-        reasoning_effort,
-        stream: Some(false),
-        temperature: None,
-        top_p: None,
-    };
-
-    let response = client.create_message(request).await?;
-    let stop_reason = response.stop_reason.clone();
-
-    for block in response.content {
-        if let ContentBlock::Text { text, .. } = block {
-            println!("{text}");
-        }
-    }
-
-    if is_incomplete_stop_reason(stop_reason.as_deref()) {
-        anyhow::bail!(
-            "Model response incomplete: provider stop reason `{}`; the partial response was printed but the command did not succeed.",
-            stop_reason_detail(stop_reason.as_deref())
-        );
-    }
-
-    Ok(())
-}
-
-async fn run_one_shot_json(
-    config: &Config,
-    model: &str,
-    prompt: &str,
-    force_configured_route: bool,
-) -> Result<()> {
-    use crate::client::CodewhaleClient;
-    use codewhale_models::{
-        ContentBlock, Message, MessageRequest, SystemPrompt, is_incomplete_stop_reason,
-        stop_reason_detail,
-    };
-
-    let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
-    let execution_config = config_for_cli_route(config, &route);
-    let provider = execution_config.provider_identity_for(route.provider);
-    let client = CodewhaleClient::new(&execution_config)?;
-    let model = route.model.clone();
-    let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort)
-    });
-    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
-    let request = MessageRequest {
-        model: model.clone(),
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: prompt.to_string(),
-                cache_control: None,
-            }],
-        }],
-        max_tokens: client.effective_max_output_tokens(&request_route.model),
-        system: Some(SystemPrompt::Text(
-            "You are a coding assistant. Give concise, actionable responses.".to_string(),
-        )),
-        tools: None,
-        tool_choice: None,
-        metadata: None,
-        thinking: None,
-        reasoning_effort,
-        stream: Some(false),
-        temperature: None,
-        top_p: None,
-    };
-
-    let response = client.create_message(request).await?;
-    let stop_reason = response.stop_reason.clone();
-    let usage = response.usage.clone();
-    let mut output = String::new();
-    for block in response.content {
-        if let ContentBlock::Text { text, .. } = block {
-            output.push_str(&text);
-        }
-    }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&one_shot_exec_json_receipt(
-            provider,
-            model,
-            output,
-            stop_reason.clone(),
-            usage,
-        ))?
-    );
-    if is_incomplete_stop_reason(stop_reason.as_deref()) {
-        anyhow::bail!(
-            "Model response incomplete: provider stop reason `{}`; the JSON receipt records success=false.",
-            stop_reason_detail(stop_reason.as_deref())
-        );
-    }
-    Ok(())
-}
-
-fn one_shot_exec_json_receipt(
-    provider: String,
-    model: String,
-    output: String,
-    stop_reason: Option<String>,
-    usage: codewhale_models::Usage,
-) -> serde_json::Value {
-    let incomplete = codewhale_models::is_incomplete_stop_reason(stop_reason.as_deref());
-    let error = incomplete.then(|| {
-        format!(
-            "Model response incomplete: provider stop reason `{}`.",
-            codewhale_models::stop_reason_detail(stop_reason.as_deref())
-        )
-    });
-    serde_json::json!({
-        "mode": "one-shot",
-        "provider": provider,
-        "model": model,
-        "success": !incomplete,
-        "output": output,
-        "stop_reason": stop_reason,
-        "usage": usage,
-        "error": error,
-    })
-}
-
 fn exec_stream_provider_route(
     identity: &crate::config::ProviderIdentity,
 ) -> (String, Option<String>) {
@@ -12184,8 +12476,49 @@ fn exec_sandbox_elevation_authorized(
 }
 
 fn emit_exec_stream_event(event: &ExecStreamEvent) -> Result<()> {
-    println!("{}", serde_json::to_string(&exec_stream_value(event)?)?);
-    Ok(())
+    let mut line = serde_json::to_string(&exec_stream_value(event)?)?;
+    line.push('\n');
+    write_exec_stdout(&line)
+}
+
+/// Headless `exec` ignores SIGPIPE while it runs, because it writes to pipes
+/// it does not own: a stdio MCP server, LSP, hook or shell child that exits
+/// early must fail that one write with `EPIPE`, not kill the run with no
+/// output. Under the default disposition, an MCP server whose interpreter
+/// could not start (a broken `node` on PATH for the built-in Computer Use
+/// plugin) made `exec --auto` exit 141 before printing anything.
+fn ignore_sigpipe_for_headless_exec() {
+    // SAFETY: a plain disposition change with no handler. Children still start
+    // with SIGPIPE at SIG_DFL: the standard library resets it before exec.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+/// Write exec output to stdout. SIGPIPE is ignored during exec (see
+/// [`ignore_sigpipe_for_headless_exec`]), so a reader that closed stdout
+/// (`codewhale exec ... | head -1`) surfaces here as `BrokenPipe`. End the
+/// process the way the default disposition would have (#4030) instead of
+/// panicking inside `print!`.
+fn write_exec_stdout(text: &str) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+            // SAFETY: restores the default disposition and re-raises the
+            // signal the write would have delivered without SIG_IGN.
+            #[cfg(unix)]
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                libc::raise(libc::SIGPIPE);
+            }
+            std::process::exit(141);
+        }
+        result => result.map_err(Into::into),
+    }
 }
 
 /// Process exit code `codewhale exec` uses when a turn ends on a retryable
@@ -12319,7 +12652,8 @@ async fn run_workflow_tool_command_inner(
     {
         let trimmed = env_url.trim();
         if !trimmed.is_empty() {
-            config.base_url = Some(trimmed.to_string());
+            let provider = config.api_provider();
+            config.set_provider_base_url_override(provider, Some(trimmed.to_string()));
         }
     }
 
@@ -13045,6 +13379,22 @@ struct ExecSummary {
     error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     released_services: Vec<crate::tools::shell::PersistentServiceReceipt>,
+    /// One-shot (`mode: "one-shot"`) receipt fields kept from the pre-#6510
+    /// direct-call path: whether the turn completed without error, and its
+    /// provider-reported usage. Absent on agent receipts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    success: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<codewhale_models::Usage>,
+}
+
+impl ExecSummary {
+    /// Fill the one-shot receipt fields from the settled turn: success means a
+    /// completed status with no error; usage is what the provider reported.
+    fn record_one_shot_outcome(&mut self, usage: Option<codewhale_models::Usage>) {
+        self.success = Some(self.error.is_none() && self.status.as_deref() == Some("completed"));
+        self.usage = usage;
+    }
 }
 
 fn validate_exec_tool_authority_resume(
@@ -13207,6 +13557,61 @@ mod doctor_legacy_state_tests {
     use std::ffi::OsString;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn doctor_reports_unreadable_files_without_clean_marker() {
+        let tmp = TempDir::new().unwrap();
+        let broken = tmp.path().join("broken.json");
+        fs::write(&broken, "{\"access_token\": unfinished").unwrap();
+        let mut report =
+            session_secret_scrub::scrub_files(std::slice::from_ref(&broken), None, &[]).unwrap();
+        let summary = doctor_stored_secrets_summary(&report, 1);
+        assert!(summary.contains("scan incomplete") && summary.contains("broken.json"));
+        assert!(!summary.contains('✓') && !summary.contains("no credentials found"));
+        report.flagged_files.push(tmp.path().join("dirty.json"));
+        let summary = doctor_stored_secrets_summary(&report, 2);
+        assert!(summary.contains("hold credentials") && summary.contains("scan incomplete"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scrub_does_not_block_tokio_worker() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let _env = lock_test_env();
+        let tmp = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let _runtime = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", tmp.path().join("runtime"));
+        let manager = session_manager::SessionManager::default_location().unwrap();
+        fs::write(manager.sessions_dir().join("dirty.json"), serde_json::json!({"type":"tool_result", "content":"sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij"}).to_string()).unwrap();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let progressed = Arc::new(AtomicBool::new(false));
+        let progress_for_lock = progressed.clone();
+        let holder = std::thread::spawn(move || {
+            manager
+                .with_session_file_lock("dirty", || {
+                    locked_tx.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    Ok(progress_for_lock.load(Ordering::SeqCst))
+                })
+                .unwrap()
+                .unwrap()
+        });
+        locked_rx.recv().unwrap();
+        let tick = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            progressed.store(true, Ordering::SeqCst);
+        });
+        run_sessions_scrub_secrets(true, None, None).await.unwrap();
+        assert!(
+            holder.join().unwrap(),
+            "the timer must run while the scrub waits on the file lock"
+        );
+        tick.await.unwrap();
+    }
 
     struct EnvVarRestore {
         key: &'static str,
@@ -14141,7 +14546,6 @@ mod doctor_setup_state_tests {
         .save()
         .expect("persist user constitution");
         let config = Config {
-            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
             approval_policy: Some("never".to_string()),
             allow_shell: Some(false),
             sandbox_mode: Some("read-only".to_string()),
@@ -14150,7 +14554,8 @@ mod doctor_setup_state_tests {
                 ..Default::default()
             }),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("TEST-STRUCTURAL-LITERAL".to_string()), None);
 
         let report = doctor_setup_report_json(&config, &workspace);
 
@@ -14194,10 +14599,8 @@ mod doctor_setup_state_tests {
         );
         assert_eq!(provider_step(&report)["result"], "deepseek/deepseek-chat");
 
-        let unprobed_config = Config {
-            api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
-            ..config.clone()
-        };
+        let unprobed_config = Config { ..config.clone() }
+            .with_legacy_root(Some(crate::config::API_KEYRING_SENTINEL.to_string()), None);
         let unprobed_report = doctor_setup_report_json(&unprobed_config, &workspace);
         assert_eq!(unprobed_report["credential"]["ready"], false);
         assert_eq!(unprobed_report["credential"]["availability"], "not_probed");
@@ -14352,9 +14755,9 @@ mod doctor_setup_state_tests {
         state.save().expect("persist setup state");
 
         let config = Config {
-            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("TEST-STRUCTURAL-LITERAL".to_string()), None);
         let report = doctor_setup_report_json(&config, &workspace);
 
         assert_eq!(report["first_run_ready"], true);
@@ -14478,9 +14881,9 @@ mod doctor_endpoint_tests {
     fn strict_tool_mode_doctor_warns_for_non_beta_deepseek_endpoint() {
         let config = Config {
             strict_tool_mode: Some(true),
-            base_url: Some("https://api.deepseek.com".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://api.deepseek.com".to_string()));
 
         let status = doctor_strict_tool_mode_status(&config);
 
@@ -14583,10 +14986,10 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_preserves_custom_deepseek_alias_namespace() {
         let mut config = Config {
-            base_url: Some("https://models.example/v1".to_string()),
             default_text_model: Some("deepseek-chat".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://models.example/v1".to_string()));
         crate::config::normalize_model_config_for_test(&mut config);
 
         let report = provider_capability_report(&config);
@@ -14612,10 +15015,13 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_preserves_v4_pro_without_retirement() {
         let mut config = Config {
-            base_url: Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
             default_text_model: Some("deepseek-v4-pro".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            None,
+            Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
+        );
         crate::config::normalize_model_config_for_test(&mut config);
         let report = provider_capability_report(&config);
         assert_eq!(report["resolved_model"], "deepseek-v4-pro");
@@ -14635,10 +15041,10 @@ mod doctor_endpoint_tests {
     #[test]
     fn provider_capability_report_leaves_custom_v4_pro_namespace_untouched() {
         let mut config = Config {
-            base_url: Some("https://models.example/v1".to_string()),
             default_text_model: Some("deepseek-v4-pro".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(None, Some("https://models.example/v1".to_string()));
         crate::config::normalize_model_config_for_test(&mut config);
 
         let report = provider_capability_report(&config);
@@ -14912,6 +15318,7 @@ mod doctor_endpoint_tests {
                 provider: Some(crate::config::SearchProvider::Tavily),
                 base_url: None,
                 api_key: None,
+                native: None,
             }),
             ..Default::default()
         };
@@ -14961,6 +15368,7 @@ mod doctor_endpoint_tests {
                 provider: Some(crate::config::SearchProvider::DuckDuckGo),
                 base_url: None,
                 api_key: None,
+                native: None,
             }),
             ..Default::default()
         };
@@ -15004,6 +15412,7 @@ mod doctor_endpoint_tests {
                 provider: Some(crate::config::SearchProvider::Bing),
                 base_url: None,
                 api_key: None,
+                native: None,
             }),
             ..Default::default()
         };
@@ -15305,8 +15714,6 @@ mod terminal_mode_tests {
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
-        crate::provider_catalog_live::reset_cache_for_test();
-
         let fleets = home.join("fleets");
         std::fs::create_dir_all(&fleets).expect("fleets dir");
         std::fs::write(
@@ -15319,8 +15726,14 @@ mod terminal_mode_tests {
 
         let config = Config {
             provider: Some("deepseek".to_string()),
+            // A fresh one-row roster must not replace the normal DeepSeek
+            // endpoint's process-wide catalog for unrelated route tests.
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            None,
+            Some("https://api.deepseek.com/v1/doctor-roster-fixture".to_string()),
+        );
         let kind = crate::config::ApiProvider::Deepseek;
         let base_url = config.base_url_for_route_identity(kind, "deepseek");
         let fetched_at = std::time::SystemTime::now()
@@ -15686,11 +16099,11 @@ reasoning = "high"
         .expect("fleet file");
 
         let base = Config {
-            api_key: Some("test-key".to_string()),
             provider: Some("openrouter".to_string()),
             reasoning_effort: Some("off".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(Some("test-key".to_string()), None);
         let mut explicit = base.clone();
         assert!(
             !apply_selected_fleet_operator_for_launch(
@@ -15726,10 +16139,10 @@ reasoning = "high"
         assert!(selected.fleet_operator_reasoning_applied);
 
         let mut reasoning_override = Config {
-            api_key: Some("test-key".to_string()),
             reasoning_effort: Some("off".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(Some("test-key".to_string()), None);
         apply_selected_fleet_operator_for_launch(
             &mut reasoning_override,
             workspace.path(),
@@ -15879,17 +16292,19 @@ reasoning = "high"
     }
 
     #[test]
-    fn cli_route_execution_config_preserves_legacy_literal_custom_root_route() {
+    fn cli_route_execution_config_preserves_the_legacy_literal_custom_route() {
         let _lock = crate::test_support::lock_test_env();
         let _source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
         let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
         let config = Config {
             provider: Some("custom".to_string()),
-            api_key: Some("legacy-root-key".to_string()),
-            base_url: Some("http://127.0.0.1:18183/v1".to_string()),
             default_text_model: Some("legacy-model".to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(
+            Some("legacy-root-key".to_string()),
+            Some("http://127.0.0.1:18183/v1".to_string()),
+        );
         let route = CliAutoRoute {
             provider: crate::config::ApiProvider::Custom,
             model: "routed-legacy-model".to_string(),
@@ -15900,13 +16315,9 @@ reasoning = "high"
 
         let execution = config_for_cli_route(&config, &route);
 
-        assert!(execution.uses_legacy_literal_custom_route());
-        assert!(
-            execution
-                .providers
-                .as_ref()
-                .is_none_or(|providers| !providers.custom.contains_key("custom"))
-        );
+        // The literal route's top-level fields live in `[providers.custom]`
+        // (#6394), and the routed model lands there too.
+        assert!(execution.selects_literal_custom_provider());
         assert_eq!(execution.provider.as_deref(), Some("custom"));
         assert_eq!(execution.default_model(), "routed-legacy-model");
         assert_eq!(
@@ -15923,6 +16334,58 @@ reasoning = "high"
         let client =
             crate::client::CodewhaleClient::new(&execution).expect("legacy execution client");
         assert_eq!(client.base_url(), "http://127.0.0.1:18183/v1");
+    }
+
+    /// #6510: only a flag that grants tool authority opens a tool surface.
+    /// Limits, prompt/hook opt-ins and the output format keep plain exec a
+    /// zero-tool one-shot; `--max-turns 1` used to make it a tool agent.
+    #[test]
+    fn exec_tool_surface_needs_an_explicit_grant() {
+        let grants = |argv: &[&str], yolo: bool, resuming: bool, env: bool| {
+            let mut full = vec!["codewhale", "exec"];
+            full.extend_from_slice(argv);
+            full.push("hi");
+            let cli = parse_cli(&full);
+            let Some(Commands::Exec(args)) = cli.command else {
+                panic!("expected exec command");
+            };
+            exec_grants_tool_surface(&args, yolo, resuming, env)
+        };
+
+        for zero_tool in [
+            &[][..],
+            &["--max-turns", "1"],
+            &["--max-tool-calls", "3"],
+            &["--disallowed-tools", "exec_shell"],
+            &["--append-system-prompt", "be brief"],
+            &["--hooks"],
+            &["--sandbox", "read-only"],
+            &["--allow-sandbox-elevation"],
+            &["--output-format", "stream-json"],
+            &["--json"],
+        ] {
+            assert!(
+                !grants(zero_tool, false, false, false),
+                "{zero_tool:?} must not grant tools"
+            );
+        }
+
+        assert!(grants(&["--auto"], false, false, false));
+        assert!(grants(
+            &["--allowed-tools", "read_file"],
+            false,
+            false,
+            false
+        ));
+        assert!(grants(
+            &["--tool-authority-json", "{}"],
+            false,
+            false,
+            false
+        ));
+        assert!(grants(&["--max-turns", "1"], true, false, false), "yolo");
+        assert!(grants(&[], false, true, false), "resumed session");
+        assert!(grants(&[], false, false, true), "launcher tool surface");
     }
 
     #[test]
@@ -15955,6 +16418,87 @@ reasoning = "high"
 
         assert!(args.json);
         assert_eq!(args.prompt, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn exec_prompt_file_carries_prompts_past_the_argv_ceiling() {
+        // #6688: argv caps one argument at 128 KiB; the file transport does not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big-prompt.txt");
+        let body = "стих ".repeat(60_000);
+        assert!(body.len() > 512 * 1024);
+        std::fs::write(&path, &body).expect("write prompt");
+        let path_arg = path.to_str().expect("utf-8 path");
+
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "--prompt-file", path_arg]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert!(args.auto);
+        assert!(args.prompt.is_empty());
+        assert_eq!(resolve_exec_prompt(&args).expect("prompt"), body);
+
+        let conflict =
+            Cli::try_parse_from(["codewhale", "exec", "--prompt-file", path_arg, "also argv"])
+                .expect_err("positional prompt and --prompt-file conflict");
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let missing = dir.path().join("missing.txt");
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--prompt-file",
+            missing.to_str().expect("utf-8 path"),
+        ]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        let err = resolve_exec_prompt(&args).expect_err("missing file fails");
+        assert!(err.to_string().contains("--prompt-file"), "{err:#}");
+
+        let cli = parse_cli(&[
+            "codewhale",
+            "exec",
+            "--parent-death-watch",
+            "--prompt-file",
+            "-",
+        ]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        let err = resolve_exec_prompt(&args).expect_err("stdin is owned by the watcher");
+        assert!(err.to_string().contains("--parent-death-watch"), "{err:#}");
+
+        let cli = parse_cli(&["codewhale", "exec", "explain", "this"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(
+            resolve_exec_prompt(&args).expect("argv prompt"),
+            "explain this"
+        );
+
+        // A positional `-` is prompt text, never a stdin read: cloud dispatch
+        // passes job prompts verbatim as argv.
+        let cli = parse_cli(&["codewhale", "exec", "--auto", "-"]);
+        let Some(Commands::Exec(args)) = cli.command else {
+            panic!("expected exec command");
+        };
+        assert_eq!(resolve_exec_prompt(&args).expect("literal dash"), "-");
+    }
+
+    #[test]
+    fn read_capped_text_names_the_limit_in_bytes() {
+        let err =
+            read_capped_text(&b"abcdef"[..], 4, "exec prompt on stdin").expect_err("over the cap");
+        assert_eq!(
+            err.to_string(),
+            "exec prompt on stdin exceeds the 4-byte limit"
+        );
+        assert_eq!(
+            read_capped_text(&b"abcd"[..], 4, "x").expect("at the cap"),
+            "abcd"
+        );
     }
 
     #[test]
@@ -17235,7 +17779,7 @@ api_key = "test-only-key"
         multi.end_line = Some(12);
         let review = review_with(Vec::new(), vec![single, multi]);
 
-        let local = render_pr_review_markdown(1, &view, &review, false);
+        let local = render_review_markdown(&review, None);
         assert!(local.contains("### Suggestions"), "{local}");
         assert!(
             local.contains("\n  ```suggestion\n  let b = a.unwrap_or_default();\n  ```\n"),
@@ -17251,13 +17795,36 @@ api_key = "test-only-key"
         // The posted body keeps the fix visible but never as a live
         // one-click block: only diff-validated inline suggestion comments
         // may carry those to GitHub.
-        let posted = render_pr_review_markdown(1, &view, &review, true);
+        let posted = render_review_markdown(&review, Some((1, &view)));
         assert!(
             posted.contains("let b = a.unwrap_or_default();"),
             "{posted}"
         );
         assert!(!posted.contains("```suggestion"), "{posted}");
         assert!(posted.contains("```text"), "{posted}");
+    }
+
+    /// #6510: a plain-diff review now asks for the one structured review
+    /// contract. A reply that keeps it renders as the Markdown report; one
+    /// that ignores it is printed verbatim, as the old prose path did.
+    #[test]
+    fn plain_diff_review_renders_structured_reply_and_keeps_prose() {
+        let json = r#"{"summary":"One risky unwrap.","issues":[{"severity":"high","title":"Unchecked unwrap","description":"Panics on None.","path":"src/lib.rs","line":11}],"suggestions":[],"overall_assessment":"request changes"}"#;
+        let structured = crate::tools::review::ReviewOutput::from_structured_str(json);
+        let report = plain_diff_review_report(structured.as_ref(), json);
+        assert!(report.starts_with("## Codewhale review"), "{report}");
+        assert!(report.contains("One risky unwrap."), "{report}");
+        assert!(report.contains("### Findings"), "{report}");
+        assert!(report.contains("`src/lib.rs:11`"), "{report}");
+        assert!(
+            !report.contains("\"issues\""),
+            "raw JSON must not leak: {report}"
+        );
+
+        let prose = "Looks fine overall; consider a test for the empty case.";
+        let structured = crate::tools::review::ReviewOutput::from_structured_str(prose);
+        assert!(structured.is_none());
+        assert_eq!(plain_diff_review_report(structured.as_ref(), prose), prose);
     }
 
     #[test]
@@ -17334,38 +17901,45 @@ api_key = "test-only-key"
     fn exec_json_receipts_keep_exact_named_custom_provider() {
         let config = custom_exec_config("custom-a");
         let provider = config.provider_identity_for(crate::config::ApiProvider::Custom);
-        let one_shot = one_shot_exec_json_receipt(
-            provider.clone(),
-            "model-a".to_string(),
-            "done".to_string(),
-            Some("end_turn".to_string()),
-            codewhale_models::Usage {
-                input_tokens: 12,
-                output_tokens: 3,
-                ..Default::default()
-            },
-        );
-        assert_eq!(one_shot["provider"], "custom-a");
-        assert_eq!(one_shot["success"], true);
-
-        let truncated = one_shot_exec_json_receipt(
-            provider.clone(),
-            "model-a".to_string(),
-            "partial".to_string(),
-            Some("max_output_tokens".to_string()),
-            codewhale_models::Usage {
-                input_tokens: 20,
-                output_tokens: 9,
-                ..Default::default()
-            },
-        );
-        assert_eq!(truncated["success"], false);
-        assert_eq!(truncated["stop_reason"], "max_output_tokens");
-        assert_eq!(truncated["usage"]["input_tokens"], 20);
-        assert_eq!(truncated["usage"]["output_tokens"], 9);
-        assert!(truncated["error"].as_str().is_some_and(|error| {
-            error.contains("Model response incomplete") && error.contains("max_output_tokens")
+        // #6510: plain exec is an Engine turn now; its `--json` receipt keeps
+        // the documented one-shot fields (docs/LIVE_SMOKE.md step 5).
+        let mut one_shot = ExecSummary {
+            mode: "one-shot".to_string(),
+            provider: provider.clone(),
+            model: "model-a".to_string(),
+            output: "done".to_string(),
+            status: Some("completed".to_string()),
+            ..ExecSummary::default()
+        };
+        one_shot.record_one_shot_outcome(Some(codewhale_models::Usage {
+            input_tokens: 12,
+            output_tokens: 3,
+            ..Default::default()
         }));
+        let one_shot = serde_json::to_value(&one_shot).expect("one-shot receipt");
+        assert_eq!(one_shot["mode"], "one-shot");
+        assert_eq!(one_shot["provider"], "custom-a");
+        assert_eq!(one_shot["model"], "model-a");
+        assert_eq!(one_shot["output"], "done");
+        assert_eq!(one_shot["success"], true);
+        assert_eq!(one_shot["usage"]["input_tokens"], 12);
+        assert_eq!(one_shot["usage"]["output_tokens"], 3);
+
+        let mut failed = ExecSummary {
+            mode: "one-shot".to_string(),
+            provider: provider.clone(),
+            model: "model-a".to_string(),
+            status: Some("failed".to_string()),
+            error: Some("Model response incomplete".to_string()),
+            ..ExecSummary::default()
+        };
+        failed.record_one_shot_outcome(None);
+        let failed = serde_json::to_value(&failed).expect("failed one-shot receipt");
+        assert_eq!(failed["success"], false);
+        assert!(
+            failed.get("usage").is_none(),
+            "no usage is never zero usage"
+        );
 
         let agent = serde_json::to_value(ExecSummary {
             mode: "agent".to_string(),
@@ -17375,6 +17949,10 @@ api_key = "test-only-key"
         })
         .expect("agent exec JSON receipt");
         assert_eq!(agent["provider"], "custom-a");
+        assert!(
+            agent.get("success").is_none() && agent.get("usage").is_none(),
+            "agent receipts keep their pre-#6510 shape"
+        );
         let serialized = serde_json::to_string(&agent).expect("serialize receipt");
         assert!(!serialized.contains("127.0.0.1"));
         assert!(!serialized.contains("local-test-key"));
@@ -18846,7 +19424,6 @@ api_key = "test-only-key"
                 alternate_screen: Some("never".to_string()),
                 mouse_capture: None,
                 selection_copy_markdown: None,
-                terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
                 max_model_steps: None,
                 turn_wall_clock_secs: None,
@@ -18947,7 +19524,6 @@ api_key = "test-only-key"
                 alternate_screen: None,
                 mouse_capture: Some(false),
                 selection_copy_markdown: None,
-                terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
                 max_model_steps: None,
                 turn_wall_clock_secs: None,
@@ -18986,7 +19562,6 @@ api_key = "test-only-key"
                 alternate_screen: None,
                 mouse_capture: Some(true),
                 selection_copy_markdown: None,
-                terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
                 max_model_steps: None,
                 turn_wall_clock_secs: None,
@@ -19079,7 +19654,6 @@ api_key = "test-only-key"
                 alternate_screen: None,
                 mouse_capture: Some(true),
                 selection_copy_markdown: None,
-                terminal_probe_timeout_ms: None,
                 stream_chunk_timeout_secs: None,
                 max_model_steps: None,
                 turn_wall_clock_secs: None,
@@ -19328,20 +19902,22 @@ mcp_oauth_callback_url = "http://evil.example.com/callback"
 "#,
         );
         let mut config = Config {
-            api_key: Some("USER_KEY".to_string()),
-            base_url: Some("https://api.deepseek.com".to_string()),
             mcp_oauth_callback_port: Some(1455),
             mcp_oauth_callback_url: Some("http://127.0.0.1:1455/callback".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("USER_KEY".to_string()),
+            Some("https://api.deepseek.com".to_string()),
+        );
         merge_project_config(&mut config, tmp.path());
         assert_eq!(
-            config.api_key.as_deref(),
+            config.deepseek_table_api_key(),
             Some("USER_KEY"),
             "user api_key must survive project-config attack"
         );
         assert_eq!(
-            config.base_url.as_deref(),
+            config.deepseek_table_base_url(),
             Some("https://api.deepseek.com"),
             "user base_url must survive project-config attack"
         );
@@ -19377,6 +19953,21 @@ sandbox_mode = "read-only"
         merge_project_config(&mut config, tmp.path());
         assert_eq!(config.approval_policy.as_deref(), Some("never"));
         assert_eq!(config.sandbox_mode.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn project_overlay_ignores_notes_path() {
+        // The auto-approved `note` tool appends to `notes_path`; a project
+        // config must not choose that write target.
+        for value in ["~/.zshrc", "/etc/profile", "../../.bashrc", "docs/notes.md"] {
+            let tmp = workspace_with_project_config(&format!("notes_path = {value:?}\n"));
+            let mut config = Config::default();
+            merge_project_config(&mut config, tmp.path());
+            assert_eq!(
+                config.notes_path, None,
+                "project notes_path {value:?} must be ignored"
+            );
+        }
     }
 
     #[test]
@@ -20942,9 +21533,9 @@ mod setup_helper_tests {
             std::env::remove_var("DEEPSEEK_API_KEY_SOURCE");
         }
         let cfg = Config {
-            api_key: Some("fresh-config-key".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("fresh-config-key".to_string()), None);
         let source = resolve_api_key_source(&cfg);
         match prev {
             Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY", value) },
@@ -21032,9 +21623,9 @@ mod setup_helper_tests {
         let _openrouter_key = crate::test_support::EnvVarGuard::remove("OPENROUTER_API_KEY");
         let cfg = Config {
             provider: Some("openrouter".to_string()),
-            api_key: Some("legacy-deepseek-root-key".to_string()),
             ..Config::default()
-        };
+        }
+        .with_legacy_root(Some("legacy-deepseek-root-key".to_string()), None);
 
         let source = resolve_api_key_source(&cfg);
 

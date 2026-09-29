@@ -6,6 +6,11 @@ Current boundary note (read the workspace version from `Cargo.toml`; this
 boundary has held since v0.9.1):
 - `crates/tui` is still the live end-user runtime for the TUI, runtime API, task manager, and tool execution loop.
 - Other workspace crates are being split out incrementally, but they are not yet the sole runtime source of truth.
+- The runtime is moving into `crates/runtime` (`codewhale-runtime`) in the
+  order `docs/design/TUI_DECONSTRUCTION.md` records: engine, tools, config,
+  client and stores move there together, never into `crates/core`, and the
+  TUI stays the only crate that writes to the terminal. Until a module has
+  moved, its path under `crates/tui/src` is still where it lives.
 - The LSP subsystem (`crates/tui/src/lsp/`) is fully wired into the engine's
   post-tool-execution path (`core/engine/lsp_hooks.rs`), providing inline
   diagnostics after `File` write, edit, and patch actions.
@@ -128,11 +133,22 @@ boundary has held since v0.9.1):
 - **`crates/models`** - Provider request/response models and the offline model
   metadata catalog.
 - **`crates/palette`** - Colour tokens, themes, and contrast math for the
-  terminal UI.
+  terminal UI. Its `ratatui` feature (on by default) gates everything that
+  renders; theme ids, setting normalizers and hex parsing compile without it,
+  which is how the runtime links it.
 - **`crates/paths`** - User-scoped runtime path authority (`CODEWHALE_HOME`
   and platform home resolution).
 - **`crates/protocol`** - Request/response framing and protocol types.
-- **`crates/secrets`** - OS keyring integration for API key storage.
+- **`crates/runtime`** - `codewhale-runtime`, the headless runtime being
+  split out of `crates/tui` (`docs/design/TUI_DECONSTRUCTION.md`). Today it
+  holds the leaf modules that moved first (retry status, safe labels, sleep
+  guard, session tree, ...) and `host_terminal`, the one port through which
+  runtime code asks the terminal UI for a terminal effect. It never depends on
+  the TUI, `ratatui` or `crossterm`; `scripts/check-command-crate-boundaries.py`
+  enforces that and ratchets the runtime -> UI references still in `crates/tui`.
+- **`crates/secrets`** - OS keyring integration for API key storage, plus the
+  shared output sanitizer (`sanitize`) and redaction (`redact`) that UI and
+  runtime code both call.
 - **`crates/state`** - SQLite thread/session persistence layer.
 - **`crates/telemetry`** - Anonymous, user-disableable aggregate usage
   counting; the only crate allowed to build or send a telemetry payload
@@ -191,7 +207,7 @@ drives turns through Chat Completions.
     `agent_open`/`agent_eval`/`agent_close` lifecycle surface was retired
     (see the `subagent/coord.rs` module doc)
   - `spec.rs` - Tool specifications
-  - `rlm.rs` - Persistent Recursive Language Model (RLM) sessions — sandboxed Python REPLs with semantic helper calls and `var_handle` output support
+  - `rlm.rs` - Persistent Recursive Language Model (RLM) sessions — persistent local Python REPL subprocesses (environment-scrubbed, not OS-sandboxed) with semantic helper calls and `var_handle` output support
 
 ### Extension Systems
 
@@ -382,4 +398,5 @@ command = "echo 'Running tool: $TOOL_NAME'"
 - `~/.codewhale/sessions/checkpoints/` - Crash checkpoint + offline queue persistence
 - `~/.codewhale/snapshots/` - Side-git pre/post-turn workspace snapshots for `/restore` and `revert_turn`
 - `~/.codewhale/tasks/` - Background task records, queue, timelines, artifacts
-- `~/.codewhale/audit.log` - Append-only audit events for credential + approval/elevation actions
+- `~/.codewhale/audit.log` - Append-only security events: credential saves and clears, hook environment key names, compaction passes, goal completions, the terminal's approval routing, Auto-Review verdicts, and outbound network decisions when `[network]` auditing is on. Not an action record: it holds no commands or file changes, and app or `serve` turns write no approvals there. See `docs/RECEIPTS.md` for what a session did
+- `~/.codewhale/sessions/<id>/approval_receipts.jsonl` - Every approval ask and decision for a session, including who decided

@@ -12,9 +12,11 @@
     "thread_sleep": 2
   },
   "crates/cli/src/config_bundles.rs": {
+    "path_canonicalize": 2,
     "std_fs": 7
   },
   "crates/cli/src/lib.rs": {
+    "path_canonicalize": 3,
     "std_fs": 4,
     "thread_sleep": 1
   },
@@ -32,9 +34,11 @@
     "std_fs": 2
   },
   "crates/config/src/lib.rs": {
+    "path_canonicalize": 3,
     "std_fs": 9
   },
   "crates/config/src/redaction.rs": {
+    "path_canonicalize": 2,
     "thread_sleep": 1
   },
   "crates/config/src/setup_state.rs": {
@@ -73,8 +77,18 @@
   "crates/release/src/check.rs": {
     "std_fs": 4
   },
+  "crates/release/src/install.rs": {
+    "std_fs": 1
+  },
   "crates/release/src/launch.rs": {
     "std_fs": 2
+  },
+  "crates/runtime/src/media_originals.rs": {
+    "path_canonicalize": 2,
+    "std_fs": 6
+  },
+  "crates/secrets/src/file_lock.rs": {
+    "path_canonicalize": 1
   },
   "crates/telemetry/src/envelope.rs": {
     "std_fs": 2
@@ -84,6 +98,9 @@
   },
   "crates/tui/src/artifacts.rs": {
     "std_fs": 4
+  },
+  "crates/tui/src/automation_manager.rs": {
+    "path_canonicalize": 4
   },
   "crates/tui/src/client.rs": {
     "std_fs": 1
@@ -95,6 +112,7 @@
     "std_fs": 7
   },
   "crates/tui/src/commands/contract.rs": {
+    "path_canonicalize": 4,
     "std_fs": 3
   },
   "crates/tui/src/commands/epic_discovery_acceptance.rs": {
@@ -109,11 +127,17 @@
   "crates/tui/src/commands/groups/core/acceptance.rs": {
     "std_fs": 1
   },
-  "crates/tui/src/commands/groups/core/voice.rs": {
-    "std_fs": 6
+  "crates/tui/src/commands/groups/core/core.rs": {
+    "path_canonicalize": 1
+  },
+  "crates/tui/src/commands/groups/plugins/render.rs": {
+    "path_canonicalize": 1
   },
   "crates/tui/src/commands/groups/project/init.rs": {
     "std_fs": 13
+  },
+  "crates/tui/src/commands/groups/session/structcopy.rs": {
+    "path_canonicalize": 1
   },
   "crates/tui/src/commands/session_acceptance.rs": {
     "std_fs": 6
@@ -137,10 +161,14 @@
     "std_fs": 4
   },
   "crates/tui/src/config.rs": {
-    "std_fs": 4
+    "path_canonicalize": 4,
+    "std_fs": 5
   },
   "crates/tui/src/context_report.rs": {
     "std_fs": 1
+  },
+  "crates/tui/src/core/authority.rs": {
+    "path_canonicalize": 2
   },
   "crates/tui/src/core/engine/tool_execution.rs": {
     "std_fs": 1
@@ -151,19 +179,23 @@
   "crates/tui/src/doctor_fix.rs": {
     "std_fs": 6
   },
+  "crates/tui/src/extension_host/mod.rs": {
+    "std_fs": 7
+  },
+  "crates/tui/src/extension_host/supervisor.rs": {
+    "std_fs": 3
+  },
   "crates/tui/src/external_credentials.rs": {
     "std_fs": 2
   },
   "crates/tui/src/fleet/artifacts.rs": {
     "std_fs": 1
   },
-  "crates/tui/src/fleet/exact.rs": {
-    "std_fs": 2
-  },
   "crates/tui/src/fleet/executor.rs": {
     "std_fs": 1
   },
   "crates/tui/src/fleet/files.rs": {
+    "path_canonicalize": 2,
     "std_fs": 5,
     "thread_sleep": 1
   },
@@ -172,13 +204,14 @@
     "thread_sleep": 2
   },
   "crates/tui/src/fleet/ledger.rs": {
+    "path_canonicalize": 2,
     "std_fs": 3
   },
   "crates/tui/src/fleet/manager.rs": {
     "std_fs": 7
   },
   "crates/tui/src/fleet/profile.rs": {
-    "std_fs": 3
+    "std_fs": 5
   },
   "crates/tui/src/fleet/task_spec.rs": {
     "std_fs": 3
@@ -186,7 +219,11 @@
   "crates/tui/src/fleet/tests/roster_shadow_and_trust.rs": {
     "std_fs": 2
   },
+  "crates/tui/src/fleet/worker_runtime.rs": {
+    "path_canonicalize": 1
+  },
   "crates/tui/src/hooks/authority.rs": {
+    "path_canonicalize": 1,
     "std_fs": 1
   },
   "crates/tui/src/hooks/config.rs": {
@@ -214,13 +251,14 @@
     "std_fs": 5
   },
   "crates/tui/src/lib.rs": {
+    "path_canonicalize": 2,
     "std_fs": 42
+  },
+  "crates/tui/src/mcp.rs": {
+    "std_fs": 1
   },
   "crates/tui/src/mcp_server.rs": {
     "std_fs": 1
-  },
-  "crates/tui/src/media_originals.rs": {
-    "std_fs": 6
   },
   "crates/tui/src/models_dev_live.rs": {
     "std_fs": 1
@@ -228,8 +266,29 @@
   "crates/tui/src/oauth.rs": {
     "thread_sleep": 1
   },
+  "crates/tui/src/plugins/builtin.rs": {
+    "path_canonicalize": 1
+  },
   "crates/tui/src/plugins/builtin_tests.rs": {
     "thread_sleep": 1
+  },
+  "crates/tui/src/plugins/discovery.rs": {
+    "path_canonicalize": 1
+  },
+  "crates/tui/src/plugins/export.rs": {
+    "path_canonicalize": 1
+  },
+  "crates/tui/src/plugins/install/dsh.rs": {
+    "path_canonicalize": 2
+  },
+  "crates/tui/src/plugins/install/mod.rs": {
+    "path_canonicalize": 1
+  },
+  "crates/tui/src/plugins/install/stage.rs": {
+    "path_canonicalize": 2
+  },
+  "crates/tui/src/plugins/manifest.rs": {
+    "path_canonicalize": 2
   },
   "crates/tui/src/plugins/marketplace/document.rs": {
     "std_fs": 1
@@ -239,6 +298,12 @@
   },
   "crates/tui/src/plugins/path_identity.rs": {
     "std_fs": 1
+  },
+  "crates/tui/src/plugins/registry.rs": {
+    "path_canonicalize": 6
+  },
+  "crates/tui/src/plugins/runtime.rs": {
+    "path_canonicalize": 2
   },
   "crates/tui/src/project_context.rs": {
     "std_fs": 1
@@ -267,10 +332,20 @@
   "crates/tui/src/rlm/turn.rs": {
     "std_fs": 2
   },
+  "crates/tui/src/runtime_api.rs": {
+    "path_canonicalize": 2
+  },
   "crates/tui/src/runtime_api/diagnostics.rs": {
     "std_fs": 5
   },
+  "crates/tui/src/runtime_api/git.rs": {
+    "std_fs": 6
+  },
+  "crates/tui/src/runtime_api/lsp.rs": {
+    "path_canonicalize": 1
+  },
   "crates/tui/src/runtime_api/workspace.rs": {
+    "path_canonicalize": 4,
     "std_fs": 3
   },
   "crates/tui/src/runtime_chat_relay.rs": {
@@ -280,16 +355,37 @@
     "std_fs": 1
   },
   "crates/tui/src/runtime_threads.rs": {
+    "path_canonicalize": 6,
     "thread_sleep": 2
   },
   "crates/tui/src/sandbox/bwrap.rs": {
+    "path_canonicalize": 1,
     "std_fs": 2
   },
   "crates/tui/src/sandbox/mod.rs": {
+    "path_canonicalize": 1,
     "std_fs": 2
+  },
+  "crates/tui/src/sandbox/policy.rs": {
+    "path_canonicalize": 8
   },
   "crates/tui/src/sandbox/read_guard.rs": {
     "std_fs": 2
+  },
+  "crates/tui/src/sandbox/seatbelt.rs": {
+    "path_canonicalize": 5
+  },
+  "crates/tui/src/session_export.rs": {
+    "path_canonicalize": 1
+  },
+  "crates/tui/src/session_manager.rs": {
+    "path_canonicalize": 2
+  },
+  "crates/tui/src/session_reconcile.rs": {
+    "path_canonicalize": 3
+  },
+  "crates/tui/src/session_secret_scrub.rs": {
+    "std_fs": 4
   },
   "crates/tui/src/settings.rs": {
     "std_fs": 4
@@ -298,16 +394,28 @@
     "std_fs": 4
   },
   "crates/tui/src/snapshot/paths.rs": {
+    "path_canonicalize": 1,
     "std_fs": 1
   },
   "crates/tui/src/snapshot/repo.rs": {
-    "std_fs": 16
+    "path_canonicalize": 4,
+    "std_fs": 17
+  },
+  "crates/tui/src/tools/git.rs": {
+    "path_canonicalize": 1
+  },
+  "crates/tui/src/tools/git_history.rs": {
+    "path_canonicalize": 1
   },
   "crates/tui/src/tools/github/report.rs": {
+    "path_canonicalize": 1,
     "std_fs": 7
   },
   "crates/tui/src/tools/github/shape.rs": {
     "std_fs": 2
+  },
+  "crates/tui/src/tools/lsp.rs": {
+    "path_canonicalize": 2
   },
   "crates/tui/src/tools/mcp_registry.rs": {
     "std_fs": 1
@@ -321,27 +429,43 @@
   "crates/tui/src/tools/resource_admission.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/tools/search.rs": {
+    "path_canonicalize": 2
+  },
   "crates/tui/src/tools/shell.rs": {
+    "path_canonicalize": 2,
     "std_fs": 3,
     "thread_sleep": 1
   },
   "crates/tui/src/tools/skill.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/tools/spec.rs": {
+    "path_canonicalize": 7
+  },
   "crates/tui/src/tools/speech.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/tools/subagent/delivery.rs": {
+    "path_canonicalize": 5
+  },
   "crates/tui/src/tools/subagent/mod.rs": {
-    "std_fs": 4
+    "path_canonicalize": 3,
+    "std_fs": 2
   },
   "crates/tui/src/tools/subagent/tests/roster_routes.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/tools/subagent/worktree.rs": {
+    "path_canonicalize": 6
+  },
   "crates/tui/src/tools/terminal_session.rs": {
+    "path_canonicalize": 3,
     "std_fs": 1,
     "thread_sleep": 2
   },
   "crates/tui/src/tools/tool_result_retrieval.rs": {
+    "path_canonicalize": 3,
     "std_fs": 1
   },
   "crates/tui/src/tools/truncate.rs": {
@@ -351,9 +475,11 @@
     "std_fs": 1
   },
   "crates/tui/src/tools/workflow/journal.rs": {
+    "path_canonicalize": 2,
     "std_fs": 4
   },
   "crates/tui/src/tools/workflow/mod.rs": {
+    "path_canonicalize": 4,
     "std_fs": 1
   },
   "crates/tui/src/tools/workflow/report.rs": {
@@ -375,6 +501,10 @@
     "std_fs": 5
   },
   "crates/tui/src/tui/file_tree.rs": {
+    "std_fs": 1
+  },
+  "crates/tui/src/tui/history.rs": {
+    "path_canonicalize": 2,
     "std_fs": 1
   },
   "crates/tui/src/tui/onboarding/mod.rs": {
@@ -405,6 +535,7 @@
     "std_fs": 1
   },
   "crates/tui/src/tui/ui/activity_detail.rs": {
+    "path_canonicalize": 2,
     "std_fs": 3
   },
   "crates/tui/src/tui/ui/apply.rs": {
@@ -418,6 +549,9 @@
   },
   "crates/tui/src/tui/ui/terminal_input.rs": {
     "thread_sleep": 1
+  },
+  "crates/tui/src/tui/views/automations/editor.rs": {
+    "path_canonicalize": 1
   },
   "crates/tui/src/tui/views/fleet_detail.rs": {
     "std_fs": 2
@@ -434,14 +568,25 @@
   "crates/tui/src/tui/workspace_context.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/tui/worktree_manager.rs": {
+    "path_canonicalize": 2
+  },
   "crates/tui/src/utils.rs": {
-    "std_fs": 13,
+    "std_fs": 12,
     "thread_sleep": 1
   },
+  "crates/tui/src/vision/tools.rs": {
+    "path_canonicalize": 2
+  },
+  "crates/tui/src/voice.rs": {
+    "std_fs": 6
+  },
   "crates/tui/src/working_set.rs": {
+    "path_canonicalize": 1,
     "std_fs": 1
   },
   "crates/tui/src/workspace_trust.rs": {
+    "path_canonicalize": 1,
     "std_fs": 2
   },
   "crates/tui/tests/cucumber/active_composer_pointer_pty.rs": {

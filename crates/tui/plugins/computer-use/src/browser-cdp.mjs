@@ -29,16 +29,13 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 import { ExecError, currentSignal } from "./exec.mjs";
 import { stateDir } from "./registry.mjs";
+import { recordingsDir as defaultRecordingsDir } from "./recordings.mjs";
 
 const APPLICATIONS = ["Google Chrome", "Chromium", "Brave Browser", "Microsoft Edge"];
 const LINUX_BINARIES = ["google-chrome", "chromium", "chromium-browser", "brave-browser", "microsoft-edge"];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const badArgs = (message) => Object.assign(new ExecError(message), { code: "bad_args" });
-
-function defaultRecordingsDir() {
-  return process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(stateDir(), "recordings");
-}
 
 /** Only http(s) and about:blank can be navigated to; everything else is refused. */
 export function checkBrowserUrl(url) {
@@ -48,7 +45,12 @@ export function checkBrowserUrl(url) {
   let parsed;
   try { parsed = new URL(trimmed); } catch { throw badArgs(`"${trimmed}" is not a URL`); }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw badArgs(`only http(s):// and about:blank URLs can be opened (got "${parsed.protocol}//")`);
+    // A person asking to "open" a local file wants to see it, not to have
+    // this self-owned browser read the disk: point at the route that shows it.
+    const hint = parsed.protocol === "file:"
+      ? "; to show a workspace file to the person use open_in_app when the Codewhale app offers it, or serve it over http://127.0.0.1"
+      : "";
+    throw badArgs(`only http(s):// and about:blank URLs can be opened (got "${parsed.protocol}//")${hint}`);
   }
   return parsed.href;
 }

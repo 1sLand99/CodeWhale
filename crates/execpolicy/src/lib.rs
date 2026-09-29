@@ -502,7 +502,14 @@ impl ExecPolicyEngine {
         // Deny rules match positional tokens at a word boundary: the command
         // must equal the rule or continue past it, so "rm" blocks "rm -rf /"
         // but NOT "rmdir" or "rmview". See `denied_prefix_matches`.
-        let deny_targets = deny_scan_targets(ctx.command);
+        let expansion = shell_expand::expand_command(ctx.command);
+        let mut deny_targets = expansion.commands;
+        // Deny rules also hold against the raw text, so a construct the
+        // expander does not model still meets every rule once.
+        let raw_command = ctx.command.trim();
+        if !raw_command.is_empty() && !deny_targets.iter().any(|t| t == raw_command) {
+            deny_targets.push(raw_command.to_string());
+        }
         if let Some(rule) = denied_prefixes.iter().find(|rule| {
             // Match the whole command OR any command the shell would actually
             // run for it — chained segments, command-substitution bodies, and
@@ -524,6 +531,57 @@ impl ExecPolicyEngine {
             });
         }
 
+        // A command word only known at run time (`$v`, `$(…)`, a glob, a
+        // shell reading its script from a pipe) cannot be matched against a
+        // deny rule, so fail closed whenever one is configured. Values from
+        // the parent environment are never substituted in.
+        let tool = ctx.tool.unwrap_or("exec_shell");
+        let deny_rules_configured = !denied_prefixes.is_empty()
+            || rulesets.iter().any(|ruleset| {
+                ruleset
+                    .ask_rules
+                    .iter()
+                    .any(|rule| rule.action == PermissionAction::Deny && rule.tool == tool)
+            });
+        // A mode that always shows a person the prompt may ask instead. The
+        // others refuse: `OnFailure` is also the posture of auto-approving
+        // sessions, where a prompt would run unseen.
+        if expansion.dynamic && deny_rules_configured {
+            let reason = "Deny rules are in force and this command's words are only known when it \
+                          runs (a variable, substitution, glob or brace list, escaped quoting, \
+                          a script read from a pipe, or text that does not parse cleanly), so \
+                          they cannot be checked against those rules.";
+            let (allow, requires_approval, requirement) = match ctx.ask_for_approval {
+                AskForApproval::UnlessTrusted | AskForApproval::OnRequest => (
+                    true,
+                    true,
+                    ExecApprovalRequirement::NeedsApproval {
+                        reason: reason.to_string(),
+                        proposed_execpolicy_amendment: None,
+                        proposed_network_policy_amendments: Vec::new(),
+                    },
+                ),
+                _ => (
+                    false,
+                    false,
+                    ExecApprovalRequirement::Forbidden {
+                        reason: reason.to_string(),
+                    },
+                ),
+            };
+            return Ok(ExecPolicyDecision {
+                allow,
+                requires_approval,
+                matched_rule: None,
+                matched_action: (!allow).then_some(PermissionAction::Deny),
+                requirement,
+            });
+        }
+        // An allow rule names the command as written. Code nested inside it
+        // (a substitution, `eval`, a `-c` payload) or a command word resolved
+        // only at run time is not what the rule approved.
+        let unresolved = expansion.dynamic || expansion.nested;
+
         // Allow (trusted) rules use arity-aware prefix matching so that
         // `auto_allow = ["git status"]` matches `git status -s` but NOT
         // `git push origin main`.
@@ -531,7 +589,7 @@ impl ExecPolicyEngine {
         // it must not sweep a chained destructive suffix (`git log ; rm -rf /`)
         // into "trusted" (#security). Chained commands fall through to the
         // normal ask/mode gate.
-        let trusted_rule = if command_is_chained(ctx.command) {
+        let trusted_rule = if unresolved || command_is_chained(ctx.command) {
             None
         } else {
             trusted_prefixes
@@ -545,8 +603,19 @@ impl ExecPolicyEngine {
         // shell would run must block, mirroring the denied-prefix scan above.
         // The invocation as typed is skipped here — it is evaluated on its own
         // just below, and gets a message that does not call it a segment.
-        let raw_command = ctx.command.trim();
-        for target in deny_targets.iter().filter(|t| t.as_str() != raw_command) {
+        // Typed rules match through the arity table, which keys on the literal
+        // program word; also try each target with a path-qualified command
+        // word folded to its basename (`/bin/rm x` is an `rm x`), as denied
+        // prefixes already do.
+        let folded_targets: Vec<String> = deny_targets
+            .iter()
+            .filter_map(|target| fold_command_word_path(target))
+            .collect();
+        for target in deny_targets
+            .iter()
+            .chain(&folded_targets)
+            .filter(|t| t.as_str() != raw_command)
+        {
             let mut seg_ctx = ctx.clone();
             seg_ctx.command = target.as_str();
             if let Some(rule) = self.matching_ask_rule(&rulesets, &seg_ctx)
@@ -597,7 +666,9 @@ impl ExecPolicyEngine {
                     // the unguarded one won (2026-08-04 review). A chained
                     // command falls through to the normal ask/mode gate,
                     // where the deny scan above has already had its say.
-                    if !command_is_chained(ctx.command) {
+                    // An exact remembered grant names the whole invocation,
+                    // so it may cover unresolved words; a prefix rule may not.
+                    if !command_is_chained(ctx.command) && (rule.command_exact || !unresolved) {
                         return Ok(ExecPolicyDecision {
                             allow: true,
                             requires_approval: false,
@@ -727,8 +798,29 @@ impl ExecPolicyEngine {
 ///
 /// Heredoc data is excluded by the shared expander, while substitutions and
 /// shell stdin remain executable policy targets.
+#[cfg(test)]
 fn deny_scan_targets(command: &str) -> Vec<String> {
     shell_expand::expanded_commands(command)
+}
+
+/// `command` with a path-qualified first word replaced by its basename, or
+/// `None` when the first word carries no path.
+fn fold_command_word_path(command: &str) -> Option<String> {
+    let command = command.trim_start();
+    let (word, rest) = command
+        .split_once(char::is_whitespace)
+        .map_or((command, ""), |(word, rest)| (word, rest));
+    let base = word
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|base| !base.is_empty())?;
+    (base.len() != word.len()).then(|| {
+        if rest.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base} {rest}")
+        }
+    })
 }
 
 /// Split a shell command into its top-level segments on the chaining/pipe

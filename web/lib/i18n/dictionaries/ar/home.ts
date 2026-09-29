@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "يمنحك {brand} وكلاء يمكنهم بناء البرمجيات والعمل على ملفاتك وتحويل المهام المتكررة إلى مسارات عمل قابلة لإعادة الاستخدام. أخبرهم بما تريد إنجازه واختر النماذج المستضافة أو المحلية المناسبة للمهمة، مع حرية تبديل المزوّدين أثناء العمل.",
   getCodewhale: "احصل على Codewhale",
+  heroInstallAria: "أمر التثبيت",
   exploreProduct: "استكشف المنتج",
   shotPreview: "معاينة الطرفية",
   shotBuild: "إصدار تطوير v{version}",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "حالة الإصدار غير متاحة",
   currentSource: "المصدر",
   sourceCandidate: "غير منشور",
-  providerRoutes: "{count} مزوّد",
   publishedRelease: "منشور",
   figcaptionSourceCandidate: "غير منشور",
   chapterTerminal: "طرفيتك",
@@ -63,7 +63,7 @@ export const home: HomeDict = {
     "بعد تثبيت Codewhale وربط نموذج، يمكنك وصف مهمتك الأولى في الطرفية وإضافة Fleet عندما تريد أن يتشارك عدة وكلاء العمل.",
   startGuideLink: "اقرأ دليل البداية ←",
   startVocabularyLink: "اطّلع على مفردات المنتج ←",
-  chapterAccount: "احصل على Codewhale",
+  chapterAvailability: "أين يعمل",
   availabilityHeading: "أين يمكنك استخدام Codewhale",
   availabilityLede:
     "يمكنك استخدام Codewhale في طرفيتك اليوم، بينما نعمل على تطوير تطبيق الويب وتطبيق سطح المكتب وأجهزة الكمبيوتر السحابية.",

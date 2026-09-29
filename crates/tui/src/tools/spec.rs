@@ -713,6 +713,13 @@ pub struct ToolExecutionState {
     pub(crate) provider_native_search: Option<crate::client::ProviderNativeSearchClient>,
     /// Exact active route capability facts. Unknown stays fail-closed.
     pub(crate) route_capabilities: codewhale_config::route::RouteCapabilities,
+    /// Engine-served gate for calls nested inside an `execute_tools` program.
+    /// Set only on the context of one `execute_tools` call by the turn loop;
+    /// every nested call is planned and approved through the same gate a
+    /// direct call gets. `None` everywhere else (sub-agents, tests, exec
+    /// hosts without an engine turn), where code mode keeps its read-only,
+    /// auto-approved profile.
+    pub(crate) nested_call_gate: Option<crate::tools::codemode::NestedCallGate>,
 }
 
 impl std::ops::Deref for ToolContext {
@@ -812,6 +819,7 @@ impl ToolContext {
                 search_base_url: None,
                 provider_native_search: None,
                 route_capabilities: codewhale_config::route::RouteCapabilities::default(),
+                nested_call_gate: None,
             }),
         }
     }
@@ -1039,6 +1047,24 @@ impl ToolContext {
         }
 
         Ok(())
+    }
+
+    /// Cap the authority a tool call asks for on work it hands off (a durable
+    /// task or a scheduled automation) at what this session holds. Requested
+    /// `allow_shell`, `trust_mode` and `auto_approve` bits are declarations
+    /// from the model; each survives only when this session already has that
+    /// authority, so delegated work never runs with more than its creator.
+    pub(crate) fn cap_delegated_authority(
+        &self,
+        allow_shell: Option<bool>,
+        trust_mode: Option<bool>,
+        auto_approve: Option<bool>,
+    ) -> (Option<bool>, Option<bool>, Option<bool>) {
+        (
+            allow_shell.map(|requested| requested && self.shell_policy == ShellPolicy::Full),
+            trust_mode.map(|requested| requested && self.trust_mode),
+            auto_approve.map(|requested| requested && self.approval_mode == ApprovalMode::Bypass),
+        )
     }
 
     /// Resolve a path relative to workspace, validating it doesn't escape.

@@ -1661,6 +1661,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
+            XAI_GROK_4_7_MODEL,
             XAI_GROK_4_5_MODEL,
             XAI_GROK_4_3_MODEL,
             XAI_GROK_BUILD_MODEL,
@@ -1735,6 +1736,18 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
 
 // === Types ===
 
+/// `[extension_host]`: settings for the experimental TypeScript extension
+/// host (`[features] extension_host`). User config only: project-scope config
+/// is applied by an explicit allowlist that does not include this table.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionHostConfig {
+    /// Path to a Node.js runtime (>= 22.19). Tried before every `node` on
+    /// `PATH`; each candidate must actually run and meet the floor.
+    #[serde(default)]
+    pub node: Option<String>,
+}
+
 /// Raw retry configuration loaded from config files.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RetryConfig {
@@ -1778,9 +1791,6 @@ pub struct TuiConfig {
     /// `/copy` use. Set `false` to restore the rendered-text payload (#6156).
     /// PRIMARY selection on Linux always keeps rendered text.
     pub selection_copy_markdown: Option<bool>,
-    /// Legacy setting retained for config compatibility. Raw mode is set
-    /// directly on the terminal-owning thread; this value has no effect.
-    pub terminal_probe_timeout_ms: Option<u64>,
     /// Per-SSE-chunk idle timeout in seconds. Defaults to 900 seconds when
     /// omitted. `0` maps to the default; values clamp to `1..=3600`.
     pub stream_chunk_timeout_secs: Option<u64>,
@@ -1820,7 +1830,7 @@ pub struct TuiConfig {
     pub posture_bar: Option<ChromeRowPreset>,
     /// The same three settings for the metrics line under the posture bar.
     /// `compact` is the default: it keeps the route, the context reading, the cost and the
-    /// balance and drops the telemetry and the help hint (#5950).
+    /// balance, the cache rate, and drops the other telemetry and the help hint (#5950, #6565).
     #[serde(default)]
     pub metrics_line: Option<ChromeRowPreset>,
     /// Emit OSC 8 hyperlink escape sequences around URLs in the transcript so
@@ -2033,11 +2043,11 @@ pub struct ToolsConfig {
     #[serde(default)]
     pub user_input_max_options: Option<u32>,
 
-    /// Seconds Codewhale waits for a user-input answer or an approval
-    /// decision before cancelling it (#6003). `None` uses the built-in
-    /// default (300). An explicit `0` disables the timeout entirely, so
-    /// long human review or overnight automation can wait indefinitely.
-    /// Values above 86,400 (24h) are clamped with a warning.
+    /// Seconds Codewhale waits for a `request_user_input` answer before
+    /// cancelling it (#6003). Absent, or an explicit `0`, waits until the
+    /// person answers or cancels — the same as an approval. A positive
+    /// value bounds that one wait. Values above 86,400 (24h) are clamped
+    /// with a warning.
     #[serde(default)]
     pub user_input_timeout_seconds: Option<u64>,
 }
@@ -2324,15 +2334,13 @@ pub struct RetryPolicy {
 
 /// Context management configuration.
 ///
-/// The append-only "Flash seam" layered-context system (#159) was removed on
-/// 2026-07-23 — it never left its opt-in default and compaction owns context
-/// reduction now. Its keys remain parsed-but-ignored so existing config files
-/// keep loading; `project_pack` is the only live setting.
+/// `project_pack` is the only setting. The removed "Flash seam" layered-context
+/// keys (`enabled`, `verbatim_window_turns`, `l1/l2/l3_threshold`,
+/// `seam_model`, #159) are no longer fields: this table does not deny unknown
+/// fields, so an older config that still carries them keeps loading and they
+/// are simply ignored (#6516).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ContextConfig {
-    /// Ignored (was: master enable for the removed layered-context system).
-    #[serde(default)]
-    pub enabled: Option<bool>,
     /// Include a deterministic project context pack in the stable prompt
     /// prefix. Default: false — the pack is a large pretty-printed directory
     /// listing the model can rebuild with one `File` call (#4781). Set
@@ -2340,19 +2348,6 @@ pub struct ContextConfig {
     /// models).
     #[serde(default)]
     pub project_pack: Option<bool>,
-    /// Ignored (was: seam verbatim window).
-    #[serde(default)]
-    pub verbatim_window_turns: Option<usize>,
-    /// Ignored (was: seam thresholds).
-    #[serde(default)]
-    pub l1_threshold: Option<usize>,
-    #[serde(default)]
-    pub l2_threshold: Option<usize>,
-    #[serde(default)]
-    pub l3_threshold: Option<usize>,
-    /// Ignored (was: seam model).
-    #[serde(default)]
-    pub seam_model: Option<String>,
 }
 
 /// Maximum characters of `[compaction] summary_instructions` that are
@@ -2492,6 +2487,24 @@ pub struct SubagentsConfig {
 #[serde(deny_unknown_fields)]
 pub struct SubagentRoleConfig {
     pub model: String,
+    /// Operator-approved `provider/model` routes, tried in order only when
+    /// this pin's first request is refused before the agent has done any
+    /// work (exhausted quota, rejected credentials or authorization, or an
+    /// unavailable model). Listing a route authorizes sending the agent's
+    /// task to that provider. Empty keeps the pin exact.
+    #[serde(default)]
+    pub replacements: Vec<String>,
+}
+
+fn parse_subagent_role_pin(value: &str) -> SubagentModelOverride {
+    let value = value.trim();
+    match value.split_once('/') {
+        Some((provider, model)) => SubagentModelOverride {
+            provider: Some(provider.trim().to_string()),
+            model: model.trim().to_string(),
+        },
+        None => value.into(),
+    }
 }
 
 /// One role override carried through Config, Engine, and child admission.
@@ -2598,7 +2611,52 @@ pub struct AutoRouterConfig {
     /// hung local router cannot stall a turn indefinitely.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Router kind (#6525): `"chat"` (default) asks a chat model for JSON;
+    /// `"decision"` asks a System One decision model (Jev) a typed Choice
+    /// between the active provider's fast and strong tiers. Any other value
+    /// leaves the router unconfigured (shown as failing, never guessed).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Decision routers only: below this answer confidence (0..=1, default
+    /// [`DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE`]) the turn takes the local
+    /// fallback instead of the decision.
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
+    /// Decision routers only: endpoint override for `provider = "typesafe"`
+    /// (default `https://api.typesafe.ai/v1`). OpenRouter decision routers use
+    /// the configured OpenRouter base URL.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
+
+/// `[auto.router] kind` (#6525).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutoRouterKind {
+    /// A chat model returns `{provider, model, thinking}` JSON.
+    Chat,
+    /// A System One decision model answers a typed Choice over tiers.
+    Decision,
+}
+
+impl AutoRouterKind {
+    /// `None` (absent) is the chat default; an unknown value is `None` so the
+    /// caller reports the router as not configured instead of guessing.
+    #[must_use]
+    pub(crate) fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(str::trim).filter(|kind| !kind.is_empty()) {
+            None => Some(Self::Chat),
+            Some(kind) if kind.eq_ignore_ascii_case("chat") => Some(Self::Chat),
+            Some(kind) if kind.eq_ignore_ascii_case("decision") => Some(Self::Decision),
+            Some(_) => None,
+        }
+    }
+}
+
+/// Default `[auto.router] min_confidence` for decision routers: TypeSafe's
+/// "below 0.5, don't act" band (for two options, the chosen tier's
+/// probability must reach 0.75).
+pub(crate) const DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE: f64 = 0.5;
 
 fn default_update_check_for_updates() -> bool {
     true
@@ -2827,10 +2885,9 @@ pub struct Config {
     #[serde(default)]
     pub stop_words: Option<Vec<String>>,
     pub provider: Option<String>,
-    #[serde(alias = "apiKey")]
-    pub api_key: Option<String>,
-    #[serde(alias = "baseUrl")]
-    pub base_url: Option<String>,
+    // No top-level `api_key` / `base_url`: `parse_config_file` moves the
+    // legacy keys into `[providers.<name>]` before this struct is built
+    // (#6394).
     /// Optional extra HTTP headers sent to model API requests.
     #[serde(alias = "httpHeaders")]
     pub http_headers: Option<HashMap<String, String>>,
@@ -3016,6 +3073,9 @@ pub struct Config {
     pub max_subagents: Option<usize>,
     pub retry: Option<RetryConfig>,
     pub features: Option<FeaturesToml>,
+    /// Experimental TypeScript extension host settings.
+    #[serde(default)]
+    pub extension_host: Option<ExtensionHostConfig>,
 
     /// Deterministic user-level auto-review policy for tool calls. The engine
     /// applies these rules after built-in safety floors, so config cannot
@@ -3228,18 +3288,10 @@ pub struct Config {
     #[serde(skip)]
     pub(crate) base_url_env_receipt: BaseUrlEnvReceipt,
 
-    /// Who owns the legacy root `base_url` field.
-    ///
-    /// `Deepseek` and `DeepseekCN` are two identities that share one legacy
-    /// root field, so the field alone cannot say whether it is a user's
-    /// file-owned endpoint (shared by both, as it always has been) or a
-    /// `CODEWHALE_BASE_URL`/`DEEPSEEK_BASE_URL` value that
-    /// [`apply_env_overrides`] addressed to exactly one of them.
-    ///
-    /// [`BaseUrlEnvReceipt::Unrecorded`] is the file-owned case and keeps the
-    /// legacy shared behavior.
+    /// What loading moved in memory from legacy top-level `base_url` /
+    /// `api_key` keys (#6394). Reported by doctor; never rewrites the file.
     #[serde(skip)]
-    pub(crate) root_base_url_owner: BaseUrlEnvReceipt,
+    pub(crate) legacy_root: codewhale_config::legacy_root::LegacyRootMigration,
 
     /// Mini-window (pinned, always-on-top) mode layout preferences
     /// (`[mini_window]` in config.toml). When the host terminal window is
@@ -4103,6 +4155,8 @@ struct ConfigFile {
     #[serde(flatten)]
     base: Box<Config>,
     profiles: Option<HashMap<String, Config>>,
+    #[serde(skip)]
+    legacy_root: codewhale_config::legacy_root::LegacyRootMigration,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -4144,7 +4198,9 @@ impl ApprovalPolicyControl {
             Self::Unset => "saved TUI posture",
             Self::RootConfig => "the root config.toml approval_policy",
             Self::Profile => "the active config profile",
-            Self::Environment => "DEEPSEEK_APPROVAL_POLICY",
+            Self::Environment => {
+                set_env_var_name(APPROVAL_POLICY_ENV).unwrap_or(APPROVAL_POLICY_ENV[0])
+            }
             Self::ManagedConfig => "managed configuration",
             Self::ProjectConfig => "project configuration",
             Self::Requirements => "managed approval requirements",
@@ -4179,7 +4235,7 @@ impl ShellAccessControl {
             Self::Unset => "the session default",
             Self::RootConfig => "the root config.toml allow_shell",
             Self::Profile => "the active config profile",
-            Self::Environment => "DEEPSEEK_ALLOW_SHELL",
+            Self::Environment => set_env_var_name(ALLOW_SHELL_ENV).unwrap_or(ALLOW_SHELL_ENV[0]),
             Self::ManagedConfig => "managed configuration",
             Self::ProjectConfig => "project configuration",
             Self::Ambiguous => "an unresolved configuration source",
@@ -4187,10 +4243,19 @@ impl ShellAccessControl {
     }
 }
 
-fn approval_policy_env_is_set() -> bool {
+const APPROVAL_POLICY_ENV: [&str; 2] = ["CODEWHALE_APPROVAL_POLICY", "DEEPSEEK_APPROVAL_POLICY"];
+const ALLOW_SHELL_ENV: [&str; 2] = ["CODEWHALE_ALLOW_SHELL", "DEEPSEEK_ALLOW_SHELL"];
+
+/// The variable of a `[CODEWHALE_*, legacy DEEPSEEK_*]` pair that is set,
+/// in the precedence the config readers use (the `CODEWHALE_*` name wins).
+/// The dispatcher only exports `CODEWHALE_*` (#6516), so a `DEEPSEEK_*` hit
+/// means the user set the legacy name themselves; naming it keeps the
+/// settings editor pointing at the variable that actually owns the value.
+fn set_env_var_name(names: [&'static str; 2]) -> Option<&'static str> {
     let read = || {
-        std::env::var_os("CODEWHALE_APPROVAL_POLICY").is_some()
-            || std::env::var_os("DEEPSEEK_APPROVAL_POLICY").is_some()
+        names
+            .into_iter()
+            .find(|name| std::env::var_os(name).is_some())
     };
     #[cfg(test)]
     {
@@ -4202,19 +4267,12 @@ fn approval_policy_env_is_set() -> bool {
     }
 }
 
+fn approval_policy_env_is_set() -> bool {
+    set_env_var_name(APPROVAL_POLICY_ENV).is_some()
+}
+
 fn allow_shell_env_is_set() -> bool {
-    let read = || {
-        std::env::var_os("CODEWHALE_ALLOW_SHELL").is_some()
-            || std::env::var_os("DEEPSEEK_ALLOW_SHELL").is_some()
-    };
-    #[cfg(test)]
-    {
-        crate::test_support::with_test_env_lock(read)
-    }
-    #[cfg(not(test))]
-    {
-        read()
-    }
+    set_env_var_name(ALLOW_SHELL_ENV).is_some()
 }
 
 fn project_config_root_bool(workspace: &Path, key: &str) -> Option<bool> {
@@ -4436,7 +4494,7 @@ impl Config {
             };
             let Some(parsed) = std::fs::read_to_string(path)
                 .ok()
-                .and_then(|raw| toml::from_str::<ConfigFile>(&raw).ok())
+                .and_then(|raw| parse_config_file(&raw).ok())
             else {
                 return Some("an unreadable active config profile");
             };
@@ -4530,7 +4588,7 @@ impl Config {
         };
         let parsed = std::fs::read_to_string(path)
             .ok()
-            .and_then(|raw| toml::from_str::<ConfigFile>(&raw).ok());
+            .and_then(|raw| parse_config_file(&raw).ok());
         let Some(parsed) = parsed else {
             return if self.approval_policy.is_some() {
                 ApprovalPolicyControl::Ambiguous
@@ -4610,7 +4668,7 @@ impl Config {
         };
         let parsed = std::fs::read_to_string(path)
             .ok()
-            .and_then(|raw| toml::from_str::<ConfigFile>(&raw).ok());
+            .and_then(|raw| parse_config_file(&raw).ok());
         let Some(parsed) = parsed else {
             return if self.allow_shell.is_some() {
                 ShellAccessControl::Ambiguous
@@ -4649,6 +4707,8 @@ impl Config {
     /// Whether organization requirements, rather than a user-editable config
     /// key, own approval posture. User config still outranks TUI settings, but
     /// `/config approval_mode ... --save` may edit that user-owned key.
+    /// Sandbox requirements also lock posture: Full Access changes the implicit
+    /// sandbox. This conservatively locks even posture changes that would fit.
     #[must_use]
     pub fn approval_policy_is_requirements_managed(&self) -> bool {
         let path = self
@@ -4667,7 +4727,10 @@ impl Config {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|contents| toml::from_str::<RequirementsFile>(&contents).ok())
-            .is_none_or(|requirements| !requirements.allowed_approval_policies.is_empty())
+            .is_none_or(|requirements| {
+                !requirements.allowed_approval_policies.is_empty()
+                    || !requirements.allowed_sandbox_modes.is_empty()
+            })
     }
 
     #[must_use]
@@ -4713,6 +4776,23 @@ impl Config {
     #[must_use]
     pub fn search_provider(&self) -> SearchProvider {
         self.search_provider_resolution().provider
+    }
+
+    /// Whether provider-native search may lead the search chain.
+    ///
+    /// `[search] native = true|false` is explicit. Unset, a user-chosen
+    /// provider (config, env, or a Tavily key) wins over provider-native
+    /// search (`Some(false)`); with no provider configured it stays `None`,
+    /// which keeps native search first on routes that offer it.
+    #[must_use]
+    pub fn search_native(&self) -> Option<bool> {
+        self.search
+            .as_ref()
+            .and_then(|search| search.native)
+            .or_else(|| {
+                (self.search_provider_resolution().source != SearchProviderSource::Default)
+                    .then_some(false)
+            })
     }
 
     /// Store a session/config provider choice and return the effective runtime
@@ -4765,6 +4845,19 @@ impl Config {
             .min(MAX_AUTO_ROUTER_TIMEOUT_SECS)
     }
 
+    /// Decision-router confidence floor, clamped to `0..=1`; absent or
+    /// non-finite values use [`DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE`].
+    #[must_use]
+    pub(crate) fn auto_router_min_confidence(&self) -> f64 {
+        self.auto
+            .as_ref()
+            .and_then(|a| a.router.as_ref())
+            .and_then(|r| r.min_confidence)
+            .filter(|value| value.is_finite())
+            .unwrap_or(DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE)
+            .clamp(0.0, 1.0)
+    }
+
     #[must_use]
     pub fn tools_always_load(&self) -> std::collections::HashSet<String> {
         self.tools
@@ -4794,8 +4887,8 @@ impl Config {
     }
 
     /// Effective wait for a user-input answer or an approval decision
-    /// (#6003). `None` means the built-in default (300s). An explicit `0`
-    /// disables the timeout; values above 24h clamp with a warning.
+    /// (#6003). `None` or `0` waits until the person answers or cancels.
+    /// A positive value bounds that one wait; values above 24h clamp.
     #[must_use]
     pub fn user_input_timeout(&self) -> Option<std::time::Duration> {
         const MAX_SECONDS: u64 = 86_400;
@@ -4849,10 +4942,13 @@ impl Config {
     /// Parse persisted configuration through the same profile precedence used
     /// at startup, without environment, credentials, or filesystem writes.
     pub(crate) fn from_saved_document(contents: &str, profile: Option<&str>) -> Result<Self> {
-        let parsed: ConfigFile = toml::from_str(contents).map_err(|_| {
+        let parsed = parse_config_file(contents).map_err(|_| {
             anyhow::anyhow!("Failed to parse configuration; file contents were omitted")
         })?;
-        apply_profile(parsed, profile)
+        let legacy_root = parsed.legacy_root.clone();
+        let mut config = apply_profile(parsed, profile)?;
+        config.legacy_root = legacy_root;
+        Ok(config)
     }
 
     fn load_with_environment_policy(
@@ -4901,7 +4997,6 @@ impl Config {
         config.exec_policy_engine = load_sibling_exec_policy_engine(path.as_deref())?;
         config.loaded_config_path = path.as_deref().map(std::path::absolute).transpose()?;
         config.validate()?;
-        config.warn_on_misplaced_root_base_url();
         Ok(config)
     }
 
@@ -5016,57 +5111,6 @@ impl Config {
         active_changed
     }
 
-    /// Surface a one-line warning when the user has set the legacy root
-    /// `base_url` field but their active provider does not read it. DeepSeek,
-    /// the NvidiaNim compatibility sniff, and the literal legacy `custom`
-    /// route are the exceptions. Common confusion: users add a top-level
-    /// `base_url = "..."` to `~/.deepseek/config.toml` for ollama / vllm /
-    /// named OpenAI-compatible servers and wonder why it is ignored (#1308).
-    fn warn_on_misplaced_root_base_url(&self) {
-        let Some(root_base) = self.base_url.as_deref().map(str::trim) else {
-            return;
-        };
-        if root_base.is_empty() {
-            return;
-        }
-        let provider = self.api_provider();
-        if matches!(
-            provider,
-            ApiProvider::Deepseek
-                | ApiProvider::DeepseekCN
-                | ApiProvider::XiaomiMimo
-                | ApiProvider::OpenaiCodex
-        ) {
-            return;
-        }
-        if matches!(provider, ApiProvider::NvidiaNim)
-            && root_base.contains("integrate.api.nvidia.com")
-        {
-            return;
-        }
-        if provider == ApiProvider::Custom && self.uses_legacy_literal_custom_route() {
-            return;
-        }
-        // Only warn if the per-provider table doesn't have an explicit
-        // `base_url`, because if it does, the per-provider one wins and the
-        // root field is just dead config — no behavior surprise.
-        let has_provider_base = self
-            .provider_config_for(provider)
-            .and_then(|p| p.base_url.as_deref().map(str::trim))
-            .is_some_and(|s| !s.is_empty());
-        if has_provider_base {
-            return;
-        }
-        let Ok(table) = provider_config_table_name(provider) else {
-            return;
-        };
-        tracing::warn!(
-            "Top-level `base_url = \"{root_base}\"` is ignored for the {provider:?} provider. \
-             Move it under `[{table}]` (e.g. `[{table}]\\nbase_url = \"...\"`) \
-             or set the corresponding `*_BASE_URL` env var. (#1308)"
-        );
-    }
-
     /// Validate that critical config fields are present.
     pub fn validate(&self) -> Result<()> {
         codewhale_config::catalog::configured::validate_configured_models(
@@ -5103,11 +5147,6 @@ impl Config {
                 return Err(SafeConfigDiagnostic::KimiCodeClaudeAlias.into());
             }
             result => result.map_err(anyhow::Error::msg)?,
-        }
-        if let Some(ref key) = self.api_key
-            && key.trim().is_empty()
-        {
-            anyhow::bail!("api_key cannot be empty string");
         }
         if let Some(features) = &self.features {
             for key in features.entries.keys() {
@@ -5255,17 +5294,10 @@ impl Config {
             }
             return provider;
         }
-        self.base_url
-            .as_deref()
-            .filter(|base| base.contains("integrate.api.nvidia.com"))
-            .map(|_| ApiProvider::NvidiaNim)
-            .or_else(|| {
-                self.base_url
-                    .as_deref()
-                    .filter(|base| base.contains("api.deepseeki.com"))
-                    .map(|_| ApiProvider::DeepseekCN)
-            })
-            .unwrap_or(ApiProvider::Deepseek)
+        // Older releases guessed NIM or DeepSeek-CN from the top-level
+        // `base_url`; parsing now writes that guess as an explicit `provider`
+        // (#6394), so an unset provider is simply DeepSeek.
+        ApiProvider::Deepseek
     }
 
     /// Whether the live config uses the released route-sensitive Ollama Cloud
@@ -5321,8 +5353,7 @@ impl Config {
         provider.as_str().to_string()
     }
 
-    /// Resolve the currently selected live route while retaining whether the
-    /// literal custom key came from the legacy root fields or an exact table.
+    /// Resolve the currently selected live route, keeping its exact id.
     pub(crate) fn active_provider_identity(
         &self,
         provider: ApiProvider,
@@ -5387,21 +5418,14 @@ impl Config {
 
         if !has_exact_custom_table && key.eq_ignore_ascii_case(ApiProvider::Custom.as_str()) {
             if self.selects_literal_custom_provider() {
-                // The historical literal `provider = "custom"` can mean
-                // either the legacy root-field route or an exact
-                // `[providers.custom]` table. Prefer the table when it exists;
-                // otherwise validate the legacy root shape. This keeps old
-                // save/resume records deterministic without treating the
-                // literal key as a wildcard for some other named provider.
-                if !has_exact_custom_table {
-                    self.validate_legacy_literal_custom_route()?;
-                    return Ok(ProviderIdentity {
-                        provider: ApiProvider::Custom,
-                        key: ApiProvider::Custom.as_str().to_string(),
-                        exact_id: None,
-                        migrated_legacy_ollama_cloud_route: false,
-                    });
-                }
+                // The literal `provider = "custom"` route lives in
+                // `[providers.custom]`; parsing moved an older top-level
+                // endpoint there (#6394). Without that table there is no
+                // route to resume.
+                return Err(
+                    "`provider = \"custom\"` requires a `[providers.custom]` table with a `base_url`; Codewhale will not use the custom-provider placeholder or fall back"
+                        .to_string(),
+                );
             }
 
             // Pre-exact releases persisted every named custom route as the
@@ -5523,7 +5547,6 @@ impl Config {
     }
 
     /// Resolve an additive exact provider id. Unlike raw selector resolution,
-    /// this never interprets the literal id `custom` as the legacy root route:
     /// an id means the record requires that exact `[providers.<id>]` table.
     fn resolve_exact_provider_identity(
         &self,
@@ -5550,7 +5573,7 @@ impl Config {
         let identity = self.resolve_provider_identity(id)?;
         if identity.provider == ApiProvider::Custom && identity.persisted_id() != Some(id) {
             return Err(format!(
-                "persisted provider route requires exact custom provider '{id}', but the live config only provides the legacy root-level custom route. Restore `[providers.{id}]` and retry; Codewhale will not fall back"
+                "persisted provider route requires exact custom provider '{id}', but the live config does not provide that exact table. Restore `[providers.{id}]` and retry; Codewhale will not fall back"
             ));
         }
         Ok(identity)
@@ -5630,15 +5653,23 @@ impl Config {
             }
 
             // The absence of the additive id is itself provenance. Released
-            // id-less `custom` records belong to the root-level route only;
-            // they must not be captured by a table added under the same key.
-            self.validate_legacy_literal_custom_root_route()?;
-            return Ok(ProviderIdentity {
-                provider: ApiProvider::Custom,
-                key: ApiProvider::Custom.as_str().to_string(),
-                exact_id: None,
-                migrated_legacy_ollama_cloud_route: false,
-            });
+            // id-less `custom` records belong to the literal `custom` route,
+            // whose older top-level endpoint parsing moved into
+            // `[providers.custom]` (#6394). They are never captured by some
+            // other named table.
+            if !self.selects_literal_custom_provider() || !self.has_literal_custom_provider_table()
+            {
+                let selected = self.provider.as_deref().map(str::trim).unwrap_or_default();
+                return Err(format!(
+                    "legacy session records only the generic `custom` provider kind, but the live config selects '{}'. Only a config with `provider = \"custom\"` and a `[providers.custom]` table can load this session; Codewhale will not guess or fall back",
+                    if selected.is_empty() {
+                        "<unset>"
+                    } else {
+                        selected
+                    }
+                ));
+            }
+            return self.resolve_exact_provider_identity(ApiProvider::Custom.as_str());
         }
 
         if let Some(id) = id
@@ -5702,72 +5733,7 @@ impl Config {
         }
     }
 
-    fn validate_legacy_literal_custom_route(&self) -> std::result::Result<(), String> {
-        if self.has_literal_custom_provider_table() {
-            return Err(
-                "legacy `provider = \"custom\"` is ambiguous because `[providers.custom]` is also present. Move the route to one named `[providers.<name>]` table and update the saved provider identity; Codewhale will not guess or fall back"
-                    .to_string(),
-            );
-        }
-
-        self.validate_legacy_literal_custom_root_route()
-    }
-
-    fn validate_legacy_literal_custom_root_route(&self) -> std::result::Result<(), String> {
-        let selected = self.provider.as_deref().map(str::trim).unwrap_or_default();
-        if !self.selects_literal_custom_provider() {
-            return Err(format!(
-                "legacy session records only the generic `custom` provider kind, but the live config selects '{}'. Only an unchanged legacy config with `provider = \"custom\"` and root-level `base_url`/`default_text_model` can load this session; Codewhale will not guess or fall back",
-                if selected.is_empty() {
-                    "<unset>"
-                } else {
-                    selected
-                }
-            ));
-        }
-
-        let base_url = self
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|base_url| !base_url.is_empty())
-            .ok_or_else(|| {
-                "legacy `provider = \"custom\"` requires a non-empty root-level `base_url` to load a saved session; Codewhale will not use the custom-provider placeholder or fall back"
-                    .to_string()
-            })?;
-        let parsed = reqwest::Url::parse(base_url).map_err(|err| {
-            format!(
-                "legacy `provider = \"custom\"` has an invalid root-level `base_url`: {err}. Fix the live config and retry; Codewhale will not fall back"
-            )
-        })?;
-        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-            return Err(
-                "legacy `provider = \"custom\"` requires a root-level `base_url` with an http(s) scheme and host; Codewhale will not fall back"
-                    .to_string(),
-            );
-        }
-
-        let model = self
-            .default_text_model
-            .as_deref()
-            .or(self.legacy_model.as_deref())
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .ok_or_else(|| {
-                "legacy `provider = \"custom\"` requires a non-empty root-level `default_text_model` to load a saved session; Codewhale will not guess or fall back"
-                    .to_string()
-            })?;
-        if model.eq_ignore_ascii_case("auto") || normalize_custom_model_id(model).is_none() {
-            return Err(
-                "legacy `provider = \"custom\"` requires one explicit, valid root-level `default_text_model` (not `auto`) to load a saved session; Codewhale will not guess or fall back"
-                    .to_string(),
-            );
-        }
-
-        Ok(())
-    }
-
-    fn selects_literal_custom_provider(&self) -> bool {
+    pub(crate) fn selects_literal_custom_provider(&self) -> bool {
         self.provider
             .as_deref()
             .map(str::trim)
@@ -5783,14 +5749,10 @@ impl Config {
         })
     }
 
-    pub(crate) fn uses_legacy_literal_custom_route(&self) -> bool {
-        self.selects_literal_custom_provider() && !self.has_literal_custom_provider_table()
-    }
-
     /// Whether `identity` names a custom route that this config can resolve.
     ///
-    /// Either an exact `[providers.<name>]` custom table, or the legacy
-    /// root-field literal `custom` route. Anything else — an empty key, a
+    /// Only an exact `[providers.<name>]` custom table (the literal `custom`
+    /// route included, since #6394). Anything else — an empty key, a
     /// removed table, a built-in provider name — is an unresolvable custom
     /// identity and endpoint resolution must fail closed on it.
     ///
@@ -5799,7 +5761,6 @@ impl Config {
     #[cfg(test)]
     pub(crate) fn custom_identity_is_resolvable(&self, identity: &str) -> bool {
         self.custom_provider_entry_for_identity(identity).is_some()
-            || (identity_is_literal_custom(identity) && self.uses_legacy_literal_custom_route())
     }
 
     /// Trimmed, non-empty `wire` dialect preference for `provider`'s config
@@ -5997,46 +5958,31 @@ impl Config {
         }
     }
 
-    /// Apply a runtime model override without migrating a released
-    /// root-literal custom route into an ambiguous `[providers.custom]` table.
+    /// Apply a runtime model override to the route's own table.
     pub(crate) fn set_provider_model_override(
         &mut self,
         provider: ApiProvider,
         model: Option<String>,
     ) {
-        if provider == ApiProvider::Custom && self.uses_legacy_literal_custom_route() {
-            self.default_text_model = model;
-        } else {
-            self.provider_config_for_mut(provider).model = model;
-        }
+        self.provider_config_for_mut(provider).model = model;
     }
 
-    /// Apply a runtime endpoint override while preserving the storage shape of
-    /// a released root-literal custom route.
+    /// Apply a runtime endpoint override to the route's own table.
     pub(crate) fn set_provider_base_url_override(
         &mut self,
         provider: ApiProvider,
         base_url: Option<String>,
     ) {
-        if provider == ApiProvider::Custom && self.uses_legacy_literal_custom_route() {
-            self.base_url = base_url;
-        } else {
-            self.provider_config_for_mut(provider).base_url = base_url;
-        }
+        self.provider_config_for_mut(provider).base_url = base_url;
     }
 
-    /// Apply an in-memory credential update without creating a named custom
-    /// table for the legacy root-literal route.
+    /// Apply an in-memory credential update to the route's own table.
     pub(crate) fn set_provider_api_key_override(
         &mut self,
         provider: ApiProvider,
         api_key: Option<String>,
     ) {
-        if provider == ApiProvider::Custom && self.uses_legacy_literal_custom_route() {
-            self.api_key = api_key;
-        } else {
-            self.provider_config_for_mut(provider).api_key = api_key;
-        }
+        self.provider_config_for_mut(provider).api_key = api_key;
     }
 
     /// Mirror a successful native xAI login into the live route config.
@@ -6080,8 +6026,6 @@ impl Config {
     pub(crate) fn refresh_provider_routes_from(&mut self, fresh: &Self) {
         self.custom_models.clone_from(&fresh.custom_models);
         self.provider.clone_from(&fresh.provider);
-        self.api_key.clone_from(&fresh.api_key);
-        self.base_url.clone_from(&fresh.base_url);
         self.http_headers.clone_from(&fresh.http_headers);
         self.default_text_model
             .clone_from(&fresh.default_text_model);
@@ -6096,8 +6040,7 @@ impl Config {
         self.providers.clone_from(&fresh.providers);
         self.base_url_env_receipt
             .clone_from(&fresh.base_url_env_receipt);
-        self.root_base_url_owner
-            .clone_from(&fresh.root_base_url_owner);
+        self.legacy_root.clone_from(&fresh.legacy_root);
         self.reasoning_effort_inferred_from_legacy_alias =
             fresh.reasoning_effort_inferred_from_legacy_alias;
         self.migrated_deepseek_model_alias
@@ -6144,6 +6087,37 @@ impl Config {
             return self
                 .provider_config_for(ApiProvider::Siliconflow)
                 .and_then(get);
+        }
+        None
+    }
+
+    /// [`Config::provider_config_string_with_runtime_fallback`] for a route's
+    /// endpoint or key. DeepSeek-CN also reads `[providers.deepseek]`: the two
+    /// identities used to share the top-level `base_url` / `api_key`, which
+    /// now live there (#6394). Only these two fields are shared — never the
+    /// model — and never a DeepSeek value the environment addressed to the
+    /// DeepSeek identity alone.
+    pub(crate) fn provider_route_string_with_deepseek_fallback<F>(
+        &self,
+        provider: ApiProvider,
+        get: F,
+    ) -> Option<String>
+    where
+        F: Fn(&ProviderConfig) -> Option<String>,
+    {
+        if let Some(value) = self.provider_config_string_with_runtime_fallback(provider, &get) {
+            return Some(value);
+        }
+        if provider == ApiProvider::DeepseekCN
+            && !matches!(
+                &self.base_url_env_receipt,
+                BaseUrlEnvReceipt::Route(ApiProvider::Deepseek, _)
+            )
+        {
+            return self
+                .provider_config_for(ApiProvider::Deepseek)
+                .and_then(get)
+                .filter(|value| !value.trim().is_empty());
         }
         None
     }
@@ -6267,6 +6241,53 @@ impl Config {
         }
 
         deepseek_alias_deprecation(&alias)
+    }
+
+    /// The root `default_text_model` alias is the *active* route's fallback.
+    /// When a switch to `incoming` leaves a route that has no model leaf of its
+    /// own and was actually resolving the alias, return that outgoing identity
+    /// and value: the choice belongs to the outgoing route and must follow it
+    /// onto its own leaf, rather than stay at the root where the incoming route
+    /// would inherit it and the outgoing route would forget it (falling back to
+    /// its catalog default on the way back). The alias is `default_text_model`
+    /// or, when that is unset, the legacy root `model` it falls back to. A
+    /// persisted writer that moves it clears both roots
+    /// (`config_persistence::unset_root_model_aliases`); clearing only the
+    /// first would resurrect the second on the incoming route after reload.
+    pub(crate) fn root_model_alias_owned_by_outgoing(
+        &self,
+        incoming: &ProviderIdentity,
+    ) -> Option<(ProviderIdentity, String)> {
+        // `default_model` reads the legacy root `model` whenever
+        // `default_text_model` is unset, so the effective alias is either one.
+        let value = self
+            .default_text_model
+            .as_deref()
+            .or(self.legacy_model.as_deref())?
+            .trim();
+        if value.is_empty()
+            || value.eq_ignore_ascii_case("auto")
+            || value.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let outgoing = self.active_provider_identity(self.api_provider()).ok()?;
+        // An unnamed custom route stores its model in the alias itself.
+        if outgoing == *incoming
+            || (outgoing.provider == ApiProvider::Custom && outgoing.persisted_id().is_none())
+        {
+            return None;
+        }
+        let mut scoped = self.clone();
+        scoped.scope_to_provider_identity(&outgoing);
+        if scoped
+            .provider_config_for(outgoing.provider)
+            .and_then(|entry| entry.model.as_deref())
+            .is_some()
+        {
+            return None;
+        }
+        (scoped.default_model() == value).then(|| (outgoing, value.to_string()))
     }
 
     #[must_use]
@@ -6483,8 +6504,9 @@ impl Config {
     /// owns, in precedence order:
     ///
     /// 1. its own `[providers.<table>]` entry (including in-memory runtime
-    ///    overrides), plus the legacy root `base_url` where that field still
-    ///    belongs to the route;
+    ///    overrides; DeepSeek-CN also reads `[providers.deepseek]`). A legacy
+    ///    top-level `base_url` was moved into its owner's table on parse
+    ///    (#6394);
     /// 2. its provider-specific environment contract (`MOONSHOT_BASE_URL`,
     ///    `OPENAI_BASE_URL`, ...), which names exactly one provider and is
     ///    therefore sound to read for a route that is not the session's;
@@ -6521,104 +6543,17 @@ impl Config {
             self.custom_provider_entry_for_identity(identity)
                 .and_then(|entry| entry.base_url.clone())
         } else {
-            self.provider_config_string_with_runtime_fallback(provider, |entry| {
+            self.provider_route_string_with_deepseek_fallback(provider, |entry| {
                 entry.base_url.clone()
             })
-        };
-        // Root `base_url` is normally the legacy DeepSeek field. Xiaomi MiMo
-        // also reads it when its table has no endpoint. OpenAI Codex must not:
-        // a legacy DeepSeek endpoint would otherwise turn a normal Codex OAuth
-        // switch into a custom route and make the saved Codex CLI login unusable.
-        // NvidiaNim has a back-compat sniff (integrate.api.nvidia.com), and the
-        // literal `provider = "custom"` legacy shape retains its root endpoint.
-        // Named custom providers always read their own `[providers.<name>]`
-        // table.
-        let root_base = match provider {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-                self.route_owned_root_base_url(provider, identity)
-            }
-            // Xiaomi MiMo honours a root `base_url` when the per-provider table
-            // has none — but only when that root is an endpoint the MiMo family
-            // owns. A legacy DeepSeek root must not become this route's
-            // endpoint: the custom-endpoint guard withholds the MiMo credential
-            // from a foreign host, so the route would answer with the other
-            // vendor's unauthenticated 401 while the user believed they were
-            // testing their own key. A proxy or any other host is still
-            // expressible on `[providers.xiaomi_mimo] base_url`.
-            ApiProvider::XiaomiMimo => self
-                .route_owned_root_base_url(provider, identity)
-                .filter(|base| xiaomi_mimo_root_belongs_to_provider(base)),
-            ApiProvider::DeepseekAnthropic => None,
-            ApiProvider::NvidiaNim => self
-                .route_owned_root_base_url(provider, identity)
-                .filter(|base| base.contains("integrate.api.nvidia.com")),
-            ApiProvider::Openai
-            | ApiProvider::Anthropic
-            | ApiProvider::Openmodel
-            | ApiProvider::Atlascloud
-            | ApiProvider::WanjieArk
-            | ApiProvider::Openrouter
-            | ApiProvider::Orcarouter
-            | ApiProvider::OpenaiCodex
-            | ApiProvider::Novita
-            | ApiProvider::Fireworks
-            | ApiProvider::Siliconflow
-            | ApiProvider::SiliconflowCn
-            | ApiProvider::Arcee
-            | ApiProvider::Moonshot
-            | ApiProvider::Sglang
-            | ApiProvider::Vllm
-            | ApiProvider::Ollama
-            | ApiProvider::OllamaCloud
-            | ApiProvider::Volcengine
-            | ApiProvider::Huggingface
-            | ApiProvider::Modelscope
-            | ApiProvider::Deepinfra
-            | ApiProvider::Together
-            | ApiProvider::Qianfan
-            | ApiProvider::Zai
-            | ApiProvider::Stepfun
-            | ApiProvider::Minimax
-            | ApiProvider::MinimaxAnthropic
-            | ApiProvider::Sakana
-            | ApiProvider::LongCat
-            | ApiProvider::OpencodeGo
-            | ApiProvider::OpencodeZen
-            | ApiProvider::Meta
-            | ApiProvider::Xai
-            | ApiProvider::Mistral
-            | ApiProvider::Google
-            | ApiProvider::Antigravity
-            | ApiProvider::Telecomjs
-            | ApiProvider::Edenai
-            | ApiProvider::Zenmux
-            | ApiProvider::Csdn
-            | ApiProvider::Concentrate
-            | ApiProvider::Codewhale
-            | ApiProvider::ModelstudioTokenPlan
-            | ApiProvider::ModelstudioTokenPlanAnthropic
-            | ApiProvider::ModelstudioCodingPlan
-            | ApiProvider::ModelstudioCodingPlanAnthropic => None,
-            // The legacy root endpoint belongs to the literal `custom`
-            // identity only. A named custom child asking about its own table
-            // must not inherit it.
-            ApiProvider::Custom
-                if identity_is_literal_custom(identity)
-                    && self.uses_legacy_literal_custom_route() =>
-            {
-                self.route_owned_root_base_url(provider, identity)
-            }
-            // Named custom routes read their base URL from `provider_base`.
-            ApiProvider::Custom => None,
         };
         // A provider-scoped endpoint variable names exactly one provider, so it
         // resolves for the selected identity whether or not that identity is
         // the session route. `apply_env_overrides` only merges these into the
         // active provider's table, which is why a non-active route has to read
         // them here instead of relying on the merged config.
-        let configured_base_url = provider_base
-            .or(root_base)
-            .or_else(|| provider_env_base_url_override(provider));
+        let configured_base_url =
+            provider_base.or_else(|| provider_env_base_url_override(provider));
         let entry = self.provider_config_for(provider);
         let mode = entry.and_then(|e| e.mode.as_deref());
         let wire = entry.and_then(|e| e.wire.as_deref());
@@ -6757,31 +6692,6 @@ impl Config {
         }
     }
 
-    /// The legacy root `base_url`, unless an environment write addressed it to
-    /// a different route.
-    ///
-    /// `Deepseek` and `DeepseekCN` share this one field. A user who writes
-    /// `base_url` in their config file still means it for both identities —
-    /// that legacy compatibility is preserved by `None` ownership. But when
-    /// [`apply_env_overrides`] wrote the value, it wrote it for exactly the
-    /// identity that was active, and a pinned child of the sibling identity
-    /// must not inherit it.
-    fn route_owned_root_base_url(&self, provider: ApiProvider, identity: &str) -> Option<String> {
-        let root = self.base_url.clone()?;
-        match &self.root_base_url_owner {
-            // File-owned legacy root: shared by every route that reads it, as
-            // it always has been.
-            BaseUrlEnvReceipt::Unrecorded => Some(root),
-            // An environment write that a higher-precedence layer has since
-            // taken authority over. It belongs to no route.
-            BaseUrlEnvReceipt::NoOwner => None,
-            BaseUrlEnvReceipt::Route(..) => self
-                .root_base_url_owner
-                .owns(provider, identity)
-                .then_some(root),
-        }
-    }
-
     /// Resolve a named custom provider's table by explicit identity.
     ///
     /// Fails closed: an empty identity, or one that names no
@@ -6849,42 +6759,23 @@ impl Config {
                 && env_base_url_override().is_some())
     }
 
+    /// The active route names its own endpoint: its `[providers.<name>]`
+    /// `base_url` (where a legacy top-level `base_url` lands too) or an
+    /// environment endpoint override. An endpoint is a configured route even
+    /// without a model or a working key.
+    pub(crate) fn active_route_endpoint_configured(&self) -> bool {
+        let provider = self.api_provider();
+        self.configured_base_url_for_provider(provider).is_some()
+            || self.active_base_url_is_environment_owned(provider)
+    }
+
     /// The endpoint `provider` owns through a file or in-memory layer, before
-    /// the environment layer is consulted.
-    ///
-    /// The legacy root field is read through
-    /// [`Config::route_owned_root_base_url`] so an environment write addressed
-    /// to one identity is not mistaken for the sibling identity's configured
-    /// endpoint. DeepSeek and Xiaomi MiMo honour root `base_url` when their
-    /// per-provider table has none. OpenAI Codex does not: its OAuth login is
-    /// valid only for the official route, not an inherited legacy endpoint.
+    /// the environment layer is consulted: its own `[providers.<name>]` table
+    /// (DeepSeek-CN also reading `[providers.deepseek]`). There is no
+    /// top-level endpoint any more (#6394).
     fn configured_base_url_for_provider(&self, provider: ApiProvider) -> Option<String> {
-        let identity = self.provider_identity_for(provider);
-        let provider_base = self
-            .provider_config_string_with_runtime_fallback(provider, |entry| entry.base_url.clone());
-        match provider {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-                provider_base.or_else(|| self.route_owned_root_base_url(provider, &identity))
-            }
-            // Same rule as `base_url_for_route`: the legacy root is a DeepSeek
-            // field, so only a MiMo-owned endpoint may be inherited from it.
-            // Every layer that reads the root has to agree, or route
-            // canonicalization and credential scoping disagree about which
-            // endpoint this route owns.
-            ApiProvider::XiaomiMimo => provider_base.or_else(|| {
-                self.route_owned_root_base_url(provider, &identity)
-                    .filter(|base| xiaomi_mimo_root_belongs_to_provider(base))
-            }),
-            ApiProvider::NvidiaNim => provider_base.or_else(|| {
-                self.route_owned_root_base_url(provider, &identity)
-                    .filter(|base| base.contains("integrate.api.nvidia.com"))
-            }),
-            ApiProvider::Custom if self.uses_legacy_literal_custom_route() => {
-                provider_base.or_else(|| self.route_owned_root_base_url(provider, &identity))
-            }
-            _ => provider_base,
-        }
-        .filter(|base| !base.trim().is_empty())
+        self.provider_route_string_with_deepseek_fallback(provider, |entry| entry.base_url.clone())
+            .filter(|base| !base.trim().is_empty())
     }
 
     /// Whether model ids for `provider` belong to the configured endpoint.
@@ -6989,8 +6880,9 @@ impl Config {
         // Reusing that slot for `[providers.<name>]` could send endpoint A's
         // bearer token to endpoint B. Named routes therefore resolve only
         // their own config/auth/api_key_env sources. The generic slot remains
-        // valid solely for the literal legacy root-field custom route.
-        if provider == ApiProvider::Custom && !self.uses_legacy_literal_custom_route() {
+        // valid solely for the literal `custom` route (whose older top-level
+        // endpoint now lives in `[providers.custom]`, #6394).
+        if provider == ApiProvider::Custom && !self.selects_literal_custom_provider() {
             return true;
         }
 
@@ -7064,10 +6956,18 @@ impl Config {
     /// provider/root config → configured custom-provider environment →
     /// secret store → ambient provider environment**.
     ///
-    /// The in-memory `self.api_key` override is only honored when the user
+    /// An in-memory provider-table key is only honored when the user
     /// explicitly set the field (not the legacy `API_KEYRING_SENTINEL`
     /// placeholder, not empty whitespace).
     pub fn active_route_api_key(&self) -> Result<String> {
+        self.active_route_api_key_with_source().map(|(key, _)| key)
+    }
+
+    /// The active route's key with a display label naming its source
+    /// (secret store slot, config file, env var name, CLI, OAuth, …) for
+    /// authentication diagnostics. The key is normalized with
+    /// [`codewhale_secrets::normalize_api_key`] (#6528).
+    pub fn active_route_api_key_with_source(&self) -> Result<(String, String)> {
         self.active_route_api_key_with_secret_store_mode(false)
     }
 
@@ -7081,6 +6981,15 @@ impl Config {
     /// behavior.
     pub(crate) fn active_route_api_key_read_only(&self) -> Result<String> {
         self.active_route_api_key_with_secret_store_mode(true)
+            .map(|(key, _)| key)
+    }
+
+    fn active_route_api_key_with_secret_store_mode(
+        &self,
+        read_only: bool,
+    ) -> Result<(String, String)> {
+        self.resolve_active_route_api_key(read_only)
+            .map(|(key, source)| (codewhale_secrets::normalize_api_key(&key), source))
     }
 
     /// Clone this route with a diagnostic-only credential in its in-memory
@@ -7099,24 +7008,23 @@ impl Config {
         Ok(diagnostic)
     }
 
-    fn active_route_api_key_with_secret_store_mode(&self, read_only: bool) -> Result<String> {
+    /// The active route's key and a display label for where it came from
+    /// (#6528). Callers go through [`Self::active_route_api_key_with_source`],
+    /// which normalizes the key.
+    fn resolve_active_route_api_key(&self, read_only: bool) -> Result<(String, String)> {
+        let keyless = || (String::new(), "none (keyless route)".to_string());
         let provider = self.api_provider();
         if provider == ApiProvider::Antigravity {
             anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
         }
         let auth_mode = self.auth_mode_for_provider(provider);
         if auth_mode_disables_api_key(auth_mode.as_deref()) {
-            return Ok(String::new());
+            return Ok(keyless());
         }
         let custom_endpoint = self.provider_uses_custom_endpoint(provider);
         let explicit_cli_key = explicit_cli_api_key_override();
 
-        // 0. Legacy root compatibility slot. The top-level `api_key` belongs
-        // to DeepSeek, plus the literal root-field `provider = "custom"`
-        // compatibility route. Provider-specific keys below must win for all
-        // named/custom-table routes so a stale root key is not sent elsewhere.
-        //
-        // However, when the CLI dispatcher forwards an explicit `--api-key`
+        // 0. When the CLI dispatcher forwards an explicit `--api-key`
         // through the provider-neutral CLI bridge with its source marker, that
         // intentional override must win over the saved root key. This is
         // essential for DeepSeek-compatible subscription endpoints where the
@@ -7124,21 +7032,17 @@ impl Config {
         //   codewhale --provider deepseek --api-key ark-... --base-url ... --model auto
         if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
             && cli_api_key_source().as_deref() == Some("cli")
-            && let Some(env_key) = explicit_cli_key
+            && let Some((env_key, source)) = explicit_cli_key
                 .as_ref()
                 .cloned()
-                .or_else(|| provider_env_api_key(provider))
+                .map(|key| (key, "--api-key (CLI)".to_string()))
+                .or_else(|| {
+                    provider_env_api_key_named(provider)
+                        .map(|(name, key)| (key, format!("env var {name}")))
+                })
             && !env_key.trim().is_empty()
         {
-            return Ok(env_key);
-        }
-        if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-            && self.config_credentials_are_bound_to_provider_endpoint(provider)
-            && let Some(configured) = self.api_key.as_ref()
-            && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
-        {
-            warn_on_config_api_key_shadowing(self, provider, "the root api_key");
-            return Ok(configured.clone());
+            return Ok((env_key, source));
         }
 
         if provider == ApiProvider::Moonshot
@@ -7167,7 +7071,8 @@ impl Config {
                 .is_some_and(provider_config_uses_xai_oauth)
             && crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, self)
         {
-            return crate::oauth::get_xai_access_token(self);
+            return crate::oauth::get_xai_access_token(self)
+                .map(|key| (key, "xAI OAuth login".to_string()));
         }
 
         // OpenAI Codex (ChatGPT) can read an existing Codex CLI OAuth login
@@ -7175,7 +7080,10 @@ impl Config {
         // rewrites that file. Explicit env overrides remain process-scoped.
         if provider == ApiProvider::OpenaiCodex && !custom_endpoint {
             if let Some(credentials) = crate::oauth::credentials_from_env() {
-                return Ok(credentials.access_token);
+                return Ok((
+                    credentials.access_token,
+                    "OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                ));
             }
             let path = crate::oauth::auth_file_path();
             let grant = self.external_credential_read_grant(
@@ -7183,7 +7091,10 @@ impl Config {
                 codewhale_config::ExternalCredentialSource::CodexCli,
                 &path,
             )?;
-            return Ok(crate::oauth::get_credentials(&grant)?.access_token);
+            return Ok((
+                crate::oauth::get_credentials(&grant)?.access_token,
+                "Codex CLI login (consented)".to_string(),
+            ));
         }
 
         // The dispatcher cannot know the effective provider until the TUI
@@ -7191,14 +7102,14 @@ impl Config {
         // therefore wins over saved API-key slots here, after OAuth routes
         // have made their own credential decision.
         if let Some(value) = explicit_cli_key {
-            return Ok(value);
+            return Ok((value, "--api-key (CLI)".to_string()));
         }
 
         // 1. Config file (provider-scoped slot). This intentionally wins
         // over ambient env so `codewhale auth set` fixes stale shell exports.
         if self.config_credentials_are_bound_to_provider_endpoint(provider)
             && let Some(configured) = self
-                .provider_config_string_with_runtime_fallback(provider, |entry| {
+                .provider_route_string_with_deepseek_fallback(provider, |entry| {
                     entry.api_key.clone()
                 })
             && classify_config_api_key_value(&configured) == ConfigApiKeyValueKind::Literal
@@ -7208,16 +7119,7 @@ impl Config {
                 Err(_) => "the provider config-table api_key".to_string(),
             };
             warn_on_config_api_key_shadowing(self, provider, &config_source);
-            return Ok(configured);
-        }
-        if provider == ApiProvider::Custom
-            && self.uses_legacy_literal_custom_route()
-            && self.config_credentials_are_bound_to_provider_endpoint(provider)
-            && let Some(configured) = self.api_key.as_ref()
-            && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
-        {
-            warn_on_config_api_key_shadowing(self, provider, "the root api_key");
-            return Ok(configured.clone());
+            return Ok((configured, format!("config file ({config_source})")));
         }
 
         // 1b. A route can explicitly bind an environment variable by name via
@@ -7236,7 +7138,9 @@ impl Config {
             && let Some(env_name) = bound_provider_api_key_env_name(self, provider)
         {
             return match std::env::var(&env_name) {
-                Ok(value) if !value.trim().is_empty() => Ok(value),
+                Ok(value) if !value.trim().is_empty() => {
+                    Ok((value, format!("env var {env_name} (api_key_env)")))
+                }
                 _ => {
                     let route_name = self.provider.as_deref().unwrap_or("<name>");
                     Err(anyhow::anyhow!(
@@ -7249,7 +7153,8 @@ impl Config {
             };
         }
         if let Some(value) = provider_config_env_api_key(self, provider) {
-            return Ok(value);
+            let name = bound_provider_api_key_env_name(self, provider).unwrap_or_default();
+            return Ok((value, format!("env var {name} (api_key_env)")));
         }
 
         // 2. The dispatcher resolves this same provider slot before launching
@@ -7260,7 +7165,13 @@ impl Config {
         if !self.should_skip_secret_store_for_provider(provider)
             && let Some(value) = provider_secret_store_api_key_with_mode(self, provider, read_only)
         {
-            return Ok(value);
+            return Ok((
+                value,
+                format!(
+                    "secret store slot `{}`",
+                    provider_secret_store_slot(provider)
+                ),
+            ));
         }
 
         // 3. Ambient provider environment variables are scoped to official
@@ -7275,13 +7186,13 @@ impl Config {
                 xiaomi_mimo_env_api_key_for_runtime(mode, Some(&self.active_route_base_url()))
                 && !value.trim().is_empty()
             {
-                return Ok(value);
+                return Ok((value, format!("env var ({})", provider.env_vars_label())));
             }
         }
         if !self.should_skip_secret_store_for_provider(provider)
-            && let Some(value) = provider_env_api_key(provider)
+            && let Some((name, value)) = provider_env_api_key_named(provider)
         {
-            return Ok(value);
+            return Ok((value, format!("env var {name}")));
         }
 
         // Official DeepSeek Harness credentials, only after explicit
@@ -7298,14 +7209,17 @@ impl Config {
                 &path,
             ) && let Some(value) = crate::dsh_credentials::deepseek_api_key_from_grant(&grant)?
             {
-                return Ok(value);
+                return Ok((
+                    value,
+                    "DeepSeek Harness credentials (consented)".to_string(),
+                ));
             }
         }
 
         // Account auth is a reversible fallback, never an overwrite of an
         // environment, config-file, or durable provider credential.
         if let Some(key) = self.account_model_api_key(provider) {
-            return Ok(key);
+            return Ok((key, "Codewhale account".to_string()));
         }
 
         // The Codewhale API always authenticates. It is not a self-hosted
@@ -7318,7 +7232,7 @@ impl Config {
             && (provider_route_is_keyless_self_hosted(provider, &self.active_route_base_url())
                 || base_url_uses_local_host(&self.active_route_base_url()))
         {
-            return Ok(String::new());
+            return Ok(keyless());
         }
 
         if custom_endpoint {
@@ -7433,14 +7347,14 @@ impl Config {
             }
             // Self-hosted deployments commonly run without auth on localhost.
             // Return an empty key and let the client omit the Authorization header.
-            ApiProvider::Sglang | ApiProvider::Vllm => Ok(String::new()),
+            ApiProvider::Sglang | ApiProvider::Vllm => Ok(keyless()),
             ApiProvider::Ollama
                 if provider_route_is_keyless_self_hosted(
                     provider,
                     &self.active_route_base_url(),
                 ) =>
             {
-                Ok(String::new())
+                Ok(keyless())
             }
             ApiProvider::Ollama => {
                 let help =
@@ -7692,14 +7606,13 @@ impl Config {
             })
     }
 
-    /// Return the configured vision model config, inheriting api_key from main config.
+    /// Return the configured vision model config. A `[vision_model]` that
+    /// used to inherit the top-level `api_key` carries its own copy since
+    /// parsing moved that key (#6394); nothing else is inherited, so a
+    /// DeepSeek key never follows `vision_model.base_url` to another host.
     #[must_use]
     pub fn vision_model_config(&self) -> Option<VisionModelConfig> {
-        let mut config = self.vision_model.clone()?;
-        if config.api_key.is_none() {
-            config.api_key = self.api_key.clone();
-        }
-        Some(config)
+        self.vision_model.clone()
     }
 
     #[must_use]
@@ -8070,8 +7983,8 @@ impl Config {
     /// R1: resolved cumulative per-turn wall-clock budget.
     ///
     /// Reads `[tui].turn_wall_clock_secs`, falling back to the
-    /// `CODEWHALE_TURN_WALL_CLOCK_SECS` env var, then to the finite
-    /// default. `0` resolves to the default; it never means "unlimited".
+    /// `CODEWHALE_TURN_WALL_CLOCK_SECS` env var, then to no limit. `0`
+    /// also means no limit.
     #[must_use]
     pub fn turn_wall_clock(&self) -> std::time::Duration {
         let raw = self
@@ -8162,19 +8075,41 @@ impl Config {
             for (key, pin) in entries {
                 // Keep blank explicit pins so admission rejects them rather
                 // than silently inheriting a different route.
-                let value = pin.model.trim();
-                let pin = match value.split_once('/') {
-                    Some((provider, model)) => SubagentModelOverride {
-                        provider: Some(provider.trim().to_string()),
-                        model: model.trim().to_string(),
-                    },
-                    None => value.into(),
-                };
-                overrides.insert(canonical(key), pin);
+                overrides.insert(canonical(key), parse_subagent_role_pin(&pin.model));
             }
         }
 
         overrides
+    }
+
+    /// The operator-approved replacement routes declared beside the role pin
+    /// that [`Self::subagent_model_overrides`] resolved under `key`. A
+    /// canonical role key wins over a legacy alias, matching pin precedence.
+    pub fn subagent_route_replacements(&self, key: &str) -> Vec<SubagentModelOverride> {
+        let Some(roles) = self.subagents.as_ref().and_then(|cfg| cfg.roles.as_ref()) else {
+            return Vec::new();
+        };
+        let canonical = |raw: &str| {
+            let raw = raw.trim().to_ascii_lowercase();
+            if raw == "default" {
+                raw
+            } else {
+                crate::fleet::role::migrate_legacy_role_token(&raw)
+                    .unwrap_or(&raw)
+                    .to_string()
+            }
+        };
+        roles
+            .iter()
+            .filter(|(raw, _)| canonical(raw) == key)
+            .max_by_key(|(raw, _)| (canonical(raw) == raw.trim().to_ascii_lowercase(), *raw))
+            .map(|(_, pin)| {
+                pin.replacements
+                    .iter()
+                    .map(|route| parse_subagent_role_pin(route))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Parsed `[fleet]` table, or defaults when the table is absent
@@ -8479,6 +8414,10 @@ pub(crate) fn is_workspace_trusted(workspace: &Path) -> bool {
 }
 
 pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
+    set_workspace_trust(workspace, true)
+}
+
+pub(crate) fn set_workspace_trust(workspace: &Path, trusted: bool) -> Result<PathBuf> {
     let config_path =
         try_default_config_path().context("Failed to resolve config path for workspace trust.")?;
     ensure_parent_dir(&config_path)?;
@@ -8488,7 +8427,7 @@ pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
         crate::config_persistence::set_document_value(
             doc,
             &["projects", project_key.as_str(), "trust_level"],
-            "trusted",
+            if trusted { "trusted" } else { "untrusted" },
         )
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
@@ -8581,7 +8520,7 @@ default_text_model = "{DEFAULT_TEXT_MODEL}"
 
 # Thinking mode (DeepSeek V4 reasoning effort):
 # "auto" | "off" | "low" | "medium" | "high" | "max"
-# Shift+Tab in the TUI cycles between off / high / max.
+# Ctrl+T in the TUI (or /effort) cycles the active model's effort levels.
 reasoning_effort = "auto"
 
 # Startup update check
@@ -8598,8 +8537,8 @@ check_for_updates = true
 
 // === Environment Overrides ===
 
-/// Read the `DEEPSEEK_BASE_URL` / `CODEWHALE_BASE_URL` env var that the CLI
-/// dispatcher forwards from `--base-url`.  Returns `None` when the var is
+/// Read the `CODEWHALE_BASE_URL` env var that the CLI dispatcher forwards from
+/// `--base-url`, or the user-set legacy `DEEPSEEK_BASE_URL` alias.  Returns `None` when the var is
 /// absent or empty so that provider-specific defaults still apply.
 fn env_base_url_override() -> Option<String> {
     codewhale_env_var("CODEWHALE_BASE_URL", "DEEPSEEK_BASE_URL")
@@ -8759,19 +8698,12 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             && first_nonempty_env(&["OLLAMA_BASE_URL"]).is_some());
     if let Ok(value) = codewhale_env_var("CODEWHALE_BASE_URL", "DEEPSEEK_BASE_URL") {
         match config.api_provider() {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-                // DeepSeek and DeepSeek-CN share this one legacy root field.
-                // Record which of them the environment addressed so the
-                // sibling identity cannot inherit the value, while a
-                // file-owned root (no owner recorded) stays shared.
-                config.base_url = Some(value);
-                // Resolve the owner *after* the write: the root value is one
-                // of the inputs `api_provider()` sniffs, so the effective
-                // identity is the post-write one, matching the receipt
-                // recorded at the end of this function.
-                let owner = config.api_provider();
-                config.root_base_url_owner =
-                    BaseUrlEnvReceipt::Route(owner, config.provider_identity_for(owner));
+            // The environment addresses the active identity's own table.
+            // DeepSeek-CN's fallback to `[providers.deepseek]` checks the
+            // receipt recorded below, so an env value written for DeepSeek
+            // never reaches the sibling identity.
+            provider @ (ApiProvider::Deepseek | ApiProvider::DeepseekCN) => {
+                config.provider_config_for_mut(provider).base_url = Some(value);
             }
             ApiProvider::DeepseekAnthropic => {
                 config
@@ -9137,8 +9069,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .base_url = Some(value);
     }
     // OpenAI-compatible and non-DeepSeek hosted providers are scoped only on
-    // their own provider entry — the legacy root `base_url` keeps DeepSeek-only
-    // semantics.
+    // their own provider entry.
     if matches!(config.api_provider(), ApiProvider::Openai)
         && let Ok(value) = std::env::var("OPENAI_BASE_URL")
         && !value.trim().is_empty()
@@ -9432,10 +9363,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
         config.http_headers = Some(root_headers);
 
         let provider = config.api_provider();
-        // Root headers are the canonical header slot for a released literal
-        // custom route. Creating `[providers.custom]` here would make the route
-        // ambiguous and disconnect its root endpoint, model, and credential.
-        if !(provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route()) {
+        {
             // Capture the custom entry key (the selected provider name) before
             // the mutable borrow of `providers` below (#1519).
             let custom_key = (provider == ApiProvider::Custom).then(|| {
@@ -10259,13 +10187,6 @@ pub(crate) fn provider_passes_model_through(provider: ApiProvider) -> bool {
     )
 }
 
-/// Whether a provider identity key is the historical literal `custom`.
-fn identity_is_literal_custom(identity: &str) -> bool {
-    identity
-        .trim()
-        .eq_ignore_ascii_case(ApiProvider::Custom.as_str())
-}
-
 fn provider_entry_uses_custom_base_url(provider: ApiProvider, entry: &ProviderConfig) -> bool {
     entry
         .base_url
@@ -10318,19 +10239,6 @@ fn xiaomi_mimo_base_url_uses_token_plan(base_url: &str) -> bool {
     normalized == XIAOMI_MIMO_TOKEN_PLAN_CN_BASE_URL
         || normalized == XIAOMI_MIMO_TOKEN_PLAN_SGP_BASE_URL
         || normalized == XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL
-}
-
-/// Whether a legacy *root* `base_url` may be inherited by the MiMo route.
-///
-/// One owner for the family definition: `provider_base_url_is_official` in
-/// `codewhale-config` is the same predicate route canonicalization and
-/// credential scoping use, so the endpoint this route advertises and the
-/// endpoint its credential is scoped to cannot disagree.
-fn xiaomi_mimo_root_belongs_to_provider(base_url: &str) -> bool {
-    codewhale_config::provider_base_url_is_official(
-        codewhale_config::ProviderKind::XiaomiMimo,
-        base_url,
-    )
 }
 
 fn xiaomi_mimo_env_var(candidates: &[&str]) -> Option<String> {
@@ -10583,21 +10491,6 @@ pub(crate) fn is_exact_direct_moonshot_k3_route(
     provider == ApiProvider::Moonshot
         && moonshot_base_url_is_exact_direct_platform(base_url)
         && model.trim().eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL)
-}
-
-/// Whether a route is exactly xAI's first-party Grok 4.6 endpoint.
-#[must_use]
-pub(crate) fn is_exact_xai_grok_4_6_route(
-    provider: ApiProvider,
-    base_url: &str,
-    model: &str,
-) -> bool {
-    provider == ApiProvider::Xai
-        && codewhale_config::provider::is_exact_xai_platform_route(
-            codewhale_config::ProviderKind::Xai,
-            base_url,
-        )
-        && model.trim().eq_ignore_ascii_case(XAI_GROK_4_6_MODEL)
 }
 
 /// Whether a route uses either official Kimi Code K3 membership model.
@@ -11143,9 +11036,6 @@ fn apply_layer_root_model(config: &mut Config, layer: &Config) {
         return;
     }
     let provider = config.api_provider();
-    if provider == ApiProvider::Custom && config.uses_legacy_literal_custom_route() {
-        return;
-    }
     let mut scoped = layer.clone();
     if let Ok(identity) = config.active_provider_identity(provider) {
         scoped.scope_to_provider_identity(&identity);
@@ -11191,14 +11081,10 @@ fn apply_profile(config: ConfigFile, profile: Option<&str>) -> Result<Config> {
 }
 
 fn merge_config(base: Config, override_cfg: Config) -> Config {
-    // Captured before the struct literal moves the field out of `override_cfg`.
-    let override_defines_root_base_url = override_cfg.base_url.is_some();
     Config {
         custom_models: override_cfg.custom_models.or(base.custom_models),
         provider: override_cfg.provider.or(base.provider),
         telemetry: override_cfg.telemetry.or(base.telemetry),
-        api_key: override_cfg.api_key.or(base.api_key),
-        base_url: override_cfg.base_url.or(base.base_url),
         http_headers: override_cfg.http_headers.or(base.http_headers),
         default_text_model: override_cfg
             .default_text_model
@@ -11307,6 +11193,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         control_socket: override_cfg.control_socket.or(base.control_socket),
         providers: merge_providers(base.providers, override_cfg.providers),
         features: merge_features(base.features, override_cfg.features),
+        extension_host: override_cfg.extension_host.or(base.extension_host),
         notifications: override_cfg.notifications.or(base.notifications),
         approval: override_cfg.approval.or(base.approval),
         network: override_cfg.network.or(base.network),
@@ -11324,28 +11211,10 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         cloud_facts: override_cfg.cloud_facts.or(base.cloud_facts),
         lsp: override_cfg.lsp.or(base.lsp),
         context: ContextConfig {
-            enabled: override_cfg.context.enabled.or(base.context.enabled),
             project_pack: override_cfg
                 .context
                 .project_pack
                 .or(base.context.project_pack),
-            verbatim_window_turns: override_cfg
-                .context
-                .verbatim_window_turns
-                .or(base.context.verbatim_window_turns),
-            l1_threshold: override_cfg
-                .context
-                .l1_threshold
-                .or(base.context.l1_threshold),
-            l2_threshold: override_cfg
-                .context
-                .l2_threshold
-                .or(base.context.l2_threshold),
-            l3_threshold: override_cfg
-                .context
-                .l3_threshold
-                .or(base.context.l3_threshold),
-            seam_model: override_cfg.context.seam_model.or(base.context.seam_model),
         },
         compaction: override_cfg.compaction.or(base.compaction),
         fleet: override_cfg.fleet.or(base.fleet),
@@ -11359,16 +11228,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
             BaseUrlEnvReceipt::Unrecorded => base.base_url_env_receipt,
             recorded => recorded,
         },
-        // A layer that supplies its own root `base_url` replaces the
-        // environment's write, so that layer's ownership wins outright.
-        root_base_url_owner: if override_defines_root_base_url {
-            override_cfg.root_base_url_owner
-        } else {
-            match override_cfg.root_base_url_owner {
-                BaseUrlEnvReceipt::Unrecorded => base.root_base_url_owner,
-                recorded => recorded,
-            }
-        },
+        legacy_root: base.legacy_root,
         account_model_access: base.account_model_access,
         runtime_chat_isolated: override_cfg.runtime_chat_isolated || base.runtime_chat_isolated,
         runtime_thread_inference_unrelated: override_cfg.runtime_thread_inference_unrelated
@@ -11568,13 +11428,171 @@ fn merge_providers(
 fn load_single_config_file(path: &Path) -> Result<Config> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-    let parsed: ConfigFile = toml::from_str(&contents).map_err(|_| {
+    let parsed = parse_config_file(&contents).map_err(|_| {
         anyhow::anyhow!(
             "Failed to parse config file {}; file contents were omitted",
             codewhale_config::quote_os_path(path)
         )
     })?;
     Ok(*parsed.base)
+}
+
+/// Table key for a built-in route's `[providers.<key>]` entry.
+#[cfg(test)]
+fn test_provider_table_key(provider: ApiProvider) -> Option<&'static str> {
+    match provider {
+        ApiProvider::Deepseek => Some("deepseek"),
+        ApiProvider::DeepseekCN => Some("deepseek_cn"),
+        ApiProvider::Custom => None,
+        other => provider_config_key(other).ok(),
+    }
+}
+
+#[cfg(test)]
+impl Config {
+    /// Test shorthand for a config file's legacy top-level `api_key` /
+    /// `base_url`: they go through the #6394 canonicalizer exactly as a
+    /// parsed file's would, landing in whichever table owns them.
+    pub(crate) fn with_legacy_root(
+        mut self,
+        api_key: Option<String>,
+        base_url: Option<String>,
+    ) -> Self {
+        self.set_legacy_root(api_key, base_url);
+        self
+    }
+
+    /// `[providers.deepseek] api_key`, where a legacy top-level key lands.
+    pub(crate) fn deepseek_table_api_key(&self) -> Option<&str> {
+        self.provider_config_for(ApiProvider::Deepseek)
+            .and_then(|entry| entry.api_key.as_deref())
+    }
+
+    /// `[providers.deepseek] base_url`, where a legacy top-level endpoint
+    /// lands.
+    pub(crate) fn deepseek_table_base_url(&self) -> Option<&str> {
+        self.provider_config_for(ApiProvider::Deepseek)
+            .and_then(|entry| entry.base_url.as_deref())
+    }
+
+    /// In-place form of [`Config::with_legacy_root`].
+    pub(crate) fn set_legacy_root(&mut self, api_key: Option<String>, base_url: Option<String>) {
+        use toml::Value;
+        let mut root = toml::Table::new();
+        if let Some(provider) = &self.provider {
+            root.insert("provider".into(), Value::String(provider.clone()));
+        }
+        if let Some(model) = self
+            .default_text_model
+            .clone()
+            .or(self.legacy_model.clone())
+        {
+            root.insert("default_text_model".into(), Value::String(model));
+        }
+        if let Some(key) = api_key {
+            root.insert("api_key".into(), Value::String(key));
+        }
+        if let Some(url) = base_url {
+            root.insert("base_url".into(), Value::String(url));
+        }
+        let entry_table = |entry: &ProviderConfig| {
+            let mut table = toml::Table::new();
+            if let Some(key) = &entry.api_key {
+                table.insert("api_key".into(), Value::String(key.clone()));
+            }
+            if let Some(url) = &entry.base_url {
+                table.insert("base_url".into(), Value::String(url.clone()));
+            }
+            if let Some(model) = &entry.model {
+                table.insert("model".into(), Value::String(model.clone()));
+            }
+            if let Some(kind) = &entry.kind {
+                table.insert("kind".into(), Value::String(kind.clone()));
+            }
+            table
+        };
+        let mut providers = toml::Table::new();
+        if let Some(configured) = self.providers.as_ref() {
+            for provider in ApiProvider::all() {
+                if let (Some(key), Some(entry)) = (
+                    test_provider_table_key(*provider),
+                    self.provider_config_for(*provider),
+                ) {
+                    providers.insert(key.to_string(), Value::Table(entry_table(entry)));
+                }
+            }
+            for (name, entry) in &configured.custom {
+                providers.insert(name.clone(), Value::Table(entry_table(entry)));
+            }
+        }
+        root.insert("providers".into(), Value::Table(providers));
+        if let Some(vision) = &self.vision_model {
+            let mut table = toml::Table::new();
+            if let Some(key) = &vision.api_key {
+                table.insert("api_key".into(), Value::String(key.clone()));
+            }
+            root.insert("vision_model".into(), Value::Table(table));
+        }
+
+        codewhale_config::legacy_root::apply_to_table(&mut root);
+
+        if let Some(provider) = root.get("provider").and_then(Value::as_str) {
+            self.provider = Some(provider.to_string());
+        }
+        if let (Some(vision), Some(key)) = (
+            self.vision_model.as_mut(),
+            root.get("vision_model")
+                .and_then(|table| table.get("api_key"))
+                .and_then(Value::as_str),
+        ) {
+            vision.api_key = Some(key.to_string());
+        }
+        let Some(providers) = root.get("providers").and_then(Value::as_table) else {
+            return;
+        };
+        for (key, table) in providers {
+            let Some(table) = table.as_table() else {
+                continue;
+            };
+            let builtin = ApiProvider::all()
+                .iter()
+                .copied()
+                .find(|provider| test_provider_table_key(*provider) == Some(key.as_str()));
+            let entry = match builtin {
+                Some(provider) => self.provider_config_for_mut(provider),
+                None => self
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .custom
+                    .entry(key.clone())
+                    .or_default(),
+            };
+            let get = |field: &str| table.get(field).and_then(Value::as_str).map(str::to_string);
+            entry.api_key = get("api_key");
+            entry.base_url = get("base_url");
+            entry.model = get("model");
+            entry.kind = get("kind");
+        }
+    }
+}
+
+/// Parse one `config.toml`-shaped layer (no profile applied) through
+/// [`parse_config_file`], so the legacy top-level keys are canonicalized.
+pub(crate) fn parse_config_base(contents: &str) -> std::result::Result<Config, toml::de::Error> {
+    let parsed = parse_config_file(contents)?;
+    let mut config = *parsed.base;
+    config.legacy_root = parsed.legacy_root;
+    Ok(config)
+}
+
+/// Parse a `config.toml`-shaped document. The legacy top-level `base_url` /
+/// `api_key` move into their `[providers.<name>]` tables first (#6394), so no
+/// reader here ever sees them; this is the only way a `ConfigFile` is parsed.
+fn parse_config_file(contents: &str) -> std::result::Result<ConfigFile, toml::de::Error> {
+    let (text, legacy_root) = codewhale_config::legacy_root::canonicalize_text(contents)?;
+    let mut parsed = toml::from_str::<ConfigFile>(&text)?;
+    parsed.legacy_root = legacy_root;
+    Ok(parsed)
 }
 
 /// Build a one-line warning when top-level-only keys are nested under a section
@@ -11666,15 +11684,27 @@ fn apply_managed_overrides(config: &mut Config) -> Result<()> {
         // `CODEWHALE_BASE_URL` fallback for every route — including pinned
         // cross-provider children, which would then borrow an ambient host
         // that managed routing had just taken authority over.
-        merged.base_url_env_receipt = BaseUrlEnvReceipt::NoOwner;
-        // The shared legacy root field is the same ambient host by another
-        // name. If the environment wrote it, managed authority takes it from
-        // every route rather than leaving it addressed to the identity that
-        // was active before the overlay. A *file*-owned root is left alone:
-        // managed did not override it, so it stays the user's value.
-        if matches!(merged.root_base_url_owner, BaseUrlEnvReceipt::Route(..)) {
-            merged.root_base_url_owner = BaseUrlEnvReceipt::NoOwner;
+        //
+        // DeepSeek's env-written endpoint lives in its own table now that
+        // there is no shared top-level field (#6394). Managed authority takes
+        // that ambient value away from every route, as it always did.
+        if let BaseUrlEnvReceipt::Route(
+            owner @ (ApiProvider::Deepseek | ApiProvider::DeepseekCN),
+            _,
+        ) = &config.base_url_env_receipt
+            && managed
+                .provider_config_for(*owner)
+                .and_then(|entry| entry.base_url.as_ref())
+                .is_none()
+            && let Some(env_value) = env_base_url_override()
+            && merged
+                .provider_config_for(*owner)
+                .and_then(|entry| entry.base_url.as_deref())
+                == Some(env_value.as_str())
+        {
+            merged.provider_config_for_mut(*owner).base_url = None;
         }
+        merged.base_url_env_receipt = BaseUrlEnvReceipt::NoOwner;
     }
     *config = merged;
     Ok(())
@@ -11722,19 +11752,11 @@ fn config_defines_base_url_for_effective_route(source: &Config, effective: &Conf
     let provider = effective.api_provider();
     let mut source = source.clone();
     source.provider.clone_from(&effective.provider);
-    let provider_base = source
-        .provider_config_string_with_runtime_fallback(provider, |entry| entry.base_url.clone());
-    let configured = match provider {
-        ApiProvider::Deepseek | ApiProvider::DeepseekCN => provider_base.or(source.base_url),
-        ApiProvider::NvidiaNim => provider_base.or_else(|| {
-            source
-                .base_url
-                .filter(|base| base.contains("integrate.api.nvidia.com"))
-        }),
-        ApiProvider::Custom if effective.uses_legacy_literal_custom_route() => source.base_url,
-        _ => provider_base,
-    };
-    configured.is_some_and(|base| !base.trim().is_empty())
+    // A managed layer's legacy top-level endpoint was already moved into its
+    // provider table when the layer was parsed (#6394).
+    source
+        .provider_route_string_with_deepseek_fallback(provider, |entry| entry.base_url.clone())
+        .is_some_and(|base| !base.trim().is_empty())
 }
 
 fn apply_requirements(config: &mut Config) -> Result<()> {
@@ -11758,25 +11780,63 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
         )
     })?;
 
-    if !requirements.allowed_approval_policies.is_empty()
-        && let Some(policy) = config.approval_policy.as_ref()
-    {
-        let policy = policy.to_ascii_lowercase();
-        if !requirements
-            .allowed_approval_policies
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case(&policy))
-        {
+    if !requirements.allowed_approval_policies.is_empty() {
+        use codewhale_execpolicy::ApprovalMode;
+
+        let policy = config
+            .approval_policy
+            .as_deref()
+            .unwrap_or("on-request")
+            .to_ascii_lowercase();
+        if !requirements.allowed_approval_policies.iter().any(|p| {
+            match (
+                ApprovalMode::from_config_value(p),
+                ApprovalMode::from_config_value(&policy),
+            ) {
+                (Some(allowed), Some(effective)) => allowed == effective,
+                _ => p.eq_ignore_ascii_case(&policy),
+            }
+        }) {
             anyhow::bail!(
                 "approval_policy '{policy}' is not allowed by requirements ({})",
                 requirements.allowed_approval_policies.join(", ")
             );
         }
     }
-    if !requirements.allowed_sandbox_modes.is_empty()
-        && let Some(mode) = config.sandbox_mode.as_ref()
-    {
-        let mode = mode.to_ascii_lowercase();
+    if !requirements.allowed_sandbox_modes.is_empty() {
+        // At config load there is no live turn mode yet. Check the Agent
+        // baseline with the engine's resolver; Plan can narrow it later.
+        // Explicit settings retain their existing allow-list check.
+        let mode = config
+            .sandbox_mode
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| {
+                use crate::core::authority::{SandboxNetworkAccess, sandbox_policy_for_turn};
+                use crate::sandbox::SandboxPolicy;
+                use codewhale_execpolicy::ApprovalMode;
+
+                // Sandbox requirements lock approval posture at startup,
+                // excluding saved preferences and every YOLO override.
+                let approval = config
+                    .approval_policy
+                    .as_deref()
+                    .and_then(ApprovalMode::from_config_value)
+                    .unwrap_or_default();
+                match sandbox_policy_for_turn(
+                    codewhale_config::AppMode::Agent,
+                    approval,
+                    None,
+                    Path::new("."),
+                    SandboxNetworkAccess::from_config(config.sandbox_network_access),
+                ) {
+                    SandboxPolicy::ReadOnly => "read-only",
+                    SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
+                    SandboxPolicy::DangerFullAccess => "danger-full-access",
+                    SandboxPolicy::ExternalSandbox { .. } => "external-sandbox",
+                }
+                .to_string()
+            });
         if !requirements
             .allowed_sandbox_modes
             .iter()
@@ -11932,15 +11992,17 @@ fn credential_config_path() -> anyhow::Result<PathBuf> {
 /// both an isolated `CODEWHALE_HOME` and an explicit backend, preventing unit
 /// tests from touching the developer's real credential store.
 pub fn save_api_key(api_key: &str) -> Result<SavedCredential> {
-    save_root_api_key_for_secret_slot(api_key, "deepseek", true)
+    save_root_api_key_for_secret_slot(api_key, "deepseek", "deepseek")
 }
 
 fn save_root_api_key_for_secret_slot(
     api_key: &str,
     secret_slot: &str,
-    clear_deepseek_provider_slot: bool,
+    table: &str,
 ) -> Result<SavedCredential> {
-    let trimmed = api_key.trim();
+    // #6528: strip pasted invisible characters and whitespace in one place.
+    let normalized = codewhale_secrets::normalize_api_key(api_key);
+    let trimmed = normalized.as_str();
     if trimmed.is_empty() {
         anyhow::bail!("Refusing to save an empty API key.");
     }
@@ -11955,10 +12017,9 @@ fn save_root_api_key_for_secret_slot(
             match prior_secret.as_ref() {
                 Ok(prior) => match secrets.set(secret_slot, trimmed) {
                     Ok(()) => {
-                        if let Err(error) = save_root_api_key_metadata_without_plaintext(
-                            &path,
-                            clear_deepseek_provider_slot,
-                        ) {
+                        if let Err(error) =
+                            save_root_api_key_metadata_without_plaintext(&path, table)
+                        {
                             let current = secrets.get(secret_slot).map_err(|rollback| {
                         anyhow::anyhow!(
                             "{error}; additionally could not verify secret-store rollback for {secret_slot}: {rollback}"
@@ -11998,7 +12059,7 @@ fn save_root_api_key_for_secret_slot(
         });
     }
 
-    let path = save_api_key_to_config_file(trimmed)?;
+    let path = save_api_key_to_config_file(trimmed, table)?;
     codewhale_config::scrub_plaintext_api_keys_from_config_backup(&path)?;
     Ok(SavedCredential::ConfigFile(path))
 }
@@ -12033,29 +12094,18 @@ pub(crate) fn credential_secret_store() -> Option<codewhale_secrets::Secrets> {
     (isolated_home && explicit_backend).then(codewhale_secrets::Secrets::auto_detect)
 }
 
-fn save_root_api_key_metadata_without_plaintext(
-    config_path: &Path,
-    clear_deepseek_provider_slot: bool,
-) -> Result<()> {
+fn save_root_api_key_metadata_without_plaintext(config_path: &Path, table: &str) -> Result<()> {
     ensure_parent_dir(config_path)?;
     crate::config_persistence::mutate_config_document(config_path, |doc| {
         crate::config_persistence::set_document_value(doc, &["auth_mode"], "api_key")?;
-        if !doc.contains_key("default_text_model") {
-            crate::config_persistence::set_document_value(
-                doc,
-                &["default_text_model"],
-                DEFAULT_TEXT_MODEL,
-            )?;
-        }
+        // Saving a key never pins a model (see
+        // `codewhale_config::credentials::prepare_provider_api_key_metadata`).
         if !doc.contains_key("reasoning_effort") {
             crate::config_persistence::set_document_value(doc, &["reasoning_effort"], "max")?;
         }
         crate::config_persistence::unset_document_value(doc, &["api_key"])?;
-        if clear_deepseek_provider_slot {
-            crate::config_persistence::unset_document_value(
-                doc,
-                &["providers", "deepseek", "api_key"],
-            )?;
+        crate::config_persistence::unset_document_value(doc, &["providers", table, "api_key"])?;
+        if table == "deepseek" {
             crate::config_persistence::unset_document_value(
                 doc,
                 &["providers", "deepseek-cn", "api_key"],
@@ -12066,8 +12116,8 @@ fn save_root_api_key_metadata_without_plaintext(
     .with_context(|| format!("Failed to write config to {}", config_path.display()))
 }
 
-/// Write the `api_key` slot directly to `config.toml`.
-fn save_api_key_to_config_file(api_key: &str) -> Result<PathBuf> {
+/// Write the key directly to `[providers.<table>] api_key` in `config.toml`.
+fn save_api_key_to_config_file(api_key: &str, table: &str) -> Result<PathBuf> {
     let config_path =
         credential_config_path().context("Failed to resolve config path for API key.")?;
 
@@ -12079,7 +12129,14 @@ fn save_api_key_to_config_file(api_key: &str) -> Result<PathBuf> {
         // api_key made it skip the insert entirely; editing the document
         // replaces or inserts the real key and keeps user comments.
         crate::config_persistence::mutate_config_document(&config_path, |doc| {
-            crate::config_persistence::set_document_value(doc, &["api_key"], api_key)?;
+            // DeepSeek's key lives in its own table (#6394); an explicit save
+            // also ends any disagreement with an older top-level key.
+            crate::config_persistence::set_document_value(
+                doc,
+                &["providers", table, "api_key"],
+                api_key,
+            )?;
+            crate::config_persistence::unset_document_value(doc, &["api_key"])?;
             crate::config_persistence::set_document_value(doc, &["auth_mode"], "api_key")
         })
         .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
@@ -12090,20 +12147,21 @@ fn save_api_key_to_config_file(api_key: &str) -> Result<PathBuf> {
 # Set provider credentials in this file or via environment variables.
 # See /links in the TUI for provider-specific credential pages.
 
-api_key = "{api_key}"
 auth_mode = "api_key"
 
-# Base URL (default: https://api.deepseek.com/beta)
-# Set https://api.deepseek.com to opt out of beta features.
-# base_url = "https://api.deepseek.com/beta"
-
-# Default model
-default_text_model = "{DEFAULT_TEXT_MODEL}"
+# Default model (unset follows the provider default)
+# default_text_model = "{DEFAULT_TEXT_MODEL}"
 
 # Thinking mode (DeepSeek V4 reasoning effort):
 # "off" | "low" | "medium" | "high" | "max"
-# Shift+Tab in the TUI cycles between off / high / max.
+# Ctrl+T in the TUI (or /effort) cycles the active model's effort levels.
 reasoning_effort = "max"
+
+[providers.{table}]
+api_key = "{api_key}"
+# Base URL (default: https://api.deepseek.com/beta)
+# Set https://api.deepseek.com to opt out of beta features.
+# base_url = "https://api.deepseek.com/beta"
 "#
         );
         crate::config_persistence::write_config_toml_atomic(&config_path, &content)
@@ -12230,7 +12288,7 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
 
     if config.config_credentials_are_bound_to_provider_endpoint(provider)
         && config
-            .provider_config_string_with_runtime_fallback(provider, |entry| entry.api_key.clone())
+            .provider_route_string_with_deepseek_fallback(provider, |entry| entry.api_key.clone())
             .is_some_and(|key| {
                 classify_config_api_key_value(&key) == ConfigApiKeyValueKind::Literal
             })
@@ -12243,12 +12301,7 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
         return true;
     }
 
-    matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        && config.config_credentials_are_bound_to_provider_endpoint(provider)
-        && config
-            .api_key
-            .as_ref()
-            .is_some_and(|key| classify_config_api_key_value(key) == ConfigApiKeyValueKind::Literal)
+    false
 }
 
 #[must_use]
@@ -12300,7 +12353,7 @@ fn user_global_config_json() -> Option<serde_json::Value> {
         return Some(cached.json.clone());
     }
     let text = fs::read_to_string(&path).ok()?;
-    let doc: codewhale_config::ConfigToml = toml::from_str(&text).ok()?;
+    let doc = codewhale_config::parse_config_toml(&text).ok()?;
     let json = serde_json::to_value(&doc).ok()?;
     *guard = Some(UserGlobalConfigCache {
         path,
@@ -12539,10 +12592,11 @@ fn save_api_key_for_identity_unlocked(
         return save_api_key(api_key);
     }
     if is_legacy_literal_custom {
-        return save_root_api_key_for_secret_slot(api_key, "custom", false);
+        return save_root_api_key_for_secret_slot(api_key, "custom", "custom");
     }
 
-    let api_key = api_key.trim();
+    let normalized = codewhale_secrets::normalize_api_key(api_key);
+    let api_key = normalized.as_str();
     anyhow::ensure!(!api_key.is_empty(), "Refusing to save an empty API key.");
 
     let config_path =
@@ -13003,26 +13057,23 @@ fn provider_config_table_name(provider: ApiProvider) -> Result<String> {
 }
 
 fn provider_env_api_key(provider: ApiProvider) -> Option<String> {
-    if provider == ApiProvider::Huggingface {
-        return std::env::var("HUGGINGFACE_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("HF_TOKEN")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            });
-    }
-    if provider == ApiProvider::Modelscope {
-        return std::env::var("MODELSCOPE_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-    }
+    provider_env_api_key_named(provider).map(|(_, value)| value)
+}
 
-    provider.env_vars().iter().find_map(|var| {
-        std::env::var(var)
+/// The provider's ambient env key and the variable that supplied it,
+/// normalized with [`codewhale_secrets::normalize_api_key`] (#6528).
+fn provider_env_api_key_named(provider: ApiProvider) -> Option<(&'static str, String)> {
+    let names: &[&'static str] = match provider {
+        ApiProvider::Huggingface => &["HUGGINGFACE_API_KEY", "HF_TOKEN"],
+        ApiProvider::Modelscope => &["MODELSCOPE_API_KEY"],
+        _ => provider.env_vars(),
+    };
+    names.iter().find_map(|name| {
+        std::env::var(name)
             .ok()
-            .filter(|value| !value.trim().is_empty())
+            .map(|value| codewhale_secrets::normalize_api_key(&value))
+            .filter(|value| !value.is_empty())
+            .map(|value| (*name, value))
     })
 }
 
@@ -13388,8 +13439,8 @@ fn clear_all_provider_api_keys_from_secret_store(
 /// Clear only the active provider's API key from the config file and delete
 /// that provider's durable secret-store slot (#5196).
 /// Unlike `clear_api_key()` which strips ALL api_key entries, this
-/// removes only the key for the specified provider section (plus the
-/// legacy root `api_key` when the provider is DeepSeek).
+/// removes only the key for the specified provider section (plus a leftover
+/// legacy top-level `api_key` for DeepSeek or the literal custom route).
 pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
     if provider == ApiProvider::Xai.as_str() {
         return codewhale_config::with_xai_oauth_revocation_transaction(|| {
@@ -13417,58 +13468,73 @@ fn clear_active_provider_api_key_under_lock(provider: &str) -> Result<()> {
         .context("Failed to resolve config path while clearing API keys.")?;
 
     if config_path.exists() {
-        // `custom` is both the legacy root-shaped route id and a valid exact
-        // `[providers.custom]` table key. Inspect the persisted shape before the
-        // mutation so logout clears exactly one credential scope.
-        let persisted = fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read config from {}", config_path.display()))?;
-        let persisted_config: Config = toml::from_str(&persisted).map_err(|_| {
-            anyhow::anyhow!(
-                "Failed to parse config from {}; file contents were omitted",
-                codewhale_config::quote_os_path(&config_path)
-            )
-        })?;
-        let exact_literal_custom_table = provider == ApiProvider::Custom.as_str()
-            && persisted_config
-                .providers
-                .as_ref()
-                .and_then(|providers| providers.custom_provider_config(provider))
-                .is_some();
-
-        crate::config_persistence::mutate_config_document(&config_path, |doc| {
-            // The root-level api_key is shared by the legacy DeepSeek and released
-            // literal-custom config shapes. Exact named custom ids remain scoped
-            // to their own table.
-            if matches!(
-                provider,
-                value if value == ApiProvider::Deepseek.as_str()
-                    || value == ApiProvider::DeepseekCN.as_str()
-            ) || (provider == ApiProvider::Custom.as_str() && !exact_literal_custom_table)
-            {
-                crate::config_persistence::unset_document_value(doc, &["api_key"])?;
-            }
-            if provider != ApiProvider::Custom.as_str() || exact_literal_custom_table {
+        crate::config_persistence::mutate_config_document_with_migration(
+            &config_path,
+            |doc, moved| {
+                // The write itself moved any older top-level `api_key` into its
+                // provider table (#6394); clear a conflicting leftover too.
+                let deepseek_family = provider == ApiProvider::Deepseek.as_str()
+                    || provider == ApiProvider::DeepseekCN.as_str();
+                if deepseek_family || provider == ApiProvider::Custom.as_str() {
+                    crate::config_persistence::unset_document_value(doc, &["api_key"])?;
+                }
+                let table = match ApiProvider::parse(provider).filter(|p| p.as_str() == provider) {
+                    Some(ApiProvider::Deepseek) => "deepseek",
+                    Some(ApiProvider::DeepseekCN) => "deepseek_cn",
+                    Some(parsed) => provider_config_key(parsed).unwrap_or(provider),
+                    None => provider,
+                };
+                let has_own_key = |doc: &toml_edit::DocumentMut| {
+                    [table, provider].iter().any(|key| {
+                        doc.get("providers")
+                            .and_then(|providers| providers.get(key))
+                            .and_then(|entry| entry.get("api_key"))
+                            .and_then(toml_edit::Item::as_str)
+                            .is_some_and(|value| !value.trim().is_empty())
+                    })
+                };
+                // DeepSeek-CN reads `[providers.deepseek] api_key` only when it has
+                // no key of its own, and older releases kept both behind one
+                // top-level key. Signing CN out clears the DeepSeek key only when
+                // it is that shared key: CN was reading it, or this write just
+                // moved the top-level key there. A DeepSeek key the user saved
+                // for DeepSeek itself stays.
+                let clears_shared_deepseek_key = provider == ApiProvider::DeepseekCN.as_str()
+                    && (!has_own_key(doc) || moved.moved_root_api_key_to("deepseek"));
                 crate::config_persistence::unset_document_value(
                     doc,
-                    &["providers", provider, "api_key"],
+                    &["providers", table, "api_key"],
                 )?;
-            }
-            if provider == ApiProvider::Xai.as_str() {
-                crate::config_persistence::unset_document_value(
-                    doc,
-                    &["providers", "xai", "oauth_credential_generation"],
-                )?;
-                crate::config_persistence::unset_document_value(
-                    doc,
-                    &["providers", "xai", "auth_mode"],
-                )?;
-                crate::config_persistence::unset_document_value(
-                    doc,
-                    &["providers", "xai", "external_credentials"],
-                )?;
-            }
-            Ok(())
-        })
+                if table != provider {
+                    // Older writers used the provider id as the table key.
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", provider, "api_key"],
+                    )?;
+                }
+                if clears_shared_deepseek_key {
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "deepseek", "api_key"],
+                    )?;
+                }
+                if provider == ApiProvider::Xai.as_str() {
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "xai", "oauth_credential_generation"],
+                    )?;
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "xai", "auth_mode"],
+                    )?;
+                    crate::config_persistence::unset_document_value(
+                        doc,
+                        &["providers", "xai", "external_credentials"],
+                    )?;
+                }
+                Ok(())
+            },
+        )
         .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
         log_sensitive_event(
             "credential.clear",

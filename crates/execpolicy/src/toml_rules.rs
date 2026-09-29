@@ -68,7 +68,18 @@ impl ExecPolicyConfig {
         // Only the deny loop is widened. The allow loop below still matches the
         // command as written, so a broader expansion can never turn into a
         // broader auto-approval.
-        let deny_targets = crate::shell_expand::expanded_commands(command);
+        let expansion = crate::shell_expand::expand_command(command);
+        let deny_targets = expansion.commands;
+        // A command word only known at run time cannot be checked against a
+        // deny pattern: fail closed while any deny pattern is configured, and
+        // never let an allow pattern written for the outer command approve
+        // nested or unresolved code.
+        if expansion.dynamic && self.rules.values().any(|rules| !rules.deny.is_empty()) {
+            return RuleDecision::Deny(
+                "execpolicy: command word cannot be resolved statically while deny rules are in force"
+                    .to_string(),
+            );
+        }
         for (group, rules) in &self.rules {
             for pattern in &rules.deny {
                 if deny_targets
@@ -80,6 +91,11 @@ impl ExecPolicyConfig {
             }
         }
 
+        if expansion.dynamic || expansion.nested {
+            return RuleDecision::AskUser(
+                "execpolicy: command runs code an allow rule cannot vouch for".to_string(),
+            );
+        }
         for (group, rules) in &self.rules {
             for pattern in &rules.allow {
                 // Allow rules use arity-aware prefix matching first so that

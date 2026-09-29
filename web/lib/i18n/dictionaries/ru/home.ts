@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand} даёт вам агентов, которые могут создавать программы, работать с вашими файлами и превращать повторяющиеся задачи в рабочие процессы, которые можно запускать повторно. Расскажите, чего хотите добиться, и выберите подходящие для задачи облачные или локальные модели, сохраняя возможность менять провайдеров по ходу работы.",
   getCodewhale: "Получить Codewhale",
+  heroInstallAria: "Команда установки",
   exploreProduct: "Посмотреть продукт",
   shotPreview: "Предпросмотр терминала",
   shotBuild: "сборка для разработки v{version}",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "Статус релиза недоступен",
   currentSource: "Исходники",
   sourceCandidate: "Не выпущено",
-  providerRoutes: "провайдеров — {count}",
   publishedRelease: "выпущено",
   figcaptionSourceCandidate: "не выпущено",
   chapterTerminal: "Ваш терминал",
@@ -62,7 +62,7 @@ export const home: HomeDict = {
     "После установки Codewhale и подключения модели вы можете описать первую задачу в терминале и добавить Fleet, когда захотите распределить работу между несколькими агентами.",
   startGuideLink: "Читать руководство «С чего начать»",
   startVocabularyLink: "Посмотреть словарь продукта",
-  chapterAccount: "Получить Codewhale",
+  chapterAvailability: "Где работает",
   availabilityHeading: "Где можно пользоваться Codewhale",
   availabilityLede:
     "Вы уже можете пользоваться Codewhale в терминале, пока мы разрабатываем веб-приложение, настольное приложение и облачные компьютеры.",

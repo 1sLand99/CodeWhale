@@ -295,13 +295,8 @@ pub(crate) async fn open_provider_picker(
     engine_handle: &EngineHandle,
 ) {
     if app.onboarding == OnboardingState::Provider {
-        open_onboarding_provider_picker(
-            app,
-            config,
-            engine_handle,
-            app.onboarding_missing_key_recovery,
-        )
-        .await;
+        let recover_configured_route = app.onboarding_recovers_configured_route();
+        open_onboarding_provider_picker(app, config, engine_handle, recover_configured_route).await;
     } else {
         open_launch_provider_picker(app, config, engine_handle).await;
     }
@@ -492,11 +487,12 @@ pub(crate) fn push_approval_request_view(
     description: &str,
     tool_input: &serde_json::Value,
     approval_key: &str,
+    approval_grouping_key: &str,
     intent_summary: Option<&str>,
     default_selection: crate::config::ApprovalDefaultSelection,
     timeout: Option<std::time::Duration>,
 ) {
-    let request = ApprovalRequest::new_with_intent(
+    let mut request = ApprovalRequest::new_with_intent(
         id,
         tool_name,
         description,
@@ -505,6 +501,22 @@ pub(crate) fn push_approval_request_view(
         intent_summary,
         &app.workspace,
     );
+    // The engine owns the grant scope: a child's grouping key is prefixed
+    // with its agent so "allow for this conversation" never covers the
+    // parent or a sibling (C3). Keep the card's own key only when the
+    // event carries none.
+    if !approval_grouping_key.is_empty() {
+        request.approval_grouping_key = approval_grouping_key.to_string();
+    }
+    // A child's gate never consults saved repo allow rules, so a child card
+    // must not offer "Always allow in this repo" — it would do nothing. The
+    // card names its agent (approvals C1).
+    if crate::tools::subagent::SubAgentManager::is_child_approval_id(id) {
+        request.persistent_allow_rules.clear();
+        if let Some(agent_id) = crate::tui::pending_requests::child_agent_id(id) {
+            request.owner = Some(crate::tui::pending_requests::owner_for(app, agent_id));
+        }
+    }
     app.view_stack.push(
         ApprovalView::new_with_default_selection(request, app.ui_locale, default_selection)
             .with_timeout(timeout),

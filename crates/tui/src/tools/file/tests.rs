@@ -16,7 +16,7 @@ async fn missing_pdf_path_precedes_unavailable_helper() {
     .expect_err("missing path must fail before the missing helper is launched");
 
     match error {
-        ToolError::ExecutionFailed { message } => {
+        ToolError::ExecutionFailed { message, .. } => {
             assert!(message.contains("Failed to read"), "{message}");
             assert!(message.contains("missing.pdf"), "{message}");
         }
@@ -432,6 +432,45 @@ async fn contract_read_offset_oob_and_limit_continuation_match_contract() {
     );
 }
 
+/// Regression: grok-4.7 serializes every JSON number as a float, so its
+/// ranged reads arrive as `{"offset": 2.0, "limit": 1.0}`. Those used to
+/// fail with "offset must be a non-negative integer" on every call.
+#[tokio::test]
+async fn contract_read_accepts_whole_number_floats_and_still_refuses_fractions() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temporary.path().join("lines.txt"), "one\ntwo\nthree").expect("fixture");
+    let context = ToolContext::new(temporary.path());
+
+    let ranged = ReadFileTool::execute_contract_read(
+        json!({"path": "lines.txt", "offset": 2.0, "limit": 1.0, "max_bytes": 200.0}),
+        &context,
+    )
+    .await
+    .expect("float-typed ranged read");
+    assert_eq!(
+        ranged.content,
+        "two\n\n[1 more lines in file (13B total). Use offset=3 to continue.]"
+    );
+
+    for (key, bad) in [
+        ("offset", json!(-1.0)),
+        ("offset", json!(2.5)),
+        ("limit", json!("2")),
+        ("limit", json!([2])),
+    ] {
+        let error =
+            ReadFileTool::execute_contract_read(json!({"path": "lines.txt", key: bad}), &context)
+                .await
+                .expect_err("non-integer must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{key} must be a non-negative integer")),
+            "{error}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn contract_read_uses_magic_not_extension_for_images() {
     let temporary = tempfile::tempdir().expect("tempdir");
@@ -531,6 +570,103 @@ async fn contract_edit_preserves_bom_and_crlf_without_prior_read() {
         std::fs::read(&path).expect("updated"),
         "\u{FEFF}one\r\ntwo\r\n".as_bytes()
     );
+    // The receipt describes the bytes written (BOM and CRLF included), not
+    // the edited text, so a turn artifact's revision matches the file read.
+    let on_disk = std::fs::read(&path).expect("updated");
+    assert_eq!(
+        result.metadata.as_ref().expect("metadata")["mutation"]["files"],
+        json!([{
+            "path": "doc.txt",
+            "outcome": "updated",
+            "size": on_disk.len(),
+            "sha256": crate::hashing::sha256_hex(&on_disk),
+        }])
+    );
+}
+
+#[tokio::test]
+async fn contract_write_receipt_carries_written_size_and_sha256() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temporary.path());
+    let result = WriteFileTool::execute_contract_write(
+        json!({"path": "notes/out.md", "content": "# Title\n"}),
+        &context,
+    )
+    .await
+    .expect("write");
+    let on_disk = std::fs::read(temporary.path().join("notes/out.md")).expect("written");
+    assert_eq!(
+        result.metadata.as_ref().expect("metadata")["mutation"]["files"],
+        json!([{
+            "path": "notes/out.md",
+            "outcome": "created",
+            "size": on_disk.len(),
+            "sha256": crate::hashing::sha256_hex(&on_disk),
+        }])
+    );
+}
+
+/// B6: bytes that are not UTF-8 survive an edit elsewhere in the file.
+#[tokio::test]
+async fn contract_edit_keeps_non_utf8_bytes() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("latin1.txt");
+    let mut original = b"caf\xe9 \xff\xfe tail\n".to_vec();
+    original.extend_from_slice(b"change me\n");
+    std::fs::write(&path, &original).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    EditFileTool::execute_contract_edits(
+        json!({"path": "latin1.txt", "edits": [{"oldText": "change me", "newText": "changed"}]}),
+        &context,
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        std::fs::read(&path).expect("updated"),
+        b"caf\xe9 \xff\xfe tail\nchanged\n".to_vec()
+    );
+}
+
+/// A valid UTF-8 file may use the placeholder range itself (Nerd Font
+/// Material Design icons are U+F0000..U+F00FF). Those characters are text,
+/// not raw bytes, and an edit elsewhere must keep them.
+#[tokio::test]
+async fn contract_edit_keeps_placeholder_range_characters_in_utf8_files() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("starship.toml");
+    let original = "icon = \"\u{F0026}\"\nwide = \"\u{F00A0}\"\ncolor = \"red\"\n";
+    std::fs::write(&path, original).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    EditFileTool::execute_contract_edits(
+        json!({"path": "starship.toml", "edits": [{"oldText": "red", "newText": "blue"}]}),
+        &context,
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("still UTF-8"),
+        original.replace("red", "blue")
+    );
+}
+
+/// B6: in a file with mixed line endings, only the lines an edit wrote take
+/// the dominant ending; every untouched line keeps its own.
+#[tokio::test]
+async fn contract_edit_keeps_untouched_line_endings() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("mixed.txt");
+    std::fs::write(&path, "one\r\ntwo\nthree\r\nfour\rfive\n").expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    EditFileTool::execute_contract_edits(
+        json!({"path": "mixed.txt", "edits": [{"oldText": "three", "newText": "THREE\nand more"}]}),
+        &context,
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("updated"),
+        "one\r\ntwo\nTHREE\r\nand more\r\nfour\rfive\n"
+    );
 }
 
 #[tokio::test]
@@ -588,6 +724,85 @@ async fn cancelled_queued_pi_write_never_starts() {
     assert!(matches!(error, ToolError::Cancelled { .. }));
     assert!(!path.exists());
     drop(held);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn contract_write_preserves_unreadable_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("write-only.txt");
+    std::fs::write(&path, "original\n").expect("fixture");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200))
+        .expect("make unreadable");
+    let context = ToolContext::new(temporary.path());
+    let result = WriteFileTool::execute_contract_write(
+        json!({"path": "write-only.txt", "content": "replacement\n"}),
+        &context,
+    )
+    .await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("restore permissions");
+
+    let error = result.expect_err("cannot overwrite without the prior contents");
+    assert!(error.to_string().contains("Failed to read"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(path).expect("unchanged"),
+        "original\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn compatibility_write_preserves_unreadable_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("write-only.txt");
+    let context = ToolContext::new(temporary.path());
+    let file_tool = crate::tools::file_tool::FileTool::new("File");
+    for tool in [&WriteFileTool as &dyn ToolSpec, &file_tool] {
+        std::fs::write(&path, "original\n").expect("fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200))
+            .expect("make unreadable");
+        let mut input = json!({"path": "write-only.txt", "content": "replacement\n"});
+        if tool.name() == "File" {
+            input["action"] = json!("write");
+        }
+        let result = tool.execute(input, &context).await;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore permissions");
+
+        let error = result.expect_err("cannot overwrite without the prior contents");
+        assert!(error.to_string().contains("Failed to read"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("unchanged"),
+            "original\n"
+        );
+    }
+}
+
+#[tokio::test]
+async fn compatibility_write_preserves_non_utf8_existing_file() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("latin1.txt");
+    let original = b"caf\xe9\n";
+    std::fs::write(&path, original).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    let file_tool = crate::tools::file_tool::FileTool::new("File");
+    for tool in [&WriteFileTool as &dyn ToolSpec, &file_tool] {
+        let mut input = json!({"path": "latin1.txt", "content": "replacement\n"});
+        if tool.name() == "File" {
+            input["action"] = json!("write");
+        }
+        let error = tool
+            .execute(input, &context)
+            .await
+            .expect_err("must decode original");
+        assert!(error.to_string().contains("Failed to read"), "{error}");
+        assert_eq!(std::fs::read(&path).expect("unchanged"), original);
+    }
 }
 
 #[cfg(unix)]

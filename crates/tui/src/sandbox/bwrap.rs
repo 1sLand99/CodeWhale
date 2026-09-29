@@ -121,6 +121,10 @@ pub fn build_bwrap_command(
     if network_access {
         cmd.push("--share-net".to_string());
     }
+    // Tie the sandbox to the outer bwrap process: if it is killed (the TUI's
+    // parent-death cleanup, a group kill), bwrap's PID-namespace init dies
+    // too and takes every process in the sandbox with it (#6654).
+    cmd.push("--die-with-parent".to_string());
 
     // Read-only bind-mount the entire root filesystem.
     cmd.push("--ro-bind".to_string());
@@ -302,6 +306,9 @@ mod tests {
         // Network stays isolated unless the policy explicitly allows it.
         assert!(cmd.contains(&"--unshare-all".to_string()));
         assert!(!cmd.contains(&"--share-net".to_string()));
+
+        // The sandbox dies with the outer bwrap process (#6654).
+        assert!(cmd.contains(&"--die-with-parent".to_string()));
 
         // Should end with the command
         assert_eq!(cmd[cmd.len() - 1], "echo hi");

@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand}은 소프트웨어를 개발하고 파일을 다루며 반복 작업을 재사용 가능한 워크플로로 바꿀 수 있는 에이전트를 제공합니다. 무엇을 이루고 싶은지 알려 주고 작업에 맞는 호스팅형 또는 로컬 모델을 선택하면, 작업을 진행하면서 제공업체도 자유롭게 바꿀 수 있습니다.",
   getCodewhale: "Codewhale 받기",
+  heroInstallAria: "설치 명령",
   exploreProduct: "제품 살펴보기",
   shotPreview: "터미널 미리보기",
   shotBuild: "v{version} 개발 빌드",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "릴리스 상태를 확인할 수 없음",
   currentSource: "소스",
   sourceCandidate: "미공개",
-  providerRoutes: "프로바이더 {count}개",
   publishedRelease: "공개됨",
   figcaptionSourceCandidate: "미공개",
   chapterTerminal: "당신의 터미널",
@@ -60,7 +60,7 @@ export const home: HomeDict = {
   startLede: "Codewhale을 설치하고 모델을 연결하면 터미널에서 첫 작업을 설명할 수 있으며, 여러 에이전트가 작업을 나누어 맡도록 하고 싶을 때 Fleet을 추가할 수 있습니다.",
   startGuideLink: "시작 가이드 읽기",
   startVocabularyLink: "제품 용어 보기",
-  chapterAccount: "Codewhale 받기",
+  chapterAvailability: "실행 환경",
   availabilityHeading: "Codewhale을 사용할 수 있는 곳",
   availabilityLede: "Codewhale은 지금 터미널에서 사용할 수 있으며, 웹 앱과 데스크톱 앱, 클라우드 컴퓨터는 개발 중입니다.",
   availability: [

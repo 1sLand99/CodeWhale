@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand}, yazılım geliştirebilen, dosyaların üzerinde çalışabilen ve tekrarlanan görevleri yeniden kullanılabilir iş akışlarına dönüştürebilen ajanlar sunar. Onlara ne yapmak istediğini anlat ve işe uygun barındırılan veya yerel modelleri seç; çalışırken sağlayıcı değiştirmekte özgürsün.",
   getCodewhale: "Codewhale'i edin",
+  heroInstallAria: "Kurulum komutu",
   exploreProduct: "Ürünü keşfet",
   shotPreview: "Terminal önizlemesi",
   shotBuild: "v{version} geliştirme derlemesi",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "Sürüm durumu kullanılamıyor",
   currentSource: "Kaynak",
   sourceCandidate: "Yayımlanmadı",
-  providerRoutes: "{count} sağlayıcı",
   publishedRelease: "yayımlandı",
   figcaptionSourceCandidate: "yayımlanmadı",
   chapterTerminal: "Senin terminalin",
@@ -63,7 +63,7 @@ export const home: HomeDict = {
     "Codewhale'i kurup bir model bağladıktan sonra ilk görevini terminalde anlatabilir, birkaç ajanın işi paylaşmasını istediğinde bir Fleet ekleyebilirsin.",
   startGuideLink: "Başlangıç kılavuzunu oku",
   startVocabularyLink: "Ürün sözlüğünü gör",
-  chapterAccount: "Codewhale'i edin",
+  chapterAvailability: "Nerede çalışır",
   availabilityHeading: "Codewhale'i nerelerde kullanabilirsin",
   availabilityLede:
     "Biz web uygulamasını, masaüstü uygulamasını ve bulut bilgisayarlarını geliştirirken sen Codewhale'i bugün terminalinde kullanabilirsin.",

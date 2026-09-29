@@ -19,6 +19,7 @@ members = [
     "crates/paths",
     "crates/protocol",
     "crates/release",
+    "crates/runtime",
     "crates/secrets",
     "crates/state",
     "crates/telemetry",
@@ -31,7 +32,7 @@ default-members = ["crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 # Rust 1.88 stabilized `let_chains` in `if`/`while` conditions, which the
 # codebase relies on extensively. Cargo enforces this so users on older
@@ -59,7 +60,7 @@ dirs = "7.0.0"
 encoding_rs = "0.8.35"
 # Sole user is crates/workflow-js (schemaui is gone); keep the graph on one
 # jsonschema/jsonschema-regex/referencing/fancy-regex stack.
-jsonschema = { version = "0.56", default-features = false }
+jsonschema = { version = "0.57", default-features = false }
 libc = "0.2"
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-no-provider", "socks"] }
 # NOT "parallel": the Workflow VM stays single-threaded and bridges to the
@@ -69,6 +70,8 @@ rustls = { version = "0.23.36", default-features = false, features = ["ring", "s
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+# DSH bundle import: event-level parsing so aliases and explicit tags can be refused.
+yaml-rust2 = { version = "0.13.0", default-features = false }
 semver = "1.0.28"
 thiserror = "2.0"
 tempfile = "3.27"

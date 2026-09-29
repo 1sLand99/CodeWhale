@@ -51,6 +51,64 @@ pub(crate) fn route_context_window_tokens(
         .unwrap_or_else(|| provider_capability(provider, model).context_window)
 }
 
+/// Share of the route's context window (in estimated characters) one tool
+/// result may occupy inline.
+const TOOL_OUTPUT_INLINE_WINDOW_PERCENT: u64 = 3;
+/// Inline ceiling for one tool result when the route is unknown, and the cap
+/// for every route unless the operator opted into a larger budget.
+const TOOL_OUTPUT_INLINE_MAX_CHARS: usize = 100_000;
+/// Hard ceiling on an operator-raised inline tool-result budget (#5367).
+const TOOL_OUTPUT_INLINE_OPT_IN_MAX_CHARS: usize = 2 * 1024 * 1024;
+
+/// The one budget for how much of a tool result the model sees inline (#6508).
+///
+/// Every tool result is measured against this number: 3% of the route's
+/// context window (at about 4 characters per token), capped at 100,000
+/// characters, or the full cap when the window is unknown. An opt-in
+/// `tool_result_max_bytes` workshop setting may raise it, up to 2 MiB.
+/// Anything past it is cut only after the raw output has been saved as a
+/// session artifact that `retrieve_tool_result` can read back.
+#[must_use]
+pub(crate) fn route_inline_char_budget(window_tokens: Option<u32>) -> usize {
+    route_inline_char_budget_with_raise(
+        window_tokens,
+        crate::tools::large_output_router::WorkshopConfig::active_tool_result_max_bytes(),
+    )
+}
+
+#[must_use]
+fn route_inline_char_budget_with_raise(window_tokens: Option<u32>, raise: Option<usize>) -> usize {
+    let base = window_tokens
+        .filter(|tokens| *tokens > 0)
+        .map(|tokens| {
+            let chars = u64::from(tokens)
+                .saturating_mul(4)
+                .saturating_mul(TOOL_OUTPUT_INLINE_WINDOW_PERCENT)
+                / 100;
+            usize::try_from(chars).unwrap_or(TOOL_OUTPUT_INLINE_MAX_CHARS)
+        })
+        .unwrap_or(TOOL_OUTPUT_INLINE_MAX_CHARS)
+        .clamp(1, TOOL_OUTPUT_INLINE_MAX_CHARS);
+    match raise {
+        Some(bytes) if bytes > base => bytes.min(TOOL_OUTPUT_INLINE_OPT_IN_MAX_CHARS),
+        _ => base,
+    }
+}
+
+/// [`route_inline_char_budget`] for a resolved provider/model route.
+#[must_use]
+pub(crate) fn route_inline_char_budget_for_route(
+    provider: ApiProvider,
+    model: &str,
+    route_limits: Option<RouteLimits>,
+) -> usize {
+    route_inline_char_budget(Some(route_context_window_tokens(
+        provider,
+        model,
+        route_limits,
+    )))
+}
+
 /// Provider/offering output cap, when the resolved route reports one.
 #[must_use]
 pub(crate) fn route_output_limit_tokens(route_limits: Option<RouteLimits>) -> Option<u32> {
@@ -254,7 +312,17 @@ pub(crate) fn effective_max_output_tokens_for_route(
     // With a known route window and no published output limit, reserve a
     // conservative part of that window. The model-only fallback reserved 64K even
     // for a configured 32K Ollama route, leaving just 1K for input (#5820).
+    // The same squeeze hit the capability *fallback* window: an unknown local
+    // Ollama tag resolves to an 8K window with no route limits, the model-only
+    // 64K request clamped to 6K, and the input budget collapsed to 1K — every
+    // turn tripped emergency compaction before its first request (#6540). So a
+    // model-only request larger than half of whatever window is in force also
+    // yields to the window-relative reservation.
     // Explicit requests and documented ceilings retain their existing rules.
+    let model_only_cap = effective_max_output_tokens(model);
+    let window_known = route_limits
+        .and_then(|limits| limits.context_tokens)
+        .is_some_and(|tokens| (1..=u64::from(u32::MAX)).contains(&tokens));
     let requested_cap = if explicit_max_output_tokens_override().is_none()
         && codewhale_models::max_output_tokens_for_model(model).is_none()
         && route_cap.is_none()
@@ -262,13 +330,11 @@ pub(crate) fn effective_max_output_tokens_for_route(
             compatibility_source,
             OutputCeilingSource::RouteDeclaredUnknown | OutputCeilingSource::Uncatalogued(_)
         )
-        && route_limits
-            .and_then(|limits| limits.context_tokens)
-            .is_some_and(|tokens| (1..=u64::from(u32::MAX)).contains(&tokens))
+        && (window_known || model_only_cap > window / 2)
     {
         (window / 4).clamp(1, UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS)
     } else {
-        effective_max_output_tokens(model)
+        model_only_cap
     };
     // Unknown means unknown only where a route *declares* it: membership ids
     // such as the `kimi-for-coding` family, and operator-owned self-hosted
@@ -414,6 +480,23 @@ pub(crate) fn auto_compact_default_for_route(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn route_inline_char_budget_is_three_percent_of_the_window_capped() {
+        use super::route_inline_char_budget_with_raise as budget;
+        assert_eq!(budget(Some(128_000), None), 15_360);
+        assert_eq!(budget(Some(10_000), None), 1_200);
+        assert_eq!(budget(None, None), 100_000);
+        assert_eq!(budget(Some(0), None), 100_000);
+        assert_eq!(budget(Some(1_000_000), None), 100_000);
+        // An operator opt-in raises the budget, never lowers it, and stops at 2 MiB.
+        assert_eq!(budget(Some(128_000), Some(80_000)), 80_000);
+        assert_eq!(budget(Some(128_000), Some(1_000)), 15_360);
+        assert_eq!(
+            budget(Some(128_000), Some(64 * 1024 * 1024)),
+            2 * 1024 * 1024
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -477,11 +560,52 @@ mod tests {
         );
     }
 
+    /// #6540: the runtime store's 15 failed compactions were all emergency
+    /// passes on an unknown local Ollama tag (`qwen3:4b`) with no route
+    /// limits: the capability fallback window (8K) minus a 6K output
+    /// reservation left a ~1K input budget, so every first request of a turn
+    /// tripped preflight recovery. The fallback window must keep the same
+    /// input room a configured window of that size gets.
+    #[test]
+    fn provider_regression_6540_fallback_window_keeps_room_for_input() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let model = "qwen3:4b";
+        assert!(codewhale_models::max_output_tokens_for_model(model).is_none());
+        let window = route_context_window_tokens(ApiProvider::Ollama, model, None);
+        assert_eq!(
+            window, 8_192,
+            "unknown local tags keep the conservative window"
+        );
+
+        let wire_cap = effective_max_output_tokens_for_route(ApiProvider::Ollama, model, None);
+        assert_eq!(wire_cap, 2_048);
+        let budget = route_context_budget(ApiProvider::Ollama, model, None, 0).unwrap();
+        assert_eq!(budget.output_cap_tokens, u64::from(wire_cap));
+        assert_eq!(budget.input_budget_ceiling, 8_192 - 2_048 - 1_024);
+        // The recorded first-request estimates (~1.9K–3.9K) now fit.
+        assert!(budget.input_budget_ceiling > 3_900, "{budget:?}");
+
+        // Same answer as the explicitly configured 8K window (#5820).
+        let configured = Some(RouteLimits {
+            context_tokens: Some(8_192),
+            ..RouteLimits::default()
+        });
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::Ollama, model, configured),
+            wire_cap
+        );
+    }
+
     /// Absence of a catalogue row is not evidence of a large ceiling. An
     /// unrecognized wire alias on a remote OpenAI-compatible route keeps the
     /// conservative compatibility ceiling, with an attributable source.
     #[test]
     fn uncatalogued_remote_model_keeps_a_conservative_ceiling() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
         let source = output_ceiling_source(ApiProvider::Openai, "totally-unknown-alias-v9");
         assert_eq!(
             source,

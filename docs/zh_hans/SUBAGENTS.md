@@ -73,7 +73,7 @@ Fleet 的八个规范角色名是 `general`、`explore`、`planner`、`reviewer`
 
 - `worktree_branch`：要创建的确切分支。
 - `worktree_base`：要从中开分支的 git ref；默认为 `HEAD`。
-- `worktree_path`：确切的检出路径。相对路径留在默认的兄弟目录 `.codewhale-worktrees/` 根下。
+- `worktree_path`：确切的检出路径。相对路径和绝对路径都必须留在默认的兄弟目录 `.codewhale-worktrees/<repo>/` 根下（检查前会解析符号链接）。任何 worktree 请求都保留审批卡片，即使是只读角色。
 
 `cwd` 可与 `worktree` 组合：所请求的目录成为仓库根（及新检出）解析所用的发现锚点（`prepare_child_workspace`）。没有 `worktree` 时，`cwd` 仍是针对父工作区内已经存在的目录的手动逃生舱。
 

@@ -18,6 +18,13 @@ pub(crate) fn exec_max_steps(max_turns: Option<u32>) -> u32 {
     crate::core::engine::turn_budget::resolve_max_model_steps(max_turns)
 }
 
+/// Model-step ceiling for a plain (zero-tool) `exec` run without
+/// `--max-turns`. Its only extra steps are output-limit continuations, which
+/// have no progress signal of their own; without this a model stuck at the
+/// output limit would be re-asked, with growing history, until the turn wall
+/// clock (#6510 review).
+pub(crate) const ONE_SHOT_DEFAULT_MAX_STEPS: u32 = 8;
+
 /// Default-denied tools for headless `exec`, on top of the operator's own
 /// `--disallowed-tools` flag.
 ///
@@ -276,6 +283,10 @@ pub(crate) fn exec_automation_services(
     Ok(Some(std::sync::Arc::new(tokio::sync::Mutex::new(service))))
 }
 
+/// Printed to stderr when a tool-less one-shot `exec` answer contained
+/// tool-call markup that the engine stripped from the visible output.
+pub(crate) const ONE_SHOT_TOOL_CALL_NOTICE: &str = "codewhale exec: the model tried to call a tool, but this run offers none, so the tool call was removed from the answer. Re-run with --auto (or --allowed-tools) to let it use tools.";
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_exec_agent(
     config: &Config,
@@ -299,6 +310,10 @@ pub(crate) async fn run_exec_agent(
     tool_authority_json: Option<String>,
     exec_hooks_enabled: bool,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+    // #6510: plain `exec` (no tool-surface flag). The caller passes an empty
+    // allowlist; this also skips workspace snapshots, LSP and the automation
+    // store, and writes the one-shot `--json` receipt shape.
+    one_shot: bool,
 ) -> Result<()> {
     use crate::compaction::CompactionConfig;
     use crate::core::engine::{EngineConfig, spawn_engine};
@@ -309,6 +324,8 @@ pub(crate) async fn run_exec_agent(
     use codewhale_config::AppMode;
     use codewhale_execpolicy::ApprovalMode;
 
+    ignore_sigpipe_for_headless_exec();
+
     // Withhold `request_user_input`; a headless run has no responder.
     let disallowed_tools = exec_disallowed_tools(disallowed_tools);
 
@@ -317,8 +334,9 @@ pub(crate) async fn run_exec_agent(
     // and explicit `always` are truthful outside the interactive TUI. With no
     // focus-reporting channel, fail closed to focused; only explicit `always`
     // may authorize a headless desktop notification.
-    crate::tui::notifications::set_terminal_focused(true);
-    let _ = crate::tui::notifications::settings(config);
+    let terminal = crate::host_terminal::host();
+    terminal.set_terminal_focused(true);
+    terminal.apply_notification_settings(&config.notifications_config());
 
     validate_exec_tool_authority_resume(tool_authority_json.as_deref(), resume_session.is_some())?;
     let fleet_authority = tool_authority_json
@@ -405,8 +423,8 @@ pub(crate) async fn run_exec_agent(
     // receipt claimed no Auto was in play.
     let reasoning_effort_auto = route.auto_controls_reasoning;
     // Resolve Auto against this run's prompt at the CLI boundary, exactly like
-    // `run_one_shot`/`run_one_shot_json` and the interactive launch path do,
-    // so the tier the engine (and the receipt below) sees is concrete.
+    // the interactive launch path does, so the tier the engine (and the
+    // receipt below) sees is concrete.
     let effective_reasoning_effort = route.reasoning_effort.and_then(|effort| {
         cli_reasoning_effort_value_for_prompt(&execution_config, &effective_model, effort)
     });
@@ -442,7 +460,7 @@ pub(crate) async fn run_exec_agent(
 
     let network_policy = exec_network_policy(&execution_config, outer_network_access);
 
-    let lsp_config = (!fleet_authority_active)
+    let lsp_config = (!fleet_authority_active && !one_shot)
         .then(|| {
             execution_config
                 .lsp
@@ -496,7 +514,7 @@ pub(crate) async fn run_exec_agent(
         && explicit_sandbox
             .is_some_and(|sandbox| sandbox.eq_ignore_ascii_case("danger-full-access"));
     let exec_shell_manager = crate::tools::shell::new_shared_shell_manager(workspace.clone());
-    let exec_automations = exec_automation_services(fleet_authority_active)?;
+    let exec_automations = exec_automation_services(fleet_authority_active || one_shot)?;
     let runtime_services = crate::tools::spec::RuntimeToolServices {
         shell_manager: Some(exec_shell_manager.clone()),
         persist_services_enabled,
@@ -559,11 +577,15 @@ pub(crate) async fn run_exec_agent(
             execution_config.subagent_max_spawn_depth_for_provider(effective_provider)
         },
         network_policy,
-        snapshots_enabled: !fleet_authority_active && execution_config.snapshots_config().enabled,
+        snapshots_enabled: !fleet_authority_active
+            && !one_shot
+            && execution_config.snapshots_config().enabled,
         snapshots_max_workspace_bytes: execution_config
             .snapshots_config()
             .max_workspace_gb
             .saturating_mul(1024 * 1024 * 1024),
+        // No host here records snapshot receipts.
+        record_restore_points: false,
         lsp_config,
         runtime_services,
         subagent_model_overrides: execution_config.subagent_model_overrides(),
@@ -625,6 +647,7 @@ pub(crate) async fn run_exec_agent(
             .search
             .as_ref()
             .and_then(|s| s.api_key.clone()),
+        search_native: execution_config.search_native(),
         search_base_url: execution_config
             .search
             .as_ref()
@@ -761,7 +784,7 @@ pub(crate) async fn run_exec_agent(
     });
 
     let mut summary = ExecSummary {
-        mode: "agent".to_string(),
+        mode: if one_shot { "one-shot" } else { "agent" }.to_string(),
         provider: effective_provider_name.clone(),
         model: effective_model.clone(),
         prompt: prompt.to_string(),
@@ -784,15 +807,17 @@ pub(crate) async fn run_exec_agent(
     let mut latest_workspace = workspace.clone();
     let mut tool_starts: HashMap<String, (Instant, String)> = HashMap::new();
     let mut turn_usage_seq: u32 = 0;
+    let mut settled_usage: Option<codewhale_models::Usage> = None;
 
-    let mut stdout = io::stdout();
     let mut ends_with_newline = false;
     // One absolute host deadline includes every autonomous child fan-in turn;
     // child-specific shorter deadlines remain enforced by their runtime.
-    let mut events = ExecAgentEvents::new(
-        engine_handle.clone(),
-        exec_turn_started_at + execution_config.turn_wall_clock(),
-    );
+    // The default wall clock is unbounded (`Duration::MAX`); a century
+    // stands in for "never" without overflowing `Instant`.
+    let exec_deadline = exec_turn_started_at
+        .checked_add(execution_config.turn_wall_clock())
+        .unwrap_or_else(|| exec_turn_started_at + Duration::from_secs(100 * 365 * 86_400));
+    let mut events = ExecAgentEvents::new(engine_handle.clone(), exec_deadline);
     loop {
         let Some(event) = events.next().await else {
             break;
@@ -804,8 +829,7 @@ pub(crate) async fn run_exec_agent(
                 if output_format == ExecOutputFormat::StreamJson {
                     emit_exec_stream_event(&ExecStreamEvent::Content { content })?;
                 } else if !json_output {
-                    print!("{content}");
-                    stdout.flush()?;
+                    write_exec_stdout(&content)?;
                 }
                 ends_with_newline = summary.output.ends_with('\n');
             }
@@ -814,7 +838,7 @@ pub(crate) async fn run_exec_agent(
                     && !json_output
                     && !ends_with_newline =>
             {
-                println!();
+                write_exec_stdout("\n")?;
             }
             Event::ThinkingDelta { .. } => {
                 // Exec stream-json intentionally omits reasoning deltas; the
@@ -1004,12 +1028,18 @@ pub(crate) async fn run_exec_agent(
             {
                 emit_exec_stream_event(&ExecStreamEvent::WorkflowEvent { run_id, event })?;
             }
+            // Headless runs have no person at the prompt: the run's flags
+            // (the posture) answer every request.
             Event::ApprovalRequired { id, .. } => {
                 if auto_approve {
-                    let _ = engine_handle.approve_tool_call(id).await;
+                    let _ = engine_handle
+                        .approve_tool_call_by(id, crate::approval_log::ApprovalDecider::Posture)
+                        .await;
                 } else {
                     approval_required = true;
-                    let _ = engine_handle.deny_tool_call(id).await;
+                    let _ = engine_handle
+                        .deny_tool_call_by(id, crate::approval_log::ApprovalDecider::Posture)
+                        .await;
                 }
             }
             Event::ElevationRequired {
@@ -1020,7 +1050,13 @@ pub(crate) async fn run_exec_agent(
             } => {
                 if can_elevate_sandbox {
                     let policy = crate::sandbox::SandboxPolicy::DangerFullAccess;
-                    let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
+                    let _ = engine_handle
+                        .retry_tool_with_policy_by(
+                            tool_id,
+                            policy,
+                            crate::approval_log::ApprovalDecider::Posture,
+                        )
+                        .await;
                 } else {
                     sandbox_denied = true;
                     approval_required = true;
@@ -1044,7 +1080,9 @@ pub(crate) async fn run_exec_agent(
                             outcome: "approval_required".to_string(),
                         })?;
                     }
-                    let _ = engine_handle.deny_tool_call(tool_id).await;
+                    let _ = engine_handle
+                        .deny_tool_call_by(tool_id, crate::approval_log::ApprovalDecider::Posture)
+                        .await;
                 }
             }
             Event::Error {
@@ -1097,6 +1135,7 @@ pub(crate) async fn run_exec_agent(
                 ..
             } => {
                 let (terminal_status, terminal_error) = (status, error);
+                settled_usage = Some(usage.clone());
                 #[cfg(unix)]
                 let (mut terminal_status, mut terminal_error) = (terminal_status, terminal_error);
                 if matches!(
@@ -1359,6 +1398,15 @@ pub(crate) async fn run_exec_agent(
                 latest_model = model;
                 latest_workspace = workspace;
             }
+            // A tool-less one-shot run has no tool channel, so a model that
+            // still tries to call a tool writes the call as text. The engine
+            // strips that markup from the answer; say why the answer is short
+            // and how to give the model tools, instead of exiting on nothing.
+            Event::Status { message }
+                if one_shot && message == crate::core::engine::FAKE_WRAPPER_NOTICE =>
+            {
+                eprintln!("{ONE_SHOT_TOOL_CALL_NOTICE}");
+            }
             // #3027: surface the engine's max-steps notice in text mode so a
             // --max-turns run that stops early says why instead of going quiet.
             Event::Status { message }
@@ -1423,8 +1471,11 @@ pub(crate) async fn run_exec_agent(
         tracing::warn!(target: "lifecycle_outbox", %error, "exec lifecycle outbox did not drain before exit");
     }
 
+    if one_shot {
+        summary.record_one_shot_outcome(settled_usage);
+    }
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&summary)?);
+        write_exec_stdout(&format!("{}\n", serde_json::to_string_pretty(&summary)?))?;
     }
 
     if let Some(error) = summary.error.as_ref()

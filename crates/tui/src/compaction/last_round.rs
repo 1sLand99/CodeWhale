@@ -104,16 +104,21 @@ pub fn inspect_compaction_keep(messages: &[Message]) -> CompactionKeep {
     }
 }
 
+/// Workspace anchors are passive model input; only user-configured trust admits
+/// them. Missing, linked, unreadable, or empty anchors contribute no text.
 #[must_use]
 pub fn pinned_anchors_text(workspace: Option<&std::path::Path>) -> Option<String> {
     let workspace = workspace?;
+    if !crate::config::is_workspace_trusted(workspace) {
+        return None;
+    }
     let primary = workspace.join(".codewhale").join("anchors.md");
-    let path = if primary.exists() {
+    let path = if primary.symlink_metadata().is_ok() || workspace.join(".codewhale").is_symlink() {
         primary
     } else {
         workspace.join(".deepseek").join("anchors.md")
     };
-    std::fs::read_to_string(path)
+    crate::fs_confined::read_to_string(workspace, &path)
         .ok()
         .map(|contents| contents.trim().to_string())
         .filter(|contents| !contents.is_empty())
@@ -369,7 +374,7 @@ pub(crate) fn validate_last_round_coverage(
     for text in last_round.iter().copied().filter_map(user_prompt_text_of) {
         if !survives(&text, replacement, user_prompt_text_of) {
             anyhow::bail!(
-                "Compaction coverage floor: a last-round user message was dropped; history was not replaced."
+                "Making room stopped: a last-round user message was dropped; history was not replaced."
             );
         }
     }
@@ -379,7 +384,7 @@ pub(crate) fn validate_last_round_coverage(
             .any(|message| has_tool_result_id(message, &id))
         {
             anyhow::bail!(
-                "Compaction coverage floor: last-round tool result {id} was dropped; history was not replaced."
+                "Making room stopped: last-round tool result {id} was dropped; history was not replaced."
             );
         }
     }
@@ -391,7 +396,7 @@ pub(crate) fn validate_last_round_coverage(
             .any(|message| has_tool_use_id(message, &id))
         {
             anyhow::bail!(
-                "Compaction coverage floor: last-round tool call {id} was dropped; history was not replaced."
+                "Making room stopped: last-round tool call {id} was dropped; history was not replaced."
             );
         }
     }
@@ -401,7 +406,7 @@ pub(crate) fn validate_last_round_coverage(
     for text in last_round.iter().copied().filter_map(assistant_text_of) {
         if !survives(&text, replacement, assistant_text_of) {
             anyhow::bail!(
-                "Compaction coverage floor: last-round assistant output was dropped; history was not replaced."
+                "Making room stopped: last-round assistant output was dropped; history was not replaced."
             );
         }
     }
@@ -413,7 +418,7 @@ pub(crate) fn validate_last_round_coverage(
             .any(|message| message.role.is_assistant_like())
     {
         anyhow::bail!(
-            "Compaction coverage floor: last-round assistant output was dropped; history was not replaced."
+            "Making room stopped: last-round assistant output was dropped; history was not replaced."
         );
     }
     Ok(())
@@ -436,7 +441,7 @@ pub(crate) fn require_text_survives(
         })
     });
     if !kept {
-        anyhow::bail!("Compaction coverage floor: {label} was dropped; history was not replaced.");
+        anyhow::bail!("Making room stopped: {label} was dropped; history was not replaced.");
     }
     Ok(())
 }
@@ -453,12 +458,12 @@ pub(crate) fn validate_survival_contract(
         .count();
     if checkpoints == 0 {
         anyhow::bail!(
-            "Compaction coverage floor: checkpoint receipt was dropped; history was not replaced."
+            "Making room stopped: checkpoint receipt was dropped; history was not replaced."
         );
     }
     if checkpoints > 1 {
         anyhow::bail!(
-            "Compaction coverage floor: prior summaries were duplicated; history was not replaced."
+            "Making room stopped: prior summaries were duplicated; history was not replaced."
         );
     }
     if let Some(anchors) = anchors {
@@ -515,6 +520,73 @@ mod tests {
     use codewhale_models::{ContentBlock, Role};
     use serde_json::json;
 
+    #[test]
+    fn confined_pinned_anchors_require_workspace_trust() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", config.path().join("config.toml"));
+        let legacy = workspace.path().join(".deepseek");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("anchors.md"), " legacy anchor \n").unwrap();
+        std::fs::write(legacy.join("trusted"), "true").unwrap();
+        assert_eq!(pinned_anchors_text(None), None);
+        assert_eq!(pinned_anchors_text(Some(workspace.path())), None);
+
+        crate::config::save_workspace_trust(workspace.path()).unwrap();
+        assert!(crate::config::is_workspace_trusted(workspace.path()));
+        assert_eq!(
+            pinned_anchors_text(Some(workspace.path())).as_deref(),
+            Some("legacy anchor")
+        );
+        let primary = workspace.path().join(".codewhale");
+        std::fs::create_dir(&primary).unwrap();
+        std::fs::write(primary.join("anchors.md"), " primary anchor \n").unwrap();
+        assert_eq!(
+            pinned_anchors_text(Some(workspace.path())).as_deref(),
+            Some("primary anchor")
+        );
+        std::fs::write(primary.join("anchors.md"), " \n").unwrap();
+        assert_eq!(pinned_anchors_text(Some(workspace.path())), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_pinned_anchors_refuse_linked_files_and_directories() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        use std::os::unix::fs::symlink;
+        let _lock = lock_test_env();
+        let config = tempfile::tempdir().unwrap();
+        let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", config.path().join("config.toml"));
+        for directory in [".codewhale", ".deepseek"] {
+            for linked_directory in [false, true] {
+                let workspace = tempfile::tempdir().unwrap();
+                let outside = tempfile::tempdir().unwrap();
+                crate::config::save_workspace_trust(workspace.path()).unwrap();
+                assert!(crate::config::is_workspace_trusted(workspace.path()));
+                let target = outside.path().join("anchors.md");
+                std::fs::write(&target, "separate anchor").unwrap();
+                let parent = workspace.path().join(directory);
+                if linked_directory {
+                    symlink(outside.path(), &parent).unwrap();
+                } else {
+                    std::fs::create_dir(&parent).unwrap();
+                    symlink(&target, parent.join("anchors.md")).unwrap();
+                }
+                assert_eq!(pinned_anchors_text(Some(workspace.path())), None);
+                // A dangling preferred path must not select legacy content.
+                if directory == ".codewhale" {
+                    let legacy = workspace.path().join(".deepseek");
+                    std::fs::create_dir(&legacy).unwrap();
+                    std::fs::write(legacy.join("anchors.md"), "legacy anchor").unwrap();
+                }
+                std::fs::remove_file(&target).unwrap();
+                assert_eq!(pinned_anchors_text(Some(workspace.path())), None);
+            }
+        }
+    }
+
     fn msg(role: &str, text: &str) -> Message {
         Message {
             role: Role::from(role),
@@ -554,6 +626,63 @@ mod tests {
         compaction_checkpoint_message(&SystemPrompt::Text(format!(
             "{COMPACTION_SUMMARY_MARKER}: {summary}"
         )))
+    }
+
+    /// The handoff header tells the next turn what survived. It must match
+    /// what the replacement history keeps: only the last steps of a long
+    /// round, with long tool output shortened and marked.
+    #[test]
+    fn summary_header_matches_what_replacement_history_keeps() {
+        let long_output = "x".repeat(LAST_ROUND_TOOL_RESULT_MAX_CHARS * 2);
+        let original = vec![
+            msg("user", "Fix the build."),
+            tool_use("first", "Bash", json!({"command": "cargo check"})),
+            tool_result("first", "first step output"),
+            tool_use("second", "Bash", json!({"command": "cargo build"})),
+            tool_result("second", "second step output"),
+            tool_use("third", "Bash", json!({"command": "cargo test"})),
+            tool_result("third", &long_output),
+        ];
+        let kept = replacement_messages(&original, 20_000);
+        let kept_ids: Vec<String> = kept.iter().flat_map(tool_result_ids).collect();
+        assert_eq!(kept_ids, ["second", "third"], "earlier steps are dropped");
+        assert!(
+            kept.iter()
+                .any(|m| user_text_of(m).as_deref() == Some("Fix the build."))
+        );
+        let shortened = kept
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "third" => Some(content.clone()),
+                _ => None,
+            })
+            .expect("the last tool result is kept");
+        assert!(shortened.len() < long_output.len());
+        assert!(shortened.starts_with("[tool result retained-history truncated from"));
+
+        let header = crate::compaction::SUMMARY_HEADER;
+        assert!(
+            header.contains("last steps of the current round"),
+            "{header}"
+        );
+        assert!(
+            header.contains("including earlier steps of this round"),
+            "{header}"
+        );
+        assert!(
+            header.contains("Long tool output there is shortened"),
+            "{header}"
+        );
+        assert!(
+            header.contains("with a marker where it was cut"),
+            "{header}"
+        );
+        assert!(!header.contains("as they were"), "{header}");
     }
 
     #[test]

@@ -317,6 +317,8 @@ pub(super) enum ToolApprovalStamp {
 }
 
 impl ToolApprovalStamp {
+    const ALL: [Self; 2] = [Self::ApprovedByUser, Self::ApprovedWithPolicy];
+
     fn decision(self) -> &'static str {
         match self {
             Self::ApprovedByUser => "approved_by_user",
@@ -361,6 +363,43 @@ pub(super) fn stamp_tool_result_approval(result: &mut ToolResult, approval: Tool
         result.content = note.to_string();
     } else {
         result.content = format!("{note}\n\n{}", result.content);
+    }
+}
+
+/// The tool output a person reads: the result without the note
+/// [`stamp_tool_result_approval`] put in front of it for the model (#6566).
+///
+/// Only a result the engine stamped (`metadata.approval.model_visible`) loses
+/// a note, and only that decision's exact note text followed by a blank line
+/// (or nothing). Output that merely begins with "[approval] " — from a
+/// command, a file, or anything else a tool read — is shown whole, so
+/// injected text cannot hide tool output from the person.
+pub(crate) fn content_without_approval_note(result: &ToolResult) -> &str {
+    let content = result.content.as_str();
+    let approval = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("approval"));
+    let stamped = approval
+        .and_then(|approval| approval.get("model_visible"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let Some(stamp) = approval
+        .and_then(|approval| approval.get("decision"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|decision| {
+            ToolApprovalStamp::ALL
+                .into_iter()
+                .find(|stamp| stamp.decision() == decision)
+        })
+        .filter(|_| stamped)
+    else {
+        return content;
+    };
+    match content.strip_prefix(stamp.model_visible_note()) {
+        Some("") => "",
+        Some(rest) => rest.strip_prefix("\n\n").unwrap_or(content),
+        None => content,
     }
 }
 
@@ -423,7 +462,7 @@ pub(super) fn format_tool_error_with_schema(
             "Path escapes workspace: {}. Use a workspace-relative path or enable trust mode.",
             path.display()
         ),
-        ToolError::ExecutionFailed { message } => message.clone(),
+        ToolError::ExecutionFailed { message, .. } => message.clone(),
         ToolError::Timeout { seconds } => format!(
             "Tool '{tool_name}' timed out after {seconds}s. Try a narrower scope or a longer timeout."
         ),
@@ -449,12 +488,15 @@ pub(super) fn format_tool_error_with_schema(
         }
         ToolError::PermissionDenied { message } => {
             let lower = message.to_ascii_lowercase();
-            // #3020: Pass through messages that already name the denial cause.
-            if mentions_mode_word(&lower)
-                || lower.contains("allow_shell")
-                || lower.contains("denied by user")
-            {
+            // #3020: messages that already name the denial cause get no
+            // conflicting "Adjust approval mode" suffix. They keep the
+            // `Tool '…' was denied:` lead, which is how a receipt tells a
+            // call Codewhale blocked from one that ran and failed; an
+            // approval denial already starts `Tool '…' denied by user`.
+            if lower.contains("denied by user") {
                 message.clone()
+            } else if mentions_mode_word(&lower) || lower.contains("allow_shell") {
+                format!("Tool '{tool_name}' was denied: {message}")
             } else {
                 format!(
                     "Tool '{tool_name}' was denied: {message}. Adjust approval mode or request permission."

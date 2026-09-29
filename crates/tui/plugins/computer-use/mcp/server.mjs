@@ -1283,6 +1283,9 @@ async function prepareArgs(computer, name, args, resolve, sink) {
   const out = { ...args };
   delete out.computer;
   delete out.ephemeral; // server-internal: never reaches a backend
+  // Captures and crops read only rasters the backend itself produced; a
+  // caller-named source file is never forwarded.
+  if (name === "screenshot" || name === "zoom") delete out.source;
   // type/key join the semantic set: their element target addresses a window
   // for input routing (hosted panels), not a point for pointer delivery.
   const semantic = new Set(["set_value", "select_text", "perform_action", "focus", "get_value", "type", "key"]);

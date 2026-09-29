@@ -363,6 +363,26 @@ pub enum EventMsg {
         tool_name: String,
         result: ToolCallOutcome,
     },
+    /// Trusted Engine-owned activity for an operation that passed dispatch
+    /// and authority checks. No tool name, arguments, command, or result is
+    /// included in the pet-facing activity contract.
+    ///
+    /// Reserved on the wire: `protocol_parity` maps the engine event, but no
+    /// runtime thread emits the pair yet, so Runtime API and GPUI clients do
+    /// not receive it. The shared pet (`pet_watch`) is the only consumer today.
+    OperationActivityStarted {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        span_id: String,
+        activity_kind: crate::engine_owner::OwnerActivityKind,
+    },
+    OperationActivityCompleted {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        span_id: String,
+        activity_kind: crate::engine_owner::OwnerActivityKind,
+        outcome: crate::engine_owner::OwnerOperationOutcome,
+    },
 
     // === Turn lifecycle ===
     TurnStarted {
@@ -376,6 +396,15 @@ pub enum EventMsg {
     /// Bounded tool-field projection from a prepared model-client request
     /// (`ToolInspectionSnapshot` serialized).
     ToolRequestSnapshot {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        snapshot: Value,
+    },
+    /// A workspace snapshot the engine took for the running turn
+    /// (`WorkspaceSnapshotRef` serialized: `kind`, `snapshot_id`, `tree_id`,
+    /// `session_id`, optional `tool_call_id`, `write_paths` and
+    /// `changed_paths`).
+    WorkspaceSnapshotTaken {
         thread_id: ThreadId,
         session_id: SessionId,
         snapshot: Value,
@@ -529,6 +558,10 @@ pub enum EventMsg {
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_source: Option<String>,
+        /// The name the agent goes by (workflow task label, dispatch name, or
+        /// role). Absent from older producers; never the raw id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
     },
     AgentProgress {
         thread_id: ThreadId,
@@ -555,6 +588,8 @@ pub enum EventMsg {
         spawn_depth: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         continuable: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
     },
     SubAgentFollowUp {
         thread_id: ThreadId,
@@ -749,8 +784,11 @@ pub const EVENT_KINDS: &[&str] = &[
     "tool_call_started",
     "tool_call_heartbeat",
     "tool_call_complete",
+    "operation_activity_started",
+    "operation_activity_completed",
     "turn_started",
     "tool_request_snapshot",
+    "workspace_snapshot_taken",
     "route_dispatched",
     "turn_complete",
     "turn_usage",
@@ -802,8 +840,11 @@ impl EventMsg {
             Self::ToolCallStarted { .. } => "tool_call_started",
             Self::ToolCallHeartbeat { .. } => "tool_call_heartbeat",
             Self::ToolCallComplete { .. } => "tool_call_complete",
+            Self::OperationActivityStarted { .. } => "operation_activity_started",
+            Self::OperationActivityCompleted { .. } => "operation_activity_completed",
             Self::TurnStarted { .. } => "turn_started",
             Self::ToolRequestSnapshot { .. } => "tool_request_snapshot",
+            Self::WorkspaceSnapshotTaken { .. } => "workspace_snapshot_taken",
             Self::RouteDispatched { .. } => "route_dispatched",
             Self::TurnComplete { .. } => "turn_complete",
             Self::TurnUsage { .. } => "turn_usage",
@@ -855,8 +896,11 @@ impl EventMsg {
             | Self::ToolCallStarted { thread_id, .. }
             | Self::ToolCallHeartbeat { thread_id, .. }
             | Self::ToolCallComplete { thread_id, .. }
+            | Self::OperationActivityStarted { thread_id, .. }
+            | Self::OperationActivityCompleted { thread_id, .. }
             | Self::TurnStarted { thread_id, .. }
             | Self::ToolRequestSnapshot { thread_id, .. }
+            | Self::WorkspaceSnapshotTaken { thread_id, .. }
             | Self::RouteDispatched { thread_id, .. }
             | Self::TurnComplete { thread_id, .. }
             | Self::TurnUsage { thread_id, .. }
@@ -908,8 +952,11 @@ impl EventMsg {
             | Self::ToolCallStarted { session_id, .. }
             | Self::ToolCallHeartbeat { session_id, .. }
             | Self::ToolCallComplete { session_id, .. }
+            | Self::OperationActivityStarted { session_id, .. }
+            | Self::OperationActivityCompleted { session_id, .. }
             | Self::TurnStarted { session_id, .. }
             | Self::ToolRequestSnapshot { session_id, .. }
+            | Self::WorkspaceSnapshotTaken { session_id, .. }
             | Self::RouteDispatched { session_id, .. }
             | Self::TurnComplete { session_id, .. }
             | Self::TurnUsage { session_id, .. }
@@ -1047,6 +1094,19 @@ mod tests {
                     error: ToolCallError::Timeout { seconds: 3 },
                 },
             },
+            EventMsg::OperationActivityStarted {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                span_id: "span-1".into(),
+                activity_kind: crate::engine_owner::OwnerActivityKind::Reading,
+            },
+            EventMsg::OperationActivityCompleted {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                span_id: "span-1".into(),
+                activity_kind: crate::engine_owner::OwnerActivityKind::Reading,
+                outcome: crate::engine_owner::OwnerOperationOutcome::Succeeded,
+            },
             EventMsg::TurnStarted {
                 thread_id: t.clone(),
                 session_id: s.clone(),
@@ -1058,6 +1118,11 @@ mod tests {
                 thread_id: t.clone(),
                 session_id: s.clone(),
                 snapshot: json!({"tool_count": 2}),
+            },
+            EventMsg::WorkspaceSnapshotTaken {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                snapshot: json!({"kind": "pre_turn", "tree_id": "t"}),
             },
             EventMsg::RouteDispatched {
                 thread_id: t.clone(),
@@ -1171,6 +1236,7 @@ mod tests {
                 spawn_depth: 1,
                 model: "m".into(),
                 route_source: Some("task.model".into()),
+                display_name: Some("audit docs".into()),
             },
             EventMsg::AgentProgress {
                 thread_id: t.clone(),
@@ -1196,6 +1262,7 @@ mod tests {
                 parent_run_id: None,
                 spawn_depth: Some(1),
                 continuable: Some(false),
+                display_name: Some("audit docs".into()),
             },
             EventMsg::SubAgentFollowUp {
                 thread_id: t.clone(),
@@ -1412,6 +1479,36 @@ mod tests {
             assert_eq!(value["session_id"], msg.session_id().to_string(), "{msg:?}");
             let back: EventMsg = serde_json::from_value(value).unwrap();
             assert_eq!(back, msg);
+        }
+    }
+
+    #[test]
+    fn agent_events_from_producers_without_a_display_name_still_load() {
+        // #6565 added `display_name`; payloads written before it omit it.
+        let mut every = every_variant();
+        every.retain(|msg| {
+            matches!(
+                msg,
+                EventMsg::AgentSpawned { .. } | EventMsg::AgentComplete { .. }
+            )
+        });
+        assert_eq!(every.len(), 2);
+        for msg in every {
+            let mut value = serde_json::to_value(&msg).unwrap();
+            assert_eq!(value["display_name"], "audit docs");
+            value.as_object_mut().unwrap().remove("display_name");
+            let back: EventMsg = serde_json::from_value(value.clone()).unwrap();
+            match &back {
+                EventMsg::AgentSpawned { display_name, .. }
+                | EventMsg::AgentComplete { display_name, .. } => assert_eq!(*display_name, None),
+                other => panic!("unexpected {other:?}"),
+            }
+            assert!(
+                serde_json::to_value(&back)
+                    .unwrap()
+                    .get("display_name")
+                    .is_none()
+            );
         }
     }
 

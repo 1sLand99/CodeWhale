@@ -320,12 +320,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             ));
             if let Some(queued) = queued.as_deref() {
                 // Truthful `· N queued`: follow-ups the running child has not
-                // yet folded into its next round. Accent so it reads as live
-                // pending work, not as part of the receipt.
+                // yet folded into its next round. Amber: a message is waiting
+                // on a busy agent, the one thing on this row that needs you.
                 spans.push(Span::styled(
                     queued.to_string(),
                     Style::default()
-                        .fg(app.ui_theme.accent_action)
+                        .fg(app.ui_theme.warning)
                         .bg(normal.bg.unwrap_or(app.ui_theme.panel_bg)),
                 ));
             }
@@ -467,9 +467,11 @@ fn empty_view_hint(panel: RailPanel) -> &'static str {
         RailPanel::Tasks => "no to-dos yet",
         RailPanel::Background => "nothing running in the background",
         RailPanel::Files => "no files touched this session",
-        RailPanel::Notepad => "Enter to write a note",
+        RailPanel::Notepad => "/note add <text> to keep a note",
         RailPanel::Context => "context budget unknown",
-        RailPanel::Git => "not a git repository",
+        // The Git view always paints its own state row ("reading git
+        // status…", "not a git repository", "git unavailable: …").
+        RailPanel::Git => "reading git status…",
         RailPanel::Price => "no priced turns yet",
     }
 }
@@ -628,7 +630,15 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         "×"
     };
-    let close = if area.width >= 60 {
+    // #6502: name Esc beside the close control only while Esc really closes
+    // the dock — the dock owns keyboard focus and has something to close
+    // (`input::handle_key`). Otherwise Esc belongs to the composer and stops
+    // the running turn, which the posture bar already says with the turn
+    // status; a bare `×` here keeps the two from reading as one shortcut.
+    let esc_closes = app.work_surface.focused
+        && !super::interaction::opened_detail_on_screen(app)
+        && (app.work_surface.explicit_view || !visible_rows_for_panel(app).is_empty());
+    let close = if esc_closes && area.width >= 60 {
         format!(" Esc {close_mark} ")
     } else {
         format!(" {close_mark} ")

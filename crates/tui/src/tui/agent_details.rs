@@ -118,11 +118,7 @@ pub(crate) fn safe_agent_display_name(app: &App, agent_id: &str) -> String {
             .map(|agent| (agent.agent_id.as_str(), agent.nickname.as_deref())),
         app.ui_locale.tag(),
     );
-    app.subagent_cache
-        .iter()
-        .find(|agent| agent.agent_id == agent_id)
-        .and_then(crate::tui::sidebar::dispatched_agent_name)
-        .map(str::to_string)
+    app.agent_given_name(agent_id)
         .or_else(|| generated.get(agent_id).cloned())
         .or_else(|| app.agent_label_map.get(agent_id).cloned())
         .and_then(|name| safe_child_value(app, &name))
@@ -582,7 +578,9 @@ mod tests {
                 role: Some("worker".to_string()),
             },
             model: "deepseek-v4-pro".to_string(),
-            nickname: Some("Blue Whale".to_string()),
+            nickname: Some(crate::tools::subagent::whale_name_for_id_in_locale(
+                agent_id, "en",
+            )),
             status,
             worker_status: None,
             runtime_permissions: None,
@@ -596,6 +594,8 @@ mod tests {
             duration_ms: 2_500,
             started_at: None,
             from_prior_session: false,
+            idle_ms: None,
+            heartbeat_timeout_ms: None,
         }
     }
 

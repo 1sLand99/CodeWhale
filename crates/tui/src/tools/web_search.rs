@@ -44,7 +44,63 @@ const SERPLY_ENDPOINT: &str = "https://api.serply.io/v1/search";
 const ERROR_BODY_PREVIEW_BYTES: usize = 512;
 const PROVIDER_NATIVE_MIN_TIMEOUT_MS: u64 = 45_000;
 const KIMI_K3_FORMULA_MIN_TIMEOUT_MS: u64 = 180_000;
+/// Time a native-search attempt allows for its search round-trips before the
+/// answer is generated (#6508).
+const NATIVE_SEARCH_ROUND_TRIP_ALLOWANCE_MS: u64 = 30_000;
+/// Conservative generation rate for a native-search answer. The request is
+/// non-streaming, so the attempt must outlast the whole generation or the
+/// answer is lost to the timeout rather than returned whole.
+const NATIVE_SEARCH_ASSUMED_TOKENS_PER_SEC: u64 = 40;
 const VOLCENGINE_MIN_TIMEOUT_MS: u64 = 90_000;
+
+/// The recency and locale knobs an adapter forwards to its backend.
+///
+/// Recency is rounded *up* to the backend's nearest window (day, week, month,
+/// year), so `recency = 10` days asks for the last month: results are never
+/// cut tighter than requested, but may be older than asked. Locale is a BCP 47
+/// style tag (`en`, `en-US`, `de_DE`); each backend takes the part it accepts.
+#[derive(Debug, Clone, Copy, Default)]
+struct QueryFilters<'a> {
+    recency: Option<Recency>,
+    locale: Option<&'a str>,
+}
+
+impl<'a> QueryFilters<'a> {
+    fn of(query: &'a SearchQuery) -> Self {
+        Self {
+            recency: query.recency,
+            locale: query
+                .locale
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        }
+    }
+
+    /// `day` / `week` / `month` / `year`, rounded up from the request.
+    fn window(self) -> Option<&'static str> {
+        self.recency.map(|recency| match recency.days() {
+            0..=1 => "day",
+            2..=7 => "week",
+            8..=31 => "month",
+            _ => "year",
+        })
+    }
+
+    /// Lowercase language subtag (`en` from `en-US`).
+    fn language(self) -> Option<String> {
+        let language = self.locale?.split(['-', '_']).next()?;
+        (matches!(language.len(), 2 | 3) && language.chars().all(|ch| ch.is_ascii_alphabetic()))
+            .then(|| language.to_ascii_lowercase())
+    }
+
+    /// Two-letter region subtag, uppercase (`US` from `en-US`).
+    fn region(self) -> Option<String> {
+        let region = self.locale?.split(['-', '_']).nth(1)?;
+        (region.len() == 2 && region.chars().all(|ch| ch.is_ascii_alphabetic()))
+            .then(|| region.to_ascii_uppercase())
+    }
+}
 
 /// Credential-free endpoint selected for an explicit doctor reachability
 /// probe. The ordinary search request builders remain the source of truth for
@@ -270,6 +326,7 @@ impl WebSearchTool {
     async fn run_firecrawl_search(
         &self,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         context: &ToolContext,
@@ -278,6 +335,7 @@ impl WebSearchTool {
         self.run_firecrawl_search_at(
             FIRECRAWL_ENDPOINT,
             query,
+            filters,
             max_results,
             timeout_ms,
             context.search_api_key.as_deref().or(env_key.as_deref()),
@@ -289,6 +347,7 @@ impl WebSearchTool {
         &self,
         endpoint: &str,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         api_key: Option<&str>,
@@ -301,11 +360,17 @@ impl WebSearchTool {
                 ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
             })?;
         let api_key = api_key.map(str::trim).filter(|key| !key.is_empty());
-        let payload = json!({
+        let mut payload = json!({
             "query": query,
             "limit": max_results,
             "sources": [{"type": "web"}],
         });
+        if let Some(window) = filters.window() {
+            payload["tbs"] = json!(format!("qdr:{}", &window[..1]));
+        }
+        if let Some(region) = filters.region() {
+            payload["country"] = json!(region);
+        }
         let mut request = client.post(endpoint).json(&payload);
         if let Some(key) = api_key {
             request = request.bearer_auth(key);
@@ -352,11 +417,12 @@ impl WebSearchTool {
     async fn run_searxng_search(
         &self,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         context: &ToolContext,
     ) -> Result<(Vec<WebSearchEntry>, String), ToolError> {
-        let (url, host) = searxng_search_url(context.search_base_url.as_deref(), query)?;
+        let (url, host) = searxng_search_url(context.search_base_url.as_deref(), query, filters)?;
         check_policy(context.network_policy.as_ref(), &host)?;
 
         let client = crate::tls::reqwest_client_builder()
@@ -408,6 +474,7 @@ impl WebSearchTool {
     async fn run_tavily_search(
         &self,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         context: &ToolContext,
@@ -439,12 +506,7 @@ impl WebSearchTool {
                 ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
             })?;
 
-        let payload = json!({
-            "api_key": api_key, // noqa: api-key-in-body
-            "query": query,
-            "search_depth": "basic",
-            "max_results": max_results,
-        });
+        let payload = tavily_search_payload(&api_key, query, filters, max_results);
 
         let resp = client
             .post(TAVILY_ENDPOINT)
@@ -543,6 +605,7 @@ impl WebSearchTool {
     async fn run_serply_search(
         &self,
         query: &str,
+        filters: QueryFilters<'_>,
         max_results: usize,
         timeout_ms: u64,
         context: &ToolContext,
@@ -566,7 +629,7 @@ impl WebSearchTool {
             })?;
 
         let resp = client
-            .get(serply_search_url(query, max_results)?)
+            .get(serply_search_url(query, filters, max_results)?)
             .header("X-Api-Key", api_key)
             .header("Accept", "application/json")
             .send()
@@ -1031,10 +1094,9 @@ fn search_timeout_budgets(
             // Provider-native search performs a model-backed request. Give it
             // a dedicated minimum without donating unused time to the
             // configured/local fallback selected by the caller.
-            let provider_budget = requested_timeout.max(
-                provider_native_timeout_floor
-                    .unwrap_or(Duration::from_millis(PROVIDER_NATIVE_MIN_TIMEOUT_MS)),
-            );
+            let provider_budget = requested_timeout
+                .max(Duration::from_millis(PROVIDER_NATIVE_MIN_TIMEOUT_MS))
+                .max(provider_native_timeout_floor.unwrap_or_default());
             (
                 provider_budget.saturating_add(requested_timeout),
                 Some(provider_budget),
@@ -1048,12 +1110,26 @@ fn search_timeout_budgets(
 fn provider_native_timeout_floor(
     client: &crate::client::ProviderNativeSearchClient,
 ) -> Option<Duration> {
-    crate::config::is_exact_direct_moonshot_k3_route(
+    let k3_formula = crate::config::is_exact_direct_moonshot_k3_route(
         client.provider(),
         client.base_url(),
         client.model(),
     )
-    .then_some(Duration::from_millis(KIMI_K3_FORMULA_MIN_TIMEOUT_MS))
+    .then_some(Duration::from_millis(KIMI_K3_FORMULA_MIN_TIMEOUT_MS));
+    let answer = client
+        .requested_answer_output_tokens()
+        .map(native_answer_time_budget);
+    k3_formula.max(answer)
+}
+
+/// Time a native-search attempt needs to return an answer of `output_tokens`
+/// whole: the search round-trips plus generation at a conservative rate
+/// (#6508). Without it, raising the requested answer length only moved the
+/// cut from the provider's token limit to this tool's timeout.
+fn native_answer_time_budget(output_tokens: u32) -> Duration {
+    let generation_ms =
+        u64::from(output_tokens).saturating_mul(1_000) / NATIVE_SEARCH_ASSUMED_TOKENS_PER_SEC;
+    Duration::from_millis(NATIVE_SEARCH_ROUND_TRIP_ALLOWANCE_MS.saturating_add(generation_ms))
 }
 
 fn register_search_citations(response: &mut SearchResponse, context: &ToolContext) {
@@ -1187,7 +1263,10 @@ fn finalize_search_response(
         ..HonoredQueryCapabilities::default()
     };
 
-    if query.recency.is_some() {
+    let adapter_ignored = |raw: &BackendSearch, knob: QueryKnob| {
+        raw.degraded.contains(&DegradedReason::KnobIgnored { knob })
+    };
+    if query.recency.is_some() && !adapter_ignored(&raw, QueryKnob::Recency) {
         if matches!(
             capabilities.recency,
             super::web::contract::CapabilityState::Supported
@@ -1206,7 +1285,7 @@ fn finalize_search_response(
         apply_domain_constraints(&query, capabilities, &mut raw);
         honored.domains = true;
     }
-    if query.locale.is_some() {
+    if query.locale.is_some() && !adapter_ignored(&raw, QueryKnob::Locale) {
         if matches!(
             capabilities.locale,
             super::web::contract::CapabilityState::Supported
@@ -1233,12 +1312,21 @@ fn finalize_search_response(
         cache_hit: false,
     };
     let count = raw.results.len();
-    let message = match (count, raw.note.as_deref()) {
+    let mut message = match (count, raw.note.as_deref()) {
         (0, Some(note)) => format!("No results found. {note}"),
         (0, None) => "No results found".to_string(),
         (_, Some(note)) => format!("Found {count} result(s). {note}"),
         (_, None) => format!("Found {count} result(s)"),
     };
+    // The answer sits in the message; say right next to it when the provider
+    // cut it short (#6508).
+    if let Some(cut) = receipt
+        .degraded
+        .iter()
+        .find(|reason| matches!(reason, DegradedReason::AnswerCutByProvider))
+    {
+        message.push_str(&format!("\n[{}]", cut.message()));
+    }
 
     SearchResponse {
         query: query.query,
@@ -1302,6 +1390,7 @@ pub(crate) async fn run_backend_search(
     )
     .unwrap_or(u64::MAX);
     let max_results = usize::from(query.max_results);
+    let filters = QueryFilters::of(query);
     let tool = WebSearchTool;
     let simple = |backend, entries: Vec<WebSearchEntry>| BackendSearch {
         backend,
@@ -1316,14 +1405,22 @@ pub(crate) async fn run_backend_search(
         SearchProvider::Firecrawl => {
             check_policy(context.network_policy.as_ref(), "api.firecrawl.dev")?;
             let (results, note) = tool
-                .run_firecrawl_search(&query.query, max_results, timeout_ms, context)
+                .run_firecrawl_search(&query.query, filters, max_results, timeout_ms, context)
                 .await?;
+            // Firecrawl targets a country, not a language: a bare `en` has
+            // nothing to send and is reported as ignored.
+            let degraded = (filters.locale.is_some() && filters.region().is_none())
+                .then_some(DegradedReason::KnobIgnored {
+                    knob: QueryKnob::Locale,
+                })
+                .into_iter()
+                .collect();
             Ok(BackendSearch {
                 backend: BackendId::Firecrawl,
                 source: "firecrawl".to_string(),
                 backend_detail: Some("api.firecrawl.dev".to_string()),
                 results: normalize_entries(results),
-                degraded: Vec::new(),
+                degraded,
                 note: Some(note),
             })
         }
@@ -1331,7 +1428,7 @@ pub(crate) async fn run_backend_search(
             check_policy(context.network_policy.as_ref(), "api.tavily.com")?;
             Ok(simple(
                 BackendId::Tavily,
-                tool.run_tavily_search(&query.query, max_results, timeout_ms, context)
+                tool.run_tavily_search(&query.query, filters, max_results, timeout_ms, context)
                     .await?,
             ))
         }
@@ -1353,7 +1450,7 @@ pub(crate) async fn run_backend_search(
         }
         SearchProvider::Searxng => {
             let (entries, host) = tool
-                .run_searxng_search(&query.query, max_results, timeout_ms, context)
+                .run_searxng_search(&query.query, filters, max_results, timeout_ms, context)
                 .await?;
             let note = format!("Backend: searxng at {host}");
             Ok(BackendSearch {
@@ -1395,7 +1492,7 @@ pub(crate) async fn run_backend_search(
             check_policy(context.network_policy.as_ref(), "api.serply.io")?;
             Ok(simple(
                 BackendId::Serply,
-                tool.run_serply_search(&query.query, max_results, timeout_ms, context)
+                tool.run_serply_search(&query.query, filters, max_results, timeout_ms, context)
                     .await?,
             ))
         }
@@ -1903,12 +2000,45 @@ fn parse_sofya_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry
 }
 
 /// Build the Serply `/v1/search` URL; `num` is the number of organic results.
-fn serply_search_url(query: &str, max_results: usize) -> Result<reqwest::Url, ToolError> {
+fn tavily_search_payload(
+    api_key: &str,
+    query: &str,
+    filters: QueryFilters<'_>,
+    max_results: usize,
+) -> Value {
+    let mut payload = json!({
+        "api_key": api_key, // noqa: api-key-in-body
+        "query": query,
+        "search_depth": "basic",
+        "max_results": max_results,
+    });
+    if let Some(window) = filters.window() {
+        payload["time_range"] = json!(window);
+    }
+    payload
+}
+
+/// Serply documents `gl` (country); `hl` is the Google interface-language
+/// parameter it forwards. Recency is not documented, so it is not sent.
+fn serply_search_url(
+    query: &str,
+    filters: QueryFilters<'_>,
+    max_results: usize,
+) -> Result<reqwest::Url, ToolError> {
     let mut url = reqwest::Url::parse(SERPLY_ENDPOINT)
         .map_err(|error| ToolError::invalid_input(format!("Invalid Serply endpoint: {error}")))?;
-    url.query_pairs_mut()
-        .append_pair("q", query)
-        .append_pair("num", &max_results.to_string());
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("q", query)
+            .append_pair("num", &max_results.to_string());
+        if let Some(language) = filters.language() {
+            pairs.append_pair("hl", &language);
+        }
+        if let Some(region) = filters.region() {
+            pairs.append_pair("gl", &region.to_ascii_lowercase());
+        }
+    }
     Ok(url)
 }
 
@@ -2268,7 +2398,11 @@ fn duckduckgo_search_url(
     Ok((url.to_string(), host.to_string()))
 }
 
-fn searxng_search_url(base_url: Option<&str>, query: &str) -> Result<(String, String), ToolError> {
+fn searxng_search_url(
+    base_url: Option<&str>,
+    query: &str,
+    filters: QueryFilters<'_>,
+) -> Result<(String, String), ToolError> {
     let raw = configured_search_base_url(base_url).ok_or_else(|| {
         ToolError::invalid_input(
             "SearXNG search requires [search] base_url = \"https://your-searxng.example\"; no public instance is used by default.",
@@ -2288,9 +2422,16 @@ fn searxng_search_url(base_url: Option<&str>, query: &str) -> Result<(String, St
     } else if path != "/search" && !path.ends_with("/search") {
         url.set_path(&format!("{path}/search"));
     }
-    url.query_pairs_mut()
-        .append_pair("q", query)
-        .append_pair("format", "json");
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("q", query).append_pair("format", "json");
+        if let Some(window) = filters.window() {
+            pairs.append_pair("time_range", window);
+        }
+        if let Some(locale) = filters.locale {
+            pairs.append_pair("language", locale);
+        }
+    }
 
     Ok((url.to_string(), host))
 }
@@ -2306,15 +2447,16 @@ fn duckduckgo_allows_bing_fallback(base_url: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ERROR_BODY_PREVIEW_BYTES, KIMI_K3_FORMULA_MIN_TIMEOUT_MS, ScrapeEndpoints,
+        ERROR_BODY_PREVIEW_BYTES, KIMI_K3_FORMULA_MIN_TIMEOUT_MS, QueryFilters, ScrapeEndpoints,
         SearchProbeTargetError, WebSearchTool, acquire_model_backed_search_inference_participant,
         baidu_search_payload, bocha_error_message, domain_matches, duckduckgo_search_url,
-        extract_search_query, finalize_search_response, optional_search_max_results,
-        parse_baidu_results, parse_bocha_results, parse_metaso_results, parse_searxng_results,
-        parse_serply_results, parse_sofya_results, parse_tavily_results, parse_volcengine_results,
-        register_search_citations, rerank, run_scrape_search_with_endpoints, sanitize_error_body,
-        search_probe_target, search_timeout_budgets, searxng_score, searxng_search_url,
-        serply_search_url, truncate_error_body, volcengine_extract_text,
+        extract_search_query, finalize_search_response, native_answer_time_budget,
+        optional_search_max_results, parse_baidu_results, parse_bocha_results,
+        parse_metaso_results, parse_searxng_results, parse_serply_results, parse_sofya_results,
+        parse_tavily_results, parse_volcengine_results, register_search_citations, rerank,
+        run_scrape_search_with_endpoints, sanitize_error_body, search_probe_target,
+        search_timeout_budgets, searxng_score, searxng_search_url, serply_search_url,
+        truncate_error_body, volcengine_extract_text,
     };
     use crate::config::SearchProvider;
     use crate::tools::web::contract::{
@@ -2343,6 +2485,64 @@ mod tests {
         assert_eq!(total, Duration::from_millis(195_000));
         assert_eq!(first, Some(Duration::from_millis(180_000)));
         assert_eq!(fallback, Some(requested));
+    }
+
+    #[test]
+    fn provider_native_budget_covers_the_requested_answer_length() {
+        // #6508: native search asks for up to 8,192 output tokens in one
+        // non-streaming request. The attempt must outlast generating them at
+        // the assumed rate, or a long answer times out instead of arriving.
+        let requested = Duration::from_millis(15_000);
+        for tokens in [128_u32, 2_048, 4_096, 8_192] {
+            let floor = native_answer_time_budget(tokens);
+            let generation = Duration::from_millis(
+                u64::from(tokens) * 1_000 / super::NATIVE_SEARCH_ASSUMED_TOKENS_PER_SEC,
+            );
+            assert!(floor >= generation, "{tokens} tokens: {floor:?}");
+            let (total, first, fallback) =
+                search_timeout_budgets(BackendId::ProviderNative, requested, Some(floor));
+            let first = first.expect("provider-native gets a dedicated attempt");
+            assert!(first >= floor, "{tokens} tokens: attempt {first:?}");
+            // The minimum never drops below the pre-#6508 floor.
+            assert!(first >= Duration::from_millis(45_000));
+            assert_eq!(total, first + requested);
+            assert_eq!(fallback, Some(requested));
+        }
+        // 8,192 tokens at 40/s plus the round-trip allowance: ~4 minutes.
+        assert_eq!(
+            native_answer_time_budget(8_192),
+            Duration::from_millis(234_800)
+        );
+    }
+
+    #[test]
+    fn provider_native_floor_follows_what_the_client_requests() {
+        use crate::config::{Config, ProviderConfig, ProvidersConfig};
+        let config = Config {
+            provider: Some("anthropic".to_string()),
+            providers: Some(ProvidersConfig {
+                anthropic: ProviderConfig {
+                    api_key: Some("anthropic-test-key".to_string()),
+                    base_url: Some("https://api.anthropic.com".to_string()),
+                    model: Some("claude-opus-4-8".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let client = crate::client::ProviderNativeSearchClient::new(
+            crate::client::CodewhaleClient::new(&config).expect("Anthropic client"),
+        )
+        .expect("Anthropic native adapter");
+        let tokens = client
+            .requested_answer_output_tokens()
+            .expect("Anthropic requests an explicit answer length");
+        assert!(tokens > 2_048, "catalogued model asks for more: {tokens}");
+        assert_eq!(
+            super::provider_native_timeout_floor(&client),
+            Some(native_answer_time_budget(tokens))
+        );
     }
 
     #[test]
@@ -2720,7 +2920,8 @@ mod tests {
 
     #[test]
     fn serply_search_url_encodes_query_and_result_count() {
-        let url = serply_search_url("rust tui & ratatui", 7).expect("serply url");
+        let url = serply_search_url("rust tui & ratatui", QueryFilters::default(), 7)
+            .expect("serply url");
 
         assert_eq!(url.host_str(), Some("api.serply.io"));
         assert_eq!(url.path(), "/v1/search");
@@ -2895,11 +3096,25 @@ mod tests {
             .await;
         let endpoint = format!("{}/v2/search", server.uri());
         let (entries, mode) = WebSearchTool
-            .run_firecrawl_search_at(&endpoint, "codewhale", 5, 5_000, None)
+            .run_firecrawl_search_at(
+                &endpoint,
+                "codewhale",
+                QueryFilters::default(),
+                5,
+                5_000,
+                None,
+            )
             .await
             .expect("keyless Firecrawl search");
         WebSearchTool
-            .run_firecrawl_search_at(&endpoint, "codewhale", 5, 5_000, Some("fc-secret"))
+            .run_firecrawl_search_at(
+                &endpoint,
+                "codewhale",
+                QueryFilters::default(),
+                5,
+                5_000,
+                Some("fc-secret"),
+            )
             .await
             .expect("authenticated Firecrawl search");
         let requests = server.received_requests().await.expect("recorded requests");
@@ -2934,6 +3149,7 @@ mod tests {
             .run_firecrawl_search_at(
                 &format!("{}/v2/search", server.uri()),
                 "quota",
+                QueryFilters::default(),
                 5,
                 5_000,
                 None,
@@ -3020,7 +3236,7 @@ mod tests {
         let mut ctx = ToolContext::new(tmp.path().to_path_buf());
         ctx.search_api_key = None;
         let err = WebSearchTool
-            .run_serply_search("anything", 5, 1_000, &ctx)
+            .run_serply_search("anything", QueryFilters::default(), 5, 1_000, &ctx)
             .await
             .expect_err("missing api_key must be an error");
 
@@ -3208,8 +3424,12 @@ mod tests {
 
     #[test]
     fn searxng_url_uses_search_path_and_json_format() {
-        let (url, host) =
-            searxng_search_url(Some("https://search.example/"), "rust async").expect("searxng url");
+        let (url, host) = searxng_search_url(
+            Some("https://search.example/"),
+            "rust async",
+            QueryFilters::default(),
+        )
+        .expect("searxng url");
         let parsed = reqwest::Url::parse(&url).expect("valid url");
         assert_eq!(host, "search.example");
         assert_eq!(parsed.path(), "/search");
@@ -3229,6 +3449,7 @@ mod tests {
         let (subpath_url, _) = searxng_search_url(
             Some("https://search.example/searxng?language=en"),
             "codewhale",
+            QueryFilters::default(),
         )
         .expect("searxng subpath url");
         let parsed = reqwest::Url::parse(&subpath_url).expect("valid subpath url");
@@ -3242,9 +3463,12 @@ mod tests {
             "en"
         );
 
-        let (search_url, _) =
-            searxng_search_url(Some("https://search.example/searxng/search"), "codewhale")
-                .expect("searxng search endpoint");
+        let (search_url, _) = searxng_search_url(
+            Some("https://search.example/searxng/search"),
+            "codewhale",
+            QueryFilters::default(),
+        )
+        .expect("searxng search endpoint");
         assert_eq!(
             reqwest::Url::parse(&search_url)
                 .expect("valid search url")
@@ -3578,7 +3802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_knobs_are_visible_and_domains_are_post_filtered() {
+    async fn searxng_honors_recency_and_locale_and_post_filters_domains() {
         use crate::config::SearchProvider;
         use crate::tools::spec::{ToolContext, ToolSpec};
         use wiremock::matchers::{method, path, query_param};
@@ -3589,6 +3813,8 @@ mod tests {
             .and(path("/search"))
             .and(query_param("q", "fresh rust"))
             .and(query_param("format", "json"))
+            .and(query_param("time_range", "week"))
+            .and(query_param("language", "en-US"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "results": [
                     {"title": "Keep", "url": "https://docs.example.com/rust", "content": "kept"},
@@ -3621,8 +3847,8 @@ mod tests {
         assert_eq!(value["count"], 1);
         assert_eq!(value["results"][0]["domain"], "docs.example.com");
         assert_eq!(value["receipt"]["honored"]["domains"], true);
-        assert_eq!(value["receipt"]["honored"]["recency"], false);
-        assert_eq!(value["receipt"]["honored"]["locale"], false);
+        assert_eq!(value["receipt"]["honored"]["recency"], true);
+        assert_eq!(value["receipt"]["honored"]["locale"], true);
         let degraded = value["receipt"]["degraded"]
             .as_array()
             .expect("degraded receipt array");
@@ -3632,14 +3858,8 @@ mod tests {
                 .any(|item| { item["kind"] == "post_filtered" && item["knob"] == "domains" })
         );
         assert!(
-            degraded
-                .iter()
-                .any(|item| { item["kind"] == "knob_ignored" && item["knob"] == "recency" })
-        );
-        assert!(
-            degraded
-                .iter()
-                .any(|item| { item["kind"] == "knob_ignored" && item["knob"] == "locale" })
+            !degraded.iter().any(|item| item["kind"] == "knob_ignored"),
+            "SearXNG forwards both knobs: {degraded:?}"
         );
     }
 
@@ -3695,6 +3915,96 @@ mod tests {
             }
         )));
         assert!(response.message.contains("Grounded answer."));
+    }
+
+    fn native_backend_search(note: String, degraded: Vec<DegradedReason>) -> BackendSearch {
+        BackendSearch {
+            backend: BackendId::ProviderNative,
+            source: "provider-native/anthropic/claude-opus-4-8".to_string(),
+            backend_detail: Some("api.anthropic.com".to_string()),
+            results: (1..=5)
+                .map(|rank| {
+                    SearchResult::new(
+                        rank,
+                        format!("Source {rank}"),
+                        format!("https://example.com/{rank}"),
+                        None,
+                        None,
+                    )
+                })
+                .collect(),
+            degraded,
+            note: Some(note),
+        }
+    }
+
+    fn native_query() -> SearchQuery {
+        SearchQuery::new("current release".to_string(), 5, None, Vec::new(), None)
+    }
+
+    fn native_capabilities() -> QueryCapabilities {
+        QueryCapabilities {
+            max_results: CapabilityState::Supported,
+            recency: CapabilityState::Unsupported,
+            domains: CapabilityState::Supported,
+            locale: CapabilityState::Unsupported,
+            published_date: CapabilityState::Unknown,
+        }
+    }
+
+    #[test]
+    fn native_answer_reaches_the_model_whole_under_the_route_budget() {
+        // #6508: a 6,000-character native answer with five citations used to
+        // reach a 128K route as a ~900-character snippet (and earlier was cut
+        // at 4,000 characters). Now the search result is whole within the
+        // route's one inline budget.
+        let answer = format!("{}END OF ANSWER", "Grounded answer sentence. ".repeat(240));
+        assert!(answer.chars().count() > 6_000);
+        let response = finalize_search_response(
+            native_query(),
+            native_capabilities(),
+            native_backend_search(answer.clone(), Vec::new()),
+            Instant::now(),
+        );
+        assert!(response.message.ends_with("END OF ANSWER"));
+        assert!(!response.message.contains("output limit"));
+
+        let output = crate::tools::spec::ToolResult::json(&response).expect("json");
+        let context = crate::core::engine::compact_tool_result_for_route(
+            crate::config::ApiProvider::Deepseek,
+            "deepseek-v3.2-128k",
+            None,
+            "web_search",
+            &output,
+        );
+        assert_eq!(context, output.content.trim());
+        assert!(context.contains("END OF ANSWER"));
+    }
+
+    #[test]
+    fn native_answer_cut_by_the_provider_says_so() {
+        let response = finalize_search_response(
+            native_query(),
+            native_capabilities(),
+            native_backend_search(
+                "Partial answer".to_string(),
+                vec![DegradedReason::AnswerCutByProvider],
+            ),
+            Instant::now(),
+        );
+        assert!(
+            response
+                .receipt
+                .degraded
+                .contains(&DegradedReason::AnswerCutByProvider)
+        );
+        assert!(
+            response
+                .message
+                .contains("the provider stopped the search answer at its output limit"),
+            "{}",
+            response.message
+        );
     }
 
     #[test]
@@ -3832,7 +4142,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let (results, host) = WebSearchTool
-            .run_searxng_search("empty", 5, 5_000, &ctx)
+            .run_searxng_search("empty", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect("empty SearXNG adapter response should be successful");
         let expected_host = reqwest::Url::parse(&server.uri())
@@ -3867,7 +4177,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let err = WebSearchTool
-            .run_searxng_search("blocked", 5, 5_000, &ctx)
+            .run_searxng_search("blocked", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect_err("403 should be actionable");
         let msg = err.to_string();
@@ -3901,7 +4211,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let err = WebSearchTool
-            .run_searxng_search("later", 5, 5_000, &ctx)
+            .run_searxng_search("later", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect_err("429 should be actionable");
         let msg = err.to_string();
@@ -3935,7 +4245,7 @@ mod tests {
         ctx.search_base_url = Some(server.uri());
 
         let err = WebSearchTool
-            .run_searxng_search("html", 5, 5_000, &ctx)
+            .run_searxng_search("html", QueryFilters::default(), 5, 5_000, &ctx)
             .await
             .expect_err("invalid JSON should be actionable");
         let msg = err.to_string();
@@ -4575,5 +4885,165 @@ mod tests {
             .expect("degraded receipt must produce a warning");
         assert!(warning.contains("bot challenge"), "{warning}");
         assert!(warning.contains("used bing fallback"), "{warning}");
+    }
+
+    fn filtered_query(recency: Option<Recency>, locale: Option<&str>) -> SearchQuery {
+        SearchQuery::new(
+            "whale song".to_string(),
+            5,
+            recency,
+            Vec::new(),
+            locale.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn query_filters_round_recency_up_and_split_locale() {
+        let query = filtered_query(Some(Recency::Days(10)), Some("pt_BR"));
+        let filters = QueryFilters::of(&query);
+        assert_eq!(filters.window(), Some("month"));
+        assert_eq!(filters.language().as_deref(), Some("pt"));
+        assert_eq!(filters.region().as_deref(), Some("BR"));
+        for (recency, window) in [
+            (Recency::Day, "day"),
+            (Recency::Week, "week"),
+            (Recency::Month, "month"),
+            (Recency::Year, "year"),
+            (Recency::Days(400), "year"),
+        ] {
+            let query = filtered_query(Some(recency), None);
+            assert_eq!(QueryFilters::of(&query).window(), Some(window));
+        }
+        let bare = filtered_query(None, Some("en"));
+        assert_eq!(QueryFilters::of(&bare).region(), None);
+        assert_eq!(QueryFilters::of(&bare).window(), None);
+    }
+
+    #[tokio::test]
+    async fn firecrawl_sends_recency_and_country() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/search"))
+            .and(body_partial_json(json!({"tbs": "qdr:w", "country": "DE"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "data": {"web": [{"title": "Fresh", "url": "https://example.de/a"}]}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let query = filtered_query(Some(Recency::Week), Some("de-DE"));
+        let (entries, _) = WebSearchTool
+            .run_firecrawl_search_at(
+                &format!("{}/v2/search", server.uri()),
+                &query.query,
+                QueryFilters::of(&query),
+                5,
+                5_000,
+                None,
+            )
+            .await
+            .expect("filtered Firecrawl search");
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn searxng_sends_time_range_and_language() {
+        use crate::tools::spec::ToolContext;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .and(query_param("time_range", "day"))
+            .and(query_param("language", "fr-FR"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"title": "Aujourd'hui", "url": "https://example.fr/a", "content": "x"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = ToolContext::new(tmp.path().to_path_buf());
+        ctx.search_provider = SearchProvider::Searxng;
+        ctx.search_base_url = Some(server.uri());
+        let query = filtered_query(Some(Recency::Day), Some("fr-FR"));
+
+        let (results, _) = WebSearchTool
+            .run_searxng_search(&query.query, QueryFilters::of(&query), 5, 5_000, &ctx)
+            .await
+            .expect("filtered SearXNG search");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn tavily_payload_carries_time_range_only_when_requested() {
+        let query = filtered_query(Some(Recency::Year), Some("en-US"));
+        let payload =
+            super::tavily_search_payload("tvly-x", &query.query, QueryFilters::of(&query), 5);
+        assert_eq!(payload["time_range"], "year");
+        assert!(
+            payload.get("country").is_none(),
+            "Tavily takes country names, not tags"
+        );
+        let plain = super::tavily_search_payload("tvly-x", "q", QueryFilters::default(), 5);
+        assert!(plain.get("time_range").is_none());
+    }
+
+    #[test]
+    fn serply_url_carries_language_and_country() {
+        let query = filtered_query(Some(Recency::Day), Some("ja-JP"));
+        let url = serply_search_url(&query.query, QueryFilters::of(&query), 3).expect("serply url");
+        let pairs: std::collections::BTreeMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(pairs.get("hl").map(String::as_str), Some("ja"));
+        assert_eq!(pairs.get("gl").map(String::as_str), Some("jp"));
+        assert!(
+            !pairs.contains_key("tbs"),
+            "Serply documents no recency parameter"
+        );
+    }
+
+    #[test]
+    fn adapter_reported_ignored_locale_is_not_counted_as_honored() {
+        let query = filtered_query(Some(Recency::Week), Some("en"));
+        let raw = BackendSearch {
+            backend: BackendId::Firecrawl,
+            source: "firecrawl".to_string(),
+            backend_detail: None,
+            results: Vec::new(),
+            degraded: vec![DegradedReason::KnobIgnored {
+                knob: QueryKnob::Locale,
+            }],
+            note: None,
+        };
+        let capabilities = QueryCapabilities {
+            recency: CapabilityState::Supported,
+            locale: CapabilityState::Supported,
+            ..QueryCapabilities::count_only()
+        };
+        let response = finalize_search_response(query, capabilities, raw, Instant::now());
+        assert!(response.receipt.honored.recency);
+        assert!(!response.receipt.honored.locale);
+        assert_eq!(
+            response
+                .receipt
+                .degraded
+                .iter()
+                .filter(|reason| matches!(
+                    reason,
+                    DegradedReason::KnobIgnored {
+                        knob: QueryKnob::Locale
+                    }
+                ))
+                .count(),
+            1
+        );
     }
 }

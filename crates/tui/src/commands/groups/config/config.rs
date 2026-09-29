@@ -12,9 +12,9 @@ use crate::config::{
     normalize_custom_model_id, normalize_model_name_for_provider, validate_route,
 };
 use crate::config_persistence::{
-    persist_provider_base_url_key, persist_root_bool_key, persist_root_string_key,
-    persist_subagents_bool_key, persist_subagents_integer_key, persist_table_string_key,
-    persist_tui_integer_key, persist_unset_root_key,
+    persist_root_bool_key, persist_root_string_key, persist_subagents_bool_key,
+    persist_subagents_integer_key, persist_table_string_key, persist_tui_integer_key,
+    persist_unset_root_key,
 };
 use crate::reasoning_preference::ReasoningEffort;
 use crate::settings::Settings;
@@ -511,9 +511,9 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             .map(|config| prompt_suggestion_display(&config)),
         "notifications" => Some(notifications_summary_value(&app.notification_settings)),
         _ => {
-            let known = Settings::available_settings()
-                .iter()
-                .any(|(k, _)| k == &key);
+            // Any spelling `/set` accepts; internal flags, actions and
+            // receipts in the schema are not settings a user can look up.
+            let known = Settings::canonical_key(&key).is_some();
             if known {
                 Some("(see /settings for current value)".to_string())
             } else {
@@ -530,13 +530,9 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
 /// Error for `/config <key>` when `key` is not a known setting: name the
 /// closest real key when there is one, and point at the full list.
 fn unknown_setting_message(key: &str) -> String {
-    let nearest = Settings::available_settings()
-        .into_iter()
-        .filter_map(|(candidate, _)| {
-            crate::commands::best_suggestion_score(key, [candidate]).map(|score| (score, candidate))
-        })
-        .min_by_key(|(score, _)| *score)
-        .map(|(_, candidate)| candidate);
+    // Suggest only keys `/set` accepts, the same set `known` checks above
+    // (#6563).
+    let nearest = crate::config_keys::nearest_key(key, crate::config_keys::settings_toml_keys());
     match nearest {
         Some(candidate) => format!(
             "Unknown setting '{key}'. Did you mean `/config {candidate}`? Run `/settings text` to list every setting."
@@ -2381,26 +2377,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             };
             return CommandResult::message(message);
         }
-        "base_url" => {
-            let value = value.trim();
-            if value.is_empty() {
-                return CommandResult::error("base_url cannot be empty");
-            }
-            if persist {
-                match persist_root_string_key(app.config_path.as_deref(), "base_url", value) {
-                    Ok(path) => {
-                        return CommandResult::message(format!(
-                            "base_url = {value} (saved to {})",
-                            path.display()
-                        ));
-                    }
-                    Err(err) => return CommandResult::error(format!("Failed to save: {err}")),
-                }
-            }
-            return CommandResult::error(
-                "base_url must be saved with --save; client base URL is loaded from config on startup. Restart and re-open your session after saving.",
-            );
-        }
         "title" | "window_title" | "tab_title" => {
             // Keep the config setter under the same terminal-control and
             // bidi/zero-width policy as `/title` and `/rename`. Persist the
@@ -2430,35 +2406,26 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 "title = {value}{suffix} — terminal window titles now read [\"{value}\"] … until /title overrides this session"
             ));
         }
-        "provider_url" | "provider_base_url" | "endpoint" => {
+        // `base_url` is the older spelling. It used to write a top-level key
+        // that every DeepSeek-family route inherited; it now writes the
+        // active route's own `[providers.<name>]` table like `provider_url`
+        // (#6394).
+        url_key @ ("base_url" | "provider_url" | "provider_base_url" | "endpoint") => {
             let value = match resolve_provider_url_value(app.api_provider, value) {
                 Ok(value) => value,
                 Err(err) => return CommandResult::error(err),
             };
-            if matches!(
-                app.api_provider,
-                ApiProvider::Deepseek | ApiProvider::DeepseekCN
-            ) {
-                if persist {
-                    match persist_root_string_key(app.config_path.as_deref(), "base_url", &value) {
-                        Ok(path) => {
-                            return CommandResult::message(format!(
-                                "provider_url = {value} (saved to {}; restart required)",
-                                path.display()
-                            ));
-                        }
-                        Err(err) => return CommandResult::error(format!("Failed to save: {err}")),
-                    }
-                }
-            } else if persist {
-                match persist_provider_base_url_key(
+            if persist {
+                let identity = app.provider_identity_for_persistence();
+                match crate::config_persistence::persist_route_base_url(
                     app.config_path.as_deref(),
                     app.api_provider,
+                    identity,
                     &value,
                 ) {
                     Ok(path) => {
                         return CommandResult::message(format!(
-                            "provider_url = {value} for {} (saved to {}; restart required)",
+                            "{url_key} = {value} for {} (saved to {}; restart required)",
                             app.api_provider.as_str(),
                             path.display()
                         ));
@@ -2466,9 +2433,9 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                     Err(err) => return CommandResult::error(format!("Failed to save: {err}")),
                 }
             }
-            return CommandResult::error(
-                "provider_url must be saved with --save; client base URL is loaded from config on startup. Restart and re-open your session after saving.",
-            );
+            return CommandResult::error(format!(
+                "{url_key} must be saved with --save; client base URL is loaded from config on startup. Restart and re-open your session after saving."
+            ));
         }
         // The two bottom-chrome rows' size presets (`tui.posture_bar`,
         // `tui.metrics_line`, #5950). Live on the next frame; `--save`
@@ -2971,10 +2938,7 @@ pub fn mode(app: &mut App, arg: Option<&str>) -> CommandResult {
     // The legacy YOLO spellings are a one-way permission shorthand, not a
     // mode: route them to the full-access compat path before parse folds
     // them to Act.
-    if matches!(
-        arg.trim().to_ascii_lowercase().as_str(),
-        "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions"
-    ) {
+    if AppMode::is_legacy_bypass_alias(arg) {
         let (message, changed) = switch_yolo_compat_with_status(app);
         if changed {
             CommandResult::with_message_and_action(message, AppAction::ModeChanged(app.mode))
@@ -3068,8 +3032,8 @@ pub fn theme(app: &mut App, arg: Option<&str>) -> CommandResult {
 ///
 /// Subcommands:
 /// - `/trust`            – show current state and trusted external paths
-/// - `/trust on`         – legacy: trust the entire workspace (turn off all path checks)
-/// - `/trust off`        – disable workspace-level trust mode
+/// - `/trust on|off`     – change file-tool trust for this session only
+/// - `/trust on|off --save` – also persist workspace trust for project sources
 /// - `/trust add <path>` – add a directory to the allowlist (#29)
 /// - `/trust remove <path>` (alias `rm`) – remove a path from the allowlist
 /// - `/trust list`       – list trusted external paths for this workspace
@@ -3082,23 +3046,46 @@ pub fn trust(app: &mut App, arg: Option<&str>) -> CommandResult {
 
     match sub.as_str() {
         "" | "status" | "list" => trust_status(&workspace, app, sub == "list"),
-        "on" | "enable" | "yes" | "y" => {
-            app.trust_mode = true;
-            CommandResult::message(
-                "Workspace trust mode enabled — agent file tools can now read/write any path. \
-                 Use `/trust off` to revert; prefer `/trust add <path>` for a narrower opt-in.",
-            )
-        }
-        "off" | "disable" | "no" | "n" => {
-            app.trust_mode = false;
-            CommandResult::message("Workspace trust mode disabled.")
+        "on" | "enable" | "yes" | "y" | "off" | "disable" | "no" | "n" => {
+            if !matches!(rest, "" | "--save") {
+                return CommandResult::error(format!(
+                    "{} /trust on|off [--save]",
+                    tr(app.ui_locale, MessageId::HelpUsageLabel)
+                ));
+            }
+            CommandResult::action(AppAction::SetWorkspaceTrust {
+                trusted: matches!(sub.as_str(), "on" | "enable" | "yes" | "y"),
+                save: rest == "--save",
+            })
         }
         "add" => trust_add(&workspace, rest),
         "remove" | "rm" | "del" | "delete" => trust_remove(&workspace, rest),
         other => CommandResult::error(format!(
-            "Unknown /trust action `{other}`. Use `/trust`, `/trust on|off`, `/trust add <path>`, or `/trust remove <path>`."
+            "Unknown /trust action `{other}`. Use `/trust`, `/trust on|off [--save]`, `/trust add <path>`, or `/trust remove <path>`."
         )),
     }
+}
+
+pub(crate) async fn set_workspace_trust(app: &mut App, trusted: bool, save: bool) -> Result<()> {
+    if !save {
+        app.trust_mode = trusted;
+        return Ok(());
+    }
+    // Revocation restricts live file access even if the saved decision cannot be updated.
+    if !trusted {
+        app.trust_mode = false;
+    }
+    let workspace = app.workspace.clone();
+    #[cfg(test)]
+    let ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(ticket);
+        crate::config::set_workspace_trust(&workspace, trusted)
+    })
+    .await??;
+    app.trust_mode = trusted;
+    Ok(())
 }
 
 fn trust_status(workspace: &Path, app: &App, force_paths: bool) -> CommandResult {
@@ -3573,6 +3560,15 @@ mod tests {
         let text = result.message.as_deref().unwrap_or_default();
         assert!(!text.contains("Did you mean"), "{text}");
         assert!(text.contains("/settings text"), "{text}");
+
+        // Internal flags, actions and retired schema defs are not settings a
+        // user can look up, and are never suggested.
+        for internal in ["feature_intro_shown", "mcp_open", "fast_model"] {
+            let result = config_command(&mut app, Some(internal));
+            assert!(result.is_error, "{internal}: {:?}", result.message);
+            let text = result.message.as_deref().unwrap_or_default();
+            assert!(!text.contains(&format!("`/config {internal}`")), "{text}");
+        }
     }
 
     #[test]
@@ -4618,14 +4614,20 @@ mod tests {
         let saved_path = crate::config_persistence::config_toml_path(None).unwrap();
         let saved = fs::read_to_string(&saved_path).unwrap();
 
+        // The active DeepSeek route's own table, not a top-level key (#6394).
         assert_eq!(
             msg,
             format!(
-                "base_url = https://example.internal.local/v1 (saved to {})",
+                "base_url = https://example.internal.local/v1 for deepseek (saved to {}; restart required)",
                 saved_path.display()
             )
         );
-        assert!(saved.contains("base_url = \"https://example.internal.local/v1\""));
+        let table: toml::Table = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            table["providers"]["deepseek"]["base_url"].as_str(),
+            Some("https://example.internal.local/v1")
+        );
+        assert!(table.get("base_url").is_none(), "{saved}");
     }
 
     #[test]
@@ -5350,11 +5352,15 @@ context_window = 262144
         assert_eq!(
             msg,
             format!(
-                "base_url = https://example.session.local/v1 (saved to {})",
+                "base_url = https://example.session.local/v1 for deepseek (saved to {}; restart required)",
                 config_path.display()
             )
         );
-        assert!(saved.contains("base_url = \"https://example.session.local/v1\""));
+        let table: toml::Table = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            table["providers"]["deepseek"]["base_url"].as_str(),
+            Some("https://example.session.local/v1")
+        );
     }
 
     #[test]
@@ -6239,15 +6245,86 @@ context_window = 262144
         assert!(app.needs_redraw);
     }
 
-    #[test]
-    fn test_trust_on_enables_flag() {
+    #[tokio::test]
+    async fn trust_only_persists_with_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(tmp.path());
+        let config_path = tmp.path().join("config.toml");
+        let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+        let workspace = tmp.path().join("workspace");
+        let commands = workspace.join(".claude/commands");
+        let skills = workspace.join(".claude/skills/review-example");
+        fs::create_dir_all(&commands).unwrap();
+        fs::create_dir_all(&skills).unwrap();
+        fs::write(commands.join("review-example.md"), "Review the example").unwrap();
+        fs::write(
+            skills.join("SKILL.md"),
+            "---\nname: review-example\ndescription: Review the example\n---\nRead the example.",
+        )
+        .unwrap();
         let mut app = create_test_app();
-        // Normalize trust state regardless of user settings on the host machine.
+        app.workspace = workspace.clone();
         app.trust_mode = false;
-        let result = trust(&mut app, Some("on"));
-        let msg = result.message.expect("message");
-        assert!(msg.contains("Workspace trust mode enabled"));
-        assert!(app.trust_mode);
+        for trusted in [false, true, false] {
+            if trusted || app.trust_mode {
+                let result = trust(
+                    &mut app,
+                    Some(if trusted { "on --save" } else { "off --save" }),
+                );
+                assert_eq!(
+                    result.action,
+                    Some(AppAction::SetWorkspaceTrust {
+                        trusted,
+                        save: true
+                    })
+                );
+                set_workspace_trust(&mut app, trusted, true).await.unwrap();
+            }
+            let saved = fs::read(&config_path).ok();
+            for session_trusted in [true, false] {
+                let result = trust(&mut app, Some(if session_trusted { "on" } else { "off" }));
+                assert_eq!(
+                    result.action,
+                    Some(AppAction::SetWorkspaceTrust {
+                        trusted: session_trusted,
+                        save: false
+                    })
+                );
+                set_workspace_trust(&mut app, session_trusted, false)
+                    .await
+                    .unwrap();
+                assert_eq!(app.trust_mode, session_trusted);
+                assert_eq!(
+                    fs::read(&config_path).ok(),
+                    saved,
+                    "session toggle must not write config"
+                );
+                assert_eq!(crate::config::is_workspace_trusted(&workspace), trusted);
+            }
+            app.trust_mode = trusted;
+            assert!(trust(&mut app, Some("on --typo")).is_error);
+            assert_eq!(crate::config::is_workspace_trusted(&workspace), trusted);
+            crate::commands::user_registry::with_registry_for_workspace(
+                Some(&workspace),
+                |registry| {
+                    assert_eq!(registry.get("review-example").is_some(), trusted);
+                },
+            );
+            assert_eq!(
+                crate::skills::discover_in_workspace(&workspace)
+                    .get("review-example")
+                    .is_some(),
+                trusted
+            );
+        }
+        // A failed write must not grant trust in memory.
+        fs::create_dir_all(tmp.path().join("bad-config")).unwrap();
+        let _bad_config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", tmp.path().join("bad-config"));
+        assert!(set_workspace_trust(&mut app, true, true).await.is_err());
+        assert!(!app.trust_mode);
+        app.trust_mode = true;
+        assert!(set_workspace_trust(&mut app, false, true).await.is_err());
+        assert!(!app.trust_mode);
     }
 
     #[test]

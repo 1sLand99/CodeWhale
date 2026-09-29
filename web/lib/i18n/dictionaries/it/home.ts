@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand} ti offre agenti che possono creare software, lavorare con i tuoi file e trasformare le attività ripetitive in flussi di lavoro riutilizzabili. Di’ loro cosa vuoi realizzare e scegli i modelli ospitati o locali adatti al lavoro, con la libertà di cambiare provider mentre procedi.",
   getCodewhale: "Ottieni Codewhale",
+  heroInstallAria: "Comando di installazione",
   exploreProduct: "Esplora il prodotto",
   shotPreview: "Anteprima del terminale",
   shotBuild: "build di sviluppo v{version}",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "Stato delle release non disponibile",
   currentSource: "Sorgente",
   sourceCandidate: "Non rilasciata",
-  providerRoutes: "{count} provider",
   publishedRelease: "rilasciata",
   figcaptionSourceCandidate: "non rilasciata",
   chapterTerminal: "Il tuo terminale",
@@ -62,7 +62,7 @@ export const home: HomeDict = {
     "Dopo aver installato Codewhale e collegato un modello, puoi descrivere la tua prima attività nel terminale e aggiungere un Fleet quando vuoi distribuire il lavoro tra più agenti.",
   startGuideLink: "Leggi la guida introduttiva",
   startVocabularyLink: "Vedi il vocabolario del prodotto",
-  chapterAccount: "Ottieni Codewhale",
+  chapterAvailability: "Dove funziona",
   availabilityHeading: "Dove puoi usare Codewhale",
   availabilityLede:
     "Puoi già usare Codewhale nel tuo terminale mentre sviluppiamo l’app web, l’app desktop e i computer cloud.",

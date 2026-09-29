@@ -112,6 +112,12 @@ impl WorkspaceFile {
         self.open_with_flags(libc::O_RDONLY)
     }
 
+    pub(crate) fn open_write(&self, append: bool) -> io::Result<File> {
+        self.open_with_flags(
+            libc::O_WRONLY | libc::O_CREAT | if append { libc::O_APPEND } else { 0 },
+        )
+    }
+
     fn open_with_flags(&self, flags: libc::c_int) -> io::Result<File> {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::fs::MetadataExt;
@@ -169,6 +175,10 @@ impl WorkspaceFile {
         let result = (|| {
             file.write_all(bytes)?;
             file.sync_all()?;
+            if !replace && rename_exclusive(self.directory.as_raw_fd(), &temporary, &self.filename)?
+            {
+                return Ok(true);
+            }
             // SAFETY: both basenames are anchored to the same open parent.
             // Replacement changes the directory entry, never a symlink target.
             let published = unsafe {
@@ -192,11 +202,11 @@ impl WorkspaceFile {
             if published != 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(())
+            Ok(replace)
         })();
         // Successful rename already consumed this temporary entry. Never
         // unlink the vacant old name, which another writer could now reuse.
-        if !replace || result.is_err() {
+        if !matches!(result, Ok(true)) {
             // SAFETY: unlink this call's exclusive temporary basename.
             if unsafe { libc::unlinkat(self.directory.as_raw_fd(), temporary.as_ptr(), 0) } != 0 {
                 return Err(io::Error::last_os_error());
@@ -205,6 +215,70 @@ impl WorkspaceFile {
         result?;
         self.directory.sync_all()
     }
+}
+
+/// Publish `from` as `to` without replacing an existing entry, as the Windows
+/// rename below does. `linkat` then `unlinkat` leaves the published file with
+/// two links for a moment, and `open_with_flags` rejects a link count other
+/// than 1, so a concurrent reader failed with InvalidData. `Ok(false)` sends
+/// the caller back to `linkat`, which keeps that window: other Unixes, and any
+/// kernel, filesystem or sandbox that refuses the exclusive rename.
+#[cfg(target_os = "linux")]
+fn rename_exclusive(
+    directory: libc::c_int,
+    from: &std::ffi::CStr,
+    to: &std::ffi::CStr,
+) -> io::Result<bool> {
+    // SAFETY: both basenames are anchored to the same open parent.
+    let renamed = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            directory,
+            from.as_ptr(),
+            directory,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    exclusive_rename_outcome(renamed == 0)
+}
+
+#[cfg(target_vendor = "apple")]
+fn rename_exclusive(
+    directory: libc::c_int,
+    from: &std::ffi::CStr,
+    to: &std::ffi::CStr,
+) -> io::Result<bool> {
+    // SAFETY: both basenames are anchored to the same open parent.
+    let renamed = unsafe {
+        libc::renameatx_np(
+            directory,
+            from.as_ptr(),
+            directory,
+            to.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    exclusive_rename_outcome(renamed == 0)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_vendor = "apple"))))]
+fn rename_exclusive(_: libc::c_int, _: &std::ffi::CStr, _: &std::ffi::CStr) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// Only an existing target is final. Any other refusal falls back to `linkat`,
+/// so publication is never worse off than before the exclusive rename.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn exclusive_rename_outcome(renamed: bool) -> io::Result<bool> {
+    if renamed {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        return Err(error);
+    }
+    Ok(false)
 }
 
 #[cfg(windows)]
@@ -284,9 +358,17 @@ impl WorkspaceFile {
     }
 
     pub(crate) fn open_update(&self, create: bool, append: bool) -> io::Result<File> {
+        self.open_with_access(create, append, true)
+    }
+
+    pub(crate) fn open_write(&self, append: bool) -> io::Result<File> {
+        self.open_with_access(true, append, false)
+    }
+
+    fn open_with_access(&self, create: bool, append: bool, read: bool) -> io::Result<File> {
         use std::os::windows::fs::OpenOptionsExt;
         let file = std::fs::OpenOptions::new()
-            .read(true)
+            .read(read)
             .write(true)
             .append(append)
             .create(create)
@@ -417,6 +499,45 @@ impl WorkspaceFile {
     }
 }
 
+#[cfg(all(test, unix))]
+mod unix_publication_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn a_racing_reader_never_sees_a_publication_half_done() {
+        // Identical replays publish the same handle concurrently and the loser
+        // reads the winner's file back. A reader that lands between linkat and
+        // the temporary's unlink sees two links, which open_file rejects.
+        let workspace = tempfile::tempdir().unwrap();
+        for round in 0..50 {
+            let relative = std::path::PathBuf::from(format!("receipt-{round}.json"));
+            let writer = WorkspaceFile::open(workspace.path(), &relative, true).unwrap();
+            let reader = WorkspaceFile::open(workspace.path(), &relative, false).unwrap();
+            std::thread::scope(|scope| {
+                let read = scope.spawn(|| {
+                    loop {
+                        match reader.open_file() {
+                            Ok(mut file) => {
+                                let mut bytes = Vec::new();
+                                file.read_to_end(&mut bytes).unwrap();
+                                break bytes;
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                                std::hint::spin_loop();
+                            }
+                            Err(error) => panic!("round {round}: {error}"),
+                        }
+                    }
+                });
+                writer.publish(b"receipt").unwrap();
+                assert_eq!(read.join().unwrap(), b"receipt");
+            });
+        }
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 50);
+    }
+}
+
 #[cfg(all(test, windows))]
 mod windows_publication_tests {
     use super::*;
@@ -512,6 +633,9 @@ impl WorkspaceFile {
         unreachable!()
     }
     pub(crate) fn open_update(&self, _: bool, _: bool) -> io::Result<File> {
+        unreachable!()
+    }
+    pub(crate) fn open_write(&self, _: bool) -> io::Result<File> {
         unreachable!()
     }
     pub(crate) fn replace(&self, _: &[u8]) -> io::Result<()> {

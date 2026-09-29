@@ -30,7 +30,7 @@ jobs:
       # CodeQL treats a *sha* ref as an untrusted checkout on workflow_dispatch
       # (default-branch cache write).
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-18
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-07-18
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -71,14 +71,15 @@ jobs:
       - name: OHOS dependency graph
         run: ./scripts/release/check-ohos-deps.sh
       - name: Clippy
+        # Same lint set as ci.yml's "Run clippy": collapsible_if and
+        # assertions_on_constants were removed there on purpose, so allowing
+        # them here made the release gate weaker than the merge gate.
         run: |
           cargo clippy --workspace --all-targets --all-features --locked -- \
             -D warnings \
             -A clippy::uninlined_format_args \
             -A clippy::too_many_arguments \
-            -A clippy::unnecessary_map_or \
-            -A clippy::collapsible_if \
-            -A clippy::assertions_on_constants
+            -A clippy::unnecessary_map_or
       - name: Workspace tests
         # Same test binaries as `cargo test`, run by cargo-nextest: one process
         # per test. This gate used libtest, where every test shares one process,

@@ -7,10 +7,12 @@ use crate::task_manager::{TaskManager, TaskManagerConfig};
 
 fn fixture_config() -> Config {
     let mut config = Config {
-        api_key: Some("local-runtime-binding-fixture".into()),
-        base_url: Some("http://127.0.0.1:1/v1".into()),
         ..Config::default()
-    };
+    }
+    .with_legacy_root(
+        Some("local-runtime-binding-fixture".into()),
+        Some("http://127.0.0.1:1/v1".into()),
+    );
     config.set_feature("mcp", false).unwrap();
     config.set_feature("subagents", false).unwrap();
     config
@@ -42,7 +44,7 @@ async fn runtime_store_binding_persists_on_exit_without_a_model_turn() -> anyhow
     sessions.save_session(&original)?;
     sessions.save_checkpoint(&original)?;
     let mut app = Box::new(create_test_app());
-    apply_loaded_session_with_goal(&mut app, &mut config, &original, None)
+    apply_loaded_session_with_goal(&mut app, &mut config, original.clone(), None)
         .map_err(anyhow::Error::msg)?;
     let task_config = TaskManagerConfig::from_runtime(&config, root.path().into(), None, Some(1));
     let tasks = TaskManager::start(
@@ -226,7 +228,7 @@ fn runtime_store_binding_survives_launch_snapshot_and_resume() -> anyhow::Result
             let resumed_config = &mut resumed_config;
             boxed_phase(move || async move {
                 let mut resumed = Box::new(create_test_app());
-                apply_loaded_session_with_goal(&mut resumed, resumed_config, loaded, None)
+                apply_loaded_session_with_goal(&mut resumed, resumed_config, loaded.clone(), None)
                     .map_err(anyhow::Error::msg)?;
                 let tasks = TaskManager::start(
                     task_config.clone(),
@@ -325,9 +327,13 @@ fn runtime_store_binding_survives_launch_snapshot_and_resume() -> anyhow::Result
                 other_app.runtime_services.task_manager = Some(foreign.clone());
                 other_app.input = "preserve pending input".into();
                 let old_id = other_app.current_session_id.clone();
-                let error =
-                    apply_loaded_session_with_goal(&mut other_app, resumed_config, loaded, None)
-                        .unwrap_err();
+                let error = apply_loaded_session_with_goal(
+                    &mut other_app,
+                    resumed_config,
+                    loaded.clone(),
+                    None,
+                )
+                .unwrap_err();
                 // The refusal must name the route that actually works. "Resume
                 // it in a new Codewhale process" was true but unactionable:
                 // starting a new process and then picking the session from
@@ -579,7 +585,7 @@ async fn picker_recovers_missing_store_into_the_idle_host_and_persists_before_re
     let held = plan_state
         .try_lock()
         .expect("hold Work state during recovery");
-    assert!(apply_loaded_session_with_goal(&mut app, &mut config, &saved, None).is_err());
+    assert!(apply_loaded_session_with_goal(&mut app, &mut config, saved.clone(), None).is_err());
     assert_eq!(app.current_session_id.as_deref(), Some("picker-current"));
     assert_eq!(app.api_messages, current_messages);
     assert_eq!(
@@ -592,7 +598,7 @@ async fn picker_recovers_missing_store_into_the_idle_host_and_persists_before_re
         "binding repair survives a contended UI restore"
     );
     drop(held);
-    apply_loaded_session_with_goal(&mut app, &mut config, &saved, None)
+    apply_loaded_session_with_goal(&mut app, &mut config, saved.clone(), None)
         .map_err(anyhow::Error::msg)?;
     assert_eq!(
         app.current_session_id.as_deref(),
@@ -644,8 +650,9 @@ fn adoptable_empty_store_reports_nothing_to_abandon() -> anyhow::Result<()> {
         !binding.is_missing_session_store()?,
         "the store exists, so the old predicate cannot recover it"
     );
-    assert!(
-        binding.has_no_durable_work()?,
+    assert_eq!(
+        binding.adoption_refusal()?,
+        None,
         "a freshly opened store holds nothing to abandon"
     );
     assert!(
@@ -675,8 +682,9 @@ fn adoptable_empty_store_reports_nothing_to_abandon() -> anyhow::Result<()> {
     ] {
         let marker = store_dir.join(dir).join("work.json");
         std::fs::write(&marker, "{}")?;
-        assert!(
-            !binding.has_no_durable_work()?,
+        assert_eq!(
+            binding.adoption_refusal()?,
+            Some(crate::runtime_threads::StoreAdoptionRefusal::HasDurableWork { dir }),
             "{dir} holds work; the store must not be adopted"
         );
         assert!(
@@ -689,6 +697,62 @@ fn adoptable_empty_store_reports_nothing_to_abandon() -> anyhow::Result<()> {
         binding.is_adoptable_empty_store()?,
         "markers removed: adoptable again"
     );
+    Ok(())
+}
+
+/// #6418: the binding a live host records is its store's canonical root,
+/// while the configured sessions root is spelled lexically. When those differ
+/// (a Windows verbatim prefix or short name, a symlinked home on Unix), the
+/// hand-built bindings above still pass but every *recorded* binding read as
+/// unconfined, so an empty, unheld store could never be adopted in-session.
+#[test]
+fn recorded_binding_is_confined_under_a_non_canonical_home() -> anyhow::Result<()> {
+    let _environment = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let real_home = root.path().join("real-home");
+    std::fs::create_dir_all(&real_home)?;
+    #[cfg(unix)]
+    let home = {
+        let linked = root.path().join("linked-home");
+        std::os::unix::fs::symlink(&real_home, &linked)?;
+        linked
+    };
+    // Windows needs no fixture: canonical paths there carry `\\?\`.
+    #[cfg(not(unix))]
+    let home = real_home.clone();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+
+    let runtime = RuntimeThreadManager::open(
+        fixture_config(),
+        home.clone(),
+        RuntimeThreadManagerConfig::for_session(home.join("tasks"), "previous"),
+    )?;
+    let binding = runtime.session_store_binding();
+    drop(runtime);
+
+    #[cfg(unix)]
+    assert!(
+        !binding.data_dir.starts_with(&home),
+        "fixture must record a binding spelled differently from the home"
+    );
+    assert!(
+        !binding.is_missing_session_store()?,
+        "the recorded store exists"
+    );
+    assert!(
+        binding.is_adoptable_empty_store()?,
+        "a recorded, empty, unheld store is confined and adoptable"
+    );
+
+    // Confinement still refuses a store outside the sessions root.
+    let outside = crate::runtime_threads::RuntimeStoreBinding {
+        data_dir: root.path().join("elsewhere/previous/runtime"),
+        execution_scope: binding.execution_scope.clone(),
+    };
+    std::fs::create_dir_all(&outside.data_dir)?;
+    assert!(!outside.is_adoptable_empty_store()?);
     Ok(())
 }
 
@@ -835,12 +899,85 @@ async fn picker_adopts_existing_empty_unheld_store() -> anyhow::Result<()> {
     app.runtime_services.task_manager = Some(tasks.clone());
     app.current_session_id = Some("picker-current".into());
 
-    apply_loaded_session_with_goal(&mut app, &mut config, &saved, None)
+    apply_loaded_session_with_goal(&mut app, &mut config, saved.clone(), None)
         .map_err(anyhow::Error::msg)?;
     assert_eq!(app.current_session_id.as_deref(), Some("picker-adoptable"));
     let durable = sessions.load_session("picker-adoptable")?;
     assert_eq!(durable.metadata.runtime_store.as_ref(), Some(&binding));
     assert_eq!(durable.messages, saved.messages);
+    // #6144 P1a: the store the conversation left is set aside where it was
+    // abandoned, not left on disk with nothing pointing at it. The switch
+    // hands that off the UI runtime, so wait for it.
+    let abandoned = root.path().join("sessions/previous/runtime");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while abandoned.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!abandoned.exists());
+    let set_aside = std::fs::read_dir(root.path().join("sessions/.set-aside"))?
+        .flatten()
+        .map(|run| std::fs::read_to_string(run.path().join("MANIFEST.jsonl")).unwrap_or_default())
+        .collect::<String>();
+    assert!(set_aside.contains("previous"), "{set_aside}");
+    tasks.shutdown_and_wait().await?;
+    Ok(())
+}
+
+/// #6144 P1a: an abandoned store another document still binds is kept.
+#[tokio::test]
+async fn picker_adoption_keeps_a_store_another_document_binds() -> anyhow::Result<()> {
+    let _environment = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+    let sessions = SessionManager::default_location()?;
+    let mut config = fixture_config();
+
+    let store_dir = root.path().join("sessions/previous/runtime");
+    drop(crate::runtime_threads::RuntimeThreadStore::open(
+        store_dir.clone(),
+    )?);
+    let binding = crate::runtime_threads::RuntimeStoreBinding::for_store_dir(&store_dir)?;
+    let mut saved = crate::session_manager::create_saved_session_with_id_and_mode(
+        "picker-adoptable".into(),
+        &[text_message("user", "retain my work")],
+        "deepseek-v4-pro",
+        root.path(),
+        0,
+        None,
+        None,
+    );
+    saved.metadata.runtime_store = Some(binding.clone());
+    sessions.save_session(&saved)?;
+    let mut sibling = crate::session_manager::create_saved_session_with_id_and_mode(
+        "same-host-sibling".into(),
+        &[text_message("user", "saved in the same host")],
+        "deepseek-v4-pro",
+        root.path(),
+        0,
+        None,
+        None,
+    );
+    sibling.metadata.runtime_store = Some(binding);
+    sessions.save_session(&sibling)?;
+
+    let mut app = Box::new(create_test_app());
+    let tasks = TaskManager::start(
+        TaskManagerConfig::from_runtime(&config, root.path().into(), None, Some(1)),
+        config.clone(),
+        app.plugin_registry.clone(),
+        "picker-current",
+        None,
+    )
+    .await?;
+    app.runtime_services.task_manager = Some(tasks.clone());
+    app.current_session_id = Some("picker-current".into());
+    apply_loaded_session_with_goal(&mut app, &mut config, saved, None)
+        .map_err(anyhow::Error::msg)?;
+    // Give the background retirement time to (wrongly) act.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(store_dir.is_dir(), "the sibling still binds it");
     tasks.shutdown_and_wait().await?;
     Ok(())
 }

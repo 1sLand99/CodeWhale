@@ -81,6 +81,8 @@ fn subagent(
         duration_ms: 0,
         started_at: None,
         from_prior_session: false,
+        idle_ms: None,
+        heartbeat_timeout_ms: None,
     }
 }
 
@@ -149,7 +151,7 @@ fn count_rows_containing(rows: &[String], needle: &str) -> usize {
 /// exposes the width band the one-owner fixture's notice collapses.
 #[test]
 fn composed_frame_paints_each_fact_in_exactly_one_row() {
-    for (width, height) in [(80u16, 24u16), (120, 32), (160, 40)] {
+    for (width, height) in [(80u16, 24u16), (120, 32), (160, 40), (200, 40)] {
         let mut app = working_app();
         let rows = draw(&mut app, width, height);
         let pct = super::info_context_percent(&app);
@@ -161,7 +163,9 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // (#5950 — it used to go silent below 50%).
         let mut facts = vec![
             ("mode chip", format!("   {mode} (")),
-            ("permission chip", format!(" {permission} (")),
+            // Mark 8: the permission in force is marked `●` and followed by
+            // what its key does, not a parenthesised chord.
+            ("permission chip", format!("● {permission}")),
             ("model", model),
             ("cost", super::session_cost_label(&app)),
             ("agent count", "2 agents".to_string()),
@@ -190,7 +194,7 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // roster — never the other way round.
         let posture = rows
             .iter()
-            .position(|row| row.contains("(Shift+Tab)"))
+            .position(|row| row.contains("● "))
             .expect("posture bar");
         let metrics = rows
             .iter()
@@ -218,8 +222,9 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // turn has been doing what it is doing, and how long the session has
         // worked. Both halves shed before the hint and the counts, so a
         // narrow row keeps the affordances and drops the stopwatch. When
-        // both would paint, the session half needs ~120 columns here and
-        // the turn half ~160; each paints in exactly one row wherever it
+        // both would paint, the session half needs ~125 columns here (the
+        // running hint also names the agent arrows, `← for agents · ↓ to
+        // manage`) and the turn half ~200; each paints in exactly one row wherever it
         // paints. The metrics line carries no repository, branch or provider.
         // First turn: the turn half names the phase and stays; the session
         // reading is the identical duration, so it is suppressed rather than
@@ -249,7 +254,7 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         let mut worked = working_app();
         worked.cumulative_turn_duration = Duration::from_secs(60);
         let rows = draw(&mut worked, width, height);
-        if width >= 120 {
+        if width >= 160 {
             let worked_needle = "worked 2m 15s";
             assert!(rows[posture].contains(worked_needle), "{}", rows[posture]);
             assert_eq!(
@@ -259,7 +264,9 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
                 rows.join("\n")
             );
         }
-        if width >= 160 {
+        // With both clock halves and the running arrow hints, the turn half
+        // needs more than 160 columns.
+        if width >= 200 {
             assert!(rows[posture].contains(turn_needle), "{}", rows[posture]);
         }
         assert!(!rows[metrics].contains('⑂'), "{}", rows[metrics]);
@@ -284,7 +291,7 @@ fn idle_frame_keeps_two_chrome_rows_and_last_turn_metrics() {
     // count (shed priority 7, ahead of the help hint) is shed by design.
     let rows = draw(&mut app, 120, 32);
     let composer = app.viewport.last_composer_area.unwrap().bottom() as usize;
-    assert!(rows[composer].contains("(Shift+Tab)"), "{}", rows[composer]);
+    assert!(rows[composer].contains("● "), "{}", rows[composer]);
     // The idle fixture sits at 0% context and says so: the reading is on
     // the row at every fullness (#5950), not only once it is a problem.
     assert!(
@@ -373,7 +380,7 @@ fn row_presets_reclaim_rows_and_quiet_them_in_the_composed_frame() {
     // halves only both fit beside the pinned unenforced-scope permission
     // chip from that width up, and this test asserts the full row's clocks.
     let (width, height) = (160u16, 32u16);
-    let posture_row = |rows: &[String]| rows.iter().position(|row| row.contains("(Shift+Tab)"));
+    let posture_row = |rows: &[String]| rows.iter().position(|row| row.contains("● "));
     let metrics_row = |rows: &[String]| rows.iter().position(|row| row.contains("context "));
 
     let mut app = working_app();

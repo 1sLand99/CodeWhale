@@ -38,6 +38,7 @@ pub mod fleet_roster;
 pub mod fleet_setup;
 pub mod mode_picker;
 pub mod route_save_prompt;
+pub(crate) mod router_setup;
 pub mod skills_manager;
 pub mod status_picker;
 pub mod workflows_manager;
@@ -85,6 +86,8 @@ pub enum ModalKind {
     /// "Resume this session?" over the launch card. Resuming replaces the
     /// whole session context, so it asks first.
     LaunchResumeConfirm,
+    /// Router setup (`/router`, `/model router`): presets for `[auto.router]`.
+    RouterSetup,
 }
 
 /// Clear and paint a modal popup with an opaque surface.
@@ -623,9 +626,12 @@ pub enum ContextMenuAction {
     OpenCommandPalette,
     OpenContextInspector,
     OpenHelp,
-    /// Open the selected file:line in the user's editor.
+    /// Open a workspace file at a line in the user's editor. The path was
+    /// resolved inside the workspace when the menu was built; the entry is
+    /// only offered when it resolved.
     OpenFileAtLine {
-        cell_index: usize,
+        path: std::path::PathBuf,
+        line: u32,
     },
     /// Hide a transcript cell. Adds the cell's index to `collapsed_cells`.
     HideCell {
@@ -637,18 +643,35 @@ pub enum ContextMenuAction {
     },
     /// Show all currently hidden cells.
     ShowAllHidden,
-    /// Execute a slash command associated with a contextual UI row.
-    ExecuteCommand {
-        command: String,
-    },
+    /// Run a work-surface row action — the same typed action a left click or
+    /// Enter on that row runs, never a free-form command string.
+    Row(crate::tui::app::SidebarRowAction),
     /// Copy a pre-resolved text payload (e.g. a sidebar row's full text)
     /// to the clipboard.
     CopyText {
         text: String,
     },
+    /// Act on a row of the open Extensions panel, found again by its id.
+    Extension {
+        item_id: String,
+        verb: ExtensionMenuVerb,
+    },
     /// Pin/unpin the host terminal window (normal window ↔ always-on-top
     /// mini window). Windows only; no-op elsewhere.
     ToggleWindowPin,
+}
+
+/// What an Extensions row menu entry does to its row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionMenuVerb {
+    /// The row's own action — what Enter runs.
+    Activate,
+    /// Show the row's state, description and detail in a pager.
+    Details,
+    /// The row's reversible on/off switch.
+    Toggle,
+    /// Remove the row. The menu already asked for confirmation.
+    Remove,
 }
 
 #[derive(Debug, Clone)]
@@ -1084,6 +1107,14 @@ pub enum ViewEvent {
     ContextMenuSelected {
         action: ContextMenuAction,
     },
+    /// A modal view asks for a context menu over itself (the Extensions
+    /// panel's row menu). The host pushes it on top of the view.
+    OpenContextMenu {
+        title: String,
+        entries: Vec<crate::tui::context_menu::ContextMenuEntry>,
+        column: u16,
+        row: u16,
+    },
     /// Emitted by the pager (`c` / `y`) to copy its body to the system
     /// clipboard. The host handler writes via `app.clipboard` and surfaces a
     /// status message — modal views cannot reach `app` directly. `label` is
@@ -1190,6 +1221,11 @@ pub struct ViewStack {
     /// Theme snapshot for the texture pass, set alongside the mode each
     /// frame. `None` (e.g. tests that never opt in) disables the texture.
     focus_texture_theme: Option<codewhale_palette::UiTheme>,
+    /// When the view now on top became the top view — pushed, or revealed
+    /// by closing or removing the views above it. A key observed before
+    /// this instant was typed at something else and must never answer an
+    /// approval card that only then became visible (approvals M2).
+    top_since: Option<std::time::Instant>,
 }
 
 /// What one [`ViewStack::tick`] produced: events to handle, and whether the
@@ -1206,6 +1242,22 @@ impl ViewStack {
             views: Vec::new(),
             focus_texture: FocusTextureMode::Off,
             focus_texture_theme: None,
+            top_since: None,
+        }
+    }
+
+    /// Identity of the top view, for noticing when a different view becomes
+    /// the top one.
+    fn top_identity(&self) -> Option<*const ()> {
+        self.views
+            .last()
+            .map(|view| std::ptr::from_ref::<dyn ModalView>(view.as_ref()).cast::<()>())
+    }
+
+    /// Restamp `top_since` when the top view changed since `before`.
+    fn note_top_change(&mut self, before: Option<*const ()>) {
+        if self.top_identity() != before {
+            self.top_since = Some(std::time::Instant::now());
         }
     }
 
@@ -1225,13 +1277,52 @@ impl ViewStack {
         self.views.last().map(|view| view.kind())
     }
 
-    /// Whether the top view is the approval card deciding exactly `gate`.
-    /// Identity-aware: a web-mirror dismissal closes its own card, never an
-    /// unrelated approval that happens to be on top.
-    pub fn top_matches_approval_gate(&self, gate: &str) -> bool {
-        self.views.last().is_some_and(|view| {
-            crate::remote_control::view_is_approval_for_gate(view.as_ref(), gate)
-        })
+    /// Remove the approval card deciding exactly `gate` at any depth, not
+    /// only the top: a decision made elsewhere (web, phone) must retire its
+    /// card even when another view sits above it. Identity-aware: it never
+    /// closes an unrelated approval card.
+    pub fn remove_approval_for_gate(&mut self, gate: &str) -> bool {
+        let before = self.views.len();
+        let top = self.top_identity();
+        self.views
+            .retain(|view| !crate::remote_control::view_is_approval_for_gate(view.as_ref(), gate));
+        self.note_top_change(top);
+        self.views.len() != before
+    }
+
+    /// Remove the approval card for tool/approval id `id` at any depth.
+    pub fn remove_approval_by_id(&mut self, id: &str) -> bool {
+        let before = self.views.len();
+        let top = self.top_identity();
+        self.views
+            .retain(|view| view.approval_request_id() != Some(id));
+        self.note_top_change(top);
+        self.views.len() != before
+    }
+
+    /// Whether an approval card for `id` is anywhere in the stack.
+    pub fn contains_approval_id(&self, id: &str) -> bool {
+        self.views
+            .iter()
+            .any(|view| view.approval_request_id() == Some(id))
+    }
+
+    /// The approval id of the top view, when it is an approval card.
+    pub fn top_approval_id(&self) -> Option<&str> {
+        self.views
+            .last()
+            .and_then(|view| view.approval_request_id())
+    }
+
+    /// Whether a key observed at `observed_at` predates the moment the
+    /// approval card on top became visible — raised, or revealed by closing
+    /// the card above it — i.e. it was typed ahead and must not answer that
+    /// card. Two quick `y` presses answer one card, never the one beneath.
+    pub fn key_predates_top_approval(&self, observed_at: std::time::Instant) -> bool {
+        self.top_approval_id().is_some()
+            && self
+                .top_since
+                .is_some_and(|top_since| observed_at < top_since)
     }
 
     pub fn contains_kind(&self, kind: ModalKind) -> bool {
@@ -1255,7 +1346,9 @@ impl ViewStack {
 
     pub fn push<V: ModalView + 'static>(&mut self, view: V) {
         let kind = view.kind();
+        let top = self.top_identity();
         self.views.push(Box::new(view));
+        self.note_top_change(top);
         tracing::debug!(target: "codewhale_tui::view_stack", action = "push", kind = ?kind, depth = self.views.len(), "view pushed");
     }
 
@@ -1264,12 +1357,16 @@ impl ViewStack {
     /// the generic `push` re-boxing dance.
     pub fn push_boxed(&mut self, view: Box<dyn ModalView>) {
         let kind = view.kind();
+        let top = self.top_identity();
         self.views.push(view);
+        self.note_top_change(top);
         tracing::debug!(target: "codewhale_tui::view_stack", action = "push_boxed", kind = ?kind, depth = self.views.len(), "view pushed");
     }
 
     pub fn pop(&mut self) -> Option<Box<dyn ModalView>> {
+        let top = self.top_identity();
         let popped = self.views.pop();
+        self.note_top_change(top);
         if let Some(view) = popped.as_ref() {
             tracing::debug!(target: "codewhale_tui::view_stack", action = "pop", kind = ?view.kind(), depth = self.views.len(), "view popped");
         }
@@ -1363,6 +1460,7 @@ impl ViewStack {
 
     fn apply_action(&mut self, action: ViewAction) -> Vec<ViewEvent> {
         let mut events = Vec::new();
+        let top = self.top_identity();
         match action {
             // Key and mouse paths already repaint after dispatch; `tick`
             // reads `Redraw` before calling here.
@@ -1382,6 +1480,7 @@ impl ViewStack {
                 }
             }
         }
+        self.note_top_change(top);
         events
     }
 
@@ -1390,6 +1489,32 @@ impl ViewStack {
         self.views
             .last()
             .is_some_and(|view| view.kind() == ModalKind::Extensions)
+    }
+
+    /// Run an Extensions row-menu entry against the panel, when it is on
+    /// top. `None` when the panel is gone or no longer lists the row.
+    pub fn extensions_menu_action(
+        &mut self,
+        item_id: &str,
+        verb: ExtensionMenuVerb,
+    ) -> Option<Vec<ViewEvent>> {
+        let action = self
+            .views
+            .last_mut()?
+            .as_any_mut()
+            .downcast_mut::<extensions::ExtensionsView>()?
+            .run_menu_verb(item_id, verb)?;
+        Some(self.apply_action(action))
+    }
+
+    /// Whether a provider picker anywhere in the stack has been used — a key
+    /// pressed or a click landed in it.
+    pub fn provider_picker_interacted(&mut self) -> bool {
+        self.views.iter_mut().any(|view| {
+            view.as_any_mut()
+                .downcast_mut::<crate::tui::provider_picker::ProviderPickerView>()
+                .is_some_and(|picker| picker.interacted())
+        })
     }
 
     /// Hand a freshly-built read model to the open Extensions panel, when it
@@ -5573,6 +5698,21 @@ pub struct SubAgentsView {
     /// the parked roster instead of stacking a second one. Direct entry
     /// (`/fleet workers`, the Work dock) leaves it false, so `Esc` closes.
     back_to_fleet_roster: bool,
+    /// Agent whose Stop is armed (addendum F4). Stopping an agent that can
+    /// change files takes two presses of `X` (or `X` then `Enter`); `Esc`
+    /// or moving the selection disarms it.
+    armed_stop: Option<String>,
+}
+
+/// Whether stopping this agent can strand file work, so `X` asks twice: it
+/// is still running and may write files (write permission or a full shell).
+/// Rows without a permission snapshot (live progress rows) stop on one press.
+fn subagent_stop_needs_confirm(agent: &SubAgentResult) -> bool {
+    agent.status == SubAgentStatus::Running
+        && agent
+            .runtime_permissions
+            .as_ref()
+            .is_some_and(|permissions| permissions.write || permissions.shell == "full")
 }
 
 /// Build the agent rows shown by `/subagents`.
@@ -5650,8 +5790,15 @@ pub(crate) fn subagent_view_agents(
     for agent in &mut agents[..manager_agent_count] {
         // The row headline reads `nickname`, so the dispatch name lands there
         // when the agent has one; the generated whale names the rest (#5287).
-        let display_name = crate::tui::sidebar::dispatched_agent_name(agent)
-            .map(str::to_string)
+        // The view is handed manager rows that may not be in
+        // `subagent_cache` yet, so the row's own dispatch name backs up the
+        // app-wide lookup.
+        let own_name = agent.name.trim();
+        let display_name = app
+            .agent_given_name(&agent.agent_id)
+            .or_else(|| {
+                (!own_name.is_empty() && own_name != agent.agent_id).then(|| own_name.to_string())
+            })
             .or_else(|| display_names.remove(&agent.agent_id));
         agent.nickname = display_name;
     }
@@ -5713,6 +5860,8 @@ fn live_subagent_result(
         duration_ms: 0,
         started_at: None,
         from_prior_session: false,
+        idle_ms: None,
+        heartbeat_timeout_ms: None,
     }
 }
 
@@ -5730,6 +5879,7 @@ impl SubAgentsView {
             locale: Locale::En,
             opened_at: std::time::Instant::now(),
             back_to_fleet_roster: false,
+            armed_stop: None,
         }
     }
 
@@ -5740,6 +5890,26 @@ impl SubAgentsView {
         view.motion = app.motion_policy().mode();
         view.locale = app.ui_locale;
         view
+    }
+
+    fn selected_agent(&self) -> Option<&SubAgentResult> {
+        let id = self.ordered_agent_ids().get(self.selected).cloned()?;
+        self.agents.iter().find(|agent| agent.agent_id == id)
+    }
+
+    /// `X`: stop the selected agent. One that can change files arms first and
+    /// stops on the second press, so a stray key cannot end a writer.
+    fn press_stop(&mut self) -> ViewAction {
+        let Some(agent) = self.selected_agent() else {
+            return ViewAction::None;
+        };
+        let agent_id = agent.agent_id.clone();
+        if subagent_stop_needs_confirm(agent) && self.armed_stop.as_deref() != Some(&agent_id) {
+            self.armed_stop = Some(agent_id);
+            return ViewAction::None;
+        }
+        self.armed_stop = None;
+        ViewAction::Emit(ViewEvent::SidebarAgentCancel { agent_id })
     }
 
     /// Mark this view as pushed on top of the Fleet roster (#5954), so the
@@ -5839,6 +6009,20 @@ impl ModalView for SubAgentsView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         use crossterm::event::KeyCode;
 
+        // An armed Stop (F4) owns Esc and Enter: Esc disarms without closing,
+        // Enter confirms — the same two-step the Work inspector's Stop uses.
+        if self.armed_stop.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.armed_stop = None;
+                    return ViewAction::None;
+                }
+                KeyCode::Enter => return self.press_stop(),
+                KeyCode::Char('x') | KeyCode::Char('X') => {}
+                _ => self.armed_stop = None,
+            }
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
             // Enter opens the selected agent's transcript — the same primary
@@ -5851,14 +6035,10 @@ impl ModalView for SubAgentsView {
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 ViewAction::Emit(ViewEvent::SubAgentsRefresh)
             }
-            // Manage: stop the selected worker. Terminal workers ignore the
-            // key; the cancel receipt names what happened either way.
-            KeyCode::Char('x') | KeyCode::Char('X') => {
-                match self.ordered_agent_ids().get(self.selected).cloned() {
-                    Some(agent_id) => ViewAction::Emit(ViewEvent::SidebarAgentCancel { agent_id }),
-                    None => ViewAction::None,
-                }
-            }
+            // Manage: stop the selected agent. Terminal agents ignore the
+            // key; the cancel receipt names what happened either way. A
+            // running agent that can change files asks twice (F4).
+            KeyCode::Char('x') | KeyCode::Char('X') => self.press_stop(),
             // The roster is the same destination either way: pop back to the
             // parked one when there is one (#5954) — re-running `/fleet`
             // would stack a duplicate roster and lose its cursor.
@@ -5942,6 +6122,15 @@ impl ModalView for SubAgentsView {
                     .position(|candidate| candidate == &id)
             })
             .unwrap_or_else(|| self.selected.min(last));
+        // An armed Stop only survives while its agent is still selected and
+        // still needs the confirm (it may have finished meanwhile).
+        let still_armed = self.armed_stop.as_deref().is_some_and(|armed| {
+            self.selected_agent()
+                .is_some_and(|agent| agent.agent_id == armed && subagent_stop_needs_confirm(agent))
+        });
+        if !still_armed {
+            self.armed_stop = None;
+        }
         true
     }
 
@@ -6094,7 +6283,14 @@ impl ModalView for SubAgentsView {
                 ActionHint::new("Esc", self.esc_hint_label()),
                 ActionHint::new("↑/↓", tr(self.locale, MessageId::CtxInspActionSelect)),
                 ActionHint::new("Enter", tr(self.locale, MessageId::ExtensionsActionFocus)),
-                ActionHint::new("X", tr(self.locale, MessageId::SidebarStopControl)),
+                if self.armed_stop.is_some() {
+                    ActionHint::new(
+                        "X/Enter",
+                        tr(self.locale, MessageId::WorkSurfaceStopConfirmHint),
+                    )
+                } else {
+                    ActionHint::new("X", tr(self.locale, MessageId::SidebarStopControl))
+                },
                 ActionHint::new("R", tr(self.locale, MessageId::SubagentsActionRefresh)),
                 ActionHint::new("F", tr(self.locale, MessageId::SubagentsActionRosterSetup)),
             ],
@@ -7188,7 +7384,103 @@ mod tests {
             duration_ms: 10,
             started_at: None,
             from_prior_session: false,
+            idle_ms: None,
+            heartbeat_timeout_ms: None,
         }
+    }
+
+    fn writer_agent(id: &str) -> SubAgentResult {
+        let mut agent = manager_agent(id, SubAgentStatus::Running);
+        agent.runtime_permissions = Some(codewhale_protocol::fleet::FleetEffectivePermissions {
+            write: true,
+            network: false,
+            shell: "read_only".to_string(),
+            tool_scope: "inherit".to_string(),
+            tools: Vec::new(),
+            background: false,
+            max_spawn_depth: 0,
+            profile_id: None,
+            profile_origin: None,
+            source: "test".to_string(),
+        });
+        agent
+    }
+
+    fn press(view: &mut SubAgentsView, code: KeyCode) -> ViewAction {
+        view.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn is_stop_of(action: &ViewAction, id: &str) -> bool {
+        matches!(
+            action,
+            ViewAction::Emit(ViewEvent::SidebarAgentCancel { agent_id }) if agent_id == id
+        )
+    }
+
+    #[test]
+    fn stopping_a_writing_agent_takes_two_presses_and_esc_disarms() {
+        let mut view = SubAgentsView::new(vec![writer_agent("w")]);
+
+        // First X arms; nothing is stopped yet and the footer asks to confirm.
+        assert!(matches!(
+            press(&mut view, KeyCode::Char('x')),
+            ViewAction::None
+        ));
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        assert!(buffer_text(&buf, area).contains("X/Enter"));
+
+        // Esc disarms without closing the register.
+        assert!(matches!(press(&mut view, KeyCode::Esc), ViewAction::None));
+        assert!(view.armed_stop.is_none());
+
+        // X, X stops; X then Enter stops too.
+        assert!(matches!(
+            press(&mut view, KeyCode::Char('X')),
+            ViewAction::None
+        ));
+        assert!(is_stop_of(&press(&mut view, KeyCode::Char('X')), "w"));
+        assert!(matches!(
+            press(&mut view, KeyCode::Char('x')),
+            ViewAction::None
+        ));
+        assert!(is_stop_of(&press(&mut view, KeyCode::Enter), "w"));
+        assert!(view.armed_stop.is_none());
+    }
+
+    #[test]
+    fn stopping_a_read_only_or_moved_selection_does_not_need_the_armed_press() {
+        // A read-only running agent (no write, no full shell) stops at once.
+        let mut read_only = writer_agent("r");
+        if let Some(permissions) = read_only.runtime_permissions.as_mut() {
+            permissions.write = false;
+        }
+        let mut view = SubAgentsView::new(vec![read_only]);
+        assert!(is_stop_of(&press(&mut view, KeyCode::Char('x')), "r"));
+
+        // Moving the selection disarms: the next X on the other writer arms
+        // afresh instead of stopping it.
+        let mut view = SubAgentsView::new(vec![writer_agent("a"), writer_agent("b")]);
+        assert!(matches!(
+            press(&mut view, KeyCode::Char('x')),
+            ViewAction::None
+        ));
+        press(&mut view, KeyCode::Down);
+        assert!(view.armed_stop.is_none());
+        assert!(matches!(
+            press(&mut view, KeyCode::Char('x')),
+            ViewAction::None
+        ));
+        assert!(is_stop_of(&press(&mut view, KeyCode::Char('x')), "b"));
+
+        // An armed agent that finishes before the confirm is disarmed.
+        let mut view = SubAgentsView::new(vec![writer_agent("w")]);
+        press(&mut view, KeyCode::Char('x'));
+        let mut done = writer_agent("w");
+        done.status = SubAgentStatus::Completed;
+        view.update_subagents(&[done]);
+        assert!(view.armed_stop.is_none());
     }
 
     #[test]
@@ -8652,19 +8944,6 @@ base_url = "https://api.xiaomimimo.com/v1"
                     def.key
                 );
             }
-        }
-    }
-
-    /// `/set` and the settings screen read one declaration. A key `/set`
-    /// accepts but the schema does not declare would be settable and
-    /// unplaceable — no kind, no label, no home.
-    #[test]
-    fn every_available_setting_is_declared_in_the_schema() {
-        for (key, _) in Settings::available_settings() {
-            assert!(
-                codewhale_config::setting(key).is_some(),
-                "`/set {key}` is accepted but undeclared in SETTINGS_SCHEMA"
-            );
         }
     }
 

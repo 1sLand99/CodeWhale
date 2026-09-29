@@ -709,7 +709,7 @@ impl FleetRosterView {
             lines
         } else {
             vec![Line::from(Span::styled(
-                "Roster is empty.",
+                "Fleet is empty.",
                 Style::default().fg(palette::TEXT_MUTED),
             ))]
         };
@@ -915,7 +915,9 @@ fn member_shadow_badge(
             ProfileOrigin::Workspace => MessageId::FleetRosterShadowBadgeProjectOverride,
             ProfileOrigin::Personal => MessageId::FleetRosterShadowBadgePersonalOverride,
             ProfileOrigin::Config => MessageId::FleetRosterShadowBadgeConfigOverride,
-            ProfileOrigin::Plugin | ProfileOrigin::BuiltIn => return None,
+            ProfileOrigin::Plugin | ProfileOrigin::BuiltIn | ProfileOrigin::ClaudeCode => {
+                return None;
+            }
         }
     };
     Some(format!("  {}", tr(locale, id)))

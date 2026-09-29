@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand} आपको ऐसे एजेंट देता है जो सॉफ़्टवेयर बना सकते हैं, आपकी फ़ाइलों पर काम कर सकते हैं और दोहराए जाने वाले कामों को बार-बार इस्तेमाल होने वाले वर्कफ़्लो में बदल सकते हैं। उन्हें बताएँ कि आप क्या करना चाहते हैं और काम के लिए उपयुक्त होस्टेड या लोकल मॉडल चुनें, जिन्हें इस्तेमाल करते हुए आप अपनी ज़रूरत के अनुसार प्रदाता भी बदल सकते हैं।",
   getCodewhale: "Codewhale लें",
+  heroInstallAria: "इंस्टॉल कमांड",
   exploreProduct: "उत्पाद देखें",
   shotPreview: "टर्मिनल पूर्वावलोकन",
   shotBuild: "v{version} डेवलपमेंट बिल्ड",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "रिलीज़ स्थिति उपलब्ध नहीं",
   currentSource: "सोर्स",
   sourceCandidate: "अप्रकाशित",
-  providerRoutes: "{count} प्रोवाइडर",
   publishedRelease: "प्रकाशित",
   figcaptionSourceCandidate: "अप्रकाशित",
   chapterTerminal: "आपका टर्मिनल",
@@ -63,7 +63,7 @@ export const home: HomeDict = {
     "Codewhale इंस्टॉल करके मॉडल कनेक्ट करने के बाद आप टर्मिनल में अपना पहला काम बता सकते हैं और जब कई एजेंटों के बीच काम बाँटना चाहें, तब Fleet जोड़ सकते हैं।",
   startGuideLink: "शुरुआती गाइड पढ़ें",
   startVocabularyLink: "उत्पाद शब्दावली देखें",
-  chapterAccount: "Codewhale लें",
+  chapterAvailability: "कहाँ चलता है",
   availabilityHeading: "आप Codewhale कहाँ इस्तेमाल कर सकते हैं",
   availabilityLede:
     "आप आज ही Codewhale को अपने टर्मिनल में इस्तेमाल कर सकते हैं, जबकि हम वेब ऐप, डेस्कटॉप ऐप और क्लाउड कंप्यूटर बनाने पर काम कर रहे हैं।",

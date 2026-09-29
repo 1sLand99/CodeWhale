@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { run, runOk, ExecError, tryJson, have, currentSignal, throwIfAborted } from "../exec.mjs";
+import { recordingsDir, recordingsOutputPath } from "../recordings.mjs";
 
 const DEVICE_TMP = "/data/local/tmp/cu";
 
@@ -203,10 +204,10 @@ export function create({ exec }) {
     },
     screenshot: async (args = {}) => {
       rejectAppSelectors(args);
-      const { path: outPath } = args;
-      const dir = process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
+      const outPath = recordingsOutputPath(args.path);
+      const dir = recordingsDir();
       fs.mkdirSync(dir, { recursive: true });
-      const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.jpeg`);
+      const file = outPath ?? path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.jpeg`);
       await snapshot(file);
       const buf = fs.readFileSync(file);
       displayPixels = jpegSize(buf) ?? displayPixels;
@@ -305,7 +306,7 @@ export function create({ exec }) {
     recordingStop: async ({ id }) => {
       if (!recording || recording.id !== id) throw new ExecError(`unknown recording "${id}"`);
       const { dir, seq, startedAt, intervalMs } = await stopFrames();
-      const dirOut = process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
+      const dirOut = recordingsDir();
       fs.mkdirSync(dirOut, { recursive: true });
       const out = path.join(dirOut, `rec-${id}.mp4`);
       const fps = Math.max(1, Math.min(15, Math.round(1000 / Math.max(150, intervalMs))));
@@ -319,7 +320,7 @@ export function create({ exec }) {
       ? { id, running: true, mode: "snapshot-series", frames: recording.seq, startedAt: recording.startedAt }
       : { id, running: false },
     recordingList: async () => {
-      const dir = process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
+      const dir = recordingsDir();
       const out = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => /\.(mp4|mov|jpeg|png)$/i.test(f)).map((f) => {
         const st = fs.statSync(path.join(dir, f));
         return { file: path.join(dir, f), bytes: st.size, modifiedAt: st.mtime.toISOString() };

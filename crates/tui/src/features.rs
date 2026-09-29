@@ -44,6 +44,10 @@ pub enum Feature {
     Verify,
     /// Expose `execute_tools` eagerly so the model composes by default (CodeMode).
     CodeMode,
+    /// Run reviewed plugins' `native` host code in the TypeScript extension
+    /// host (experimental). Toggling it changes the plugin activation policy,
+    /// so every plugin is re-reviewed after a restart, in either direction.
+    ExtensionHost,
 }
 
 impl fmt::Display for Stage {
@@ -231,6 +235,16 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeMode,
         key: "code_mode",
+        // Stays listed as experimental so `/config` shows the escape hatch.
+        stage: Stage::Experimental,
+        // #6562: code mode is the default way MCP and plugin tools compose.
+        // `[features] code_mode = false` is the escape hatch: execute_tools
+        // goes back to deferred (reachable through tool_search).
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::ExtensionHost,
+        key: "extension_host",
         stage: Stage::Experimental,
         default_enabled: false,
     },
@@ -257,9 +271,21 @@ mod tests {
     }
 
     #[test]
-    fn code_mode_flag_parses_and_defaults_off() {
+    fn code_mode_flag_parses_and_defaults_on_with_an_off_switch() {
         assert_eq!(feature_from_key("code_mode"), Some(Feature::CodeMode));
-        assert!(!Features::with_defaults().enabled(Feature::CodeMode));
+        let mut features = Features::with_defaults();
+        assert!(features.enabled(Feature::CodeMode));
+        features.apply_map(&BTreeMap::from([("code_mode".to_string(), false)]));
+        assert!(!features.enabled(Feature::CodeMode));
+    }
+
+    #[test]
+    fn extension_host_flag_parses_and_defaults_off() {
+        assert_eq!(
+            feature_from_key("extension_host"),
+            Some(Feature::ExtensionHost)
+        );
+        assert!(!Features::with_defaults().enabled(Feature::ExtensionHost));
     }
 
     #[test]

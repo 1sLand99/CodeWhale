@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 const DEFAULT_ACTION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -118,7 +119,7 @@ export class ThreadStore {
   async putAction(action) {
     if (!this.options.actions) return "";
     this.ensureShape();
-    const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const token = randomBytes(16).toString("hex");
     this.data.actions[token] = {
       ...action,
       createdAt: new Date().toISOString()

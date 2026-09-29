@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     config::{Config, MemoryBackend, MemoryConfig, SkillsConfig},
+    core::engine::ISOLATED_CHAT_SYSTEM_PROMPT,
     plugins::PluginRegistry,
     runtime_threads::{
         CreateThreadRequest, RuntimeEventRecord, RuntimeThreadManager, RuntimeThreadManagerConfig,
@@ -37,7 +38,6 @@ const MAX_RELAY_ID_BYTES: usize = 240;
 const MAX_OPERATION_KEY_BYTES: usize = 128;
 const STATE_FILE: &str = "runtime-chat-bindings.json";
 const SCOPE_LOCK_FILE: &str = "runtime-chat.owner.lock";
-const SAFE_CHAT_SYSTEM_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This is an isolated chat-only session: no local project, workspace, memory, skill, account, credential, path, or runtime context is available or implied. Do not claim to inspect or change local files, run tools, or perform work execution.";
 
 #[cfg(test)]
 static TEST_STATE_PERSIST_FAILURES: std::sync::Mutex<Vec<(PathBuf, usize)>> =
@@ -777,6 +777,8 @@ impl RuntimeChatRelayHost {
                     auto_approve: Some(false),
                     dynamic_tools: Vec::new(),
                     environment_id: None,
+                    model_provider: None,
+                    model_provider_id: None,
                 },
                 &reserved_native_turn_id,
             )
@@ -1307,15 +1309,15 @@ fn resolve_interrupt_target(
     ))
 }
 
-fn dedicated_chat_system_prompt(account_instructions: Option<&str>) -> String {
+pub(crate) fn dedicated_chat_system_prompt(account_instructions: Option<&str>) -> String {
     match account_instructions
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         Some(instructions) => format!(
-            "{SAFE_CHAT_SYSTEM_PROMPT}\n\n<account_chat_instructions>\n{instructions}\n</account_chat_instructions>"
+            "{ISOLATED_CHAT_SYSTEM_PROMPT}\n\n<account_chat_instructions>\n{instructions}\n</account_chat_instructions>"
         ),
-        None => SAFE_CHAT_SYSTEM_PROMPT.to_string(),
+        None => ISOLATED_CHAT_SYSTEM_PROMPT.to_string(),
     }
 }
 
@@ -2064,8 +2066,8 @@ mod tests {
             default_text_model: Some(crate::config::DEFAULT_OLLAMA_MODEL.to_string()),
             ..Config::default()
         };
-        config.api_key = Some("must-not-cross".to_string());
-        config.base_url = Some("http://127.0.0.1:11434/v1".to_string());
+        config.set_legacy_root(Some("must-not-cross".to_string()), None);
+        config.set_legacy_root(None, Some("http://127.0.0.1:11434/v1".to_string()));
         let challenge = "c".repeat(32);
         assert!(crate::runtime_api::runtime_chat_relay_catalog(&config, &challenge).is_err());
         config.default_text_model = Some("relay-local:fixture".to_string());
@@ -2162,7 +2164,6 @@ mod tests {
             }),
             context: ContextConfig {
                 project_pack: Some(true),
-                ..ContextConfig::default()
             },
             ..Config::default()
         };
@@ -2180,7 +2181,7 @@ mod tests {
         assert!(execution.skills_config().scan_codewhale_only());
 
         let prompt = dedicated_chat_system_prompt(None);
-        assert_eq!(prompt, SAFE_CHAT_SYSTEM_PROMPT);
+        assert_eq!(prompt, ISOLATED_CHAT_SYSTEM_PROMPT);
         for canary in [
             "CANARY_SKILLS",
             "CANARY_AGENTS",
@@ -2190,7 +2191,7 @@ mod tests {
             assert!(!prompt.contains(canary));
         }
         let account_prompt = dedicated_chat_system_prompt(Some("Reply in short paragraphs."));
-        assert!(account_prompt.starts_with(SAFE_CHAT_SYSTEM_PROMPT));
+        assert!(account_prompt.starts_with(ISOLATED_CHAT_SYSTEM_PROMPT));
         assert!(account_prompt.contains("<account_chat_instructions>"));
     }
 

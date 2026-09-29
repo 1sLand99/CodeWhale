@@ -37,10 +37,10 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-09-22T18:25:10.895Z",
+  "generatedAt": "2026-09-28T21:21:23.884Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
-  "version": "0.10.0",
+  "version": "0.10.1",
   "crates": [
     "agent",
     "app-server",
@@ -61,6 +61,7 @@ export const FACTS: RepoFacts = {
     "paths",
     "protocol",
     "release",
+    "runtime",
     "secrets",
     "state",
     "telemetry",
@@ -326,6 +327,14 @@ export const FACTS: RepoFacts = {
     }
   ],
   "models": [
+    {
+      "id": "grok-4.7",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-09-23"
+    },
     {
       "id": "step-3.5-flash",
       "provider": "StepFun",

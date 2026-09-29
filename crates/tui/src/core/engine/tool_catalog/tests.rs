@@ -170,7 +170,6 @@ fn eager_workflow_still_respects_command_allow_and_deny_gates() {
                 allow.map(|name| vec![name.to_string()]),
                 deny.map(|name| vec![name.to_string()]),
                 None,
-                codewhale_execpolicy::ApprovalMode::Suggest,
                 ToolMode::Direct,
             );
             assert_eq!(policy.allows_tool("workflow"), expected);
@@ -380,12 +379,14 @@ fn catalog_build_does_not_append_registry_guidance_to_the_shell_tool() {
 fn requested_tool_mode_prefers_model_hint_then_flag_then_direct() {
     use crate::features::{Feature, Features};
 
-    let off = Features::with_defaults();
-    assert_eq!(requested_tool_mode(None, &off), ToolMode::Direct);
-
-    let mut on = Features::with_defaults();
-    on.enable(Feature::CodeMode);
+    // #6562: code mode is the default; `[features] code_mode = false` is the
+    // escape hatch back to Direct.
+    let on = Features::with_defaults();
     assert_eq!(requested_tool_mode(None, &on), ToolMode::CodeMode);
+
+    let mut off = Features::with_defaults();
+    off.disable(Feature::CodeMode);
+    assert_eq!(requested_tool_mode(None, &off), ToolMode::Direct);
 
     // Model metadata wins over config, in both directions (Codex parity).
     assert_eq!(

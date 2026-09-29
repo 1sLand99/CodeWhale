@@ -582,6 +582,79 @@ fn resolver_routes_deepseek_vision_exp_over_chat_with_image_input() {
 }
 
 #[test]
+fn resolver_keeps_deepseek_flash_image_input_on_the_official_route() {
+    // #6421: the curated DeepSeek rows win over the Models.dev asset, so the
+    // resolved route (what the engine strips images against) must carry the
+    // documented Flash vision fact itself — default selector included.
+    for selector in [None, Some("deepseek-flash"), Some("deepseek-v4-flash")] {
+        let route = RouteResolver::new()
+            .resolve(&req(Some(ProviderKind::Deepseek), selector))
+            .expect("official DeepSeek Flash route resolves");
+        assert_eq!(
+            route.capabilities().image_input,
+            CapabilityState::Supported,
+            "{selector:?} must keep image input on the official endpoint"
+        );
+    }
+    let pro = RouteResolver::new()
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
+        .expect("official DeepSeek Pro route resolves");
+    assert_eq!(
+        pro.capabilities().image_input,
+        CapabilityState::Unsupported,
+        "the Flash correction must not widen Pro"
+    );
+}
+
+#[test]
+fn resolver_keeps_deepseek_flash_image_input_on_the_messages_route() {
+    // #6521 review: Flash vision is documented for Messages too. Both
+    // spellings of that route must resolve with image input — the legacy
+    // `deepseek-anthropic` kind and canonical DeepSeek with `wire =
+    // "anthropic"` (which selects the `/anthropic` base URL) — while a custom
+    // compatible host and Pro stay unwidened.
+    let messages = |kind: ProviderKind, selector: &str, base_url: Option<&str>| {
+        let mut request = req(Some(kind), Some(selector));
+        request.base_url_override = base_url.map(str::to_string);
+        RouteResolver::new()
+            .resolve(&request)
+            .expect("DeepSeek Messages route resolves")
+            .capabilities()
+            .image_input
+    };
+    for selector in ["deepseek-flash", "deepseek-v4-flash"] {
+        assert_eq!(
+            messages(ProviderKind::DeepseekAnthropic, selector, None),
+            CapabilityState::Supported,
+            "deepseek-anthropic {selector}"
+        );
+        assert_eq!(
+            messages(
+                ProviderKind::Deepseek,
+                selector,
+                Some("https://api.deepseek.com/anthropic")
+            ),
+            CapabilityState::Supported,
+            "deepseek wire=anthropic {selector}"
+        );
+        assert_ne!(
+            messages(
+                ProviderKind::Deepseek,
+                selector,
+                Some("https://proxy.example.com/anthropic")
+            ),
+            CapabilityState::Supported,
+            "a custom compatible host is not DeepSeek's documented route"
+        );
+    }
+    assert_ne!(
+        messages(ProviderKind::DeepseekAnthropic, "deepseek-v4-pro", None),
+        CapabilityState::Supported,
+        "Pro stays text-only on Messages"
+    );
+}
+
+#[test]
 fn resolver_keeps_custom_deepseek_same_name_capabilities_unverified() {
     let route = RouteResolver::new()
         .resolve(&RouteRequest {
@@ -1068,7 +1141,7 @@ fn default_resolver_yields_real_facts_from_bundled_catalog() {
         .resolve(&req(Some(ProviderKind::Moonshot), Some("kimi-k3")))
         .expect("Moonshot kimi-k3 should resolve from the bundled catalog");
     assert_eq!(kimi_k3.limits().context_tokens, Some(1_048_576));
-    assert_eq!(kimi_k3.limits().output_tokens, Some(131_072));
+    assert_eq!(kimi_k3.limits().output_tokens, Some(1_048_576));
 
     // With the #3085 pricing keystone present on the release branch, the asset's
     // provider-scoped `cost` now projects onto the candidate via
@@ -1078,7 +1151,7 @@ fn default_resolver_yields_real_facts_from_bundled_catalog() {
     let glm51 = r
         .resolve(&req(Some(ProviderKind::Zai), Some("glm-5.1")))
         .expect("Z.ai glm-5.1 should resolve from the bundled catalog");
-    assert_eq!(glm51.limits().context_tokens, Some(202_752));
+    assert_eq!(glm51.limits().context_tokens, Some(200_000));
     assert!(matches!(
         glm51.pricing(),
         Some(super::candidate::PricingSku::Token { .. })
@@ -1167,7 +1240,7 @@ fn openrouter_qwen37_plus_aliases_use_exact_catalog_wire_identity() {
             .resolve(&req(Some(ProviderKind::Openrouter), Some(requested)))
             .expect("OpenRouter Qwen 3.7 Plus route should resolve");
         assert_eq!(route.wire_model_id().as_str(), "qwen/qwen3.7-plus");
-        assert!(!route.limits().has_known_limit());
+        assert_eq!(route.limits().context_tokens, Some(1_000_000));
         assert!(matches!(
             route.pricing(),
             Some(super::candidate::PricingSku::Token {

@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand} cung cấp các tác tử có thể xây dựng phần mềm, làm việc với tệp và biến những tác vụ lặp lại thành quy trình có thể tái sử dụng. Hãy cho chúng biết bạn muốn hoàn thành điều gì rồi chọn mô hình chạy trên máy chủ hoặc cục bộ phù hợp với công việc, đồng thời bạn có thể tự do chuyển đổi nhà cung cấp trong quá trình làm việc.",
   getCodewhale: "Tải Codewhale",
+  heroInstallAria: "Lệnh cài đặt",
   exploreProduct: "Khám phá sản phẩm",
   shotPreview: "Xem trước terminal",
   shotBuild: "bản phát triển v{version}",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "Không có trạng thái phát hành",
   currentSource: "Mã nguồn",
   sourceCandidate: "Chưa phát hành",
-  providerRoutes: "{count} nhà cung cấp",
   publishedRelease: "đã phát hành",
   figcaptionSourceCandidate: "chưa phát hành",
   chapterTerminal: "Terminal của bạn",
@@ -63,7 +63,7 @@ export const home: HomeDict = {
     "Sau khi cài đặt Codewhale và kết nối một mô hình, bạn có thể mô tả tác vụ đầu tiên trong terminal và thêm Fleet khi muốn nhiều tác tử cùng chia sẻ công việc.",
   startGuideLink: "Đọc hướng dẫn bắt đầu",
   startVocabularyLink: "Xem thuật ngữ sản phẩm",
-  chapterAccount: "Tải Codewhale",
+  chapterAvailability: "Chạy ở đâu",
   availabilityHeading: "Nơi bạn có thể sử dụng Codewhale",
   availabilityLede:
     "Bạn có thể sử dụng Codewhale trong terminal ngay hôm nay, trong khi chúng tôi đang phát triển ứng dụng web, ứng dụng máy tính và máy tính đám mây.",

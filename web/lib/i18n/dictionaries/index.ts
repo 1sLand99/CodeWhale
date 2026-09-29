@@ -19,7 +19,6 @@ import type {
   DocsAuthDict,
   DocsComputersDict,
   DocsConfigurationDict,
-  DocsConstitutionDict,
   DocsFleetDict,
   DocsGuideDict,
   DocsHooksDict,
@@ -28,12 +27,18 @@ import type {
   DocsSandboxDict,
   DocsShellDict,
   DocsModesDict,
+  DocsReviewDict,
   DocsSubagentsDict,
   DocsTroubleshootingDict,
   DocsTrustDict,
   DocsWebDict,
   DocsWorkDict,
   HomeDict,
+  DigestDict,
+  FaqDict,
+  LegalPrivacyDict,
+  LegalTermsDict,
+  RoadmapDict,
   StatesDict,
 } from "./types";
 import { chrome as enChrome } from "./en/chrome";
@@ -48,8 +53,6 @@ import { docsTroubleshooting as enDocsTroubleshooting } from "./en/docs-troubles
 import { docsTroubleshooting as zhDocsTroubleshooting } from "./zh/docs-troubleshooting";
 import { docsConfiguration as enDocsConfiguration } from "./en/docs-configuration";
 import { docsConfiguration as zhDocsConfiguration } from "./zh/docs-configuration";
-import { docsConstitution as enDocsConstitution } from "./en/docs-constitution";
-import { docsConstitution as zhDocsConstitution } from "./zh/docs-constitution";
 import { docsFleet as enDocsFleet } from "./en/docs-fleet";
 import { docsFleet as zhDocsFleet } from "./zh/docs-fleet";
 import { docsMcp as enDocsMcp } from "./en/docs-mcp";
@@ -72,6 +75,8 @@ import { docsAuth as enDocsAuth } from "./en/docs-auth";
 import { docsAuth as zhDocsAuth } from "./zh/docs-auth";
 import { docsTrust as enDocsTrust } from "./en/docs-trust";
 import { docsTrust as zhDocsTrust } from "./zh/docs-trust";
+import { docsReview as enDocsReview } from "./en/docs-review";
+import { docsReview as zhDocsReview } from "./zh/docs-review";
 import { computerUse as enComputerUse } from "./en/computer-use";
 import { computerUse as zhComputerUse } from "./zh/computer-use";
 import { computerUse as jaComputerUse } from "./ja/computer-use";
@@ -94,6 +99,16 @@ import { states as enStates } from "./en/states";
 import { states as zhStates } from "./zh/states";
 import { changelog as enChangelog } from "./en/changelog";
 import { changelog as zhChangelog } from "./zh/changelog";
+import { legalTerms as enLegalTerms } from "./en/legal-terms";
+import { legalTerms as zhLegalTerms } from "./zh/legal-terms";
+import { legalPrivacy as enLegalPrivacy } from "./en/legal-privacy";
+import { legalPrivacy as zhLegalPrivacy } from "./zh/legal-privacy";
+import { digest as enDigest } from "./en/digest";
+import { digest as zhDigest } from "./zh/digest";
+import { faq as enFaq } from "./en/faq";
+import { faq as zhFaq } from "./zh/faq";
+import { roadmap as enRoadmap } from "./en/roadmap";
+import { roadmap as zhRoadmap } from "./zh/roadmap";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -215,10 +230,6 @@ const DOCS_CONFIGURATION: Record<string, DocsConfigurationDict> = {
   zh: zhDocsConfiguration,
 };
 
-const DOCS_CONSTITUTION: Record<string, DocsConstitutionDict> = {
-  zh: zhDocsConstitution,
-};
-
 const DOCS_FLEET: Record<string, DocsFleetDict> = {
   zh: zhDocsFleet,
 };
@@ -283,10 +294,15 @@ const DOCS_TRUST: Record<string, DocsTrustDict> = {
   zh: zhDocsTrust,
 };
 
+const DOCS_REVIEW: Record<string, DocsReviewDict> = {
+  zh: zhDocsReview,
+};
+
 /**
- * Shared surface states and the changelog page follow the same optional
- * per-locale rule as the docs page dictionaries: English is the reference,
- * every other locale falls back to it at lookup time.
+ * Shared surface states, the changelog page, the two legal pages, the digest
+ * page, the FAQ and the roadmap follow the same optional per-locale rule as
+ * the docs page dictionaries: English is the reference, every other locale
+ * falls back to it at lookup time.
  */
 const STATES: Record<string, StatesDict> = {
   zh: zhStates,
@@ -294,6 +310,26 @@ const STATES: Record<string, StatesDict> = {
 
 const CHANGELOG: Record<string, ChangelogDict> = {
   zh: zhChangelog,
+};
+
+const LEGAL_TERMS: Record<string, LegalTermsDict> = {
+  zh: zhLegalTerms,
+};
+
+const LEGAL_PRIVACY: Record<string, LegalPrivacyDict> = {
+  zh: zhLegalPrivacy,
+};
+
+const DIGEST: Record<string, DigestDict> = {
+  zh: zhDigest,
+};
+
+const FAQ: Record<string, FaqDict> = {
+  zh: zhFaq,
+};
+
+const ROADMAP: Record<string, RoadmapDict> = {
+  zh: zhRoadmap,
 };
 
 export function getChrome(locale: string): ChromeDict {
@@ -322,10 +358,6 @@ export function getDocsTroubleshooting(locale: string): DocsTroubleshootingDict 
 
 export function getDocsConfiguration(locale: string): DocsConfigurationDict {
   return DOCS_CONFIGURATION[locale] ?? enDocsConfiguration;
-}
-
-export function getDocsConstitution(locale: string): DocsConstitutionDict {
-  return DOCS_CONSTITUTION[locale] ?? enDocsConstitution;
 }
 
 export function getDocsFleet(locale: string): DocsFleetDict {
@@ -372,6 +404,10 @@ export function getDocsTrust(locale: string): DocsTrustDict {
   return DOCS_TRUST[locale] ?? enDocsTrust;
 }
 
+export function getDocsReview(locale: string): DocsReviewDict {
+  return DOCS_REVIEW[locale] ?? enDocsReview;
+}
+
 export function getComputerUse(locale: string): ComputerUseDict {
   return COMPUTER_USE[locale] ?? enComputerUse;
 }
@@ -384,6 +420,26 @@ export function getChangelog(locale: string): ChangelogDict {
   return CHANGELOG[locale] ?? enChangelog;
 }
 
+export function getLegalTerms(locale: string): LegalTermsDict {
+  return LEGAL_TERMS[locale] ?? enLegalTerms;
+}
+
+export function getLegalPrivacy(locale: string): LegalPrivacyDict {
+  return LEGAL_PRIVACY[locale] ?? enLegalPrivacy;
+}
+
+export function getDigest(locale: string): DigestDict {
+  return DIGEST[locale] ?? enDigest;
+}
+
+export function getFaq(locale: string): FaqDict {
+  return FAQ[locale] ?? enFaq;
+}
+
+export function getRoadmap(locale: string): RoadmapDict {
+  return ROADMAP[locale] ?? enRoadmap;
+}
+
 /**
  * Select one side of a legacy `{ en, zh }` content pair by locale. This is
  * the transitional bridge for `web/lib/content/` modules that still carry
@@ -392,7 +448,12 @@ export function getChangelog(locale: string): ChangelogDict {
  * stay locale-agnostic.
  */
 export function pickText(pair: { en: string; zh: string }, locale: string): string {
-  return locale === "zh" ? pair.zh : pair.en;
+  return pair[pickTextLocale(locale)];
+}
+
+/** The actual language selected by the legacy two-language content bridge. */
+export function pickTextLocale(locale: string): "en" | "zh" {
+  return locale === "zh" ? "zh" : "en";
 }
 
 /** Reference dictionaries (parity baseline for the locale checks). */
@@ -403,7 +464,6 @@ export const EN_DOCS_SHELL = enDocsShell;
 export const EN_DOCS_HOOKS = enDocsHooks;
 export const EN_DOCS_TROUBLESHOOTING = enDocsTroubleshooting;
 export const EN_DOCS_CONFIGURATION = enDocsConfiguration;
-export const EN_DOCS_CONSTITUTION = enDocsConstitution;
 export const EN_DOCS_FLEET = enDocsFleet;
 export const EN_DOCS_MCP = enDocsMcp;
 export const EN_DOCS_MODES = enDocsModes;
@@ -415,9 +475,15 @@ export const EN_DOCS_WORK = enDocsWork;
 export const EN_DOCS_COMPUTERS = enDocsComputers;
 export const EN_DOCS_AUTH = enDocsAuth;
 export const EN_DOCS_TRUST = enDocsTrust;
+export const EN_DOCS_REVIEW = enDocsReview;
 export const EN_COMPUTER_USE = enComputerUse;
 export const EN_STATES = enStates;
 export const EN_CHANGELOG = enChangelog;
+export const EN_LEGAL_TERMS = enLegalTerms;
+export const EN_LEGAL_PRIVACY = enLegalPrivacy;
+export const EN_DIGEST = enDigest;
+export const EN_FAQ = enFaq;
+export const EN_ROADMAP = enRoadmap;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */
@@ -438,16 +504,3 @@ export function splitToken(template: string, token: string): string[] {
   return template.split(`{${token}}`);
 }
 
-/**
- * Split a template on every `{token}` it carries, for a sentence with more
- * than one substituted node. Returns literal text and token names
- * interleaved in template order, so a locale that reorders the tokens still
- * renders correctly and no translated fragment is concatenated by the
- * call site.
- */
-export function splitTokens(template: string): Array<{ text: string } | { token: string }> {
-  return template
-    .split(/\{(\w+)\}/g)
-    .map((part, i) => (i % 2 === 1 ? { token: part } : { text: part }))
-    .filter((part) => "token" in part || part.text !== "");
-}

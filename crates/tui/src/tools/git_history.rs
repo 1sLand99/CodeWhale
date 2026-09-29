@@ -16,7 +16,6 @@ use super::spec::{
 };
 use crate::dependencies::ExternalTool;
 
-const MAX_OUTPUT_CHARS: usize = 40_000;
 const DEFAULT_LOG_MAX_COUNT: u64 = 20;
 const MAX_LOG_MAX_COUNT: u64 = 200;
 const DEFAULT_UNIFIED: u64 = 3;
@@ -131,7 +130,7 @@ impl ToolSpec for GitLogTool {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let content = stdout.into_owned();
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
@@ -140,8 +139,6 @@ impl ToolSpec for GitLogTool {
             "author": author,
             "since": since,
             "until": until,
-            "truncated": truncated,
-            "omitted_chars": omitted_chars,
         })))
     }
 }
@@ -218,11 +215,8 @@ impl ToolSpec for GitShowTool {
         let stat = optional_bool(&input, "stat", true)?;
         let unified = optional_u64(&input, "unified", DEFAULT_UNIFIED)?.min(MAX_UNIFIED);
 
-        let mut args = vec![
-            "show".to_string(),
-            "--no-color".to_string(),
-            "--no-ext-diff".to_string(),
-        ];
+        let mut args = vec!["show".to_string(), "--no-color".to_string()];
+        args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS.map(String::from));
         if patch {
             args.push(format!("--unified={unified}"));
         } else {
@@ -238,7 +232,11 @@ impl ToolSpec for GitShowTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let working_dir = git_ctx.working_dir.clone();
+        let output =
+            tokio::task::spawn_blocking(move || super::git::run_git_command(&working_dir, &args))
+                .await
+                .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -253,7 +251,7 @@ impl ToolSpec for GitShowTool {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let content = stdout.into_owned();
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
@@ -262,8 +260,6 @@ impl ToolSpec for GitShowTool {
             "patch": patch,
             "stat": stat,
             "unified": if patch { Some(unified) } else { None },
-            "truncated": truncated,
-            "omitted_chars": omitted_chars,
         })))
     }
 }
@@ -359,8 +355,11 @@ impl ToolSpec for GitBlameTool {
         let end_line = start_line.saturating_add(max_lines.saturating_sub(1));
         let porcelain = optional_bool(&input, "porcelain", false)?;
 
+        // Blame reads the working-tree file, so it runs under the review
+        // command (no clean filters) and skips textconv drivers.
         let mut args = vec![
             "blame".to_string(),
+            "--no-textconv".to_string(),
             "--date=iso".to_string(),
             format!("-L{start_line},{end_line}"),
         ];
@@ -372,7 +371,11 @@ impl ToolSpec for GitBlameTool {
         args.push(pathspec.display().to_string());
 
         let command_str = format_command(working_dir, &args);
-        let output = run_git_command_async(working_dir.to_path_buf(), args).await?;
+        let blame_dir = working_dir.to_path_buf();
+        let output =
+            tokio::task::spawn_blocking(move || super::git::run_git_command(&blame_dir, &args))
+                .await
+                .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -387,7 +390,7 @@ impl ToolSpec for GitBlameTool {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let content = stdout.into_owned();
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": working_dir,
@@ -396,8 +399,6 @@ impl ToolSpec for GitBlameTool {
             "start_line": start_line,
             "max_lines": max_lines,
             "porcelain": porcelain,
-            "truncated": truncated,
-            "omitted_chars": omitted_chars,
         })))
     }
 }
@@ -452,7 +453,7 @@ impl ToolSpec for GitFetchTool {
                 "refspecs": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional refspecs to fetch (e.g. pull/123/head). Empty fetches the remote's defaults."
+                    "description": "Optional refspecs to fetch (e.g. pull/123/head); a `src:dst` destination must be under refs/remotes/. Empty fetches the remote's defaults."
                 },
                 "path": {
                     "type": "string",
@@ -520,14 +521,12 @@ impl ToolSpec for GitFetchTool {
         } else {
             format!("{stdout}\n{stderr}")
         };
-        let (content, truncated, omitted_chars) = truncate_with_note(&combined, MAX_OUTPUT_CHARS);
+        let content = combined;
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
             "remote": remote,
             "refspecs": refspecs,
-            "truncated": truncated,
-            "omitted_chars": omitted_chars,
         })))
     }
 }
@@ -635,7 +634,7 @@ impl ToolSpec for GitMergeTreeTool {
         }
 
         let conflicts = !output.status.success();
-        let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let content = stdout.into_owned();
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
@@ -643,8 +642,6 @@ impl ToolSpec for GitMergeTreeTool {
             "theirs": theirs,
             "base": base,
             "conflicts": conflicts,
-            "truncated": truncated,
-            "omitted_chars": omitted_chars,
         })))
     }
 }
@@ -790,8 +787,26 @@ fn validate_git_refspec(refspec: &str) -> Result<(), ToolError> {
             "git refspec '{refspec}' must have at most one ':'"
         )));
     }
-    for side in parts {
+    for side in &parts {
         validate_git_refspec_side(refspec, side)?;
+    }
+    // `git fetch <remote> tag <name>` is shorthand for
+    // `refs/tags/<name>:refs/tags/<name>`, a local tag write.
+    if refspec == "tag" {
+        return Err(ToolError::invalid_input(
+            "git refspec 'tag' is not accepted: the `tag <name>` form writes a local tag; \
+             fetch refs/tags/<name> into FETCH_HEAD or under refs/remotes/ instead",
+        ));
+    }
+    // The tool updates remote-tracking refs only: a destination under
+    // `refs/heads/` or `refs/tags/` (or a bare name git would resolve there)
+    // could rewrite local branches and tags.
+    if let Some(dst) = parts.get(1)
+        && (!dst.starts_with("refs/remotes/") || dst.split('/').any(|part| part == ".."))
+    {
+        return Err(ToolError::invalid_input(format!(
+            "git refspec '{refspec}' must write under refs/remotes/; omit the destination to fetch into FETCH_HEAD"
+        )));
     }
     Ok(())
 }
@@ -856,20 +871,10 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
+/// History reads share the read-only runner in `git.rs`, which disables the
+/// workspace's fsmonitor, hooks and filters.
 fn run_git_command(working_dir: &Path, args: &[String]) -> Result<Output, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::command() else {
-        return Err(ToolError::not_available(
-            "git is not installed or not in PATH",
-        ));
-    };
-    cmd.args(args).current_dir(working_dir);
-    cmd.output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ToolError::not_available("git is not installed or not in PATH")
-        } else {
-            ToolError::execution_failed(format!("Failed to run git: {e}"))
-        }
-    })
+    super::git::run_git_command(working_dir, args)
 }
 
 /// Async wrapper that offloads the blocking `git` invocation onto a
@@ -958,34 +963,6 @@ fn format_command(working_dir: &Path, args: &[String]) -> String {
     )
 }
 
-fn truncate_with_note(text: &str, max_chars: usize) -> (String, bool, usize) {
-    if text.chars().count() <= max_chars {
-        return (text.to_string(), false, 0);
-    }
-    let end = char_boundary_index(text, max_chars);
-    let truncated = &text[..end];
-    let omitted_chars = text
-        .chars()
-        .count()
-        .saturating_sub(truncated.chars().count());
-    let note = format!(
-        "\n\n[output truncated to {max_chars} characters; {omitted_chars} characters omitted]"
-    );
-    (format!("{truncated}{note}"), true, omitted_chars)
-}
-
-fn char_boundary_index(text: &str, max_chars: usize) -> usize {
-    if max_chars == 0 {
-        return 0;
-    }
-    for (count, (idx, _)) in text.char_indices().enumerate() {
-        if count == max_chars {
-            return idx;
-        }
-    }
-    text.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,6 +1034,37 @@ mod tests {
         assert!(result.success);
         assert!(result.content.contains("diff --git"));
         assert!(result.content.contains("+two"));
+    }
+
+    #[tokio::test]
+    async fn git_show_returns_a_large_patch_whole() {
+        // #6508: no 40,000-character per-tool cut; the end of the patch
+        // reaches the caller.
+        if !git_available() {
+            return;
+        }
+        let tmp = tempdir().expect("tempdir");
+        init_git_repo(tmp.path());
+        fs::write(tmp.path().join("file.txt"), "one\n").expect("write");
+        commit_all(tmp.path(), "first");
+        fs::write(
+            tmp.path().join("file.txt"),
+            format!("{}FINAL LINE\n", "line of patch\n".repeat(4_000)),
+        )
+        .expect("write");
+        commit_all(tmp.path(), "second");
+
+        let result = GitShowTool
+            .execute(
+                json!({ "rev": "HEAD", "stat": false }),
+                &ToolContext::new(tmp.path()),
+            )
+            .await
+            .expect("execute");
+        assert!(result.success);
+        assert!(result.content.chars().count() > 40_000);
+        assert!(result.content.contains("+FINAL LINE"));
+        assert!(!result.content.contains("output truncated"));
     }
 
     #[tokio::test]
@@ -1228,6 +1236,36 @@ mod tests {
                 "{refspec}: {err}"
             );
         }
+        for refspec in [
+            "+main:refs/heads/main",
+            "v1:refs/tags/v1",
+            "main:other",
+            "main:refs/remotes/../heads/main",
+        ] {
+            let err = validate_git_refspec(refspec)
+                .expect_err("a destination outside refs/remotes/ must be refused");
+            assert!(
+                err.to_string().contains("refs/remotes/"),
+                "{refspec}: {err}"
+            );
+        }
+        // `tag <name>` arrives as two array elements, each a plain rev.
+        let err = GitFetchTool
+            .execute(json!({ "refspecs": ["tag", "v1"] }), &ctx)
+            .await
+            .expect_err("the tag shorthand writes a local tag");
+        assert!(
+            matches!(err, ToolError::InvalidInput { .. }) && err.to_string().contains("tag"),
+            "{err}"
+        );
+        for refspec in [
+            "pull/123/head",
+            "refs/tags/v1",
+            "refs/heads/x:refs/remotes/origin/x",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ] {
+            validate_git_refspec(refspec).expect(refspec);
+        }
         let err = GitFetchTool
             .execute(json!({ "refspecs": "pull/1/head" }), &ctx)
             .await
@@ -1385,6 +1423,7 @@ mod tests {
                     Ok(0) => break,
                     Ok(_) => continue, // the request itself
                     Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => panic!("transport child outlived the deadline: {e}"),
                 }
             }

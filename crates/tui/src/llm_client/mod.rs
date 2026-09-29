@@ -144,26 +144,11 @@ pub struct AuthenticationErrorContext {
     pub key_source: Option<String>,
     pub key_fingerprint: Option<String>,
     pub key_kind: Option<String>,
+    /// The one command or action that replaces the rejected credential.
+    pub fix: Option<String>,
 }
 
 impl AuthenticationErrorContext {
-    #[must_use]
-    pub fn new(
-        provider: &str,
-        base_url: &str,
-        model: &str,
-        key_source: &str,
-        api_key: &str,
-    ) -> Self {
-        Self::from_parts(
-            Some(provider),
-            Some(base_url),
-            Some(model),
-            Some(key_source),
-            Some(api_key),
-        )
-    }
-
     #[must_use]
     pub fn from_parts(
         provider: Option<&str>,
@@ -180,7 +165,14 @@ impl AuthenticationErrorContext {
             key_source: key_source.and_then(non_empty_trimmed).map(str::to_string),
             key_fingerprint: api_key.map(redacted_key_fingerprint),
             key_kind: api_key.map(classify_api_key_prefix).map(str::to_string),
+            fix: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into()).filter(|fix: &String| !fix.trim().is_empty());
+        self
     }
 
     fn is_empty(&self) -> bool {
@@ -190,6 +182,7 @@ impl AuthenticationErrorContext {
             && self.key_source.is_none()
             && self.key_fingerprint.is_none()
             && self.key_kind.is_none()
+            && self.fix.is_none()
     }
 
     fn detail_segments(&self) -> Vec<String> {
@@ -211,6 +204,9 @@ impl AuthenticationErrorContext {
         }
         if let Some(kind) = self.key_kind.as_deref() {
             segments.push(format!("key type: {kind}"));
+        }
+        if let Some(fix) = self.fix.as_deref() {
+            segments.push(format!("fix: {fix}"));
         }
         segments
     }
@@ -241,11 +237,6 @@ impl AuthenticationErrorDetail {
             message: message.into(),
             context,
         }
-    }
-
-    #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
     }
 
     #[must_use]
@@ -315,6 +306,7 @@ fn public_key_prefix(api_key: &str) -> Option<&str> {
         .find(|prefix| api_key.starts_with(prefix))
 }
 
+#[cfg(test)]
 fn redact_api_key_from_message(message: &str, api_key: Option<&str>) -> String {
     let Some(api_key) = api_key.and_then(non_empty_trimmed) else {
         return message.to_string();
@@ -565,6 +557,7 @@ impl LlmError {
     /// Constructs an `LlmError` from HTTP response data plus request context
     /// that is safe to display when authentication fails.
     #[must_use]
+    #[cfg(test)]
     pub fn from_http_response_with_request_context(
         status: u16,
         body: &str,

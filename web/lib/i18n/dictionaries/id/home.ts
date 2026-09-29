@@ -16,6 +16,7 @@ export const home: HomeDict = {
   heroIntro:
     "{brand} menyediakan agen yang dapat membangun perangkat lunak, mengelola berkas Anda, dan mengubah tugas berulang menjadi alur kerja yang dapat digunakan kembali. Sampaikan apa yang ingin Anda capai dan pilih model yang dihosting atau dijalankan secara lokal sesuai kebutuhan tugas, dengan kebebasan untuk berganti penyedia selama bekerja.",
   getCodewhale: "Dapatkan Codewhale",
+  heroInstallAria: "Perintah instalasi",
   exploreProduct: "Jelajahi produk",
   shotPreview: "Pratinjau terminal",
   shotBuild: "build pengembangan v{version}",
@@ -25,7 +26,6 @@ export const home: HomeDict = {
   releaseUnavailable: "Status rilis tidak tersedia",
   currentSource: "Sumber",
   sourceCandidate: "Belum dirilis",
-  providerRoutes: "{count} penyedia",
   publishedRelease: "dirilis",
   figcaptionSourceCandidate: "belum dirilis",
   chapterTerminal: "Terminal Anda",
@@ -63,7 +63,7 @@ export const home: HomeDict = {
     "Setelah menginstal Codewhale dan menghubungkan model, Anda dapat menjelaskan tugas pertama di terminal dan menambahkan Fleet saat ingin beberapa agen berbagi pekerjaan.",
   startGuideLink: "Baca panduan memulai",
   startVocabularyLink: "Lihat kosakata produk",
-  chapterAccount: "Dapatkan Codewhale",
+  chapterAvailability: "Tempat menjalankan",
   availabilityHeading:
     "Tempat Anda dapat menggunakan Codewhale",
   availabilityLede:

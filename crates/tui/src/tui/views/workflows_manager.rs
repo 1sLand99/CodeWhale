@@ -51,9 +51,7 @@ fn status_style(status: &str) -> Style {
         }
         "completed" | "succeeded" => Style::default().fg(palette::STATUS_SUCCESS),
         "degraded" => Style::default().fg(palette::STATUS_WARNING),
-        "failed" | "budget_exceeded" | "replay_diverged" => {
-            Style::default().fg(palette::STATUS_ERROR)
-        }
+        "failed" | "budget_exceeded" => Style::default().fg(palette::STATUS_ERROR),
         _ => Style::default().fg(palette::TEXT_MUTED),
     }
 }
@@ -64,6 +62,16 @@ fn child_state_glyph(state: &str) -> &'static str {
         "succeeded" => "✓",
         _ => "✗",
     }
+}
+
+/// Open `/workflows` unless it is already on top. `/workflows`, the
+/// workbar's `↓ to manage`, and a click on a workbar row all land here.
+pub(crate) fn open(app: &mut App) {
+    if app.view_stack.top_kind() != Some(ModalKind::WorkflowsManager) {
+        let view = WorkflowsManagerView::new(app);
+        app.view_stack.push(view);
+    }
+    app.needs_redraw = true;
 }
 
 pub struct WorkflowsManagerView {

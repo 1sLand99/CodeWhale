@@ -50,6 +50,107 @@ pub(crate) fn refresh_parked_fleet_roster(app: &mut App, config: &Config) {
     app.view_stack.push_boxed(view);
 }
 
+/// Rebuild the open model picker from live state and show `notice` inside
+/// it. The picker covers the status line, so a receipt written only there
+/// made ⇧P and ⇧F look like they did nothing (#6500). Returns whether a
+/// picker was open.
+pub(super) fn refresh_open_model_picker(
+    app: &mut App,
+    config: &Config,
+    notice: Option<(String, StatusToastLevel)>,
+) -> bool {
+    if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
+        return false;
+    }
+    let Some(mut boxed) = app.view_stack.pop() else {
+        return false;
+    };
+    if let Some(picker) = boxed
+        .as_any_mut()
+        .downcast_mut::<crate::tui::model_picker::ModelPickerView>()
+    {
+        picker.re_resolve_from_app(app, config);
+        if let Some((text, level)) = notice {
+            picker.set_notice(text, level);
+        }
+    }
+    app.view_stack.push_boxed(boxed);
+    true
+}
+
+/// The picker's ⇧P: toggle the exact route in `settings.toml`'s pins.
+pub(super) fn toggle_model_picker_pin(
+    app: &mut App,
+    config: &Config,
+    provider_key: &str,
+    model: &str,
+) {
+    let locale = app.ui_locale;
+    let route = format!("{provider_key}/{model}");
+    let (receipt, level) = match crate::settings::Settings::transact(|settings| {
+        Ok(settings.toggle_pinned_model(provider_key, model))
+    }) {
+        Ok(true) => (
+            tr(locale, MessageId::ModelPickerPinned).replace("{route}", &route),
+            StatusToastLevel::Success,
+        ),
+        Ok(false) => (
+            tr(locale, MessageId::ModelPickerUnpinned).replace("{route}", &route),
+            StatusToastLevel::Success,
+        ),
+        Err(error) => (
+            tr(locale, MessageId::ModelPickerPinFailed).replace("{error}", &error.to_string()),
+            StatusToastLevel::Error,
+        ),
+    };
+    if let Ok(settings) = crate::settings::Settings::load_persisted() {
+        app.pinned_models = settings.pinned_models;
+    }
+    app.status_message = Some(receipt.clone());
+    refresh_open_model_picker(app, config, Some((receipt, level)));
+    app.needs_redraw = true;
+}
+
+/// The picker's ⇧F: add the exact route to the selected Fleet, or remove the
+/// shortlist row it added. Same provider gate as `/fleet add`.
+pub(super) fn toggle_model_picker_fleet(
+    app: &mut App,
+    config: &Config,
+    provider_key: &str,
+    model: &str,
+) {
+    use crate::fleet::members::{FleetModelChange, change_receipt, toggle_fleet_model};
+    let locale = app.ui_locale;
+    let (receipt, level) = if let Some(rejection) =
+        crate::commands::fleet_provider_rejection(app, config, provider_key)
+    {
+        app.set_sticky_status(rejection.clone(), StatusToastLevel::Error, None);
+        (rejection, StatusToastLevel::Error)
+    } else {
+        match toggle_fleet_model(&app.workspace, provider_key, model) {
+            Ok(change) => {
+                let level = if matches!(change, FleetModelChange::Unchanged { .. }) {
+                    StatusToastLevel::Info
+                } else {
+                    app.fleet_roster_stale = true;
+                    StatusToastLevel::Success
+                };
+                let receipt = change_receipt(locale, provider_key, model, &change);
+                app.push_status_toast(receipt.clone(), level, Some(FLEET_TOGGLE_TOAST_TTL_MS));
+                (receipt, level)
+            }
+            Err(error) => {
+                let message = tr(locale, MessageId::FleetToggleFailed)
+                    .replace("{error}", &error.message(locale));
+                app.set_sticky_status(message.clone(), StatusToastLevel::Error, None);
+                (message, StatusToastLevel::Error)
+            }
+        }
+    };
+    refresh_open_model_picker(app, config, Some((receipt, level)));
+    app.needs_redraw = true;
+}
+
 pub(super) fn dismiss_fleet_assignment(app: &mut App, editor_id: uuid::Uuid) {
     if let Some(mut boxed) = app.view_stack.pop() {
         let remove = if let Some(view) = boxed
@@ -209,83 +310,6 @@ pub(crate) fn handle_prompt_transcript_key(app: &mut App, key: &event::KeyEvent)
         _ => return false,
     }
     true
-}
-
-/// Route only non-text controls to a focused workflow panel.
-///
-/// Returning `false` for every character is deliberate: the caller then lets
-/// the normal composer path insert it. A prior bare-letter contract used
-/// t/c/j/k here, which made the first matching letter of a new chat disappear
-/// after the user clicked the workflow card.
-pub(crate) fn handle_workflow_panel_key(app: &mut App, key: &event::KeyEvent) -> bool {
-    if !app
-        .workflow_panel
-        .as_ref()
-        .is_some_and(|panel| panel.keyboard_focus)
-    {
-        return false;
-    }
-
-    if matches!(key.code, KeyCode::Char(_)) {
-        if let Some(panel) = app.workflow_panel.as_mut() {
-            panel.keyboard_focus = false;
-        }
-        app.needs_redraw = true;
-        return false;
-    }
-
-    if !key.modifiers.is_empty() && key.code != KeyCode::Esc {
-        return false;
-    }
-
-    match key.code {
-        KeyCode::Esc => {
-            if let Some(panel) = app.workflow_panel.as_mut() {
-                panel.keyboard_focus = false;
-            }
-            app.needs_redraw = true;
-            true
-        }
-        KeyCode::Enter => {
-            if let Some(panel) = app.workflow_panel.as_mut() {
-                let _ = panel.toggle_expanded();
-            }
-            app.needs_redraw = true;
-            true
-        }
-        KeyCode::Down => {
-            if let Some(panel) = app.workflow_panel.as_mut() {
-                panel.select_next_phase();
-            }
-            app.needs_redraw = true;
-            true
-        }
-        KeyCode::Up => {
-            if let Some(panel) = app.workflow_panel.as_mut() {
-                panel.select_prev_phase();
-            }
-            app.needs_redraw = true;
-            true
-        }
-        KeyCode::Delete => {
-            let Some(run_id) = app
-                .workflow_panel
-                .as_ref()
-                .and_then(|panel| panel.lifecycle.is_running().then(|| panel.run_id.clone()))
-            else {
-                return false;
-            };
-            app.input = format!("/workflow cancel {run_id}");
-            app.cursor_position = app.input.chars().count();
-            app.status_message = Some(app.tr(MessageId::SidebarDestructiveArmed).into_owned());
-            if let Some(panel) = app.workflow_panel.as_mut() {
-                panel.keyboard_focus = false;
-            }
-            app.needs_redraw = true;
-            true
-        }
-        _ => false,
-    }
 }
 
 /// One-shot "draft my constitution" call against the user's first configured
@@ -1399,10 +1423,11 @@ pub(crate) async fn handle_view_events(
             ViewEvent::CopyToClipboard { text, label } => {
                 if text.is_empty() {
                     app.status_message = Some(format!("{label} is empty"));
-                } else if app.clipboard.write_text(&text).is_ok() {
-                    app.status_message = Some(format!("{label} copied"));
                 } else {
-                    app.status_message = Some(format!("Copy failed ({label})"));
+                    app.status_message = Some(match app.clipboard.write_text_status(&text) {
+                        Ok(transport) => copy_receipt(app, transport, format!("{label} copied")),
+                        Err(_) => format!("Copy failed ({label})"),
+                    });
                 }
             }
             ViewEvent::ApprovalDecision {
@@ -1513,10 +1538,14 @@ pub(crate) async fn handle_view_events(
                     Ok(recovery) => {
                         let session = recovery.session;
                         let next_config = config.clone();
+                        let message_count = session.metadata.message_count;
+                        // Keep the saved-store confinement check a pure
+                        // comparison on this runtime (#6522).
+                        crate::runtime_threads::prepare_canonical_sessions_root().await;
                         let respawn = match apply_loaded_session_config_snapshot(
                             app,
                             config,
-                            &session,
+                            session,
                             next_config,
                             false,
                         ) {
@@ -1570,7 +1599,7 @@ pub(crate) async fn handle_view_events(
                         let loaded_message = format!(
                             "Session loaded (ID: {}, {} messages)",
                             crate::session_manager::truncate_id(&session_id),
-                            session.metadata.message_count
+                            message_count
                         );
                         app.add_message(HistoryCell::System {
                             content: loaded_message.clone(),
@@ -2291,14 +2320,7 @@ pub(crate) async fn handle_view_events(
                 }
             }
             ViewEvent::OpenAgentTranscript { agent_id } => {
-                // One agent, one destination: focus the worker so its full
-                // transcript owns the main area and the composer addresses
-                // its fork. The register modal closes so the focus is visible.
-                if app.view_stack.top_kind() == Some(ModalKind::SubAgents) {
-                    app.view_stack.pop();
-                }
-                crate::tui::agent_focus::focus_agent(app, &agent_id);
-                app.needs_redraw = true;
+                open_agent_transcript(app, config, &agent_id);
             }
             ViewEvent::AgentDetailsClosed { agent_id } => {
                 crate::tui::work_surface::agent_details_closed(app, &agent_id);
@@ -2365,22 +2387,14 @@ pub(crate) async fn handle_view_events(
                 // rebuild catalog rows. Non-destructive: never clears the list
                 // when a refresh fails; just re-project from current config.
                 sync_config_provider_from_app(config, app);
-                if app.view_stack.top_kind() == Some(ModalKind::ModelPicker)
-                    && let Some(mut boxed) = app.view_stack.pop()
-                {
-                    if let Some(picker) = boxed
-                        .as_any_mut()
-                        .downcast_mut::<crate::tui::model_picker::ModelPickerView>(
-                    ) {
-                        picker.re_resolve_from_app(app, config);
-                        app.status_message =
-                            Some("Model readiness refreshed · catalog rows rebuilt".into());
-                    }
-                    app.view_stack.push_boxed(boxed);
+                let refreshed =
+                    tr(app.ui_locale, MessageId::ModelPickerReadinessRefreshed).into_owned();
+                let notice = Some((refreshed.clone(), StatusToastLevel::Info));
+                app.status_message = Some(if refresh_open_model_picker(app, config, notice) {
+                    refreshed
                 } else {
-                    app.status_message =
-                        Some("Open /model to refresh readiness and catalog".into());
-                }
+                    tr(app.ui_locale, MessageId::ModelPickerOpenToRefresh).into_owned()
+                });
                 app.needs_redraw = true;
             }
             ViewEvent::ModelPickerToggleFleet {
@@ -2388,49 +2402,8 @@ pub(crate) async fn handle_view_events(
                 provider_id,
                 model,
             } => {
-                use crate::fleet::members::{FleetModelChange, change_receipt, toggle_fleet_model};
                 let provider_key = provider_id.unwrap_or_else(|| provider.as_str().to_string());
-                let locale = app.ui_locale;
-                // Same gate as `/fleet add`, against the live config: a
-                // locked or unauthenticated provider row never enters the
-                // fleet from the picker either.
-                if let Some(rejection) =
-                    crate::commands::fleet_provider_rejection(app, config, &provider_key)
-                {
-                    app.set_sticky_status(rejection, StatusToastLevel::Error, None);
-                } else {
-                    match toggle_fleet_model(&app.workspace, &provider_key, &model) {
-                        Ok(change) => {
-                            let level = if matches!(change, FleetModelChange::Unchanged { .. }) {
-                                StatusToastLevel::Info
-                            } else {
-                                app.fleet_roster_stale = true;
-                                StatusToastLevel::Success
-                            };
-                            app.push_status_toast(
-                                change_receipt(locale, &provider_key, &model, &change),
-                                level,
-                                Some(FLEET_TOGGLE_TOAST_TTL_MS),
-                            );
-                        }
-                        Err(error) => app.set_sticky_status(
-                            tr(locale, MessageId::FleetToggleFailed)
-                                .replace("{error}", &error.message(locale)),
-                            StatusToastLevel::Error,
-                            None,
-                        ),
-                    }
-                }
-                if let Some(mut boxed) = app.view_stack.pop() {
-                    if let Some(picker) = boxed
-                        .as_any_mut()
-                        .downcast_mut::<crate::tui::model_picker::ModelPickerView>(
-                    ) {
-                        picker.re_resolve_from_app(app, config);
-                    }
-                    app.view_stack.push_boxed(boxed);
-                }
-                app.needs_redraw = true;
+                toggle_model_picker_fleet(app, config, &provider_key, &model);
             }
             ViewEvent::ModelPickerTogglePin {
                 provider,
@@ -2438,30 +2411,7 @@ pub(crate) async fn handle_view_events(
                 model,
             } => {
                 let provider_key = provider_id.unwrap_or_else(|| provider.as_str().to_string());
-                match crate::settings::Settings::transact(|settings| {
-                    Ok(settings.toggle_pinned_model(&provider_key, &model))
-                }) {
-                    Ok(true) => app.status_message = Some(format!("Pinned {provider_key}/{model}")),
-                    Ok(false) => {
-                        app.status_message = Some(format!("Unpinned {provider_key}/{model}"))
-                    }
-                    Err(error) => {
-                        app.status_message = Some(format!("Could not update pin: {error}"))
-                    }
-                }
-                if let Ok(settings) = crate::settings::Settings::load_persisted() {
-                    app.pinned_models = settings.pinned_models;
-                }
-                if let Some(mut boxed) = app.view_stack.pop() {
-                    if let Some(picker) = boxed
-                        .as_any_mut()
-                        .downcast_mut::<crate::tui::model_picker::ModelPickerView>(
-                    ) {
-                        picker.re_resolve_from_app(app, config);
-                    }
-                    app.view_stack.push_boxed(boxed);
-                }
-                app.needs_redraw = true;
+                toggle_model_picker_pin(app, config, &provider_key, &model);
             }
             ViewEvent::ModelPickerMovePin {
                 provider,
@@ -2480,19 +2430,24 @@ pub(crate) async fn handle_view_events(
                     Ok(None) => {}
                     Ok(Some(pinned_models)) => {
                         app.pinned_models = pinned_models;
-                        app.status_message = Some("Pinned model order updated".into());
-                        if let Some(mut boxed) = app.view_stack.pop() {
-                            if let Some(picker) = boxed
-                                .as_any_mut()
-                                .downcast_mut::<crate::tui::model_picker::ModelPickerView>(
-                            ) {
-                                picker.re_resolve_from_app(app, config);
-                            }
-                            app.view_stack.push_boxed(boxed);
-                        }
+                        let receipt =
+                            tr(app.ui_locale, MessageId::ModelPickerPinOrderUpdated).into_owned();
+                        app.status_message = Some(receipt.clone());
+                        refresh_open_model_picker(
+                            app,
+                            config,
+                            Some((receipt, StatusToastLevel::Success)),
+                        );
                     }
                     Err(error) => {
-                        app.status_message = Some(format!("Could not reorder pin: {error}"));
+                        let receipt = tr(app.ui_locale, MessageId::ModelPickerPinReorderFailed)
+                            .replace("{error}", &error.to_string());
+                        app.status_message = Some(receipt.clone());
+                        refresh_open_model_picker(
+                            app,
+                            config,
+                            Some((receipt, StatusToastLevel::Error)),
+                        );
                     }
                 }
                 app.needs_redraw = true;
@@ -2808,24 +2763,35 @@ pub(crate) async fn handle_view_events(
                 app.status_message = Some("Backtrack canceled".to_string());
                 app.needs_redraw = true;
             }
-            ViewEvent::ContextMenuSelected {
-                action: ContextMenuAction::ExecuteCommand { command },
-            } => {
-                if execute_command_input(
-                    terminal,
-                    app,
-                    engine_handle,
-                    task_manager,
-                    config,
-                    &command,
-                )
-                .await?
-                {
-                    return Ok(true);
+            ViewEvent::ContextMenuSelected { action } => {
+                match apply_context_menu_action(app, action) {
+                    ContextMenuOutcome::Done => {}
+                    ContextMenuOutcome::Events(events) => {
+                        if handle_view_events_boxed(
+                            terminal,
+                            app,
+                            config,
+                            task_manager,
+                            engine_handle,
+                            events,
+                        )
+                        .await?
+                        {
+                            return Ok(true);
+                        }
+                    }
+                    ContextMenuOutcome::OpenInEditor { path, line } => {
+                        open_file_in_editor(terminal, app, &path, line);
+                    }
                 }
             }
-            ViewEvent::ContextMenuSelected { action } => {
-                handle_context_menu_action(terminal, app, action)
+            ViewEvent::OpenContextMenu {
+                title,
+                entries,
+                column,
+                row,
+            } => {
+                push_context_menu(app, entries, column, row, title);
             }
             ViewEvent::SkillMutationRequested { request } => {
                 handle_skill_mutation_requested(app, request).await;
@@ -2918,4 +2884,23 @@ pub(crate) fn handle_view_events_boxed<'a>(
         }
         Ok(false)
     })
+}
+
+/// `/agents` → an agent, or "Go to agent" on its card. One agent, one
+/// destination: focus the worker so its full transcript owns the main area
+/// and the composer addresses its fork; the register modal closes so the
+/// focus is visible. A hidden approval card for this agent comes back on top
+/// of its transcript so the person can answer it (approvals C1).
+pub(super) fn open_agent_transcript(app: &mut App, config: &Config, agent_id: &str) {
+    if app.view_stack.top_kind() == Some(ModalKind::SubAgents) {
+        app.view_stack.pop();
+    }
+    crate::tui::agent_focus::focus_agent(app, agent_id);
+    crate::tui::pending_requests::repush_for_agent(
+        app,
+        agent_id,
+        config.approval_default_selection(),
+        config.approval_timeout(),
+    );
+    app.needs_redraw = true;
 }

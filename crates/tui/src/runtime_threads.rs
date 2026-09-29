@@ -291,6 +291,13 @@ fn strip_summary_section(base: &str) -> String {
     out
 }
 
+/// A fresh durable record id: `<prefix>_<32 hex>`. Records live in flat
+/// per-kind directories and saves replace by id, so ids carry a full UUID; an
+/// 8-hex suffix (32 bits) collides often enough to overwrite another record.
+fn runtime_record_id(prefix: &str) -> String {
+    format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
 fn validated_record_id<'a>(id: &'a str, label: &str) -> Result<&'a str> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
@@ -598,7 +605,6 @@ where
 }
 const RUNTIME_RESTART_REASON: &str = "Interrupted by process restart";
 const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
-const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
 const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[cfg(test)]
@@ -610,10 +616,11 @@ static TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl RuntimeThreadManager {
-    /// Wait for one external approval decision. `[tools]
-    /// user_input_timeout_seconds` governs (#6003): absent uses the built-in
-    /// default, an explicit 0 returns `None` and the decision waits
-    /// indefinitely.
+    /// Wait for one external approval decision. The one approval clock,
+    /// `[approval] timeout_seconds`, governs here as it does for the TUI
+    /// card: absent or `0` returns `None` and the decision waits until the
+    /// person answers or stops the turn (CURRENT_DECISIONS §21). A GPUI or
+    /// web approval is never denied on the user's behalf by default.
     pub(crate) fn approval_decision_timeout(&self) -> Option<Duration> {
         #[cfg(test)]
         {
@@ -622,11 +629,46 @@ impl RuntimeThreadManager {
                 return Some(Duration::from_millis(ms));
             }
         }
-        match self.read_config().user_input_timeout() {
-            Some(wait) if wait.is_zero() => None,
-            Some(wait) => Some(wait),
-            None => Some(APPROVAL_DECISION_TIMEOUT),
-        }
+        self.read_config().approval_timeout()
+    }
+}
+
+/// `tool_call_after` (and `on_error` for a failed call) on a Runtime API
+/// thread, as the TUI fires them (B4). Observer events: their output never
+/// changes the result the model sees, and a full observer queue is logged,
+/// not fatal to the turn.
+fn fire_runtime_tool_completion_hooks(
+    hooks: &crate::hooks::HookExecutor,
+    thread_id: &str,
+    id: &str,
+    name: &str,
+    result: &std::result::Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError>,
+) {
+    use crate::hooks::{HookContext, HookEvent};
+    let wants_after = hooks.has_hooks_for_event(HookEvent::ToolCallAfter);
+    let wants_error = hooks.has_hooks_for_event(HookEvent::OnError);
+    if !wants_after && !wants_error {
+        return;
+    }
+    let context = HookContext::new()
+        .with_workspace(hooks.default_working_dir().to_path_buf())
+        .with_session_id(thread_id)
+        .with_tool_name(name)
+        .with_tool_call_id(id)
+        .with_tool_outcome(result);
+    let failed = context.tool_success == Some(false);
+    let error_context = (wants_error && failed).then(|| {
+        let text = context.tool_result.as_deref().unwrap_or_default();
+        let message = format!("tool `{name}` failed: {text}");
+        context.clone().with_error(&message)
+    });
+    if wants_after && let Err(error) = hooks.submit_observer(HookEvent::ToolCallAfter, context) {
+        tracing::warn!(target: "hooks", %error, thread_id, "tool_call_after hook was not submitted");
+    }
+    if let Some(error_context) = error_context
+        && let Err(error) = hooks.submit_observer(HookEvent::OnError, error_context)
+    {
+        tracing::warn!(target: "hooks", %error, thread_id, "on_error hook was not submitted");
     }
 }
 
@@ -759,40 +801,239 @@ pub struct ThreadRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SavedSessionCheckpoint {
     pub covered_turn_id: Option<String>,
+    /// Fingerprint of the document's first `messages_len` messages.
     pub messages_sha256: String,
+    /// How many leading document messages the fingerprint covers (#6144).
+    ///
+    /// The document is the conversation's own record, and other writers
+    /// append to it legitimately — a TUI autosave of the same id, a later
+    /// `PUT /v1/sessions`. A fingerprint of the *whole* document turned every
+    /// such append into "changed after this thread's checkpoint" and stranded
+    /// the thread. Fingerprinting a prefix keeps the thread's history exact
+    /// (document prefix + its own later turns) while the document grows.
+    /// `None` is a checkpoint written before this field; it is migrated on
+    /// read by finding the prefix its whole-document fingerprint names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_len: Option<usize>,
     /// A backtracked fork may retain only a prefix of the verified snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_messages: Option<usize>,
 }
 
 fn session_messages_sha256(messages: &[Message]) -> Result<String> {
-    Ok(Sha256::digest(serde_json::to_vec(messages)?)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(hex_digest(Sha256::digest(serde_json::to_vec(messages)?)))
 }
 
-/// Compare only fields represented by legacy seeding. A match identifies a
-/// prefix boundary; the saved messages themselves retain every raw block.
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// How many leading `messages` the checkpoint's fingerprint covers, or `None`
+/// when no prefix of this document is the one the thread was bound to.
+///
+/// A checkpoint with `messages_len` is checked directly. A legacy one
+/// fingerprinted the whole document at bind time, and the document may have
+/// grown since, so every prefix is a candidate. `serde_json` writes a slice as
+/// `[` + elements joined by `,` + `]`, so one pass that serializes each message
+/// once can fingerprint every prefix — no quadratic re-serialization.
+fn checkpoint_prefix_len(
+    checkpoint: &SavedSessionCheckpoint,
+    messages: &[Message],
+) -> Result<Option<usize>> {
+    if let Some(len) = checkpoint.messages_len {
+        if len > messages.len() {
+            return Ok(None);
+        }
+        return Ok(
+            (session_messages_sha256(&messages[..len])? == checkpoint.messages_sha256)
+                .then_some(len),
+        );
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"[");
+    let close = |hasher: &Sha256| hex_digest(hasher.clone().chain_update(b"]").finalize());
+    if close(&hasher) == checkpoint.messages_sha256 {
+        return Ok(Some(0));
+    }
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 {
+            hasher.update(b",");
+        }
+        hasher.update(serde_json::to_vec(message)?);
+        if close(&hasher) == checkpoint.messages_sha256 {
+            return Ok(Some(index + 1));
+        }
+    }
+    Ok(None)
+}
+
+/// A thread's saved-session binding no longer describes any readable
+/// document: the document is gone, or its prefix is not the one the thread
+/// was bound to. The thread still owns its turns, so the binding is dropped
+/// (with a receipt) and the thread hydrates from them instead of failing.
+#[derive(Debug)]
+pub(crate) struct StaleSessionBinding {
+    pub(crate) reason: String,
+}
+
+impl std::fmt::Display for StaleSessionBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for StaleSessionBinding {}
+
+/// The session document a Runtime thread writes under when nothing bound it
+/// to one yet (#6144).
+///
+/// A Runtime thread's engine used to mint a random conversation id every time
+/// it was loaded, so everything it kept under its session directory —
+/// compaction transfers, background-shell evidence, truncation spills — went
+/// to a directory no document would ever name, and even the thread lost it at
+/// the next load. Exporting the thread (`POST /v1/sessions`) minted yet
+/// another id. Deriving the id from the thread makes all three agree, and
+/// makes the export idempotent: a retry after a crash between "save the
+/// document" and "bind the checkpoint" finds the document it already wrote.
+pub(crate) fn thread_session_id(thread_id: &str) -> String {
+    // The thread's own id: the same id its engine runs under (see
+    // `ensure_engine_loaded`, #6621), so the export, the engine's session
+    // directory and the thread all name one conversation, and the export
+    // stays idempotent because the id is fixed by the thread.
+    thread_id.to_string()
+}
+
+/// The prompt text a user-role message contributes to a history comparison,
+/// or `None` when it carries none.
+///
+/// Tool results are user-role messages with no text. The per-turn
+/// `<turn_meta>` preamble is rebuilt from runtime facts when a turn is
+/// installed and never recorded on the turn's items, so it is not part of the
+/// conversation a reconstruction can identify — both sides of every comparison
+/// drop it, and `extract_user_prompt` is the repository's one rule for what a
+/// user's prompt is once that envelope is removed (it trims the block's edges
+/// too, and applies the same way on both sides).
+fn projected_user_text(message: &Message) -> Option<String> {
+    if message.role.as_str() != "user" {
+        return None;
+    }
+    // An engine-owned compaction checkpoint is not a turn's prompt. No turn
+    // record can reproduce one — the compaction ran in the engine, between
+    // records — so a document that carries it would read as drifted from the
+    // records it was rebuilt from. Every fork of a compacted source inherits
+    // the summary in its system prompt, and the engine installs the checkpoint
+    // into the synced history on the fork's first load, so leaving it in took
+    // the cut away from the fork itself: `/undo`, retry and fork-again each
+    // refused with "cannot identify an exact saved-history boundary".
+    if crate::compaction::is_wire_compaction_checkpoint_message(message) {
+        return None;
+    }
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .map(crate::session_manager::extract_user_prompt)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn projected_user_texts(messages: &[Message]) -> Vec<String> {
+    messages.iter().filter_map(projected_user_text).collect()
+}
+
+/// The message index in a saved transcript where the undone turn begins.
+///
+/// A backtrack may only keep the messages that belong to the turns before the
+/// undone one, and the transcript alone cannot say where that is: it is the
+/// model-visible history, carrying the per-turn `<turn_meta>` preamble and tool
+/// results as the route's compaction left them, while the turn records keep the
+/// prompt and the raw output. The prompts *are* recorded verbatim, and a turn
+/// begins with its user message, so walking the transcript's user text
+/// messages — the kept turns' prompts in order, then the undone turn's —
+/// locates the boundary exactly.
+///
+/// `None` refuses: the caller must not cut a history it cannot account for, and
+/// a transcript that drifted from the records (edited, purged, or belonging to
+/// another conversation) fails the prompt sequence rather than matching by
+/// coincidence.
+fn saved_history_boundary(
+    messages: &[Message],
+    kept_prompts: &[String],
+    target_prompt: &str,
+) -> Option<usize> {
+    let mut kept = kept_prompts.iter();
+    let mut expected = kept.next();
+    for (index, message) in messages.iter().enumerate() {
+        let Some(text) = projected_user_text(message) else {
+            continue;
+        };
+        match expected {
+            Some(next) if next == &text => expected = kept.next(),
+            // A kept prompt is still unaccounted for, so this transcript has
+            // drifted from the records; even the undone turn's prompt here
+            // would cut away a turn the backtrack must keep.
+            Some(_) => return None,
+            // The first user text after the whole kept prefix is where the
+            // undone turn begins — and it has to be that turn's own prompt.
+            None => return (text == target_prompt).then_some(index),
+        }
+    }
+    None
+}
+
+/// The number of leading messages whose recovery projection is exactly
+/// `target`, or `None` when no prefix matches.
+///
+/// `session_recovery_projection` is a per-message concatenation, so the first
+/// exact prefix match is found in one walk: append each message's entries in
+/// order, and the moment one is longer than `target` or differs from `target`'s
+/// entry at that position, no longer prefix can match either.
+///
+/// Rebuilding the projection of every prefix instead — what the alignment used
+/// to do — is quadratic in the transcript: measured at ~9 s on a 5 MB session,
+/// before a fork could do anything else.
+fn exact_prefix_boundary(messages: &[Message], target: &[Value]) -> Option<usize> {
+    if target.is_empty() {
+        return Some(0);
+    }
+    let mut produced = 0usize;
+    for (index, message) in messages.iter().enumerate() {
+        for entry in session_recovery_projection(std::slice::from_ref(message)) {
+            if produced >= target.len() || target[produced] != entry {
+                return None;
+            }
+            produced += 1;
+        }
+        if produced == target.len() {
+            return Some(index + 1);
+        }
+    }
+    None
+}
+
+/// The conversation identity two histories are compared by: user prompts (their
+/// `<turn_meta>` envelope removed), assistant text, thinking and tool calls,
+/// and tool results.
+///
+/// Everything a turn record cannot reproduce stays out — that preamble, image
+/// blocks, and the bytes the route's compaction left in a tool result — so a
+/// match identifies a prefix boundary rather than a byte-for-byte replay. The
+/// saved messages themselves retain every raw block.
 fn session_recovery_projection(messages: &[Message]) -> Vec<Value> {
     let mut projection = Vec::new();
     for message in messages {
         let role = message.role.as_str();
-        if role == "user" {
-            let text = message
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
-                        Some(text.as_str())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !text.is_empty() {
-                projection.push(json!(["user", text]));
-            }
+        if let Some(text) = projected_user_text(message) {
+            projection.push(json!(["user", text]));
         }
         for block in &message.content {
             match block {
@@ -829,6 +1070,89 @@ fn session_recovery_projection(messages: &[Message]) -> Vec<Value> {
         }
     }
     projection
+}
+
+/// Whether a source's saved transcript has stopped being a transcript of its
+/// turns.
+///
+/// A context compaction rewrites the model-visible history in place: what
+/// stays verbatim is the user prompts inside a token budget, and everything a
+/// prompt stood for — the answers, the tool calls, their results — is
+/// summarized away. The saved messages are therefore an *abbreviation* of the
+/// turns, and every boundary in them still names a turn while carrying only
+/// its prompt.
+///
+/// That matters to a fork, which is a slice of that history. Copying the
+/// abbreviation into a document that claims, through its checkpoint, to cover
+/// the kept turns hands every reader of that document — the session view,
+/// `restore_thread_messages` — a run of prompts with the agent's
+/// output missing, because nothing is left for it to rebuild the turns from.
+/// The turn store is not rewritten by compaction, so the records can: they are
+/// what the fork rebuilds the kept exchanges from
+/// (`reconstruct_messages_from_turns_with`).
+///
+/// The compaction names the turn it ran for, so the records answer the
+/// question directly. Any compaction in the thread is enough: the turns before
+/// it are the ones whose transcript was replaced, and a cut after them would
+/// still slice an abbreviation.
+fn saved_transcript_is_compacted(
+    turns: &[TurnRecord],
+    items_by_turn: &HashMap<String, Vec<TurnItemRecord>>,
+) -> bool {
+    turns.iter().any(|turn| {
+        items_by_turn.get(&turn.id).is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.kind == TurnItemKind::ContextCompaction)
+        })
+    })
+}
+
+/// The result a rebuilt history must give a tool call whose outcome the turn
+/// store never recorded, or `None` when nothing is missing.
+///
+/// A call that failed, was interrupted, or was canceled can be persisted as a
+/// single `tool_call` item that carries the call alone: the failure text lives
+/// on the item's own `detail`, and no `tool_result_for` item follows. Rebuilding
+/// only the call leaves it unanswered, which a provider rejects outright —
+/// `No tool output found for tool call …`. The missing result is also what
+/// stopped the first of two responses from flushing, so the rebuild glued them
+/// into one assistant message (`thinking`, `call`, `thinking`, `call`) and the
+/// provider read *that* as the first call never being answered, even after the
+/// request-time repair had answered it.
+///
+/// Both are cured by answering the call where its own outcome is known: the
+/// item's failure text for a failure, and the repository's interrupted-call
+/// notice for a call the process never finished.
+///
+/// An answer is only ever paired with a call the rebuild actually emits, so the
+/// identity required here is the one the caller needs before it emits the call
+/// at all (#5823): a snapshot with no tool name is skipped rather than replayed
+/// as an empty shell, and answering it would leave the result on its own.
+///
+/// A call still running is deliberately left alone. A rebuild of a live turn
+/// must not invent an outcome the engine is still waiting for — the result is
+/// coming — so this answers only the terminal failures.
+fn unanswered_call_result(
+    item: &TurnItemRecord,
+    call_id: &str,
+    call_name: &str,
+    recorded_results: &HashSet<String>,
+) -> Option<String> {
+    if call_id.is_empty() || call_name.is_empty() || recorded_results.contains(call_id) {
+        return None;
+    }
+    match item.status {
+        TurnItemLifecycleStatus::Failed => {
+            Some(item.detail.clone().unwrap_or_else(|| item.summary.clone()))
+        }
+        TurnItemLifecycleStatus::Interrupted | TurnItemLifecycleStatus::Canceled => {
+            Some(crate::tool_history_repair::CRASH_REPAIR_CONTENT.to_string())
+        }
+        TurnItemLifecycleStatus::Queued
+        | TurnItemLifecycleStatus::InProgress
+        | TurnItemLifecycleStatus::Completed => None,
+    }
 }
 
 fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> bool {
@@ -1037,6 +1361,25 @@ pub struct TurnRecord {
     /// turn queue; ordinary external-user turns leave it unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_mail_message_id: Option<String>,
+    /// What this turn produced, merged from its items' refs and, once
+    /// settled, the workspace snapshot delta. Empty until the turn ends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<TurnArtifactRef>,
+    /// Where the workspace-level accounting stands. `None` while the turn
+    /// runs (and on records written before this field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<TurnWorkspaceArtifacts>,
+    /// Workspace snapshots the engine took while this turn ran, in the order
+    /// the engine reported them (one FIFO event channel, one consumer per
+    /// turn): the turn's `pre_turn` restore point, one `tool` snapshot before
+    /// each file-modifying tool call, and its `post_turn` state. A thread owns
+    /// exactly the restore points recorded on its own turns — a fork owns the
+    /// ones its cloned turns carry — and turn-scoped undo and file revert
+    /// resolve only these. Records written before this field existed, turns
+    /// imported from a saved session, and turns that ran with snapshots off
+    /// carry none, and so have no restore point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_snapshots: Vec<crate::snapshot::WorkspaceSnapshotRef>,
 }
 
 impl TurnRecord {
@@ -1240,7 +1583,7 @@ fn unaccepted_routed_usage_turn_id(
         )
         .collect::<Vec<_>>();
     if identities.is_empty() {
-        return format!("turn_unaccepted_{}", &Uuid::new_v4().to_string()[..8]);
+        return runtime_record_id("turn_unaccepted");
     }
     identities.sort_unstable();
     identities.dedup();
@@ -1310,6 +1653,9 @@ fn settle_unaccepted_routed_usage(
             item_ids: Vec::new(),
             steer_count: 0,
             agent_mail_message_id: None,
+            artifacts: Vec::new(),
+            workspace: None,
+            workspace_snapshots: Vec::new(),
         }
     };
     append_initial_routed_usage_to_turn(&mut turn, batch);
@@ -1403,8 +1749,15 @@ pub struct TurnItemRecord {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// Legacy projection of `artifacts`: workspace-relative paths of the
+    /// files this item created, changed or renamed (never deleted files,
+    /// spills or media). Derived only by `legacy_artifact_refs`.
     #[serde(default)]
     pub artifact_refs: Vec<PathBuf>,
+    /// What this item produced, as typed references. The authority for a
+    /// single tool call's artifacts; the turn aggregate is merged from these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<TurnArtifactRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1633,7 +1986,9 @@ pub(crate) struct RuntimeEventReplay {
     pub(crate) base_seq: u64,
     /// Filesystem parsing happens on the blocking pool and publishes bounded
     /// chunks through this small channel, applying backpressure instead of
-    /// allocating an unbounded backlog on a Tokio worker.
+    /// allocating an unbounded backlog on a Tokio worker. A closed channel
+    /// means history is complete; every failure, a worker panic included,
+    /// arrives as an `Err` batch first.
     pub(crate) batches: mpsc::Receiver<std::result::Result<Vec<RuntimeEventRecord>, String>>,
 }
 
@@ -1825,6 +2180,39 @@ impl RuntimeThreadStore {
         store.recover_incomplete_turn_operations()?;
         store.recover_claimed_agent_mail()?;
         Ok(store)
+    }
+
+    /// Open an existing store only to read it: no directories, owner file,
+    /// torn-tail repair, or recovery. `None` when `root` holds no store.
+    /// Offline readers (`codewhale receipts`) use this so reading a thread
+    /// never mutates a store a live `codewhale serve` may own. Event reads
+    /// still take the shared event lock, so they see only committed records.
+    pub(crate) fn open_read_only(root: PathBuf) -> Result<Option<Self>> {
+        let root = checked_runtime_store_root(root)?;
+        let threads_dir = root.join("threads");
+        if !threads_dir.is_dir() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            threads_dir,
+            turns_dir: root.join("turns"),
+            items_dir: root.join("items"),
+            events_dir: root.join("events"),
+            goals_dir: root.join("goals"),
+            mail_dir: root.join("agent-mail"),
+            turn_operations_dir: root.join("turn-operations"),
+            owner_id: String::new(),
+            state_path: root.join("state.json"),
+            event_lock_path: root.join(EVENT_TRANSACTION_LOCK_FILE),
+            thread_mutation: Arc::new(parking_lot::Mutex::new(())),
+            turn_mutation: Arc::new(parking_lot::ReentrantMutex::new(())),
+            goal_mutation: Arc::new(parking_lot::Mutex::new(())),
+            mail_mutation: Arc::new(parking_lot::Mutex::new(())),
+            #[cfg(test)]
+            turn_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            item_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }))
     }
 
     fn open_event_lock(&self) -> Result<File> {
@@ -2252,6 +2640,29 @@ impl RuntimeThreadStore {
         })
     }
 
+    /// Publish many items at once, paying the items directory's costs once.
+    ///
+    /// Each `save_item` sweeps the whole items directory for stale temp files
+    /// and fsyncs it — right for one record, ruinous for the hundreds a fork
+    /// clones (measured: 22 ms of directory scan per item, 34 s for one fork's
+    /// 771). The per-record checks and the atomic replace are unchanged; see
+    /// [`crate::utils::write_atomic_batch`].
+    ///
+    /// Ordering stays the caller's: items, then their turns, then the thread
+    /// record that makes them reachable.
+    pub fn save_items_batch(&self, items: &[&TurnItemRecord]) -> Result<()> {
+        let mut files = Vec::with_capacity(items.len());
+        for item in items {
+            validated_record_id(&item.turn_id, "turn id")?;
+            let path = self.item_path(&item.id)?;
+            reject_symlinked_store_file(&path)?;
+            let payload = serde_json::to_string_pretty(item)?;
+            files.push((path, payload.into_bytes()));
+        }
+        crate::utils::write_atomic_batch(&files)
+            .with_context(|| format!("Failed to write {} store items", files.len()))
+    }
+
     fn remove_turn(&self, turn_id: &str) -> Result<()> {
         remove_file_if_exists(&self.turn_path(turn_id)?)
     }
@@ -2350,7 +2761,21 @@ impl RuntimeThreadStore {
     }
 
     pub fn list_threads(&self) -> Result<Vec<ThreadRecord>> {
+        let (threads, skipped) = self.list_threads_lenient()?;
+        for skipped in skipped {
+            tracing::warn!(target: "runtime", "skipped an unreadable thread record: {skipped}");
+        }
+        Ok(threads)
+    }
+
+    /// Every readable thread, plus a description of each record that could
+    /// not be read. One corrupt record used to fail the whole thread rail
+    /// (#6144 P7); it is now skipped and reported instead. A record from a
+    /// newer schema is still refused outright — skipping it would hide work
+    /// a newer build owns.
+    pub fn list_threads_lenient(&self) -> Result<(Vec<ThreadRecord>, Vec<String>)> {
         let mut out = Vec::new();
+        let mut skipped = Vec::new();
         let threads_dir = checked_existing_runtime_store_dir(&self.threads_dir)?;
         for entry in fs::read_dir(&threads_dir)
             .with_context(|| format!("Failed to read {}", threads_dir.display()))?
@@ -2360,10 +2785,18 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = read_store_file(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            let thread: ThreadRecord = serde_json::from_str(&raw)
-                .with_context(|| format!("Failed to parse {}", path.display()))?;
+            let thread: ThreadRecord = match read_store_file(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))
+                .and_then(|raw| {
+                    serde_json::from_str(&raw)
+                        .with_context(|| format!("Failed to parse {}", path.display()))
+                }) {
+                Ok(thread) => thread,
+                Err(error) => {
+                    skipped.push(format!("{error:#}"));
+                    continue;
+                }
+            };
             if thread.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
                 bail!(
                     "Thread schema v{} is newer than supported v{}",
@@ -2374,7 +2807,7 @@ impl RuntimeThreadStore {
             out.push(thread);
         }
         out.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
-        Ok(out)
+        Ok((out, skipped))
     }
 
     pub fn list_turns_for_thread(&self, thread_id: &str) -> Result<Vec<TurnRecord>> {
@@ -2884,19 +3317,44 @@ impl RuntimeThreadStore {
         batch_tx: mpsc::Sender<std::result::Result<Vec<RuntimeEventRecord>, String>>,
     ) {
         let mut base_tx = Some(base_tx);
-        let result = match tail_limit {
+        // A panic here must not look like the end of history. Unwound, it
+        // would drop `batch_tx` with no `Err`, the stream would read the
+        // closed channel as "history complete", go live, and silently skip
+        // the rest — with no `previous_seq` gap any client could detect.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match tail_limit {
             Some(limit) => {
                 self.publish_tail_event_replay(thread_id, since_seq, limit, &mut base_tx, &batch_tx)
             }
             None => self.publish_full_event_replay(thread_id, since_seq, &mut base_tx, &batch_tx),
-        };
-        if let Err(error) = result {
-            let message = format!("{error:#}");
-            if let Some(base_tx) = base_tx.take() {
-                let _ = base_tx.send(Err(message));
-            } else {
-                let _ = batch_tx.blocking_send(Err(message));
+        }));
+        Self::route_replay_outcome(outcome, &mut base_tx, &batch_tx);
+    }
+
+    /// Deliver a replay worker's failure, including a panic, to whoever is
+    /// waiting: the request before the base cursor was sent (HTTP 500), the
+    /// open stream after it (`stream.end`). Success needs nothing: dropping
+    /// `batch_tx` is how the stream learns history is complete.
+    fn route_replay_outcome(
+        outcome: std::thread::Result<Result<()>>,
+        base_tx: &mut Option<oneshot::Sender<std::result::Result<u64, String>>>,
+        batch_tx: &mpsc::Sender<std::result::Result<Vec<RuntimeEventRecord>, String>>,
+    ) {
+        let message = match outcome {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => format!("{error:#}"),
+            Err(panic) => {
+                let detail = panic
+                    .downcast_ref::<&str>()
+                    .map(|detail| (*detail).to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                format!("Runtime event replay worker panicked: {detail}")
             }
+        };
+        if let Some(base_tx) = base_tx.take() {
+            let _ = base_tx.send(Err(message));
+        } else {
+            let _ = batch_tx.blocking_send(Err(message));
         }
     }
 
@@ -3073,6 +3531,89 @@ pub struct RuntimeThreadManagerConfig {
     pub max_active_threads: usize,
 }
 
+/// Why a session switch refused to adopt an existing Runtime store.
+///
+/// Returned by [`RuntimeStoreBinding::adoption_refusal`]; the first guard
+/// that did not provably hold wins. Known limitation: it names one reason,
+/// not every one — a store both held and non-empty reports only the hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoreAdoptionRefusal {
+    /// The store is not at `<state>/sessions/<id>/runtime` (or a
+    /// `runtime-recovered-*` sibling), or a symlink sits on the way down.
+    Unconfined,
+    /// The confined store path is not an existing directory.
+    NotADirectory,
+    /// Another live process holds the store's process-owner lock.
+    HeldByLiveProcess,
+    /// The named store directory holds work a switch would abandon.
+    HasDurableWork { dir: &'static str },
+    /// An automation is pinned to this store's execution scope.
+    ScopePinnedAutomation,
+}
+
+impl std::fmt::Display for StoreAdoptionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unconfined => f.write_str("the saved store is outside the session directory"),
+            Self::NotADirectory => f.write_str("the saved store path is not an existing directory"),
+            Self::HeldByLiveProcess => {
+                f.write_str("another running Codewhale process holds the saved store")
+            }
+            Self::HasDurableWork { dir } => {
+                write!(f, "the saved store still holds work in `{dir}`")
+            }
+            Self::ScopePinnedAutomation => {
+                f.write_str("an automation is pinned to the saved store")
+            }
+        }
+    }
+}
+
+/// Canonical spellings of configured sessions roots, keyed by the lexical
+/// root `resolve_state_dir("sessions")` returns (tests move the state dir per
+/// case, so one slot is not enough). The confinement predicate compares
+/// against this instead of resolving a path itself, so a `/resume`, `/load`
+/// or launch resume on the UI runtime never waits on filesystem resolution:
+/// those entry points warm the cache on a blocking thread first
+/// ([`prepare_canonical_sessions_root`]) (#6522).
+static CANONICAL_SESSIONS_ROOTS: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn cached_canonical_sessions_root(sessions: &Path) -> Option<PathBuf> {
+    CANONICAL_SESSIONS_ROOTS
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(lexical, _)| lexical == sessions)
+        .map(|(_, canonical)| canonical.clone())
+}
+
+/// Resolve and remember the canonical form of `sessions`. Blocking: reach it
+/// through [`prepare_canonical_sessions_root`] from async code. A root that
+/// does not exist yet is not remembered, so a later call can still resolve it.
+fn resolve_canonical_sessions_root(sessions: &Path) -> Option<PathBuf> {
+    let canonical = sessions.canonicalize().ok()?;
+    if let Ok(mut cache) = CANONICAL_SESSIONS_ROOTS.lock()
+        && !cache.iter().any(|(lexical, _)| lexical == sessions)
+    {
+        cache.push((sessions.to_path_buf(), canonical.clone()));
+    }
+    Some(canonical)
+}
+
+/// Resolve the configured sessions root's canonical spelling on a blocking
+/// thread so the store-confinement checks that follow on the UI runtime are
+/// pure comparisons.
+pub(crate) async fn prepare_canonical_sessions_root() {
+    let Ok(sessions) = codewhale_config::resolve_state_dir("sessions") else {
+        return;
+    };
+    if cached_canonical_sessions_root(&sessions).is_some() {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || resolve_canonical_sessions_root(&sessions)).await;
+}
+
 /// Durable host authority shared by conversations created in that host.
 /// A conversation id can change at launch; the locked Runtime store cannot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3094,7 +3635,26 @@ impl RuntimeStoreBinding {
         let Some(store_name) = self.data_dir.file_name().and_then(|name| name.to_str()) else {
             return Ok(false);
         };
-        if session_dir.parent() != Some(sessions.as_path())
+        // A host records its binding from the store's canonical root
+        // (`checked_runtime_store_root`), while the configured sessions root
+        // is lexical. The two differ whenever an ancestor is spelled another
+        // way — Windows `\\?\C:\` verbatim prefixes and 8.3 short names, or
+        // a symlinked home/TMPDIR on Unix — and every real binding then read
+        // as unconfined, so no switch could ever adopt it (#6418). Accept the
+        // configured spelling or its canonical form only; nothing in the
+        // binding's own path is resolved, so the symlink checks below still
+        // fail closed.
+        //
+        // The canonical root comes from the cache the async entry points
+        // (`TaskManager::start`, `/resume`, `/load`) warm off the UI runtime
+        // via `prepare_canonical_sessions_root`; only a caller that never
+        // warmed it (synchronous tests and tools) resolves it here.
+        let parent = session_dir.parent();
+        let under_sessions = parent == Some(sessions.as_path())
+            || cached_canonical_sessions_root(&sessions)
+                .or_else(|| resolve_canonical_sessions_root(&sessions))
+                .is_some_and(|canonical| parent == Some(canonical.as_path()));
+        if !under_sessions
             || !(store_name == "runtime" || store_name.starts_with("runtime-recovered-"))
             || !session_dir
                 .file_name()
@@ -3122,8 +3682,8 @@ impl RuntimeStoreBinding {
         }
     }
 
-    /// True when a confined store exists but holds nothing a session switch
-    /// could abandon.
+    /// The first store directory holding durable work, or `None` when the
+    /// store holds nothing a session switch could abandon.
     ///
     /// The switch path can rebind a conversation but cannot carry a store's
     /// durable work across — queued tasks, pending approvals, agent mail —
@@ -3132,22 +3692,16 @@ impl RuntimeStoreBinding {
     /// there is nothing to abandon, so refusing protects nothing, and a
     /// force-quit leaves exactly this shape (#6207).
     ///
-    /// Fails closed: anything unreadable, unconfined, or non-empty is treated
-    /// as work worth keeping. Scope-pinned automations live outside the store
-    /// directories and are covered by [`Self::has_scope_pinned_automation`],
-    /// not here.
-    pub(crate) fn has_no_durable_work(&self) -> Result<bool> {
-        if !self.is_confined_session_store()? {
-            return Ok(false);
-        }
-        if !self.data_dir.is_dir() {
-            return Ok(false);
-        }
+    /// Callers establish confinement and that `data_dir` is a directory
+    /// first; this only reads. Scope-pinned automations live outside the
+    /// store directories and are covered by
+    /// [`Self::has_scope_pinned_automation`], not here.
+    fn first_durable_work_dir(&self) -> Result<Option<&'static str>> {
         for name in RUNTIME_STORE_WORK_DIRS {
             match fs::read_dir(self.data_dir.join(name)) {
                 Ok(mut entries) => {
                     if entries.next().is_some() {
-                        return Ok(false);
+                        return Ok(Some(name));
                     }
                 }
                 // A store opened by an older build may predate a directory;
@@ -3157,13 +3711,13 @@ impl RuntimeStoreBinding {
             }
         }
         // A sequence past its initial value means events were appended, even
-        // if those files have since been pruned.
+        // if those files have since been pruned — reported as `events`.
         match fs::read_to_string(self.data_dir.join("state.json")) {
             Ok(raw) => {
                 let state: RuntimeStoreState = serde_json::from_str(&raw)?;
-                Ok(state.next_seq <= 1)
+                Ok((state.next_seq > 1).then_some("events"))
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err.into()),
         }
     }
@@ -3199,7 +3753,7 @@ impl RuntimeStoreBinding {
     /// True when an automation's execution scope matches this binding.
     ///
     /// Scope-pinned automations are recorded outside the store directories, so
-    /// [`Self::has_no_durable_work`] cannot see them — adopting their store
+    /// [`Self::first_durable_work_dir`] cannot see them — adopting their store
     /// would orphan their scheduled work. A missing automations directory
     /// means no definitions exist. Read-only: the manager is only opened when
     /// the directory exists, and listing takes no locks.
@@ -3220,27 +3774,39 @@ impl RuntimeStoreBinding {
         }))
     }
 
-    /// True when the bound store exists and a switch may adopt it: confined,
-    /// empty, unheld, with no scope-pinned automation. Liveness is checked
-    /// before emptiness — a live holder's disk state moves under the read —
-    /// and the automation check runs last because it parses every definition.
-    pub(crate) fn is_adoptable_empty_store(&self) -> Result<bool> {
+    /// Why a session switch may not adopt the bound store, or `None` when it
+    /// may: confined, a directory, unheld, empty, with no scope-pinned
+    /// automation. Liveness is checked before emptiness — a live holder's
+    /// disk state moves under the read — and the automation check runs last
+    /// because it parses every definition.
+    ///
+    /// Fails closed: every refusal is the first condition that did not
+    /// provably hold, and an unexpected IO or parse error is an `Err`, which
+    /// callers treat as a refusal. The reason exists so a user can be told
+    /// *which* guard refused (#6418); it never widens what is adoptable.
+    pub(crate) fn adoption_refusal(&self) -> Result<Option<StoreAdoptionRefusal>> {
         if !self.is_confined_session_store()? {
-            return Ok(false);
+            return Ok(Some(StoreAdoptionRefusal::Unconfined));
         }
         if !self.data_dir.is_dir() {
-            return Ok(false);
+            return Ok(Some(StoreAdoptionRefusal::NotADirectory));
         }
         if self.has_live_holder()? {
-            return Ok(false);
+            return Ok(Some(StoreAdoptionRefusal::HeldByLiveProcess));
         }
-        if !self.has_no_durable_work()? {
-            return Ok(false);
+        if let Some(dir) = self.first_durable_work_dir()? {
+            return Ok(Some(StoreAdoptionRefusal::HasDurableWork { dir }));
         }
         if self.has_scope_pinned_automation()? {
-            return Ok(false);
+            return Ok(Some(StoreAdoptionRefusal::ScopePinnedAutomation));
         }
-        Ok(true)
+        Ok(None)
+    }
+
+    /// True when the bound store exists and a switch may adopt it; see
+    /// [`Self::adoption_refusal`] for the reason when it may not.
+    pub(crate) fn is_adoptable_empty_store(&self) -> Result<bool> {
+        Ok(self.adoption_refusal()?.is_none())
     }
 
     pub(crate) fn validate_existing_store(&self) -> Result<()> {
@@ -3396,6 +3962,19 @@ pub struct UpdateThreadRequest {
     pub title: Option<String>,
     pub system_prompt: Option<String>,
     pub workspace: Option<PathBuf>,
+    /// Switch the provider this thread's future turns route through: a
+    /// built-in kind (`deepseek`, `xai`, ...) or a configured route name, as
+    /// `/provider` accepts. Validated against the live config (the route must
+    /// resolve and its credentials must be usable) before it is saved. Without
+    /// `model`, the thread takes that provider's default model; `auto` stays
+    /// `auto`. Conversation history is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    /// Exact configured provider id (`[providers.<id>]`), as `POST /v1/threads`
+    /// and `POST /v1/providers/{id}/switch` accept it. Takes precedence over a
+    /// route name in `model_provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3435,6 +4014,52 @@ pub struct StartTurnRequest {
     pub dynamic_tools: Vec<DynamicToolSpec>,
     #[serde(default)]
     pub environment_id: Option<String>,
+    /// Route this turn only through another provider (same grammar as
+    /// `UpdateThreadRequest::model_provider`). The thread's saved provider is
+    /// unchanged. Without `model`, the turn uses that provider's default model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    /// Exact configured provider id for this turn only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
+}
+
+/// Resolve a caller-selected provider the way `/provider` and
+/// `POST /v1/providers/{id}/switch` do. An exact configured id names one
+/// `[providers.<id>]` route; otherwise `model_provider` is a provider pin: a
+/// built-in kind or a configured route name. `Ok(None)` when neither is set.
+fn requested_provider_identity(
+    config: &Config,
+    model_provider: Option<&str>,
+    model_provider_id: Option<&str>,
+) -> Result<Option<ProviderIdentity>> {
+    if model_provider.is_some_and(|value| value.trim().is_empty()) {
+        bail!("model_provider must not be empty");
+    }
+    if model_provider_id.is_some_and(|value| value.trim().is_empty()) {
+        bail!("model_provider_id must not be empty");
+    }
+    let kind = model_provider.map(str::trim);
+    let identity = match (kind, model_provider_id.map(str::trim)) {
+        (None, None) => return Ok(None),
+        (kind, Some(exact_id)) => config.resolve_persisted_provider_identity(kind, Some(exact_id)),
+        (Some(kind), None) => config.resolve_provider_pin_identity(kind),
+    };
+    identity.map(Some).map_err(|reason| anyhow!(reason))
+}
+
+/// Resolve and client-preflight `identity` for `model` (`None` or `auto`
+/// selects the provider's default route). A provider whose route does not
+/// resolve, or whose credentials cannot build a client, is not ready.
+fn ready_provider_route(
+    config: &Config,
+    identity: &ProviderIdentity,
+    model: Option<&str>,
+) -> Result<crate::route_runtime::ResolvedRuntimeRoute> {
+    let model = model.filter(|model| !model.trim().eq_ignore_ascii_case("auto"));
+    resolve_runtime_thread_route_for_identity(config, identity, model)?
+        .preflight()
+        .map_err(|reason| anyhow!("provider '{}' is not ready: {reason}", identity.key))
 }
 
 fn parse_runtime_reasoning_effort(
@@ -4446,6 +5071,10 @@ struct ActiveThreadState {
     active_turn: Option<ActiveTurnState>,
     route_identity: ProviderIdentity,
     route_model: String,
+    /// The thread's hook executor (B4): global, reviewed plugin and trusted
+    /// project hooks for the thread's workspace. `None` only for injected
+    /// test engines.
+    hook_executor: Option<Arc<crate::hooks::HookExecutor>>,
     /// Real engines client-preflight before an in-progress record is written.
     /// Explicitly injected test engines own their client seam.
     client_preflight_required: bool,
@@ -4464,7 +5093,10 @@ struct ActiveThreads {
 
 pub(crate) struct PreparedThreadFork {
     source_id: String,
-    target_turn_id: String,
+    /// The first turn the fork *drops*, when it drops any: the turn whose
+    /// prompt the receipt hands back. `None` for a fork that keeps the whole
+    /// conversation (a branch point at the last turn).
+    dropped_turn_id: Option<String>,
     depth_from_tail: usize,
     thread: ThreadRecord,
     records: Vec<(TurnRecord, Vec<TurnItemRecord>)>,
@@ -4476,6 +5108,42 @@ pub(crate) struct PreparedThreadFork {
     /// it while preparing would leave an unreferenced document behind whenever
     /// the caller abandons the fork (a refused or failed file undo).
     own_session: Option<(String, Vec<Message>, Option<String>)>,
+    /// The turns the fork drops, oldest first, with the workspace restore
+    /// points each recorded: what a turn-scoped file undo rolls back.
+    dropped_turns: Vec<DroppedTurnSnapshots>,
+}
+
+impl PreparedThreadFork {
+    /// The turns this fork drops, oldest first.
+    pub(crate) fn dropped_turns(&self) -> &[DroppedTurnSnapshots] {
+        &self.dropped_turns
+    }
+}
+
+/// One turn a fork drops, as a turn-scoped file undo sees it.
+#[derive(Debug, Clone)]
+pub(crate) struct DroppedTurnSnapshots {
+    pub turn_id: String,
+    /// Whether the turn may have changed workspace files, and so needs a
+    /// restore point to be undone. Every change a turn makes goes through a
+    /// tool call (file tools, shell, sub-agents), so a turn this Runtime ran
+    /// (its record carries the policy receipt every accepted turn gets) with
+    /// no tool items provably changed nothing, as does an accounting-only
+    /// routing settlement or a record with no items at all. A turn imported
+    /// from a saved session proves nothing either way: saved documents need
+    /// not keep tool calls.
+    pub may_change_files: bool,
+    /// The restore points the engine reported for the turn, in order.
+    pub snapshots: Vec<crate::snapshot::WorkspaceSnapshotRef>,
+    /// Paths the turn's file-tool calls (`write_file`, `edit_file`,
+    /// `apply_patch`) declared they write, as the calls named them, for every
+    /// call that ran (completed, or stopped mid-run). A turn-scoped undo can
+    /// only restore what the snapshots hold, so each is checked against the
+    /// snapshot exclusions.
+    pub declared_writes: Vec<String>,
+    /// Tool calls recorded as failed, canceled or never started: whatever
+    /// paths their snapshot receipts declare, they wrote nothing.
+    pub unrun_tool_calls: std::collections::BTreeSet<String>,
 }
 
 /// Shared ownership of an existing task's join. A canceled drain drops only
@@ -4577,10 +5245,361 @@ pub struct RuntimeThreadManager {
     recovery_receipts: Arc<parking_lot::Mutex<HashMap<String, Vec<RecoveredTurnReceipt>>>>,
     notices: Arc<parking_lot::Mutex<HashMap<String, Vec<ActiveNotice>>>>,
     recovery_flush: Arc<Mutex<()>>,
+    /// One hook observer pool for the process. Each thread's executor is a
+    /// `rebind` of it, so a thread gets its own hook set and workspace without
+    /// spawning another dispatcher.
+    hook_base: Arc<std::sync::OnceLock<crate::hooks::HookExecutor>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
     #[cfg(test)]
     replay_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<ReplayTestPoint>>>>,
+    /// Test seam: the model client every engine this manager builds uses in
+    /// place of the route's provider client. Everything else about the build
+    /// — `EngineConfig`, `SyncSession`, snapshots — is the production path.
+    #[cfg(test)]
+    test_model_client:
+        Arc<parking_lot::Mutex<Option<crate::core::model_client::SharedModelClient>>>,
+}
+
+impl RuntimeStoreBinding {
+    /// The binding a host that opened `data_dir` would have recorded: its
+    /// canonical root and the scope derived from the store's owner. A store
+    /// whose owner was never written has no scope an automation could pin.
+    pub(crate) fn for_store_dir(data_dir: &Path) -> Result<Self> {
+        let root = checked_runtime_store_root(data_dir.to_path_buf())?;
+        let execution_scope = match read_store_file(&root.join(AGENT_MAIL_OWNER_FILE)) {
+            Ok(raw) => {
+                let owner: RuntimeStoreOwner = serde_json::from_str(&raw)?;
+                runtime_execution_scope(&owner.owner_id, &root.join(EVENT_TRANSACTION_LOCK_FILE))
+            }
+            Err(_) if !root.join(AGENT_MAIL_OWNER_FILE).exists() => String::new(),
+            Err(error) => return Err(error),
+        };
+        Ok(Self {
+            data_dir: root,
+            execution_scope,
+        })
+    }
+
+    /// Take this store's process-owner lock for maintenance, or `None` when
+    /// a live process holds it (#6144).
+    ///
+    /// Holding the same lock a host takes in `open_inner` is what makes the
+    /// maintenance exact: while it is held no process can open the store, so
+    /// an emptiness read cannot race new work, and a move cannot pull the
+    /// store out from under an opener — the opener fails its lock instead.
+    /// Unconfined paths and non-directories are refused.
+    pub(crate) fn try_hold(&self) -> Result<Option<HeldRuntimeStore>> {
+        anyhow::ensure!(
+            self.is_confined_session_store()?,
+            "Runtime store {} is outside the sessions directory",
+            self.data_dir.display()
+        );
+        anyhow::ensure!(
+            self.data_dir.is_dir(),
+            "Runtime store {} is not a directory",
+            self.data_dir.display()
+        );
+        let lock = RuntimeProcessOwnerLock::try_acquire_file(
+            &self.data_dir.join(RUNTIME_PROCESS_OWNER_LOCK_FILE),
+            true,
+        )?;
+        Ok(lock.map(|lock| HeldRuntimeStore {
+            binding: self.clone(),
+            _lock: lock,
+        }))
+    }
+}
+
+/// A Runtime store held under its process-owner lock by maintenance —
+/// session reconcile, or the switch/delete that just stopped binding it.
+pub(crate) struct HeldRuntimeStore {
+    binding: RuntimeStoreBinding,
+    _lock: RuntimeProcessOwnerLock,
+}
+
+/// One thread recovered from a store no document references.
+pub(crate) struct RecoverableThread {
+    pub(crate) thread: ThreadRecord,
+    pub(crate) messages: Vec<Message>,
+}
+
+impl HeldRuntimeStore {
+    pub(crate) fn binding(&self) -> &RuntimeStoreBinding {
+        &self.binding
+    }
+
+    /// Why this store must be kept, or `None` when it holds nothing: the same
+    /// "nothing to lose" test a session switch applies before adopting it,
+    /// read while no process can add work.
+    pub(crate) fn keep_reason(&self) -> Result<Option<String>> {
+        if let Some(dir) = self.binding.first_durable_work_dir()? {
+            return Ok(Some(format!("holds work in `{dir}`")));
+        }
+        if self.binding.has_scope_pinned_automation()? {
+            return Ok(Some("an automation is pinned to it".to_string()));
+        }
+        Ok(None)
+    }
+
+    /// Move the store to `destination`, holding its lock for the whole move,
+    /// so no opener can race it. Nothing is unlinked.
+    ///
+    /// The store directory itself is not renamed: it contains the open lock
+    /// file, and Windows refuses to rename a directory while a handle inside
+    /// it is open. Each entry is renamed into `destination` instead, the lock
+    /// file last. Renaming the open, locked lock file is allowed on every
+    /// platform: unix renames the inode the lock is on, and on Windows std
+    /// opens files with `FILE_SHARE_DELETE`, which permits a rename while the
+    /// handle is open (a `LockFile` byte-range lock does not block it). The
+    /// lock is dropped only after the emptied source directory is removed.
+    ///
+    /// Unlinking the lock file after dropping it is what this must never do
+    /// (#6144): on unix `remove_file` succeeds while another process holds a
+    /// lock on the file, so an opener that locked in that gap would hold a
+    /// lock on an unlinked inode, and the next opener would create and lock a
+    /// fresh file: two owners of one store. An opener that opened the old
+    /// path before the move and locks after it sees its file is no longer at
+    /// the path and reopens (see [`RuntimeProcessOwnerLock`]).
+    pub(crate) fn move_to(self, destination: &Path) -> Result<()> {
+        anyhow::ensure!(
+            !destination.exists(),
+            "set-aside destination {} already exists",
+            destination.display()
+        );
+        let source = self.binding.data_dir.clone();
+        fs::create_dir_all(destination)
+            .with_context(|| format!("Failed to create {}", destination.display()))?;
+        let mut names: Vec<std::ffi::OsString> = Vec::new();
+        let listed = fs::read_dir(&source)
+            .and_then(|entries| {
+                for entry in entries {
+                    let name = entry?.file_name();
+                    if name != RUNTIME_PROCESS_OWNER_LOCK_FILE {
+                        names.push(name);
+                    }
+                }
+                Ok(())
+            })
+            .with_context(|| format!("Failed to read Runtime store {}", source.display()));
+        if let Err(error) = listed {
+            let _ = fs::remove_dir(destination);
+            return Err(error);
+        }
+        names.push(RUNTIME_PROCESS_OWNER_LOCK_FILE.into());
+        let mut moved: Vec<&std::ffi::OsString> = Vec::new();
+        for name in &names {
+            if let Err(error) = fs::rename(source.join(name), destination.join(name)) {
+                // Put back what already moved so the store is never left
+                // split across two directories; the lock is still held.
+                for name in moved.into_iter().rev() {
+                    let _ = fs::rename(destination.join(name), source.join(name));
+                }
+                let _ = fs::remove_dir(destination);
+                return Err(anyhow::Error::from(error).context(format!(
+                    "Failed to move Runtime store {} to {}",
+                    source.display(),
+                    destination.display()
+                )));
+            }
+            moved.push(name);
+        }
+        #[cfg(test)]
+        run_owner_lock_test_hook(OwnerLockTestPoint::LockFileMoved);
+        // Still holding the lock. A directory that is no longer empty means
+        // an opener created a fresh lock file in it after the move; that
+        // store is its own, so it stays.
+        let _ = fs::remove_dir(&source);
+        drop(self);
+        Ok(())
+    }
+
+    fn open_store(&self) -> Result<RuntimeThreadStore> {
+        RuntimeThreadStore::open(self.binding.data_dir.clone())
+    }
+
+    /// Threads in this store that name no session document, with their
+    /// history rebuilt from their own turns. Threads with no turns carry no
+    /// conversation to recover and are left out.
+    pub(crate) fn recoverable_threads(&self) -> Result<Vec<RecoverableThread>> {
+        let store = self.open_store()?;
+        let (threads, _) = store.list_threads_lenient()?;
+        let mut out = Vec::new();
+        for thread in threads {
+            if thread.session_id.is_some() {
+                continue;
+            }
+            let turns = store.list_turns_for_thread(&thread.id)?;
+            if turns.is_empty() {
+                continue;
+            }
+            let turn_ids: Vec<String> = turns.iter().map(|turn| turn.id.clone()).collect();
+            let items = store.list_items_for_turns_map(&turn_ids)?;
+            let messages =
+                RuntimeThreadManager::reconstruct_messages_from_turns_with(&turns, &items)?;
+            if messages.is_empty() {
+                continue;
+            }
+            out.push(RecoverableThread { thread, messages });
+        }
+        Ok(out)
+    }
+
+    /// Bind `thread_id` to the document just written for it, covering every
+    /// turn the document was rebuilt from.
+    pub(crate) fn bind_recovered_thread(
+        &self,
+        thread_id: &str,
+        session: &crate::session_manager::SavedSession,
+    ) -> Result<()> {
+        let store = self.open_store()?;
+        let _thread_mutation = store.thread_mutation.lock();
+        let mut thread = store.load_thread(thread_id)?;
+        thread.session_id = Some(session.metadata.id.clone());
+        thread.saved_session_checkpoint = Some(SavedSessionCheckpoint {
+            covered_turn_id: thread.latest_turn_id.clone(),
+            messages_sha256: session_messages_sha256(&session.messages)?,
+            messages_len: Some(session.messages.len()),
+            retained_messages: None,
+        });
+        thread.updated_at = Utc::now();
+        store.save_thread(&thread)
+    }
+
+    /// Unbind threads whose session document no longer exists (#6144 R4).
+    /// `exists` answers for a session id; a thread whose document is present
+    /// is untouched — its checkpoint is verified (and migrated) when it loads.
+    pub(crate) fn unbind_threads_without_documents(
+        &self,
+        exists: impl Fn(&str) -> bool,
+    ) -> Result<usize> {
+        if !self.binding.data_dir.join("threads").is_dir() {
+            return Ok(0);
+        }
+        let store = self.open_store()?;
+        let (threads, _) = store.list_threads_lenient()?;
+        let mut unbound = 0;
+        for thread in threads {
+            let Some(session_id) = thread.session_id.as_deref() else {
+                continue;
+            };
+            if exists(session_id) {
+                continue;
+            }
+            unbound += unbind_session_threads_in_store(
+                &store,
+                &self.binding.data_dir,
+                session_id,
+                "its session document no longer exists",
+            )?;
+        }
+        Ok(unbound)
+    }
+}
+
+/// Clear `session_id` (and its checkpoint) on every thread in `store` that
+/// names it, recording each old binding in the reconcile receipts.
+fn unbind_session_threads_in_store(
+    store: &RuntimeThreadStore,
+    store_dir: &Path,
+    session_id: &str,
+    reason: &str,
+) -> Result<usize> {
+    let _thread_mutation = store.thread_mutation.lock();
+    let (threads, _) = store.list_threads_lenient()?;
+    let mut unbound = 0;
+    for mut thread in threads {
+        if thread.session_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        crate::session_reconcile::record_thread_unbound(store_dir, &thread, reason);
+        thread.session_id = None;
+        thread.saved_session_checkpoint = None;
+        thread.updated_at = Utc::now();
+        store.save_thread(&thread)?;
+        unbound += 1;
+    }
+    Ok(unbound)
+}
+
+/// Try to take an exclusive OS lock on `file` without blocking: `Ok(true)`
+/// when acquired (released when the file closes), `Ok(false)` when another
+/// open file description holds it.
+pub(crate) fn try_lock_file_exclusive(file: &File) -> std::io::Result<bool> {
+    match RuntimeProcessOwnerLock::try_lock_exclusive(file) {
+        Ok(()) => Ok(true),
+        Err(error) if RuntimeProcessOwnerLock::is_contention(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// How many times an owner-lock acquire reopens the path after finding the
+/// file it locked was moved out of the store. Each retry needs another
+/// maintenance move to land in the same window, so a few is plenty.
+const OWNER_LOCK_MOVED_RETRIES: usize = 4;
+
+/// True when `file` is still the file at `path`. [`HeldRuntimeStore::move_to`]
+/// renames a held lock file out of its store, so a process that opened the
+/// path before that move and locked after it holds a lock on the moved store,
+/// not on the one at `path` (#6144). A held file that is no longer one
+/// regular file (unlinked, or linked twice) is not at the path either.
+fn owner_lock_is_at_path(file: &File, path: &Path) -> Result<bool> {
+    let Ok(held) = runtime_store_file_identity(file) else {
+        return Ok(false);
+    };
+    let current = match open_runtime_store_file(path, "Runtime process owner lock", |options| {
+        options.read(true);
+    }) {
+        Ok(current) => current,
+        Err(error)
+            if error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(runtime_store_file_identity(&current)? == held)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum OwnerLockTestPoint {
+    /// In `RuntimeProcessOwnerLock::acquire`, after the lock file is opened
+    /// and before it is locked.
+    LockFileOpened,
+    /// In `HeldRuntimeStore::move_to`, after the held lock file is renamed
+    /// into the destination and before the lock is dropped.
+    LockFileMoved,
+}
+
+#[cfg(test)]
+type OwnerLockTestHooks = Vec<(OwnerLockTestPoint, Box<dyn FnOnce()>)>;
+
+#[cfg(test)]
+thread_local! {
+    static OWNER_LOCK_TEST_HOOKS: std::cell::RefCell<OwnerLockTestHooks> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `hook` once, on this thread, the next time `point` is reached.
+#[cfg(test)]
+pub(crate) fn set_owner_lock_test_hook(point: OwnerLockTestPoint, hook: impl FnOnce() + 'static) {
+    OWNER_LOCK_TEST_HOOKS.with(|hooks| hooks.borrow_mut().push((point, Box::new(hook))));
+}
+
+#[cfg(test)]
+fn run_owner_lock_test_hook(point: OwnerLockTestPoint) {
+    let hook = OWNER_LOCK_TEST_HOOKS.with(|hooks| {
+        let mut hooks = hooks.borrow_mut();
+        let index = hooks.iter().position(|(at, _)| *at == point)?;
+        Some(hooks.remove(index).1)
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 #[derive(Debug)]
@@ -4597,55 +5616,83 @@ impl RuntimeProcessOwnerLock {
                 .context("Owner lease has no parent")?
                 .to_path_buf(),
         )?;
-        ensure_runtime_store_dir(&root)?;
-        let file = open_runtime_store_file(path, "Execution owner lease", |options| {
-            options
-                .create(create)
-                .truncate(false)
-                .read(true)
-                .write(true);
-        })?;
-        match Self::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(error) if Self::is_contention(&error) => Ok(None),
-            Err(error) => Err(error).context("Failed to acquire execution owner lease"),
+        for _ in 0..OWNER_LOCK_MOVED_RETRIES {
+            ensure_runtime_store_dir(&root)?;
+            let file = open_runtime_store_file(path, "Execution owner lease", |options| {
+                options
+                    .create(create)
+                    .truncate(false)
+                    .read(true)
+                    .write(true);
+            })?;
+            match Self::try_lock_exclusive(&file) {
+                Ok(()) => {}
+                Err(error) if Self::is_contention(&error) => return Ok(None),
+                Err(error) => {
+                    return Err(error).context("Failed to acquire execution owner lease");
+                }
+            }
+            if owner_lock_is_at_path(&file, path)? {
+                return Ok(Some(Self { _file: file }));
+            }
+            // Moved out of this store between open and lock: reopen.
         }
+        Ok(None)
     }
 
     pub(crate) fn acquire(root: &Path) -> Result<Self> {
         let root = checked_runtime_store_root(root.to_path_buf())?;
-        ensure_runtime_store_dir(&root)?;
         let path = root.join(RUNTIME_PROCESS_OWNER_LOCK_FILE);
-        let file = open_runtime_store_file(&path, "Runtime process owner lock", |options| {
-            options.create(true).truncate(false).read(true).write(true);
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            file.set_permissions(fs::Permissions::from_mode(0o600))
-                .context("Failed to protect Runtime process owner lock")?;
-        }
         // Same-process drop-then-reopen can observe WouldBlock for a brief
         // window while the previous fd is still closing — the same close-
         // release race #5735 hit on the Runtime Chat scope lock. Retry only
         // that contention; a lock that stays held still belongs to its owner.
         let deadline = Instant::now() + Duration::from_millis(25);
-        loop {
-            match Self::try_lock_exclusive(&file) {
-                Ok(()) => break,
-                Err(error) if Self::is_contention(&error) => {
-                    if Instant::now() >= deadline {
-                        bail!("{RUNTIME_PROCESS_OWNER_LOCK_HELD}");
+        for _ in 0..OWNER_LOCK_MOVED_RETRIES {
+            ensure_runtime_store_dir(&root)?;
+            let file = open_runtime_store_file(&path, "Runtime process owner lock", |options| {
+                options.create(true).truncate(false).read(true).write(true);
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+                    .context("Failed to protect Runtime process owner lock")?;
+            }
+            #[cfg(test)]
+            run_owner_lock_test_hook(OwnerLockTestPoint::LockFileOpened);
+            loop {
+                match Self::try_lock_exclusive(&file) {
+                    Ok(()) => break,
+                    Err(error) if Self::is_contention(&error) => {
+                        if Instant::now() >= deadline {
+                            return Err(Self::held_error());
+                        }
+                        std::thread::yield_now();
+                        std::thread::sleep(Duration::from_millis(1));
                     }
-                    std::thread::yield_now();
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => {
-                    return Err(error).context("Failed to acquire Runtime process owner lock");
+                    Err(error) => {
+                        return Err(error).context("Failed to acquire Runtime process owner lock");
+                    }
                 }
             }
+            if owner_lock_is_at_path(&file, &path)? {
+                return Ok(Self { _file: file });
+            }
+            // A maintenance move renamed the file out of this store between
+            // our open and our lock; the lock we hold is on the moved store.
         }
-        Ok(Self { _file: file })
+        Err(Self::held_error())
+    }
+
+    /// A held lock is typed `WouldBlock` so callers (the credential scrub,
+    /// #6601) can tell a busy owner from a real lock failure.
+    fn held_error() -> anyhow::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            RUNTIME_PROCESS_OWNER_LOCK_HELD,
+        )
+        .into()
     }
 
     fn is_contention(error: &std::io::Error) -> bool {
@@ -4858,6 +5905,31 @@ struct DynamicToolSettlementAck {
 
 impl RuntimeThreadManager {
     /// Helper to read the current config under RwLock.
+    /// The hook executor for one workspace: global hooks from `config`,
+    /// reviewed plugin hooks, then trusted and approved project hooks — the
+    /// set the TUI and `exec --hooks` build. It shares this process's observer
+    /// pool instead of spawning its own.
+    pub(crate) fn hook_executor_for_workspace(
+        &self,
+        config: &Config,
+        workspace: &Path,
+        plugins: Option<&crate::plugins::PluginRegistry>,
+    ) -> crate::hooks::HookExecutor {
+        let hooks = crate::hooks::HooksConfig::load_with_project_and_plugins(
+            config.hooks_config(),
+            workspace,
+            plugins,
+        );
+        self.hook_base
+            .get_or_init(|| {
+                crate::hooks::HookExecutor::new(
+                    crate::hooks::HooksConfig::default(),
+                    workspace.to_path_buf(),
+                )
+            })
+            .rebind(hooks, workspace.to_path_buf())
+    }
+
     pub(crate) fn read_config(&self) -> parking_lot::RwLockReadGuard<'_, Config> {
         self.config.read()
     }
@@ -4898,13 +5970,27 @@ impl RuntimeThreadManager {
             });
         match restored {
             Some((restored_kind, restored_id, model)) => {
-                let identity = thread_config
-                    .resolve_persisted_provider_identity(
-                        restored_kind.as_deref(),
-                        restored_id.as_deref(),
-                    )
-                    .map_err(|reason| anyhow!(reason))?;
-                resolve_runtime_thread_route_for_identity(config, &identity, Some(&model))
+                let identity = thread_config.resolve_persisted_provider_identity(
+                    restored_kind.as_deref(),
+                    restored_id.as_deref(),
+                );
+                // The saved thread provider is the authority. An earlier Auto
+                // pick is restored only when it was made on that same
+                // provider; a pick from before a provider switch, from a
+                // one-turn override, or from a provider no longer configured
+                // is ignored and the saved provider's default route applies.
+                match identity {
+                    Ok(identity)
+                        if identity.provider == provider_identity.provider
+                            && identity.key == provider_identity.key
+                            && identity.exact_id == provider_identity.exact_id =>
+                    {
+                        resolve_runtime_thread_route_for_identity(config, &identity, Some(&model))
+                    }
+                    _ => {
+                        resolve_runtime_thread_route_for_identity(config, &provider_identity, None)
+                    }
+                }
             }
             None => resolve_runtime_thread_route_for_identity(config, &provider_identity, None),
         }
@@ -4976,6 +6062,18 @@ impl RuntimeThreadManager {
                 Some(&engine_model),
             ) {
                 Ok(route) => validated.push((thread_id, engine, route, active_turn_id)),
+                // An idle engine still carries the route of its last turn,
+                // which may predate a provider switch or have been a one-turn
+                // override. Its next turn resolves the saved thread route, so
+                // that is the route the new config has to serve.
+                Err(err) if active_turn_id.is_none() => match self
+                    .store
+                    .load_thread(&thread_id)
+                    .and_then(|thread| self.resolved_route_for_thread(&new_config, &thread))
+                {
+                    Ok(route) => validated.push((thread_id, engine, route, active_turn_id)),
+                    Err(_) => failures.push(format!("{thread_id}: {err}")),
+                },
                 Err(err) => failures.push(format!("{thread_id}: {err}")),
             }
         }
@@ -5158,10 +6256,13 @@ impl RuntimeThreadManager {
             recovery_receipts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             notices: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             recovery_flush: Arc::new(Mutex::new(())),
+            hook_base: Arc::new(std::sync::OnceLock::new()),
             #[cfg(test)]
             snapshot_test_hook: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(test)]
             replay_test_hook: Arc::new(parking_lot::Mutex::new(None)),
+            #[cfg(test)]
+            test_model_client: Arc::new(parking_lot::Mutex::new(None)),
         };
         manager.recover_interrupted_state()?;
         Ok(manager)
@@ -6273,6 +7374,8 @@ impl RuntimeThreadManager {
             auto_approve: None,
             dynamic_tools: Vec::new(),
             environment_id: None,
+            model_provider: None,
+            model_provider_id: None,
         };
         self.start_turn_with_source(
             thread_id,
@@ -6795,6 +7898,8 @@ impl RuntimeThreadManager {
                     auto_approve: None,
                     dynamic_tools: Vec::new(),
                     environment_id: None,
+                    model_provider: None,
+                    model_provider_id: None,
                 },
                 RuntimeTurnInputSource::AgentMail {
                     message_id: message_id.to_string(),
@@ -7411,11 +8516,37 @@ impl RuntimeThreadManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn events_path_for_test(&self, thread_id: &str) -> Result<PathBuf> {
+        self.store.events_path(thread_id)
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_replay_test_hook(&self, hook: mpsc::UnboundedSender<ReplayTestPoint>) {
         *self.replay_test_hook.lock() = Some(hook);
     }
 
     pub async fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadRecord> {
+        self.create_thread_with_shell_policy(req, None, None).await
+    }
+
+    /// Create a thread, resolving an unset `allow_shell` against the config
+    /// source the host actually loaded (`config_path`/`config_profile`).
+    ///
+    /// An unset `allow_shell` takes the interactive default
+    /// (`Config::interactive_allow_shell`, on unless configured off): a
+    /// conversation opened from an app is attended, and every shell command
+    /// still passes the thread's approval posture. The default is then checked
+    /// with the same `validate_shell_access_policy` a PATCH opt-in runs, so a
+    /// shell restriction from a project, profile, environment or managed
+    /// source still wins at creation: an unset value falls back to no shell,
+    /// and an explicit `allow_shell: true` is refused, as PATCH refuses it.
+    /// An explicit `false` is never checked.
+    pub(crate) async fn create_thread_with_shell_policy(
+        &self,
+        req: CreateThreadRequest,
+        config_path: Option<&Path>,
+        config_profile: Option<&str>,
+    ) -> Result<ThreadRecord> {
         let now = Utc::now();
         let reasoning_effort = canonical_runtime_reasoning_effort(req.reasoning_effort.as_deref())?;
         let (model_provider, model_provider_id, default_model) = {
@@ -7471,15 +8602,30 @@ impl RuntimeThreadManager {
         )?;
         let mode = policy.mode_setting().to_string();
         let permission_posture = Some(policy.permission_wire().to_string());
-        let allow_shell = req
-            .allow_shell
-            .unwrap_or_else(|| self.read_config().allow_shell());
+        let allow_shell = match req.allow_shell {
+            // An explicit opt-in passes the same policy check a PATCH opt-in
+            // runs, and is refused (not silently downgraded) on denial.
+            Some(true) => {
+                self.validate_shell_access_policy(&workspace, config_path, config_profile)
+                    .await?;
+                true
+            }
+            Some(false) => false,
+            None => {
+                let interactive_default = self.read_config().interactive_allow_shell();
+                interactive_default
+                    && self
+                        .validate_shell_access_policy(&workspace, config_path, config_profile)
+                        .await
+                        .is_ok()
+            }
+        };
         let trust_mode = req.trust_mode.unwrap_or(false);
         let auto_approve = policy.auto_approve();
 
         let thread = ThreadRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            id: format!("thr_{}", &Uuid::new_v4().to_string()[..8]),
+            id: runtime_record_id("thr"),
             created_at: now,
             updated_at: now,
             model,
@@ -7715,7 +8861,7 @@ impl RuntimeThreadManager {
             codewhale_config::notifications::NotificationEvent::parse(kind).is_some(),
             "notice kind must be a NotificationEvent name: {kind}"
         );
-        let id = format!("notice_{}", &Uuid::new_v4().to_string()[..8]);
+        let id = runtime_record_id("notice");
         let mut notices = self.notices.lock();
         let list = notices.entry(thread_id.to_string()).or_default();
         list.push(ActiveNotice {
@@ -7975,6 +9121,49 @@ impl RuntimeThreadManager {
         Ok(split)
     }
 
+    /// One turn's artifact references, read from the store: the turn's own
+    /// aggregate once it has ended, or its items' refs merged on the fly
+    /// while it runs. `Ok(None)` when the turn does not exist or belongs to
+    /// another thread.
+    pub async fn turn_artifacts(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<TurnArtifactsView>> {
+        let thread = self.get_thread(thread_id).await?;
+        if validated_record_id(turn_id, "turn id").is_err() {
+            return Ok(None);
+        }
+        let manager = self.clone();
+        let thread_id = thread_id.to_string();
+        let turn_id = turn_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if !manager.store.turn_path(&turn_id)?.exists() {
+                return Ok(None);
+            }
+            let turn = manager.store.load_turn(&turn_id)?;
+            if turn.thread_id != thread_id {
+                return Ok(None);
+            }
+            let item_artifacts = manager.item_artifact_refs(&turn);
+            let artifacts = if turn.workspace.is_some() {
+                turn.artifacts
+            } else {
+                turn_artifacts::merge_turn_artifacts(&item_artifacts, None).artifacts
+            };
+            Ok(Some(TurnArtifactsView {
+                thread_id,
+                turn_id,
+                workspace: turn.workspace,
+                artifacts,
+                item_artifacts,
+                thread_workspace: thread.workspace,
+            }))
+        })
+        .await
+        .context("turn artifact read task failed")?
+    }
+
     pub async fn get_thread(&self, id: &str) -> Result<ThreadRecord> {
         self.flush_recovery_receipts_for_thread(id).await?;
         self.store
@@ -8009,6 +9198,8 @@ impl RuntimeThreadManager {
             && req.title.is_none()
             && req.system_prompt.is_none()
             && req.workspace.is_none()
+            && req.model_provider.is_none()
+            && req.model_provider_id.is_none()
         {
             bail!("At least one thread field is required");
         }
@@ -8033,6 +9224,41 @@ impl RuntimeThreadManager {
         {
             bail!("workspace must not be empty");
         }
+
+        // A provider switch resolves and preflights the target route before
+        // anything is saved, exactly like the TUI's `/provider`: a provider
+        // that cannot serve the next turn is refused, not recorded. History
+        // stays with the thread; the next turn installs the new route.
+        let provider_switch = {
+            let config = self.read_config().clone();
+            match requested_provider_identity(
+                &config,
+                req.model_provider.as_deref(),
+                req.model_provider_id.as_deref(),
+            )? {
+                Some(identity) => {
+                    let current_model = self.get_thread(id).await?.model;
+                    let requested_model = req.model.clone().or_else(|| {
+                        current_model
+                            .trim()
+                            .eq_ignore_ascii_case("auto")
+                            .then_some(current_model)
+                    });
+                    let route =
+                        ready_provider_route(&config, &identity, requested_model.as_deref())?;
+                    let model = match requested_model {
+                        Some(model) if model.trim().eq_ignore_ascii_case("auto") => model,
+                        _ => route.model.clone(),
+                    };
+                    Some((
+                        identity.provider.as_str().to_string(),
+                        identity.exact_id,
+                        model,
+                    ))
+                }
+                None => None,
+            }
+        };
 
         // Source resolution reads config files. Do it off the Tokio worker,
         // then recheck the conversation identity before committing the grant.
@@ -8116,7 +9342,21 @@ impl RuntimeThreadManager {
                 thread.trust_mode = trust_mode;
                 changes.insert("trust_mode".to_string(), json!(trust_mode));
             }
-            if let Some(model) = req.model
+            let requested_model = match provider_switch {
+                Some((model_provider, model_provider_id, model)) => {
+                    if thread.model_provider.as_deref() != Some(model_provider.as_str())
+                        || thread.model_provider_id != model_provider_id
+                    {
+                        changes.insert("model_provider".to_string(), json!(model_provider));
+                        changes.insert("model_provider_id".to_string(), json!(model_provider_id));
+                        thread.model_provider = Some(model_provider);
+                        thread.model_provider_id = model_provider_id;
+                    }
+                    Some(model)
+                }
+                None => req.model,
+            };
+            if let Some(model) = requested_model
                 && thread.model != model
             {
                 thread.model = model.clone();
@@ -8339,6 +9579,30 @@ impl RuntimeThreadManager {
         Ok(())
     }
 
+    /// Every workspace restore point recorded on this thread's turns — the
+    /// snapshots the thread owns, including those its cloned (forked) turns
+    /// carry. Callers hold `thread_restore_guard`, so no turn is recording.
+    pub(crate) fn thread_workspace_snapshots(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<crate::snapshot::WorkspaceSnapshotRef>> {
+        Ok(self
+            .store
+            .list_turns_for_thread(thread_id)?
+            .into_iter()
+            .flat_map(|turn| turn.workspace_snapshots)
+            .collect())
+    }
+
+    /// Test seam: build every later engine with `client` as its model client.
+    #[cfg(test)]
+    pub(crate) fn set_test_model_client(
+        &self,
+        client: crate::core::model_client::SharedModelClient,
+    ) {
+        *self.test_model_client.lock() = Some(client);
+    }
+
     /// Test seam: mark or clear an active turn on an installed test engine so
     /// route-level tests can exercise restore admission.
     #[cfg(test)]
@@ -8378,6 +9642,7 @@ impl RuntimeThreadManager {
             thread.saved_session_checkpoint = Some(SavedSessionCheckpoint {
                 covered_turn_id: thread.latest_turn_id.clone(),
                 messages_sha256,
+                messages_len: Some(session.messages.len()),
                 retained_messages: None,
             });
             thread.updated_at = Utc::now();
@@ -8484,20 +9749,45 @@ impl RuntimeThreadManager {
     /// exactly when the first one is busy — is where the duplicates came from.
     /// A client that lands on one has to treat its composer as steering rather
     /// than as a new turn (`start_turn` refuses a busy thread by design).
+    /// Another unarchived thread in this store bound to `session_id`.
+    pub(crate) fn thread_bound_to_session(
+        &self,
+        session_id: &str,
+        except_thread_id: &str,
+    ) -> Option<String> {
+        self.store
+            .list_threads()
+            .ok()?
+            .into_iter()
+            .find(|thread| {
+                !thread.archived
+                    && thread.id != except_thread_id
+                    && thread.session_id.as_deref() == Some(session_id)
+            })
+            .map(|thread| thread.id)
+    }
+
     pub(crate) fn thread_holding_session(
         &self,
         session_id: &str,
         session: &crate::session_manager::SavedSession,
     ) -> Option<ThreadRecord> {
-        let expected = session_messages_sha256(&session.messages).ok()?;
         // Store order is newest-first, so the first match is the newest binding
         // and the one a client most likely means.
         for thread in self.store.list_threads().ok()? {
             if thread.archived || thread.session_id.as_deref() != Some(session_id) {
                 continue;
             }
+            // The checkpoint must cover the *whole* document. Hydration
+            // accepts a prefix (the document may have grown since the bind),
+            // but that thread shows the prefix plus its own turns, so anything
+            // another writer appended after the bind would be missing from it.
+            // A grown document gets a fresh thread holding all of it instead.
             if let Some(checkpoint) = thread.saved_session_checkpoint.as_ref()
-                && checkpoint.messages_sha256 != expected
+                && !matches!(
+                    checkpoint_prefix_len(checkpoint, &session.messages),
+                    Ok(Some(len)) if len == session.messages.len()
+                )
             {
                 continue;
             }
@@ -8584,13 +9874,26 @@ impl RuntimeThreadManager {
         session.metadata.copy_cost_from(&source.metadata);
 
         let session_id = session.metadata.id.clone();
-        let messages_sha256 = session_messages_sha256(prefix)?;
         manager.save_session(&session)?;
+
+        // Fingerprint the document the way every reader sees it. A saved
+        // session is repaired on the way out — `resume_session` re-pairs the
+        // tool calls with their results and writes the repair back — so a
+        // prefix rebuilt from turn records can be stored in one shape and read
+        // in another: a tool call whose result never arrived arrives here as
+        // the repair's notice message. Fingerprinting the written shape names
+        // bytes no reader sees, and every reader then rejects the fork — its
+        // own hydration refuses the document, and resuming the session does
+        // not recognise the thread that holds it, so it opens a second one and
+        // the first is left stale.
+        let stored = manager.resume_session(&session_id)?.session.messages;
+        let messages_sha256 = session_messages_sha256(&stored)?;
 
         forked.session_id = Some(session_id);
         forked.saved_session_checkpoint = Some(SavedSessionCheckpoint {
             covered_turn_id,
             messages_sha256,
+            messages_len: Some(stored.len()),
             retained_messages: None,
         });
         Ok(())
@@ -8600,33 +9903,49 @@ impl RuntimeThreadManager {
         let source = self.get_thread(id).await?;
         let mut forked = source.clone();
         let now = Utc::now();
-        forked.id = format!("thr_{}", &Uuid::new_v4().to_string()[..8]);
+        forked.id = runtime_record_id("thr");
         forked.created_at = now;
         forked.updated_at = now;
         forked.latest_turn_id = None;
         forked.archived = false;
 
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
+        // One read for every turn's items — see `prepared_items_for_turns`: a
+        // whole-thread fork visits every turn, and the per-turn scan made that
+        // quadratic over a store that only grows.
+        let mut items_by_turn = self.prepared_items_for_turns(&source_turns)?;
         // The fork's own document holds exactly the prefix its source
         // checkpoint already covers — see `bind_fork_to_own_session`. A source
         // whose checkpoint no longer matches its file has no prefix to copy;
         // the fork then keeps the binding it inherited, which is what it did
         // before this existed, rather than failing the fork outright.
-        let fork_prefix = match self.saved_session_prefix(&source, &source_turns) {
-            Ok(Some(prefix)) => Some(prefix),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    thread_id = %source.id,
-                    "fork source has no usable saved-session prefix: {error:#}"
-                );
-                None
+        //
+        // A compacted source has no transcript to copy at all: its saved
+        // messages are the summary plus the prompts that stayed verbatim, so
+        // the whole conversation is rebuilt from its records instead — see
+        // `saved_transcript_is_compacted`.
+        let fork_prefix = if saved_transcript_is_compacted(&source_turns, &items_by_turn) {
+            Some((
+                Self::reconstruct_messages_from_turns_with(&source_turns, &items_by_turn)?,
+                source_turns.len(),
+            ))
+        } else {
+            match self.saved_session_prefix(&source, &source_turns) {
+                Ok(Some(prefix)) => Some(prefix),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %source.id,
+                        "fork source has no usable saved-session prefix: {error:#}"
+                    );
+                    None
+                }
             }
         };
         let mut cloned_records = Vec::with_capacity(source_turns.len());
         for source_turn in source_turns {
             let mut cloned_turn = source_turn.clone();
-            cloned_turn.id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+            cloned_turn.id = runtime_record_id("turn");
             cloned_turn.thread_id = forked.id.clone();
             if let Some(checkpoint) = forked.saved_session_checkpoint.as_mut()
                 && checkpoint.covered_turn_id.as_deref() == Some(source_turn.id.as_str())
@@ -8635,11 +9954,11 @@ impl RuntimeThreadManager {
             }
             cloned_turn.item_ids.clear();
 
-            let items = self.store.list_items_for_turn(&source_turn.id)?;
+            let items = items_by_turn.remove(&source_turn.id).unwrap_or_default();
             let mut cloned_items = Vec::with_capacity(items.len());
             for item in items {
                 let mut cloned_item = item.clone();
-                cloned_item.id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                cloned_item.id = runtime_record_id("item");
                 cloned_item.turn_id = cloned_turn.id.clone();
                 cloned_turn.item_ids.push(cloned_item.id.clone());
                 cloned_items.push(cloned_item);
@@ -8706,12 +10025,14 @@ impl RuntimeThreadManager {
     /// `None` when no detail was recorded (defensive — every persisted
     /// `UserMessage` since v0.6 carries a detail string).
     ///
-    /// Counts user turns by iterating `list_turns_for_thread` (sorted
-    /// oldest → newest) backwards. A turn is counted as a "user turn"
+    /// Counts user turns over `list_turns_for_thread` (sorted
+    /// oldest → newest). A turn is counted as a "user turn"
     /// when at least one of its items has `kind ==
     /// TurnItemKind::UserMessage`. Steered turns (which append additional
     /// `UserMessage` items) still count as one turn — backtrack rewinds
-    /// at the turn boundary, not at the steer boundary.
+    /// at the turn boundary, not at the steer boundary. That predicate lives
+    /// in `user_turn_indices`, which the named anchor is resolved through
+    /// (`fork_cut_for_user_turn`) as well.
     ///
     /// Errors:
     /// - `depth_from_tail` exceeds the number of user turns
@@ -8733,6 +10054,114 @@ impl RuntimeThreadManager {
         self.publish_prepared_fork(prepared).await
     }
 
+    /// Fork a thread at a named user turn — the branch point a transcript's
+    /// "continue from here" row names.
+    ///
+    /// The fork *keeps* that turn and every turn before it, and drops the
+    /// turns after it; the first dropped turn's prompt comes back so a client
+    /// can put it in the composer as the thing that was asked next, to edit or
+    /// replace. Naming the last turn keeps every turn — a fork of the whole
+    /// conversation — which is the same rule read at the end of the thread.
+    ///
+    /// `turn_id` is a turn id as `GET /v1/threads/{id}` reports it and must
+    /// name a user turn (the same predicate [`Self::fork_at_user_message`]
+    /// counts). This exists because a client cannot count those turns for
+    /// itself: the transcript it renders and the turn store this cuts are not
+    /// the same list — steers, image-only prompts and injected handoffs each
+    /// sit on one side only — so a depth the client computed is an off-by-one
+    /// waiting to fork the wrong prefix and report success. Naming the turn
+    /// moves that decision to the side that owns the list.
+    ///
+    /// Like every other fork, this touches neither the source thread nor the
+    /// workspace: it is a sibling conversation, never an undo. Rollback of
+    /// the dropped turns' file changes is `/patch-undo` territory and is
+    /// deliberately absent here — a fork that rewound the workspace would
+    /// rewind it for the branch that was left behind too.
+    pub async fn fork_at_user_turn(
+        &self,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<(
+        ThreadRecord,
+        Option<String>,
+        Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+        Option<std::num::NonZeroU32>,
+    )> {
+        let prepared = self.prepare_fork_at_user_turn(id, turn_id).await?;
+        self.publish_prepared_fork(prepared).await
+    }
+
+    /// How many turns a named anchor keeps, the first user turn it drops, and
+    /// its distance from the tail.
+    ///
+    /// The fork keeps the anchor turn, so the cut is one past it: the branch
+    /// point is the answer a person is looking at, not the question above it.
+    /// The turn right after the anchor need not be a user turn — a manual
+    /// `/compact` is a turn of its own with no prompt — so the receipt names
+    /// the next *user* turn, which is what was asked next, while the cut still
+    /// drops everything after the anchor.
+    fn fork_cut_for_user_turn(
+        &self,
+        turns: &[TurnRecord],
+        items_by_turn: &HashMap<String, Vec<TurnItemRecord>>,
+        turn_id: &str,
+    ) -> Result<(usize, Option<usize>, usize)> {
+        // Oldest → newest, so the named turn's position is a direct index.
+        let user_turn_indices = Self::user_turn_indices(turns, items_by_turn);
+        let position = user_turn_indices
+            .iter()
+            .position(|index| turns[*index].id == turn_id)
+            .with_context(|| {
+                format!("fork_at_user_turn: turn {turn_id} is not a user turn of this thread")
+            })?;
+        Ok((
+            user_turn_indices[position] + 1,
+            user_turn_indices.get(position + 1).copied(),
+            user_turn_indices.len() - 1 - position,
+        ))
+    }
+
+    /// The indices into `turns` that count as user turns, oldest → newest.
+    ///
+    /// A turn is a user turn when at least one of its items has `kind ==
+    /// TurnItemKind::UserMessage`; a steered turn counts once, at its turn
+    /// boundary, not once per steer. One home for that rule, so a
+    /// tail-relative depth and a named-turn anchor can never disagree about
+    /// which turn they mean. Free-standing because it reads nothing but the
+    /// turns and the items already loaded for them.
+    fn user_turn_indices(
+        turns: &[TurnRecord],
+        items_by_turn: &HashMap<String, Vec<TurnItemRecord>>,
+    ) -> Vec<usize> {
+        let mut indices = Vec::new();
+        for (idx, turn) in turns.iter().enumerate() {
+            let is_user_turn = items_by_turn.get(&turn.id).is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.kind == TurnItemKind::UserMessage)
+            });
+            if is_user_turn {
+                indices.push(idx);
+            }
+        }
+        indices
+    }
+
+    /// Every item of every turn in `turns`, keyed by turn id.
+    ///
+    /// `list_items_for_turn` scans the store's whole items directory to find
+    /// one turn's items, and a fork visits every turn: on a store holding tens
+    /// of thousands of items that is seconds per turn, which is how a branch
+    /// came to take minutes. One scan answers all of them — the same call the
+    /// thread projection already reads a transcript with.
+    fn prepared_items_for_turns(
+        &self,
+        turns: &[TurnRecord],
+    ) -> Result<HashMap<String, Vec<TurnItemRecord>>> {
+        let turn_ids: Vec<String> = turns.iter().map(|turn| turn.id.clone()).collect();
+        self.store.list_items_for_turns_map(&turn_ids)
+    }
+
     pub(crate) async fn prepare_fork_at_user_message(
         &self,
         id: &str,
@@ -8740,19 +10169,12 @@ impl RuntimeThreadManager {
     ) -> Result<PreparedThreadFork> {
         let source = self.get_thread(id).await?;
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
+        // Every item of every turn in one read: see `prepared_items_for_turns`.
+        let items_by_turn = self.prepared_items_for_turns(&source_turns)?;
 
-        // Walk turns from newest to oldest. For each turn, ask: does it
-        // contain a UserMessage item? If yes, it counts toward the depth.
-        let mut user_turn_indices: Vec<usize> = Vec::new();
-        for (idx, turn) in source_turns.iter().enumerate().rev() {
-            let items = self.store.list_items_for_turn(&turn.id)?;
-            if items
-                .iter()
-                .any(|item| item.kind == TurnItemKind::UserMessage)
-            {
-                user_turn_indices.push(idx);
-            }
-        }
+        // Which turns count as user turns, oldest first; the depth names one
+        // of them counting back from the end.
+        let user_turn_indices = Self::user_turn_indices(&source_turns, &items_by_turn);
         if depth_from_tail >= user_turn_indices.len() {
             bail!(
                 "fork_at_user_message: depth {} exceeds {} user turn(s)",
@@ -8760,36 +10182,155 @@ impl RuntimeThreadManager {
                 user_turn_indices.len()
             );
         }
-        // `user_turn_indices` is newest-first because we iterated in
-        // reverse, so the Nth element is exactly the Nth-from-tail user
-        // turn in the original chronological list.
-        let target_turn_idx = user_turn_indices[depth_from_tail];
-        let target_turn_id = source_turns[target_turn_idx].id.clone();
+        let target_turn_idx = user_turn_indices[user_turn_indices.len() - 1 - depth_from_tail];
+        // A depth-relative cut *drops* the turn it names — `/undo` removes the
+        // exchange a person pointed at — where a named-turn cut keeps it. That
+        // one turn is the whole difference between "undo this" and "branch
+        // after this", and it lives here rather than in either caller.
+        self.prepare_fork_from_cutoff(
+            source,
+            source_turns,
+            items_by_turn,
+            target_turn_idx,
+            Some(target_turn_idx),
+            depth_from_tail,
+        )
+    }
 
-        // Pull the original user-message text out of the dropped turn so
-        // the caller can drop it back into the composer.
-        let target_items = self.store.list_items_for_turn(&target_turn_id)?;
-        let original_user_text = target_items
+    pub(crate) async fn prepare_fork_at_user_turn(
+        &self,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<PreparedThreadFork> {
+        let source = self.get_thread(id).await?;
+        let source_turns = self.store.list_turns_for_thread(&source.id)?;
+        let items_by_turn = self.prepared_items_for_turns(&source_turns)?;
+        let (cutoff_turn_idx, receipt_turn_idx, depth_from_tail) =
+            self.fork_cut_for_user_turn(&source_turns, &items_by_turn, turn_id)?;
+        self.prepare_fork_from_cutoff(
+            source,
+            source_turns,
+            items_by_turn,
+            cutoff_turn_idx,
+            receipt_turn_idx,
+            depth_from_tail,
+        )
+    }
+
+    /// Clone the turns before `cutoff_turn_idx` into a sibling thread, and name
+    /// the first *user* turn left behind (`receipt_turn_idx`, at or after the
+    /// cutoff) in the receipt.
+    ///
+    /// One body for every fork that cuts a suffix: the depth-relative path
+    /// (`/undo`, retry, backtrack) passes the anchor turn's own index and drops
+    /// it, the named-anchor path passes one past its anchor and keeps it, so
+    /// the cloning, the saved-session prefix and the receipt cannot drift apart
+    /// between them.
+    fn prepare_fork_from_cutoff(
+        &self,
+        source: ThreadRecord,
+        source_turns: Vec<TurnRecord>,
+        mut items_by_turn: HashMap<String, Vec<TurnItemRecord>>,
+        cutoff_turn_idx: usize,
+        receipt_turn_idx: Option<usize>,
+        depth_from_tail: usize,
+    ) -> Result<PreparedThreadFork> {
+        // The first user turn the fork drops, when it drops any. Its prompt is
+        // what the caller puts back in the composer: for a depth-relative cut
+        // that is the turn being undone, and for an anchored cut it is the
+        // question that followed the branch point — not a prompt-less turn
+        // (a manual compaction, a routing settlement) that happens to sit
+        // between them.
+        debug_assert!(receipt_turn_idx.is_none_or(|idx| idx >= cutoff_turn_idx));
+        let dropped_turns = source_turns
             .iter()
-            .find(|item| item.kind == TurnItemKind::UserMessage)
+            .skip(cutoff_turn_idx)
+            .map(|turn| {
+                let items = items_by_turn.get(&turn.id).map_or(&[][..], Vec::as_slice);
+                let ran_tools = items.iter().any(|item| {
+                    matches!(
+                        item.kind,
+                        TurnItemKind::ToolCall
+                            | TurnItemKind::FileChange
+                            | TurnItemKind::CommandExecution
+                    )
+                });
+                let ran_here = turn.permission_posture.is_some();
+                let mut declared_writes = Vec::new();
+                let mut unrun_tool_calls = std::collections::BTreeSet::new();
+                for item in items {
+                    let Some(meta) = item.metadata.as_ref() else {
+                        continue;
+                    };
+                    let call_id = meta.get("tool_use_id").and_then(Value::as_str);
+                    if matches!(
+                        item.status,
+                        TurnItemLifecycleStatus::Failed
+                            | TurnItemLifecycleStatus::Canceled
+                            | TurnItemLifecycleStatus::Queued
+                    ) {
+                        if let Some(call_id) = call_id {
+                            unrun_tool_calls.insert(call_id.to_string());
+                        }
+                        continue;
+                    }
+                    let (Some(name), Some(input)) = (
+                        meta.get("tool_name").and_then(Value::as_str),
+                        meta.get("tool_input").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    let Ok(input) = serde_json::from_str::<Value>(input) else {
+                        continue;
+                    };
+                    if let Some(paths) =
+                        crate::core::engine::file_write_tool_target_paths(name, &input)
+                    {
+                        declared_writes.extend(paths);
+                    }
+                }
+                DroppedTurnSnapshots {
+                    turn_id: turn.id.clone(),
+                    may_change_files: !turn.routing_settlement
+                        && !items.is_empty()
+                        && (ran_tools || !ran_here),
+                    snapshots: turn.workspace_snapshots.clone(),
+                    declared_writes,
+                    unrun_tool_calls,
+                }
+            })
+            .collect();
+        let dropped_turn = receipt_turn_idx.and_then(|idx| source_turns.get(idx));
+        let dropped_turn_id = dropped_turn.map(|turn| turn.id.clone());
+        let dropped_user_item = dropped_turn
+            .and_then(|turn| items_by_turn.get(&turn.id))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.kind == TurnItemKind::UserMessage)
+            });
+        let original_user_text = dropped_user_item
+            .as_ref()
             .and_then(|item| item.detail.clone());
-        let original_images = target_items
-            .iter()
-            .find(|item| item.kind == TurnItemKind::UserMessage)
+        let original_images = dropped_user_item
+            .as_ref()
             .map(|item| {
                 item.user_content()
                     .and_then(|content| crate::image_attach::runtime_images_from_blocks(&content))
             })
             .transpose()?
             .unwrap_or_default();
+        // The next turn's allowance travels with the prompt it belongs to;
+        // with nothing dropped there is no next turn to inherit from.
+        let max_output_tokens = dropped_turn.and_then(|turn| turn.max_output_tokens);
 
-        // Copy turns strictly before `target_turn_idx` into a new thread.
-        // Mirrors `fork_thread` but stops at the cutoff instead of copying
-        // every turn. Kept structurally close so future parity reviews
-        // can spot drift between the two paths.
+        // Copy the turns before the cutoff into a new thread. Mirrors
+        // `fork_thread` but stops at the cutoff instead of copying every turn.
+        // Kept structurally close so future parity reviews can spot drift
+        // between the two paths.
         let mut forked = source.clone();
         let now = Utc::now();
-        forked.id = format!("thr_{}", &Uuid::new_v4().to_string()[..8]);
+        forked.id = runtime_record_id("thr");
         forked.created_at = now;
         forked.updated_at = now;
         forked.latest_turn_id = None;
@@ -8799,34 +10340,122 @@ impl RuntimeThreadManager {
         // own — see `bind_fork_to_own_session`.
         let mut fork_prefix: Option<(Vec<Message>, usize)> = None;
         if let Some((messages, covered)) = self.saved_session_prefix(&source, &source_turns)? {
-            let kept_turns = covered.min(target_turn_idx);
-            let retained_messages = if covered <= target_turn_idx {
-                messages.len()
+            let kept_turns = covered.min(cutoff_turn_idx);
+            // A compacted source has no transcript to cut — see
+            // `saved_transcript_is_compacted`. Every boundary in its saved
+            // messages names a turn while carrying only that turn's prompt, so
+            // a slice of them would claim coverage of exchanges the fork's own
+            // document does not hold. There is nothing for the boundary search
+            // to find either, so it is skipped rather than risk a refusal for a
+            // trim the fork is not going to take.
+            let compacted = saved_transcript_is_compacted(&source_turns, &items_by_turn);
+            let retained_messages = if compacted {
+                None
+            } else if covered <= cutoff_turn_idx {
+                Some(messages.len())
             } else {
-                let expected = session_recovery_projection(
-                    &self.reconstruct_messages_from_turns(&source_turns[..target_turn_idx])?,
-                );
-                (0..=messages.len())
-                    .find(|count| session_recovery_projection(&messages[..*count]) == expected)
+                let kept_messages = Self::reconstruct_messages_from_turns_with(
+                    &source_turns[..cutoff_turn_idx],
+                    &items_by_turn,
+                )?;
+                let kept_projection = session_recovery_projection(&kept_messages);
+                // An exact projection match is the strongest proof: message for
+                // message, this prefix *is* the kept history. It holds for a
+                // transcript the records reproduce, and is tried first so those
+                // shapes keep their exact boundary.
+                // One walk, not one rebuild per prefix — see
+                // `exact_prefix_boundary`.
+                Some(
+                    if let Some(count) = exact_prefix_boundary(&messages, &kept_projection) {
+                        count
+                    } else {
+                        // It cannot hold for a real conversation: the model-visible
+                        // transcript carries the per-turn `<turn_meta>` preamble and
+                        // tool results as the route's compaction left them, neither
+                        // of which the records keep. The prompt is recorded
+                        // verbatim, so it still names the message the first dropped
+                        // turn begins at — see `saved_history_boundary`.
+                        //
+                        // That turn is the one the kept history stops *before*: the
+                        // anchor itself for a depth-relative cut, and the next user
+                        // turn after the anchor for a fork at a named turn, which
+                        // keeps it. When no user turn is dropped at all, every
+                        // saved prompt belongs to a kept turn, and so does the
+                        // whole saved transcript.
+                        match dropped_turn {
+                            None => messages.len(),
+                            Some(dropped_turn) => {
+                                let dropped_prompt = projected_user_texts(
+                        &Self::reconstruct_messages_from_turns_with(
+                            std::slice::from_ref(dropped_turn),
+                            &items_by_turn,
+                        )?,
+                    )
+                    .into_iter()
+                    .next()
+                    .with_context(|| {
+                        format!(
+                            "Turn {} records no user prompt to align the saved history with; the source thread was preserved",
+                            dropped_turn.id
+                        )
+                    })?;
+                                saved_history_boundary(
+                        &messages,
+                        &projected_user_texts(&kept_messages),
+                        &dropped_prompt,
+                    )
                     .context("Cannot identify an exact saved-history boundary for this backtrack; the source thread was preserved")?
+                            }
+                        }
+                    },
+                )
+            };
+            let (prefix, covered_turns) = match retained_messages {
+                Some(retained) => (messages[..retained].to_vec(), kept_turns),
+                None => (
+                    Self::reconstruct_messages_from_turns_with(
+                        &source_turns[..cutoff_turn_idx],
+                        &items_by_turn,
+                    )?,
+                    cutoff_turn_idx,
+                ),
             };
             forked.saved_session_checkpoint = Some(SavedSessionCheckpoint {
-                covered_turn_id: kept_turns
+                covered_turn_id: covered_turns
                     .checked_sub(1)
                     .map(|index| source_turns[index].id.clone()),
-                messages_sha256: match &source.saved_session_checkpoint {
-                    Some(checkpoint) => checkpoint.messages_sha256.clone(),
-                    None => session_messages_sha256(&messages)?,
+                // A copy of the source's own slice keeps the source's
+                // fingerprint, which is what an inherited binding (the fork
+                // could not be given a document) is verified against. A
+                // rebuilt prefix describes itself and hashes itself.
+                messages_sha256: if compacted {
+                    session_messages_sha256(&prefix)?
+                } else {
+                    match &source.saved_session_checkpoint {
+                        Some(checkpoint) => checkpoint.messages_sha256.clone(),
+                        None => session_messages_sha256(&messages)?,
+                    }
                 },
-                retained_messages: Some(retained_messages),
+                // The fingerprint's own extent: the rebuilt prefix, the
+                // source checkpoint's (a legacy `None` migrates on read), or
+                // the whole verified legacy document.
+                messages_len: if compacted {
+                    Some(prefix.len())
+                } else {
+                    match &source.saved_session_checkpoint {
+                        Some(checkpoint) => checkpoint.messages_len,
+                        None => Some(messages.len()),
+                    }
+                },
+                retained_messages: Some(prefix.len()),
             });
-            fork_prefix = Some((messages[..retained_messages].to_vec(), kept_turns));
+            fork_prefix = Some((prefix, covered_turns));
         }
 
-        let mut cloned_records = Vec::with_capacity(target_turn_idx);
-        for source_turn in source_turns.iter().take(target_turn_idx) {
+        let mut cloned_records = Vec::with_capacity(cutoff_turn_idx);
+        for source_turn in source_turns.iter().take(cutoff_turn_idx) {
             let mut cloned_turn = source_turn.clone();
-            cloned_turn.id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+            cloned_turn.id = runtime_record_id("turn");
             cloned_turn.thread_id = forked.id.clone();
             if let Some(checkpoint) = forked.saved_session_checkpoint.as_mut()
                 && checkpoint.covered_turn_id.as_deref() == Some(source_turn.id.as_str())
@@ -8835,11 +10464,11 @@ impl RuntimeThreadManager {
             }
             cloned_turn.item_ids.clear();
 
-            let items = self.store.list_items_for_turn(&source_turn.id)?;
+            let items = items_by_turn.remove(&source_turn.id).unwrap_or_default();
             let mut cloned_items = Vec::with_capacity(items.len());
             for item in items {
                 let mut cloned_item = item.clone();
-                cloned_item.id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                cloned_item.id = runtime_record_id("item");
                 cloned_item.turn_id = cloned_turn.id.clone();
                 cloned_turn.item_ids.push(cloned_item.id.clone());
                 cloned_items.push(cloned_item);
@@ -8861,14 +10490,15 @@ impl RuntimeThreadManager {
         );
         Ok(PreparedThreadFork {
             source_id: source.id,
-            target_turn_id,
+            dropped_turn_id,
             depth_from_tail,
             thread: forked,
             records: cloned_records,
             original_user_text,
             original_images,
-            max_output_tokens: source_turns[target_turn_idx].max_output_tokens,
+            max_output_tokens,
             own_session,
+            dropped_turns,
         })
     }
 
@@ -8909,7 +10539,7 @@ impl RuntimeThreadManager {
                     "thread": prepared.thread,
                     "source_thread_id": prepared.source_id,
                     "backtrack_depth_from_tail": prepared.depth_from_tail,
-                    "dropped_turn_id": prepared.target_turn_id,
+                    "dropped_turn_id": prepared.dropped_turn_id,
                 }),
             )
             .await
@@ -8939,11 +10569,18 @@ impl RuntimeThreadManager {
         let mut saved_turn_ids = Vec::new();
         let mut saved_item_ids = Vec::new();
         let persistence = (|| -> Result<()> {
-            for (turn, items) in records {
-                for item in items {
-                    self.store.save_item(item)?;
-                    saved_item_ids.push(item.id.clone());
-                }
+            // Every cloned item in one batch. Each `save_item` sweeps the
+            // whole items directory and fsyncs it, which is right for a single
+            // record and ruinous for the hundreds a fork clones — the sweep
+            // gives the same answer every time. Items first, turns next, the
+            // thread record that makes them reachable last: the commit point is
+            // unchanged, and the ids are recorded before the batch so a partial
+            // write is still cleaned up.
+            let batch: Vec<&TurnItemRecord> =
+                records.iter().flat_map(|(_, items)| items.iter()).collect();
+            saved_item_ids.extend(batch.iter().map(|item| item.id.clone()));
+            self.store.save_items_batch(&batch)?;
+            for (turn, _) in records {
                 self.store.save_turn(turn)?;
                 saved_turn_ids.push(turn.id.clone());
             }
@@ -9158,14 +10795,14 @@ impl RuntimeThreadManager {
 
         for turn_seed in turns {
             let turn_at = next_seed_stamp();
-            let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+            let turn_id = runtime_record_id("turn");
             let summary =
                 crate::utils::truncate_with_ellipsis(&turn_seed.user_text, SUMMARY_LIMIT, "...");
             let mut item_ids = Vec::new();
 
             // Save user message item.
             if !turn_seed.user_text.is_empty() || !turn_seed.image_content.is_empty() {
-                let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_id = runtime_record_id("item");
                 let item_at = next_seed_stamp();
                 let mut item = TurnItemRecord {
                     schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -9177,6 +10814,7 @@ impl RuntimeThreadManager {
                     detail: Some(turn_seed.user_text.clone()),
                     metadata: None,
                     artifact_refs: Vec::new(),
+                    artifacts: Vec::new(),
                     started_at: Some(item_at),
                     ended_at: Some(item_at),
                 };
@@ -9190,7 +10828,7 @@ impl RuntimeThreadManager {
 
             // Save assistant content items in order.
             for seed_item in &turn_seed.items {
-                let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                let item_id = runtime_record_id("item");
                 let item_at = next_seed_stamp();
                 match seed_item {
                     SeedItem::Text(text) => {
@@ -9209,6 +10847,7 @@ impl RuntimeThreadManager {
                             detail: Some(text.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -9229,6 +10868,7 @@ impl RuntimeThreadManager {
                             detail: Some(thinking.clone()),
                             metadata: None,
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -9266,6 +10906,7 @@ impl RuntimeThreadManager {
                                 .clone(),
                             )),
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -9302,6 +10943,7 @@ impl RuntimeThreadManager {
                             detail: Some(content.clone()),
                             metadata: Some(Value::Object(metadata)),
                             artifact_refs: Vec::new(),
+                            artifacts: Vec::new(),
                             started_at: Some(item_at),
                             ended_at: Some(item_at),
                         })?;
@@ -9352,6 +10994,9 @@ impl RuntimeThreadManager {
                     item_ids,
                     steer_count: 0,
                     agent_mail_message_id: None,
+                    artifacts: Vec::new(),
+                    workspace: None,
+                    workspace_snapshots: Vec::new(),
                 })?;
 
                 thread.latest_turn_id = Some(turn_id);
@@ -9389,7 +11034,7 @@ impl RuntimeThreadManager {
             .transpose()?;
         let turn_id = match requested_turn_id.as_deref() {
             Some(turn_id) => turn_id.to_string(),
-            None => format!("turn_{}", &Uuid::new_v4().to_string()[..8]),
+            None => runtime_record_id("turn"),
         };
         Ok(Some(PreparedRuntimeTurnOperation {
             binding: RuntimeTurnOperationBinding {
@@ -9695,6 +11340,15 @@ impl RuntimeThreadManager {
                         turn.ended_at = Some(now);
                         turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
                         turn.error = Some(reason.to_string());
+                    }
+                    if turn.workspace.is_none() {
+                        // The monitor died before the engine reported a
+                        // snapshot pair; keep what the tool receipts say.
+                        self.set_turn_artifacts(
+                            &mut turn,
+                            None,
+                            TurnWorkspaceArtifacts::unavailable(TurnWorkspaceReason::NotCaptured),
+                        );
                     }
                     (
                         matches!(
@@ -10214,7 +11868,30 @@ impl RuntimeThreadManager {
                 )
             };
         let mode = policy.mode;
-        let requested_model = req.model.as_deref().unwrap_or(&thread.model).to_string();
+        let cfg_snapshot = self.config.read().clone();
+        // Optional per-turn provider override: routes this turn only. The
+        // saved thread keeps its provider; `route_thread` is the view the
+        // route, fingerprint and turn receipt are resolved from.
+        let turn_provider = requested_provider_identity(
+            &cfg_snapshot,
+            req.model_provider.as_deref(),
+            req.model_provider_id.as_deref(),
+        )?;
+        let mut route_thread = thread.clone();
+        let requested_model = match turn_provider.as_ref() {
+            Some(identity) => {
+                route_thread.model_provider = Some(identity.provider.as_str().to_string());
+                route_thread.model_provider_id = identity.exact_id.clone();
+                match req.model.as_deref() {
+                    Some(model) => model.to_string(),
+                    None if thread.model.trim().eq_ignore_ascii_case("auto") => {
+                        thread.model.clone()
+                    }
+                    None => ready_provider_route(&cfg_snapshot, identity, None)?.model.clone(),
+                }
+            }
+            None => req.model.as_deref().unwrap_or(&thread.model).to_string(),
+        };
         let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
         if !image_blocks.is_empty() && (requested_model.is_empty() || requested_model.trim() != requested_model) {
             bail!("image inputs require an exact nonempty named model");
@@ -10222,7 +11899,6 @@ impl RuntimeThreadManager {
         if !image_blocks.is_empty() && auto_model {
             bail!("image inputs require an exact named model with supported image input; Auto is unavailable for images");
         }
-        let cfg_snapshot = self.config.read().clone();
         let configured_reasoning_preference = cfg_snapshot
             .reasoning_effort()
             .map(crate::reasoning_preference::ReasoningEffort::from_setting);
@@ -10244,7 +11920,7 @@ impl RuntimeThreadManager {
         let operation = if let Some(operation_key) = req.operation_key.as_deref() {
             validate_runtime_turn_operation_key(operation_key)?;
             let request_fingerprint = runtime_turn_request_fingerprint(
-                &thread,
+                &route_thread,
                 &prompt,
                 req.input_summary.as_deref(),
                 &requested_model,
@@ -10273,7 +11949,7 @@ impl RuntimeThreadManager {
             return Ok((original_turn, true));
         }
         if !image_blocks.is_empty() || req.max_output_tokens.is_some() {
-            let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
+            let identity = self.provider_identity_for_thread(&cfg_snapshot, &route_thread)?;
             let route = resolve_runtime_thread_route_for_identity(&cfg_snapshot, &identity, Some(&requested_model))?;
             if !image_blocks.is_empty() && route.candidate.capabilities().image_input != codewhale_config::route::CapabilityState::Supported {
                 bail!("image inputs require a model with explicitly supported image input");
@@ -10300,7 +11976,7 @@ impl RuntimeThreadManager {
         // Resolve the concrete provider/model before persisting a turn. Auto
         // routing can fail, and such a failure must not leave a zombie
         // in-progress record behind.
-        let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
+        let identity = self.provider_identity_for_thread(&cfg_snapshot, &route_thread)?;
         let mut thread_config = cfg_snapshot.clone();
         thread_config.scope_to_provider_identity(&identity);
         let verbosity = thread_config.verbosity.clone();
@@ -10403,7 +12079,7 @@ impl RuntimeThreadManager {
                 None,
             )
         };
-        let route = if client_preflight_required {
+        let route = if client_preflight_required || turn_provider.is_some() {
             route
                 .preflight()
                 .map_err(|reason| anyhow!("Failed to validate runtime thread route: {reason}"))?
@@ -10434,7 +12110,7 @@ impl RuntimeThreadManager {
         let turn_id = operation
             .as_ref()
             .map(|operation| operation.binding.turn_id.clone())
-            .unwrap_or_else(|| format!("turn_{}", &Uuid::new_v4().to_string()[..8]));
+            .unwrap_or_else(|| runtime_record_id("turn"));
         compaction.runtime_cost_owner = Some(turn_id.clone());
         let input_summary = req
             .input_summary
@@ -10477,13 +12153,16 @@ impl RuntimeThreadManager {
             item_ids: Vec::new(),
             steer_count: 0,
             agent_mail_message_id: input_source.mail_message_id().map(str::to_string),
+            artifacts: Vec::new(),
+            workspace: None,
+            workspace_snapshots: Vec::new(),
         };
         append_initial_routed_usage_to_turn(&mut turn, &initial_routed_usage);
         // The engine's TurnComplete owns synchronous dropped coverage,
         // including this classifier batch. Pre-persisting the count here and
         // adding TurnComplete at settlement would count the same gap twice.
 
-        let user_item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+        let user_item_id = runtime_record_id("item");
         let mut user_item = TurnItemRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: user_item_id.clone(),
@@ -10494,6 +12173,7 @@ impl RuntimeThreadManager {
             detail: input_source.item_detail(&prompt),
             metadata: input_source.item_metadata(),
             artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
             started_at: Some(now),
             ended_at: Some(now),
         };
@@ -10529,6 +12209,13 @@ impl RuntimeThreadManager {
             })
             .unwrap_or(crate::tools::goal::GoalStatus::Active);
 
+        let turn_hook_executor = self
+            .active
+            .lock()
+            .await
+            .engines
+            .get(thread_id)
+            .and_then(|state| state.hook_executor.clone());
         let op = Op::SendMessage (TurnSpec {
             max_output_tokens,
             content: prompt,
@@ -10549,7 +12236,9 @@ impl RuntimeThreadManager {
             translation_enabled: false,
             allowed_tools,
             dynamic_tools: req.dynamic_tools,
-            hook_executor: None,
+            // The turn op re-installs the executor into the engine, so it
+            // must carry the thread's own, never `None`.
+            hook_executor: turn_hook_executor,
             approval_mode: policy.permission,
             verbosity,
             provenance: input_source.provenance(),
@@ -10778,7 +12467,7 @@ impl RuntimeThreadManager {
         let queued_turn;
         let item = TurnItemRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+            id: runtime_record_id("item"),
             turn_id: turn_id.to_string(),
             kind: TurnItemKind::UserMessage,
             // Queued, not Completed: the text is in the engine's mailbox, not
@@ -10789,6 +12478,7 @@ impl RuntimeThreadManager {
             detail: Some(prompt.clone()),
             metadata: None,
             artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
             started_at: Some(now),
             ended_at: None,
         };
@@ -10909,8 +12599,8 @@ impl RuntimeThreadManager {
         );
 
         let now = Utc::now();
-        let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
-        let compaction_id = format!("compact_{}", &Uuid::new_v4().to_string()[..8]);
+        let turn_id = runtime_record_id("turn");
+        let compaction_id = runtime_record_id("compact");
         compaction.runtime_cost_owner = Some(turn_id.clone());
         // The same projection the turn record receipts, computed once: the
         // compaction runs under the thread's persisted policy.
@@ -10962,6 +12652,9 @@ impl RuntimeThreadManager {
             item_ids: Vec::new(),
             steer_count: 0,
             agent_mail_message_id: None,
+            artifacts: Vec::new(),
+            workspace: None,
+            workspace_snapshots: Vec::new(),
         };
         let op = Op::CompactContext {
             id: compaction_id.clone(),
@@ -11210,6 +12903,14 @@ impl RuntimeThreadManager {
                         .map(|registry| registry.rediscover_for_workspace(&thread.workspace))
                 })
                 .flatten();
+            // Hooks fire on Runtime API threads as they do in the TUI and
+            // `exec --hooks` (B4): the same global, reviewed-plugin and
+            // trusted-project set, for this thread's workspace.
+            let thread_hooks = Arc::new(self.hook_executor_for_workspace(
+                &cfg,
+                &thread.workspace,
+                thread_plugin_registry.as_deref(),
+            ));
             // Rehydrate the persisted thread goal into the engine so the
             // goal loop, prompt surface, and `update_goal` tool operate on
             // the durable record from the first turn. Usage and continuation
@@ -11268,7 +12969,19 @@ impl RuntimeThreadManager {
                 model: route_model.clone(),
                 active_route_limits: route_limits,
                 workspace: thread.workspace.clone(),
-                session_id: None,
+                // The engine runs every Runtime thread under the thread's own
+                // id, from its first turn and across every restart and LRU
+                // eviction. That id tags every workspace snapshot the engine
+                // takes; a generated id (what `None` meant here) changed on
+                // each rebuild and was recorded nowhere, so no later request
+                // could prove the thread owned its own snapshots (#6621). It
+                // is deliberately not `thread.session_id`: that names the
+                // saved-session document the thread is bound to, which save,
+                // resume and fork rebind, and the conversation's identity
+                // must not change when its document does. Ownership itself is
+                // the receipts recorded on the thread's turns
+                // (`TurnRecord::workspace_snapshots`).
+                session_id: Some(thread.id.clone()),
                 subagent_state_root: None,
                 plugin_registry: thread_plugin_registry.clone(),
                 allow_shell: thread.allow_shell,
@@ -11311,6 +13024,12 @@ impl RuntimeThreadManager {
                     .snapshots_config()
                     .max_workspace_gb
                     .saturating_mul(1024 * 1024 * 1024),
+                // Every snapshot receipt, post-turn included, reaches
+                // `monitor_turn` before the turn settles, and every tool
+                // call that may write is bounded by its own snapshots, so
+                // turn-scoped undo can tell the turn's changes from anyone
+                // else's.
+                record_restore_points: true,
                 lsp_config,
                 runtime_services: crate::tools::spec::RuntimeToolServices {
                     task_manager: self.task_manager.lock().upgrade(),
@@ -11326,7 +13045,7 @@ impl RuntimeThreadManager {
                     work: None,
                     shell_manager: Some(shell_manager),
                     persist_services_enabled: false,
-                    hook_executor: None,
+                    hook_executor: Some(Arc::clone(&thread_hooks)),
                     handle_store: crate::tools::handle::new_shared_handle_store(),
                     rlm_sessions: crate::rlm::session::new_shared_rlm_session_store(),
                     media_originals_dir: crate::media_originals::default_store_dir(),
@@ -11383,7 +13102,7 @@ impl RuntimeThreadManager {
                 allowed_tools: isolated_chat.then(Vec::new),
                 disallowed_tools: None,
                 max_tool_calls: None,
-                hook_executor: None,
+                hook_executor: Some(Arc::clone(&thread_hooks)),
                 locale_tag: codewhale_localization::resolve_locale(&settings.locale)
                     .tag()
                     .to_string(),
@@ -11391,6 +13110,7 @@ impl RuntimeThreadManager {
                 search_provider: cfg.search_provider(),
                 search_api_key: cfg.search.as_ref().and_then(|s| s.api_key.clone()),
                 search_base_url: cfg.search.as_ref().and_then(|s| s.base_url.clone()),
+                search_native: cfg.search_native(),
                 tools_always_load: if isolated_chat {
                     HashSet::new()
                 } else {
@@ -11413,10 +13133,15 @@ impl RuntimeThreadManager {
 
             // Verify the persisted history before spawning an Engine task.
             let session_messages = self.restore_thread_messages(&thread)?;
+            #[cfg(test)]
+            let model_client = self.test_model_client.lock().clone();
+            #[cfg(not(test))]
+            let model_client = None;
             let (engine, worker) = spawn_engine_with_authoritative_route_config(
                 engine_cfg,
                 &cfg,
                 Arc::clone(&self.config),
+                model_client,
             );
             {
                 let mut workers = self.engine_workers.lock();
@@ -11431,7 +13156,10 @@ impl RuntimeThreadManager {
             if !session_messages.is_empty() || sys_prompt.is_some() {
                 engine
                     .send(Op::SyncSession {
-                        session_id: thread.session_id.clone(),
+                        // Same identity the engine was built with: a
+                        // re-sync of the same conversation, never a
+                        // conversation boundary.
+                        session_id: Some(thread.id.clone()),
                         messages: session_messages,
                         system_prompt: sys_prompt,
                         system_prompt_override: thread.system_prompt.is_some(),
@@ -11483,6 +13211,7 @@ impl RuntimeThreadManager {
                     active_turn: None,
                     route_identity,
                     route_model,
+                    hook_executor: Some(Arc::clone(&thread_hooks)),
                     client_preflight_required: true,
                 },
             );
@@ -11628,11 +13357,108 @@ impl RuntimeThreadManager {
 
     fn restore_thread_messages(&self, thread: &ThreadRecord) -> Result<Vec<Message>> {
         let turns = self.store.list_turns_for_thread(&thread.id)?;
-        let (mut messages, covered) = self
-            .saved_session_prefix(thread, &turns)?
-            .unwrap_or_default();
+        let (mut messages, covered) = match self.saved_session_prefix(thread, &turns) {
+            Ok(prefix) => prefix.unwrap_or_default(),
+            Err(error) => {
+                let Some(stale) = error.downcast_ref::<StaleSessionBinding>() else {
+                    return Err(error);
+                };
+                // The binding describes no readable document. The thread's
+                // own turns are its history; drop the dead link (keeping it
+                // in a receipt) instead of stranding the thread (#6144).
+                self.unbind_stale_session(thread, &stale.reason)?;
+                (Vec::new(), 0)
+            }
+        };
         messages.extend(self.reconstruct_messages_from_turns(&turns[covered..])?);
         Ok(messages)
+    }
+
+    /// Drop `thread`'s saved-session binding when the stored record still
+    /// carries exactly the binding that was found stale, and record the old
+    /// binding in the session reconcile receipts.
+    fn unbind_stale_session(&self, thread: &ThreadRecord, reason: &str) -> Result<()> {
+        let _thread_mutation = self.store.thread_mutation.lock();
+        let mut stored = self.store.load_thread(&thread.id)?;
+        if stored.session_id != thread.session_id
+            || stored.saved_session_checkpoint != thread.saved_session_checkpoint
+        {
+            return Ok(());
+        }
+        crate::session_reconcile::record_thread_unbound(
+            &self.session_store_binding().data_dir,
+            &stored,
+            reason,
+        );
+        stored.session_id = None;
+        stored.saved_session_checkpoint = None;
+        stored.updated_at = Utc::now();
+        self.store.save_thread(&stored)
+    }
+
+    /// Unbind every thread in this store that names `session_id` (#6144).
+    /// Called when that document is deleted: the threads keep their turns and
+    /// hydrate from them instead of failing with "Cannot read saved session".
+    pub(crate) fn unbind_session_threads(&self, session_id: &str) -> Result<usize> {
+        unbind_session_threads_in_store(
+            &self.store,
+            &self.session_store_binding().data_dir,
+            session_id,
+            "the session document was deleted",
+        )
+    }
+
+    /// Give a legacy `session_id`-only link the checkpoint its projection
+    /// match just established. Best effort, like [`Self::record_checkpoint_len`].
+    fn record_legacy_checkpoint(
+        &self,
+        thread: &ThreadRecord,
+        messages: &[Message],
+        turns: &[TurnRecord],
+        covered: usize,
+    ) {
+        let Ok(messages_sha256) = session_messages_sha256(messages) else {
+            return;
+        };
+        let _thread_mutation = self.store.thread_mutation.lock();
+        let Ok(mut stored) = self.store.load_thread(&thread.id) else {
+            return;
+        };
+        if stored.session_id != thread.session_id || stored.saved_session_checkpoint.is_some() {
+            return;
+        }
+        stored.saved_session_checkpoint = Some(SavedSessionCheckpoint {
+            covered_turn_id: covered
+                .checked_sub(1)
+                .and_then(|index| turns.get(index))
+                .map(|turn| turn.id.clone()),
+            messages_sha256,
+            messages_len: Some(messages.len()),
+            retained_messages: None,
+        });
+        if let Err(error) = self.store.save_thread(&stored) {
+            tracing::debug!(thread_id = %thread.id, %error, "migrated legacy checkpoint was not saved");
+        }
+    }
+
+    /// Record a migrated legacy checkpoint's prefix length, so the prefix
+    /// search runs once. Best effort: a failed write only repeats the search.
+    fn record_checkpoint_len(&self, thread: &ThreadRecord, len: usize) {
+        let _thread_mutation = self.store.thread_mutation.lock();
+        let Ok(mut stored) = self.store.load_thread(&thread.id) else {
+            return;
+        };
+        if stored.session_id != thread.session_id
+            || stored.saved_session_checkpoint != thread.saved_session_checkpoint
+        {
+            return;
+        }
+        if let Some(checkpoint) = stored.saved_session_checkpoint.as_mut() {
+            checkpoint.messages_len = Some(len);
+        }
+        if let Err(error) = self.store.save_thread(&stored) {
+            tracing::debug!(thread_id = %thread.id, %error, "migrated checkpoint length was not saved");
+        }
     }
 
     fn saved_session_prefix(
@@ -11643,16 +13469,41 @@ impl RuntimeThreadManager {
         let Some(session_id) = thread.session_id.as_deref() else {
             return Ok(None);
         };
-        let session = crate::session_manager::default_sessions_dir()
+        let loaded = crate::session_manager::default_sessions_dir()
             .and_then(crate::session_manager::SessionManager::new)
-            .and_then(|manager| manager.resume_session(session_id).map(|recovery| recovery.session))
-            .with_context(|| format!("Cannot read saved session {session_id}; restore that session file before resuming thread {}", thread.id))?;
-        let covered = if let Some(checkpoint) = &thread.saved_session_checkpoint {
-            if checkpoint.messages_sha256 != session_messages_sha256(&session.messages)? {
-                bail!(
-                    "Saved session {session_id} changed after this thread's checkpoint; re-import it into a separate thread to preserve both histories"
-                );
+            .and_then(|manager| {
+                manager
+                    .resume_session(session_id)
+                    .map(|recovery| recovery.session)
+            });
+        let mut session = match loaded {
+            Ok(session) => session,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StaleSessionBinding {
+                    reason: format!("saved session {session_id} no longer exists"),
+                }
+                .into());
             }
+            Err(error) => {
+                return Err(error).with_context(|| format!("Cannot read saved session {session_id}; restore that session file before resuming thread {}", thread.id));
+            }
+        };
+        let covered = if let Some(checkpoint) = &thread.saved_session_checkpoint {
+            let Some(len) = checkpoint_prefix_len(checkpoint, &session.messages)? else {
+                return Err(StaleSessionBinding {
+                    reason: format!(
+                        "Saved session {session_id} changed after this thread's checkpoint: its first messages are no longer the ones this thread was bound to"
+                    ),
+                }
+                .into());
+            };
+            if checkpoint.messages_len.is_none() {
+                self.record_checkpoint_len(thread, len);
+            }
+            // Messages past the prefix were appended to the document by its
+            // own conversation after this thread's checkpoint; the thread's
+            // history is the prefix plus its own later turns.
+            session.messages.truncate(len);
             match checkpoint.covered_turn_id.as_deref() {
                 Some(id) => turns.iter().position(|turn| turn.id == id)
                     .map(|index| index + 1)
@@ -11664,6 +13515,11 @@ impl RuntimeThreadManager {
             // match to the existing seeder's projection; never use mtime or
             // silently let a saved file replace a newer Runtime transcript.
             let expected = session_recovery_projection(&session.messages);
+            // One read for every turn, not one per turn: the walk below
+            // rebuilds each turn's messages as it compares prefixes, and
+            // `list_items_for_turn` scans the store's whole items directory
+            // per call.
+            let items_by_turn = self.prepared_items_for_turns(turns)?;
             let mut prefix = Vec::new();
             let mut covered = (expected.is_empty()).then_some(0);
             for (index, turn) in turns.iter().enumerate() {
@@ -11671,7 +13527,10 @@ impl RuntimeThreadManager {
                     break;
                 }
                 prefix.extend(session_recovery_projection(
-                    &self.reconstruct_messages_from_turns(std::slice::from_ref(turn))?,
+                    &Self::reconstruct_messages_from_turns_with(
+                        std::slice::from_ref(turn),
+                        &items_by_turn,
+                    )?,
                 ));
                 if prefix == expected {
                     covered = Some(index + 1);
@@ -11679,7 +13538,20 @@ impl RuntimeThreadManager {
                     break;
                 }
             }
-            covered.with_context(|| format!("Saved session {session_id} has no verifiable Runtime checkpoint; keep both histories and re-import the saved session into a separate thread"))?
+            match covered {
+                Some(covered) => {
+                    // Migrate the legacy link to a prefix checkpoint so this
+                    // projection walk runs once, not on every load.
+                    self.record_legacy_checkpoint(thread, &session.messages, turns, covered);
+                    covered
+                }
+                None => {
+                    return Err(StaleSessionBinding {
+                        reason: format!("Saved session {session_id} has no verifiable Runtime checkpoint: no prefix of this thread's turns matches it"),
+                    }
+                    .into());
+                }
+            }
         };
         let mut messages = session.messages;
         if let Some(retained) = thread
@@ -11698,9 +13570,21 @@ impl RuntimeThreadManager {
     }
 
     fn reconstruct_messages_from_turns(&self, turns: &[TurnRecord]) -> Result<Vec<Message>> {
+        // One batch read for the whole set. `list_items_for_turn` scans the
+        // store's entire items directory to answer for a single turn, so a
+        // caller with several turns — the fork alignment below, a legacy
+        // saved-session link — paid one scan per turn.
+        let items_by_turn = self.prepared_items_for_turns(turns)?;
+        Self::reconstruct_messages_from_turns_with(turns, &items_by_turn)
+    }
+
+    fn reconstruct_messages_from_turns_with(
+        turns: &[TurnRecord],
+        items_by_turn: &HashMap<String, Vec<TurnItemRecord>>,
+    ) -> Result<Vec<Message>> {
         let mut messages = Vec::new();
         for turn in turns {
-            let stored_items = self.store.list_items_for_turn(&turn.id)?;
+            let stored_items = items_by_turn.get(&turn.id).cloned().unwrap_or_default();
             let items = if turn.item_ids.is_empty() {
                 stored_items
             } else {
@@ -11722,6 +13606,26 @@ impl RuntimeThreadManager {
                 }
                 ordered
             };
+
+            // The calls this turn already answers with a result item of their
+            // own. Only a `tool_call` item is rebuilt into a result — a
+            // `file_change` item records its own call and result, and the
+            // rebuild reads neither — so this set names exactly the answers a
+            // rebuild will emit, and a call in it must not be answered twice.
+            // A call item may carry its result (the completed live shape) or a
+            // sibling `tool_result_for` item may (seeded history, and the
+            // repair's own notice); both are `tool_call` items.
+            let recorded_results: HashSet<String> = items
+                .iter()
+                .filter(|item| item.kind == TurnItemKind::ToolCall)
+                .filter_map(|item| {
+                    item.metadata
+                        .as_ref()?
+                        .get("tool_result_for")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .collect();
 
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
             let mut user_blocks: Vec<ContentBlock> = Vec::new();
@@ -11790,6 +13694,17 @@ impl RuntimeThreadManager {
                         let tool_use_id = meta_str("tool_use_id");
                         let tool_name = meta_str("tool_name");
                         let tool_result_for = meta_str("tool_result_for");
+                        // A call whose own outcome the store never recorded is
+                        // answered with the outcome it does hold, decided while
+                        // the id is still borrowed — see
+                        // `unanswered_call_result`.
+                        let unanswered = unanswered_call_result(
+                            &item,
+                            &tool_use_id,
+                            &tool_name,
+                            &recorded_results,
+                        )
+                        .map(|content| (tool_use_id.clone(), content));
                         // Completed live turns persist the call and its result
                         // on one item; seeded history persists them as two.
                         // Both shapes must rebuild the paired tool_call /
@@ -11831,6 +13746,17 @@ impl RuntimeThreadManager {
                                 content,
                                 is_error: if is_error { Some(true) } else { None },
                                 content_blocks,
+                            });
+                        } else if let Some((call_id, content)) = unanswered {
+                            // The call above had no recorded outcome: pair it
+                            // here, in the position the live transcript held
+                            // its result, so the rebuilt turn is complete.
+                            flush_assistant(&mut assistant_blocks, &mut messages);
+                            user_blocks.push(ContentBlock::ToolResult {
+                                tool_use_id: call_id,
+                                content,
+                                is_error: Some(true),
+                                content_blocks: None,
                             });
                         }
                     }
@@ -11887,6 +13813,58 @@ impl RuntimeThreadManager {
         );
     }
 
+    /// Persist an engine status line as a completed `status` item.
+    ///
+    /// Model-facing hints (deferred-tool retry) already reach the model in the
+    /// tool result; they are not user items. Scheduler, continuation and
+    /// approval-wait rows keep a receipt tagged so clients collapse them.
+    /// An approval-wait heartbeat naming a call in `settled_approval_calls`
+    /// is stale (its approval was already answered) and is dropped, whichever
+    /// path dequeued it.
+    async fn publish_status_item(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        message: String,
+        settled_approval_calls: &HashSet<String>,
+    ) -> Result<()> {
+        if crate::core::events::approval_wait_tool_call(&message)
+            .is_some_and(|call| settled_approval_calls.contains(call))
+        {
+            return Ok(());
+        }
+        let visibility = crate::core::events::status_visibility(&message);
+        if visibility == crate::core::events::StatusVisibility::ModelOnly {
+            return Ok(());
+        }
+        let item = TurnItemRecord {
+            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+            id: runtime_record_id("item"),
+            turn_id: turn_id.to_string(),
+            kind: TurnItemKind::Status,
+            status: TurnItemLifecycleStatus::Completed,
+            summary: summarize_text(&message, SUMMARY_LIMIT),
+            detail: Some(message),
+            metadata: (visibility == crate::core::events::StatusVisibility::Internal)
+                .then(|| json!({ "visibility": visibility.as_str() })),
+            artifact_refs: Vec::new(),
+            artifacts: Vec::new(),
+            started_at: Some(Utc::now()),
+            ended_at: Some(Utc::now()),
+        };
+        self.store.save_item(&item)?;
+        self.attach_item_to_turn(turn_id, &item.id)?;
+        self.emit_event(
+            thread_id,
+            Some(turn_id),
+            Some(&item.id),
+            "item.completed",
+            json!({ "item": item }),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn monitor_turn(
         &self,
         thread_id: String,
@@ -11912,24 +13890,69 @@ impl RuntimeThreadManager {
         let mut engine_turn_id: Option<String> = None;
         let mut pending_event: Option<EngineEvent> = None;
         let mut event_channel_closed = false;
+        // Raw tool call IDs whose external approval this turn already settled.
+        // An approval-wait heartbeat naming one of them is stale by the time
+        // it is dequeued and must not be published as a live claim.
+        let mut settled_approval_calls: HashSet<String> = HashSet::new();
         // Latest engine-side goal snapshot observed during this turn. The
         // model's `update_goal` decision (complete/blocked/paused) lands here
         // before TurnComplete, so terminal settlement can mirror it into the
         // durable goal record instead of continuing to spend.
-        let mut admitted_goal_id = {
+        let (mut admitted_goal_id, thread_hooks) = {
             let active = self.active.lock().await;
-            active
-                .engines
-                .get(&thread_id)
-                .and_then(|state| state.active_turn.as_ref())
-                .filter(|turn| turn.turn_id == turn_id)
-                .and_then(|turn| turn.goal_id.clone())
+            let state = active.engines.get(&thread_id);
+            (
+                state
+                    .and_then(|state| state.active_turn.as_ref())
+                    .filter(|turn| turn.turn_id == turn_id)
+                    .and_then(|turn| turn.goal_id.clone()),
+                state.and_then(|state| state.hook_executor.clone()),
+            )
         };
+        // Runtime receipts always mask credentials, including when verbatim
+        // model-bound tool output was explicitly enabled. Resolve the active
+        // thread's key off the runtime and reuse the client's exact-value list.
+        let mut receipt_config = self.read_config().clone();
+        if let Some(state) = self.active.lock().await.engines.get(&thread_id) {
+            receipt_config.scope_to_provider_identity(&state.route_identity);
+        }
+        #[cfg(test)]
+        let ticket = crate::test_support::env_scope_ticket();
+        let receipt_secrets = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let _membership = crate::test_support::join_env_scope(ticket);
+            let active_key = receipt_config
+                .active_route_api_key_read_only()
+                .unwrap_or_default();
+            crate::client::configured_model_bound_secret_values(&receipt_config, &active_key)
+        })
+        .await
+        .context("Runtime receipt redaction setup failed")?;
         let mut latest_goal_snapshot: Option<crate::tools::goal::GoalSnapshot> = None;
         // Tool definitions of the finished turn's request surface, from the
         // final TurnComplete receipt. Goal settlement uses it to mirror the
         // engine's own `update_goal` precondition for continuation.
         let mut turn_tool_catalog: Option<Vec<codewhale_core::request::Tool>> = None;
+        // Every file path in a tool receipt is confined to the thread
+        // workspace.
+        let artifact_workspace = self
+            .store
+            .load_thread(&thread_id)
+            .map(|thread| thread.workspace)
+            .unwrap_or_else(|_| self.workspace.clone());
+        let artifact_workspace_roots = {
+            let mut roots = vec![artifact_workspace.clone()];
+            if let Ok(canonical) = tokio::fs::canonicalize(&artifact_workspace).await
+                && canonical != artifact_workspace
+            {
+                roots.push(canonical);
+            }
+            roots
+        };
+        // The `tool` restore point recorded on this turn for each call, by
+        // call id: a tool artifact names one only when this thread owns it
+        // (#6621), so file-revert accepts exactly what the ref advertises.
+        let mut tool_restore_points: HashMap<String, String> = HashMap::new();
 
         loop {
             let event = if let Some(event) = pending_event.take() {
@@ -12056,7 +14079,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::MessageStarted { .. } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                         id: item_id.clone(),
@@ -12067,6 +14090,7 @@ impl RuntimeThreadManager {
                         detail: Some(String::new()),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -12129,7 +14153,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::ThinkingStarted { .. } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                         id: item_id.clone(),
@@ -12140,6 +14164,7 @@ impl RuntimeThreadManager {
                         detail: Some(String::new()),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -12198,7 +14223,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::ToolCallStarted { id, name, input } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     tool_items.insert(id.clone(), item_id.clone());
                     let kind = tool_kind_for_name(&name);
                     let summary = summarize_text(&format!("{name} started"), SUMMARY_LIMIT);
@@ -12230,6 +14255,7 @@ impl RuntimeThreadManager {
                             meta
                         }),
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -12245,6 +14271,9 @@ impl RuntimeThreadManager {
                     .await?;
                 }
                 EngineEvent::ToolCallComplete { id, name, result } => {
+                    if let Some(hooks) = thread_hooks.as_deref() {
+                        fire_runtime_tool_completion_hooks(hooks, &thread_id, &id, &name, &result);
+                    }
                     // An elevation question is over once its tool call
                     // completes, however it completed. Clear before the
                     // notify raise below: a notify call of its own settles
@@ -12326,18 +14355,33 @@ impl RuntimeThreadManager {
                                         "response_redacted": true,
                                     }));
                                 } else {
+                                    // Durable receipt: credentials a tool
+                                    // printed are masked before they reach
+                                    // the item store or the event log (B1).
+                                    let content = crate::client::redact_model_bound_text(
+                                        &output.content,
+                                        &receipt_secrets,
+                                    );
                                     item.summary = summarize_text(
-                                        &format!("{name}: {}", output.content),
+                                        &format!("{name}: {content}"),
                                         SUMMARY_LIMIT,
                                     );
-                                    item.detail = Some(output.content.clone());
+                                    item.detail = Some(content);
                                     // `detail` is now the tool output, so the
                                     // call identity persisted at start must be
                                     // carried through metadata. Mark the
                                     // terminal result too so restart history
                                     // rebuild can re-emit the paired
                                     // tool_call/tool_result (#5823).
-                                    let mut meta = match output.metadata {
+                                    // Tool metadata carries output too
+                                    // (`exec_shell` keeps stdout/stderr
+                                    // summaries), so it is masked the same way.
+                                    let mut meta = match output.metadata.as_ref().map(|value| {
+                                        crate::client::redact_json_model_bound_text(
+                                            value,
+                                            &receipt_secrets,
+                                        )
+                                    }) {
                                         Some(Value::Object(map)) => Value::Object(map),
                                         _ => json!({}),
                                     };
@@ -12370,14 +14414,36 @@ impl RuntimeThreadManager {
                                         obj.insert("tool_result_for".to_string(), json!(id));
                                         obj.insert("is_error".to_string(), json!(!output.success));
                                     }
+                                    // Failed calls count too: a large error
+                                    // output spills like any other.
+                                    let refs = turn_artifacts::artifact_refs_from_tool_metadata(
+                                        &meta,
+                                        &turn_artifacts::ToolArtifactContext {
+                                            item_id: &item_id,
+                                            tool_call_id: &id,
+                                            tool_name: &name,
+                                            workspace_roots: &artifact_workspace_roots,
+                                            restore_snapshot_id: tool_restore_points
+                                                .get(&id)
+                                                .map(String::as_str),
+                                            recorded_at: now,
+                                        },
+                                    );
+                                    item.artifact_refs =
+                                        turn_artifacts::legacy_artifact_refs(&refs);
+                                    item.artifacts = refs;
                                     item.metadata = Some(meta);
                                 }
                             }
                             Err(err) => {
                                 item.status = TurnItemLifecycleStatus::Failed;
+                                let err = crate::client::redact_model_bound_text(
+                                    &err.to_string(),
+                                    &receipt_secrets,
+                                );
                                 item.summary =
                                     summarize_text(&format!("{name} failed: {err}"), SUMMARY_LIMIT);
-                                item.detail = Some(err.to_string());
+                                item.detail = Some(err);
                             }
                         }
                         self.store.save_item(&item)?;
@@ -12422,7 +14488,7 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::CompactionStarted { id, auto, message } => {
-                    let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
+                    let item_id = runtime_record_id("item");
                     compaction_items.insert(id.clone(), item_id.clone());
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -12434,6 +14500,7 @@ impl RuntimeThreadManager {
                         detail: Some(message.clone()),
                         metadata: Some(json!({ "compaction_id": id })),
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
                     };
@@ -12548,15 +14615,18 @@ impl RuntimeThreadManager {
                     worker_status,
                     parent_run_id,
                     spawn_depth,
+                    display_name,
                     ..
                 } if owner_session_id == thread_id => {
+                    // Hosts name the agent the way the TUI does (#6565).
+                    let name = display_name.as_deref().unwrap_or(&id);
                     let message = format!(
-                        "Sub-agent {id} spawned: {}",
+                        "Sub-agent {name} spawned: {}",
                         summarize_text(&prompt, SUMMARY_LIMIT)
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -12564,6 +14634,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -12574,7 +14645,7 @@ impl RuntimeThreadManager {
                         Some(&turn_id),
                         Some(&item.id),
                         "agent.spawned",
-                        json!({ "item": item, "agent_id": id,
+                        json!({ "item": item, "agent_id": id, "agent_name": display_name,
                             "worker_status": worker_status, "parent_run_id": parent_run_id,
                             "spawn_depth": spawn_depth }),
                     )
@@ -12591,7 +14662,7 @@ impl RuntimeThreadManager {
                     let message = format!("Sub-agent {id}: {status}");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -12599,6 +14670,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -12624,18 +14696,20 @@ impl RuntimeThreadManager {
                     spawn_depth,
                     continuable,
                     usage,
+                    display_name,
                 } if owner_session_id == thread_id => {
                     let worker_status = outcome
                         .as_ref()
                         .map(crate::tools::subagent::subagent_status_name);
+                    let name = display_name.as_deref().unwrap_or(&id);
                     let message = format!(
-                        "Sub-agent {id} {}: {}",
+                        "Sub-agent {name} {}: {}",
                         worker_status.unwrap_or("settled (outcome unconfirmed)"),
                         summarize_text(&result, SUMMARY_LIMIT)
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -12643,6 +14717,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -12653,7 +14728,7 @@ impl RuntimeThreadManager {
                         Some(&turn_id),
                         Some(&item.id),
                         "agent.completed",
-                        json!({ "item": item, "agent_id": id,
+                        json!({ "item": item, "agent_id": id, "agent_name": display_name,
                             "worker_status": worker_status, "parent_run_id": parent_run_id,
                             "spawn_depth": spawn_depth, "continuable": continuable,
                             "usage": usage }),
@@ -12666,9 +14741,18 @@ impl RuntimeThreadManager {
                         &turn_id,
                         &id,
                         format!(
-                            "sub-agent {} {}",
-                            id,
-                            worker_status.unwrap_or("settled (outcome unconfirmed)")
+                            "{name} {}",
+                            match outcome.as_ref() {
+                                Some(SubAgentStatus::Completed) => "finished",
+                                Some(
+                                    SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted,
+                                ) => "failed",
+                                Some(
+                                    SubAgentStatus::Cancelled | SubAgentStatus::Interrupted(_),
+                                ) => "stopped",
+                                Some(SubAgentStatus::Running) | None =>
+                                    "settled (outcome unconfirmed)",
+                            }
                         ),
                     );
                 }
@@ -12695,7 +14779,7 @@ impl RuntimeThreadManager {
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -12703,6 +14787,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -12731,7 +14816,9 @@ impl RuntimeThreadManager {
                         .active_turn_authority(&thread_id, &turn_id, &engine)
                         .await
                     else {
-                        let _ = engine.deny_tool_call(&id).await;
+                        let _ = engine
+                            .deny_tool_call_by(&id, crate::approval_log::ApprovalDecider::Host)
+                            .await;
                         continue;
                     };
                     let auto_approve = authority.auto_approve;
@@ -12813,9 +14900,19 @@ impl RuntimeThreadManager {
                         .await
                         .ok();
                         if approved {
-                            let _ = engine.approve_tool_call(id).await;
+                            let _ = engine
+                                .approve_tool_call_by(
+                                    id,
+                                    crate::approval_log::ApprovalDecider::Posture,
+                                )
+                                .await;
                         } else {
-                            let _ = engine.deny_tool_call(id).await;
+                            let _ = engine
+                                .deny_tool_call_by(
+                                    id,
+                                    crate::approval_log::ApprovalDecider::Posture,
+                                )
+                                .await;
                         }
                         continue;
                     }
@@ -12842,7 +14939,9 @@ impl RuntimeThreadManager {
                         )
                         .await
                         .ok();
-                        let _ = engine.deny_tool_call(id).await;
+                        let _ = engine
+                            .deny_tool_call_by(id, crate::approval_log::ApprovalDecider::Posture)
+                            .await;
                         continue;
                     }
 
@@ -12886,7 +14985,12 @@ impl RuntimeThreadManager {
                         )
                         .await
                         .ok();
-                        let _ = engine.approve_tool_call(id).await;
+                        let _ = engine
+                            .approve_tool_call_by(
+                                id,
+                                crate::approval_log::ApprovalDecider::SessionRule,
+                            )
+                            .await;
                         continue;
                     }
 
@@ -12909,7 +15013,9 @@ impl RuntimeThreadManager {
                     };
                     let Some((approval_id, rx)) = registration else {
                         drop(projection);
-                        let _ = engine.deny_tool_call(&id).await;
+                        let _ = engine
+                            .deny_tool_call_by(&id, crate::approval_log::ApprovalDecider::Host)
+                            .await;
                         continue;
                     };
                     if let Err(err) = self
@@ -12932,15 +15038,58 @@ impl RuntimeThreadManager {
                     {
                         self.cancel_pending_approval(&approval_id);
                         drop(projection);
-                        let _ = engine.deny_tool_call(&id).await;
+                        let _ = engine
+                            .deny_tool_call_by(&id, crate::approval_log::ApprovalDecider::Host)
+                            .await;
                         return Err(err);
                     }
                     drop(projection);
                     let approval_timeout = self.approval_decision_timeout();
-                    let decision = match approval_timeout {
-                        Some(wait) => tokio::time::timeout(wait, rx).await,
-                        None => Ok(rx.await),
+                    let wait_for_decision = async {
+                        match approval_timeout {
+                            Some(wait) => tokio::time::timeout(wait, rx).await,
+                            None => Ok(rx.await),
+                        }
                     };
+                    let mut wait_for_decision = std::pin::pin!(wait_for_decision);
+                    // Keep draining engine status while the card is open. The
+                    // engine's approval-wait heartbeat fires during this wait;
+                    // parking the pump here used to sequence it after
+                    // `approval.decided`, where it read as a live claim that
+                    // the answered call was still waiting (DESKTOP-QA-20260923).
+                    // Anything else is held for the main loop, in order.
+                    let decision = loop {
+                        tokio::select! {
+                            biased;
+                            decision = &mut wait_for_decision => break decision,
+                            event = async { engine.rx_event.write().await.recv().await },
+                                if pending_event.is_none() && !event_channel_closed =>
+                            {
+                                match event {
+                                    Some(EngineEvent::Status { message }) => {
+                                        if let Err(err) = self
+                                            .publish_status_item(
+                                                &thread_id,
+                                                &turn_id,
+                                                message,
+                                                &settled_approval_calls,
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                thread_id = %thread_id,
+                                                turn_id = %turn_id,
+                                                "failed to persist status during approval wait: {err:#}"
+                                            );
+                                        }
+                                    }
+                                    Some(other) => pending_event = Some(other),
+                                    None => event_channel_closed = true,
+                                }
+                            }
+                        }
+                    };
+                    settled_approval_calls.insert(id.clone());
                     // A decision may already have consumed the sender when
                     // Stop wins. Never remember or dispatch that late allow.
                     let cancelled = {
@@ -12971,7 +15120,9 @@ impl RuntimeThreadManager {
                         )
                         .await
                         .ok();
-                        let _ = engine.deny_tool_call(id).await;
+                        let _ = engine
+                            .deny_tool_call_by(id, crate::approval_log::ApprovalDecider::Host)
+                            .await;
                         continue;
                     }
                     match decision {
@@ -13027,8 +15178,10 @@ impl RuntimeThreadManager {
                             let _ = engine.deny_tool_call(id).await;
                         }
                         Ok(Err(_recv_err)) => {
+                            // The decision channel closed with no answer:
+                            // nobody refused the call, it was unavailable.
                             self.cancel_pending_approval(&approval_id);
-                            let _ = engine.deny_tool_call(id).await;
+                            let _ = engine.deny_tool_call_unavailable(id).await;
                         }
                         Err(_timeout) => {
                             self.cancel_pending_approval(&approval_id);
@@ -13060,7 +15213,10 @@ impl RuntimeThreadManager {
                             )
                             .await
                             .ok();
-                            let _ = engine.deny_tool_call(id).await;
+                            // Recorded and reported as a timeout, not the
+                            // operator's denial; the engine refunds the call's
+                            // tool-call budget slot.
+                            let _ = engine.deny_tool_call_timed_out(id).await;
                         }
                     }
                 }
@@ -13103,15 +15259,21 @@ impl RuntimeThreadManager {
                     match Self::approval_decision(auto_approve, trust_mode, true) {
                         RuntimeApprovalDecision::RetryWithFullAccess => {
                             let _ = engine
-                                .retry_tool_with_policy(
+                                .retry_tool_with_policy_by(
                                     tool_id,
                                     crate::sandbox::SandboxPolicy::DangerFullAccess,
+                                    crate::approval_log::ApprovalDecider::Posture,
                                 )
                                 .await;
                         }
                         RuntimeApprovalDecision::ApproveTool
                         | RuntimeApprovalDecision::DenyTool => {
-                            let _ = engine.deny_tool_call(tool_id).await;
+                            let _ = engine
+                                .deny_tool_call_by(
+                                    tool_id,
+                                    crate::approval_log::ApprovalDecider::Posture,
+                                )
+                                .await;
                         }
                     }
                 }
@@ -13147,36 +15309,13 @@ impl RuntimeThreadManager {
                     drop(projection);
                 }
                 EngineEvent::Status { message } => {
-                    // Model-facing hints (deferred-tool retry) already reach
-                    // the model in the tool result; they are not user items.
-                    // Scheduler/continuation rows keep a receipt tagged so
-                    // clients collapse them by default.
-                    let visibility = crate::core::events::status_visibility(&message);
-                    if visibility == crate::core::events::StatusVisibility::ModelOnly {
-                        continue;
-                    }
-                    let item = TurnItemRecord {
-                        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
-                        turn_id: turn_id.clone(),
-                        kind: TurnItemKind::Status,
-                        status: TurnItemLifecycleStatus::Completed,
-                        summary: summarize_text(&message, SUMMARY_LIMIT),
-                        detail: Some(message.clone()),
-                        metadata: (visibility == crate::core::events::StatusVisibility::Internal)
-                            .then(|| json!({ "visibility": visibility.as_str() })),
-                        artifact_refs: Vec::new(),
-                        started_at: Some(Utc::now()),
-                        ended_at: Some(Utc::now()),
-                    };
-                    self.store.save_item(&item)?;
-                    self.attach_item_to_turn(&turn_id, &item.id)?;
-                    self.emit_event(
+                    // A heartbeat queued behind another event while its
+                    // approval was answered is dropped inside the helper.
+                    self.publish_status_item(
                         &thread_id,
-                        Some(&turn_id),
-                        Some(&item.id),
-                        "item.completed",
-                        json!({ "item": item }),
+                        &turn_id,
+                        message,
+                        &settled_approval_calls,
                     )
                     .await?;
                 }
@@ -13192,7 +15331,7 @@ impl RuntimeThreadManager {
                     );
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Status,
                         status: TurnItemLifecycleStatus::Completed,
@@ -13205,6 +15344,7 @@ impl RuntimeThreadManager {
                             "omitted_tool_count": omitted_tool_count,
                         })),
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -13225,7 +15365,7 @@ impl RuntimeThreadManager {
                     let message = envelope.message.clone();
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                        id: runtime_record_id("item"),
                         turn_id: turn_id.clone(),
                         kind: TurnItemKind::Error,
                         status: TurnItemLifecycleStatus::Failed,
@@ -13233,6 +15373,7 @@ impl RuntimeThreadManager {
                         detail: Some(message),
                         metadata: None,
                         artifact_refs: Vec::new(),
+                        artifacts: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
                     };
@@ -13287,6 +15428,46 @@ impl RuntimeThreadManager {
                             None,
                             "model.tools.snapshot",
                             json!({ "snapshot": snapshot, "projection_redacted": true }),
+                        )
+                        .await?;
+                    }
+                }
+                EngineEvent::WorkspaceSnapshotTaken { snapshot } => {
+                    // The restore point belongs to the turn this monitor
+                    // owns: snapshot receipts share the engine's FIFO
+                    // channel and, with `record_restore_points`, all
+                    // arrive before this turn's TurnComplete. A receipt that
+                    // cannot be recorded leaves the turn without that
+                    // restore point, and patch-undo then refuses the turn
+                    // instead of guessing — so say it loudly, but do not fail
+                    // a turn whose work already happened.
+                    let recorded = {
+                        let _turn_mutation = self.store.turn_mutation.lock();
+                        self.store.load_turn(&turn_id).and_then(|mut turn| {
+                            turn.workspace_snapshots.push(snapshot.clone());
+                            self.store.save_turn(&turn)
+                        })
+                    };
+                    if let Err(err) = recorded {
+                        tracing::warn!(
+                            target: "snapshot",
+                            thread_id = %thread_id,
+                            turn_id = %turn_id,
+                            kind = ?snapshot.kind,
+                            "workspace snapshot receipt was not recorded; this turn has no such restore point: {err:#}"
+                        );
+                    } else {
+                        if snapshot.kind == crate::snapshot::WorkspaceSnapshotKind::Tool
+                            && let Some(call_id) = snapshot.tool_call_id.as_ref()
+                        {
+                            tool_restore_points.insert(call_id.clone(), snapshot.tree_id.clone());
+                        }
+                        self.emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            None,
+                            "turn.workspace_snapshot",
+                            serde_json::to_value(&snapshot)?,
                         )
                         .await?;
                     }
@@ -13447,7 +15628,7 @@ impl RuntimeThreadManager {
             turn_error = Some(EMPTY_TURN_REASON.to_string());
             let item = TurnItemRecord {
                 schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
+                id: runtime_record_id("item"),
                 turn_id: turn_id.clone(),
                 kind: TurnItemKind::Error,
                 status: TurnItemLifecycleStatus::Failed,
@@ -13455,6 +15636,7 @@ impl RuntimeThreadManager {
                 detail: Some(EMPTY_TURN_REASON.to_string()),
                 metadata: None,
                 artifact_refs: Vec::new(),
+                artifacts: Vec::new(),
                 started_at: Some(Utc::now()),
                 ended_at: Some(Utc::now()),
             };
@@ -13517,6 +15699,12 @@ impl RuntimeThreadManager {
                 .saturating_add(turn_routed_usage_dropped_records);
             turn.model_request_diagnostics = turn_model_request_diagnostics;
             turn.error = turn_error;
+            // Item refs are final now. The workspace delta derives from the
+            // pre/post-turn restore points recorded on this turn (every
+            // receipt arrives before TurnComplete) and settles off the
+            // monitor, since diffing them is git work.
+            let initial = self.initial_turn_workspace(&thread_id, &turn.workspace_snapshots);
+            self.set_turn_artifacts(&mut turn, None, initial);
             self.store.save_turn(&turn)?;
             turn
         };
@@ -13528,6 +15716,14 @@ impl RuntimeThreadManager {
             self.store.save_thread(&thread)?;
         }
         self.emit_turn_completed_if_missing(&turn, false).await?;
+        if let Some(pair) = turn_snapshot_pair(&turn.workspace_snapshots)
+            && turn
+                .workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.state == TurnWorkspaceState::Pending)
+        {
+            self.spawn_turn_workspace_settlement(thread_id.clone(), turn_id.clone(), pair);
+        }
 
         {
             let mut active = self.active.lock().await;
@@ -13563,6 +15759,193 @@ impl RuntimeThreadManager {
         // next one, keeping every wake explicit and bounded to one turn.
         self.spawn_agent_mail_safe_boundary_delivery(thread_id.clone());
 
+        Ok(())
+    }
+
+    /// Every artifact ref this turn's items recorded, in item order.
+    fn item_artifact_refs(&self, turn: &TurnRecord) -> Vec<TurnArtifactRef> {
+        turn.item_ids
+            .iter()
+            .filter_map(|item_id| self.store.load_item(item_id).ok())
+            .flat_map(|item| item.artifacts)
+            .collect()
+    }
+
+    /// Recompute a turn's aggregate through the one merge function.
+    fn set_turn_artifacts(
+        &self,
+        turn: &mut TurnRecord,
+        delta: Option<&turn_artifacts::WorkspaceDelta>,
+        mut workspace: TurnWorkspaceArtifacts,
+    ) {
+        let items = self.item_artifact_refs(turn);
+        let merged = turn_artifacts::merge_turn_artifacts(&items, delta);
+        workspace.truncated = merged.truncated;
+        workspace.omitted = merged.omitted;
+        turn.artifacts = merged.artifacts;
+        turn.workspace = Some(workspace);
+    }
+
+    fn spawn_turn_workspace_settlement(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        pair: TurnSnapshotPair,
+    ) {
+        let manager = self.clone();
+        let worker = tokio::spawn(async move {
+            if let Err(error) = manager
+                .settle_turn_workspace(&thread_id, &turn_id, pair)
+                .await
+            {
+                tracing::warn!(thread_id, turn_id, %error, "Failed to settle turn artifacts");
+            }
+        });
+        self.track_receipt_worker(worker);
+    }
+
+    /// A turn's workspace state at terminal settlement, before any delta,
+    /// from the restore points recorded on it. `pending` when it holds both a
+    /// pre-turn and a post-turn receipt; otherwise `unavailable`, with the
+    /// snapshot gate that refused the thread's engine when there is one.
+    fn initial_turn_workspace(
+        &self,
+        thread_id: &str,
+        snapshots: &[crate::snapshot::WorkspaceSnapshotRef],
+    ) -> TurnWorkspaceArtifacts {
+        if let Some(pair) = turn_snapshot_pair(snapshots) {
+            return TurnWorkspaceArtifacts::pending(pair.pre.tree_id);
+        }
+        let pre = snapshots
+            .iter()
+            .find(|snapshot| snapshot.kind == crate::snapshot::WorkspaceSnapshotKind::PreTurn);
+        let gated = || -> Option<TurnWorkspaceReason> {
+            if !self.config.read().snapshots_config().enabled {
+                return Some(TurnWorkspaceReason::SnapshotsDisabled);
+            }
+            let workspace = self.store.load_thread(thread_id).ok()?.workspace;
+            // The engine runs under the thread's own id (#6621), so its
+            // gate notice is keyed by it.
+            let status = crate::core::turn::snapshots_disabled_status(&workspace, Some(thread_id))?;
+            use crate::core::turn::SnapshotsDisabledScope;
+            match status.scope {
+                SnapshotsDisabledScope::WorkspaceTooLarge => {
+                    Some(TurnWorkspaceReason::WorkspaceTooLarge)
+                }
+                SnapshotsDisabledScope::TooManyFiles => Some(TurnWorkspaceReason::TooManyFiles),
+                SnapshotsDisabledScope::UnsafeLocation => Some(TurnWorkspaceReason::UnsafeLocation),
+                _ => Some(TurnWorkspaceReason::SnapshotFailed),
+            }
+        };
+        match pre {
+            // A pre-turn restore point without its post-turn pair: the
+            // closing snapshot failed or was gated.
+            Some(pre) => TurnWorkspaceArtifacts {
+                pre_turn_snapshot_id: Some(pre.tree_id.clone()),
+                ..TurnWorkspaceArtifacts::unavailable(
+                    gated().unwrap_or(TurnWorkspaceReason::SnapshotFailed),
+                )
+            },
+            // No pre-turn receipt: snapshots were off or gated, or the turn
+            // (a compaction, a purge, one that ended early) took none. A
+            // failed snapshot reports no receipt either.
+            None => TurnWorkspaceArtifacts::unavailable(
+                gated().unwrap_or(TurnWorkspaceReason::NotCaptured),
+            ),
+        }
+    }
+
+    /// Diff the turn's recorded pre-turn and post-turn restore points, merge
+    /// the delta into the turn's aggregate, and publish `turn.artifacts`.
+    /// Every outcome publishes, so a client waiting on a `pending` turn
+    /// always hears back.
+    async fn settle_turn_workspace(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        pair: TurnSnapshotPair,
+    ) -> Result<()> {
+        let thread = self.store.load_thread(thread_id)?;
+        let turn = self.store.load_turn(turn_id)?;
+        let item_paths: Vec<String> = self
+            .item_artifact_refs(&turn)
+            .into_iter()
+            .filter(|reference| reference.kind == TurnArtifactKind::File)
+            .flat_map(|reference| std::iter::once(reference.path).chain(reference.previous_path))
+            .collect();
+        // The pre-turn restore point is recorded on this turn, so this
+        // thread owns it and file-revert accepts it for every path the delta
+        // names (#6621). Trees, not commit ids: a prune rewrites commits.
+        let restore_snapshot_id = Some(pair.pre.tree_id.clone());
+        let TurnSnapshotPair { pre, post } = pair;
+        let workspace = thread.workspace.clone();
+        let (pre_tree, post_tree) = (pre.tree_id, post.tree_id);
+        let delta = tokio::task::spawn_blocking(move || {
+            workspace_delta(&workspace, &pre_tree, &post_tree, &item_paths)
+                .map(|(delta, tracked)| (post_tree, delta, tracked))
+        })
+        .await
+        .map_err(|error| anyhow!("turn delta task failed: {error}"))
+        .and_then(|result| result)
+        .map_err(|error| {
+            tracing::warn!(turn_id, %error, "Failed to diff turn snapshots");
+            TurnWorkspaceReason::DeltaFailed
+        });
+
+        let turn = {
+            let _turn_mutation = self.store.turn_mutation.lock();
+            let mut turn = self.store.load_turn(turn_id)?;
+            let Some(workspace) = turn
+                .workspace
+                .clone()
+                .filter(|workspace| workspace.state == TurnWorkspaceState::Pending)
+            else {
+                return Ok(());
+            };
+            match delta {
+                Ok((post, delta, tracked)) => {
+                    let refs = turn_artifacts::delta_refs(
+                        &delta,
+                        restore_snapshot_id.as_deref(),
+                        Utc::now(),
+                    );
+                    let delta = turn_artifacts::WorkspaceDelta {
+                        refs,
+                        tracked_item_paths: tracked,
+                        truncated: delta.truncated,
+                        omitted: delta.omitted,
+                    };
+                    let settled = TurnWorkspaceArtifacts {
+                        state: TurnWorkspaceState::Settled,
+                        post_turn_snapshot_id: Some(post),
+                        ..workspace
+                    };
+                    self.set_turn_artifacts(&mut turn, Some(&delta), settled);
+                }
+                Err(reason) => {
+                    let unavailable = TurnWorkspaceArtifacts {
+                        state: TurnWorkspaceState::Unavailable,
+                        reason: Some(reason),
+                        ..workspace
+                    };
+                    self.set_turn_artifacts(&mut turn, None, unavailable);
+                }
+            }
+            self.store.save_turn(&turn)?;
+            turn
+        };
+        self.emit_event(
+            thread_id,
+            Some(turn_id),
+            None,
+            "turn.artifacts",
+            json!({
+                "turn_id": turn.id,
+                "workspace": turn.workspace,
+                "artifacts": turn.artifacts,
+            }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -13704,8 +16087,23 @@ impl RuntimeThreadManager {
                     let elapsed = now.signed_duration_since(started_at);
                     turn.duration_ms = Some(elapsed.num_milliseconds().max(0) as u64);
                 }
+                self.set_turn_artifacts(
+                    &mut turn,
+                    None,
+                    TurnWorkspaceArtifacts::unavailable(TurnWorkspaceReason::RuntimeRestarted),
+                );
                 self.store.save_turn(&turn)?;
                 thread_changed = true;
+            } else if let Some(workspace) = turn
+                .workspace
+                .as_mut()
+                .filter(|workspace| workspace.state == TurnWorkspaceState::Pending)
+            {
+                // The post-turn snapshot id died with the process. Keep the
+                // item-derived aggregate rather than guess at a delta.
+                workspace.state = TurnWorkspaceState::Unavailable;
+                workspace.reason = Some(TurnWorkspaceReason::RuntimeRestarted);
+                self.store.save_turn(&turn)?;
             }
             if thread_changed && let Some(thread) = threads.get_mut(&turn.thread_id) {
                 thread.updated_at = now;
@@ -13831,6 +16229,7 @@ impl RuntimeThreadManager {
                 active_turn: None,
                 route_identity: route.identity,
                 route_model: route.model,
+                hook_executor: None,
                 client_preflight_required: false,
             },
         );
@@ -13907,7 +16306,7 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
                 "runtime dynamic tool '{name}' has no active turn"
             ))
         })?;
-        let call_id = format!("call_{}", &Uuid::new_v4().to_string()[..8]);
+        let call_id = runtime_record_id("call");
         let params = DynamicToolCallParams {
             thread_id: thread_id.clone(),
             turn_id: turn_id.clone(),
@@ -14097,12 +16496,7 @@ fn runtime_policy_with_overrides(
     auto_approve: Option<bool>,
 ) -> Result<RuntimePolicyProjection> {
     let requested_mode = mode.unwrap_or(&thread.mode);
-    let legacy_bypass_mode = mode.is_some_and(|mode| {
-        matches!(
-            mode.trim().to_ascii_lowercase().as_str(),
-            "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions"
-        )
-    });
+    let legacy_bypass_mode = mode.is_some_and(codewhale_config::AppMode::is_legacy_bypass_alias);
     let inherited = RuntimePolicyProjection::from_persisted(
         &thread.mode,
         thread.permission_posture.as_deref(),
@@ -14573,6 +16967,74 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
         Err(err) => Err(err).with_context(|| format!("Failed to remove {}", path.display())),
     }
 }
+
+/// A turn's artifact references as the Runtime API serves them.
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnArtifactsView {
+    pub thread_id: String,
+    pub turn_id: String,
+    /// `null` while the turn is still running.
+    pub workspace: Option<TurnWorkspaceArtifacts>,
+    pub artifacts: Vec<TurnArtifactRef>,
+    /// Every item-level ref, including intermediate revisions of a file the
+    /// turn wrote more than once. The read route resolves `?revision=`
+    /// against these.
+    #[serde(skip)]
+    pub item_artifacts: Vec<TurnArtifactRef>,
+    /// The thread workspace every file ref is relative to.
+    #[serde(skip)]
+    pub thread_workspace: PathBuf,
+}
+
+/// The pre-turn and post-turn restore points recorded on one turn: the
+/// pair its workspace delta is diffed from.
+struct TurnSnapshotPair {
+    pre: crate::snapshot::WorkspaceSnapshotRef,
+    post: crate::snapshot::WorkspaceSnapshotRef,
+}
+
+/// The turn's first `pre_turn` and last `post_turn` receipts, when both were
+/// recorded.
+fn turn_snapshot_pair(
+    snapshots: &[crate::snapshot::WorkspaceSnapshotRef],
+) -> Option<TurnSnapshotPair> {
+    use crate::snapshot::WorkspaceSnapshotKind;
+    let pre = snapshots
+        .iter()
+        .find(|snapshot| snapshot.kind == WorkspaceSnapshotKind::PreTurn)?;
+    let post = snapshots
+        .iter()
+        .rev()
+        .find(|snapshot| snapshot.kind == WorkspaceSnapshotKind::PostTurn)?;
+    Some(TurnSnapshotPair {
+        pre: pre.clone(),
+        post: post.clone(),
+    })
+}
+
+/// Diff the turn's snapshot pair in the existing side repo, and report
+/// which item-recorded paths either snapshot can see.
+fn workspace_delta(
+    workspace: &Path,
+    pre: &str,
+    post: &str,
+    item_paths: &[String],
+) -> Result<(crate::snapshot::SnapshotDelta, HashSet<String>)> {
+    let repo = crate::snapshot::SnapshotRepo::open_existing(workspace)?
+        .context("workspace snapshot repo is missing")?;
+    let pre = crate::snapshot::SnapshotId::parse(pre)?;
+    let post = crate::snapshot::SnapshotId::parse(post)?;
+    let delta = repo.diff_snapshots(&pre, &post, turn_artifacts::MAX_TURN_ARTIFACTS)?;
+    let mut tracked = repo.tracked_paths(&pre, item_paths)?;
+    tracked.extend(repo.tracked_paths(&post, item_paths)?);
+    Ok((delta, tracked))
+}
+
+mod turn_artifacts;
+pub use turn_artifacts::{
+    FileChangeKind, TurnArtifactKind, TurnArtifactRef, TurnWorkspaceArtifacts, TurnWorkspaceReason,
+    TurnWorkspaceState,
+};
 
 #[cfg(test)]
 mod tests;

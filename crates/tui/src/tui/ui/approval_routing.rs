@@ -37,6 +37,7 @@ pub(super) fn end_turn_scoped_denials(app: &mut App) {
 pub(super) fn reset_approval_scope_for_new_conversation(app: &mut App) {
     app.approval_session_denied.clear();
     app.approval_session_approved.clear();
+    crate::tui::pending_requests::clear_all(app);
 }
 
 pub(super) fn session_denied_notice(app: &App, tool_name: &str) -> String {
@@ -90,7 +91,12 @@ pub(super) async fn auto_deny_session_approval(
             "session_id": app.current_session_id,
         }),
     );
-    let _ = engine_handle.deny_tool_call(id.to_string()).await;
+    let _ = engine_handle
+        .deny_tool_call_by(
+            id.to_string(),
+            crate::approval_log::ApprovalDecider::SessionRule,
+        )
+        .await;
     surface_session_denied_notice(app, tool_name);
 }
 
@@ -112,6 +118,24 @@ fn app_turn_authority_for_approvals(app: &App) -> crate::core::authority::TurnAu
     )
 }
 
+/// Who answered an `AutoApprove` disposition: the posture when it allows the
+/// call on its own, otherwise the remembered session rule that did.
+pub(super) fn auto_approval_decider(
+    app: &App,
+    approval_force_prompt: bool,
+) -> crate::approval_log::ApprovalDecider {
+    use crate::core::authority::ApprovalRequestDisposition;
+    match crate::core::authority::resolve_approval_request_disposition(
+        &app_turn_authority_for_approvals(app),
+        false,
+        false,
+        approval_force_prompt,
+    ) {
+        ApprovalRequestDisposition::AutoApprove => crate::approval_log::ApprovalDecider::Posture,
+        _ => crate::approval_log::ApprovalDecider::SessionRule,
+    }
+}
+
 pub(super) fn resolve_ui_approval_disposition(
     app: &App,
     tool_name: &str,
@@ -127,14 +151,84 @@ pub(super) fn resolve_ui_approval_disposition(
     )
 }
 
-pub(super) fn should_suppress_user_input_prompt(app: &App) -> bool {
-    // Legacy hosts may still report Yolo/auto-approve with a stale `Auto`
-    // enum. Canonicalize that shape to Full Access before applying the one
-    // posture that suppresses questions: genuine Auto-Review.
-    let effective_posture = if app_auto_approve_enabled(app) {
-        ApprovalMode::Bypass
-    } else {
-        app.approval_mode
-    };
-    !crate::core::authority::permission_posture_allows_questions(effective_posture)
+/// Answer, explicitly, a request that must not open a card here, so nothing
+/// waits on a card that never shows (approvals C1):
+///
+/// - a child agent's approval from another conversation (the agent is known
+///   to belong elsewhere) is answered `unavailable`;
+/// - while the parent is idle or its turn was cancelled locally, a request
+///   the parent owns can only be stale: an approval or sandbox elevation is
+///   answered `unavailable`, a question is cancelled. Neither is recorded
+///   as the person's denial.
+///
+/// A child agent's request from this conversation is never stale on the
+/// idle/cancel basis: the child is still running and waiting on the person,
+/// so it falls through to the normal handler. Returns `true` when the event
+/// was consumed here.
+pub(super) async fn resolve_stale_parent_request(
+    app: &App,
+    engine_handle: &EngineHandle,
+    event: &crate::core::events::Event,
+) -> bool {
+    use crate::core::events::Event;
+    if let Event::ApprovalRequired { id, tool_name, .. } = event
+        && crate::tui::pending_requests::is_foreign_child_request(app, id)
+    {
+        log_sensitive_event(
+            "tool.approval.foreign_session_child_resolved",
+            serde_json::json!({
+                "tool_name": tool_name,
+                "session_id": app.current_session_id,
+            }),
+        );
+        let _ = engine_handle.deny_tool_call_unavailable(id.clone()).await;
+        return true;
+    }
+    if !(app.suppress_stream_events_until_turn_complete || !app.is_loading) {
+        return false;
+    }
+    match event {
+        Event::ApprovalRequired { id, tool_name, .. }
+            if !crate::tools::subagent::SubAgentManager::is_child_approval_id(id) =>
+        {
+            log_sensitive_event(
+                "tool.approval.stale_parent_resolved",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle.deny_tool_call_unavailable(id.clone()).await;
+            true
+        }
+        Event::ElevationRequired {
+            tool_id, tool_name, ..
+        } => {
+            log_sensitive_event(
+                "tool.sandbox.stale_elevation_resolved",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle
+                .deny_tool_call_unavailable(tool_id.clone())
+                .await;
+            true
+        }
+        Event::UserInputRequired { id, .. }
+            if !crate::tools::subagent::SubAgentManager::is_child_approval_id(id) =>
+        {
+            log_sensitive_event(
+                "tool.user_input.stale_parent_resolved",
+                serde_json::json!({
+                    "tool_id": id,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle.cancel_user_input(id.clone()).await;
+            true
+        }
+        _ => false,
+    }
 }

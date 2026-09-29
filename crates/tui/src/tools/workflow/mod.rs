@@ -9,7 +9,7 @@ mod shortlist_tests;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,7 +42,8 @@ use crate::tools::spec::{
 };
 use crate::tools::subagent::{
     SharedSubAgentManager, SubAgentCompletion, SubAgentManager, SubAgentResult, SubAgentRuntime,
-    SubAgentStatus, WorkflowTaskSpawnIdentity, WorkflowTaskSpawnMetadata, spawn_workflow_task,
+    SubAgentStatus, WorkflowTaskSpawnIdentity, WorkflowTaskSpawnMetadata, send_terminal_event,
+    spawn_workflow_task,
 };
 use crate::tools::verifier::run_workflow_completion_gates;
 use crate::tools::workflow_plan_approval::{
@@ -323,7 +324,7 @@ fn finish_workflow_controller(state: &WorkflowWorkspaceState, record: &WorkflowR
             .filter(|current| current.status == WorkflowRunStatus::Cancelled)
             .cloned();
         let record = cancelled.as_ref().unwrap_or(record);
-        let receipt = json!({
+        let mut receipt = json!({
             "event": if record.status == WorkflowRunStatus::Completed {
                 "workflow.completed"
             } else {
@@ -336,24 +337,15 @@ fn finish_workflow_controller(state: &WorkflowWorkspaceState, record: &WorkflowR
             "child_count": record.child_ids.len(),
             "detail": { "tool": "workflow", "action": "status", "run_id": truncate_chars(&record.run_id, 64) },
         });
-        let mut summary = format!(
-            "Workflow {} ended {:?}.",
-            truncate_chars(&record.run_id, 64),
-            record.status
+        let report = written_run_report(&controller.driver.workspace, &record.run_id);
+        if let Some(report) = &report {
+            receipt["report"] = json!(report);
+        }
+        let summary = workflow_receipt_summary(
+            record,
+            &controller.driver.task_records_snapshot(),
+            report.as_deref(),
         );
-        if let Some(goal) = &record.workflow_goal {
-            summary.push_str(&format!("\nGoal: {}", truncate_chars(goal, 160)));
-        }
-        if let Some(error) = &record.error {
-            summary.push_str(&format!("\nError: {}", truncate_chars(error, 512)));
-        }
-        if let Some(result) = &record.result {
-            summary.push_str(&format!(
-                "\nResult preview: {}",
-                truncate_chars(&result.to_string(), 512)
-            ));
-        }
-        summary.push_str("\nInspect the recorded result and evidence before summarizing the outcome and remaining work.");
         let payload =
             format!("{summary}\n<codewhale:subagent.done>{receipt}</codewhale:subagent.done>");
         debug_assert!(payload.len() <= WORKFLOW_COMPLETION_MAX_BYTES);
@@ -364,6 +356,59 @@ fn finish_workflow_controller(state: &WorkflowWorkspaceState, record: &WorkflowR
         });
     }
     controllers.remove(&record.run_id);
+}
+
+/// The plain-language half of a workflow's parent receipt: what ended, how
+/// many agents finished and why the others stopped, where the report is, and
+/// a bounded result preview. Event names and the JSON receipt carry the
+/// machine-readable status; this is for the reader. `tasks` is the driver's
+/// per-task ledger, which counts the agents once the run's retained event
+/// tail has been trimmed.
+fn workflow_receipt_summary(
+    record: &WorkflowRunRecord,
+    tasks: &[RuntimeTaskRecord],
+    report: Option<&str>,
+) -> String {
+    let name = record
+        .workflow_goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .map(|goal| format!("Workflow \"{}\"", truncate_chars(goal, 160)))
+        .unwrap_or_else(|| format!("Workflow {}", truncate_chars(&record.run_id, 64)));
+    // Counts come from the driver's ledger; the retained events (at most
+    // WORKFLOW_RUN_EVENTS_MAX_RETAINED) only name the agents that stopped.
+    let mut tally = WorkflowTally::from_events(&record.events);
+    tally.count_from_ledger(
+        tasks.iter().map(|task| task.status),
+        record.dispatch_failure_count,
+    );
+    let mut summary = format!(
+        "{name} {}: {}.",
+        view::run_outcome_phrase(record.status),
+        // Bounded so the whole receipt stays under the completion cap.
+        truncate_chars(&tally.agents_sentence(), 600)
+    );
+    if let Some(error) = &record.error {
+        summary.push_str(&format!("\nError: {}", truncate_chars(error, 512)));
+    }
+    match report {
+        Some(report) => summary.push_str(&format!("\nReport: {report}")),
+        None => summary.push_str(&format!(
+            "\nNo report file was written; `workflow status {}` has the run record.",
+            truncate_chars(&record.run_id, 64)
+        )),
+    }
+    if let Some(result) = &record.result {
+        summary.push_str(&format!(
+            "\nResult preview: {}",
+            truncate_chars(&result.to_string(), 512)
+        ));
+    }
+    summary.push_str(
+        "\nRead the report or the recorded result before summarizing the outcome and remaining work.",
+    );
+    summary
 }
 
 /// Active controllers, including gaps between child phases. This reads only
@@ -524,6 +569,10 @@ enum WorkflowUiEventKind {
         workflow_goal: Option<String>,
         source_path: Option<PathBuf>,
         token_budget: Option<u64>,
+        /// Agents this run may have live at once. Absent on journals written
+        /// before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_concurrent: Option<u32>,
     },
     RunCompleted {
         status: WorkflowRunStatus,
@@ -531,6 +580,10 @@ enum WorkflowUiEventKind {
         /// Run-wide usage totals reconciled from per-task telemetry (#2974).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<WorkflowRunUsage>,
+        /// One readable line naming what the run returned, so the transcript's
+        /// finish line can state the result without the full record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_preview: Option<String>,
     },
     RunCancelled {
         reason: String,
@@ -538,13 +591,35 @@ enum WorkflowUiEventKind {
     PhaseStarted {
         title: String,
     },
+    /// A `task()` is waiting for one of the run's concurrent slots. The
+    /// matching `task_started` carries the same `queue_ticket`.
+    TaskQueued {
+        ticket: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+    },
     TaskStarted(Box<WorkflowTaskStartedEvent>),
     TaskCompleted {
         task_id: String,
         status: IrWorkflowRunStatus,
+        /// One bounded line saying why the agent did not finish. Absent when
+        /// it finished, and on journals written before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<WorkflowTaskStopKind>,
         /// Per-worker telemetry captured at terminal delivery (#2974).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<WorkflowTaskUsage>,
+    },
+    /// A settled `parallel()`/`pipeline()` slot resolved to `null`. The
+    /// per-slot log line carries the message.
+    SlotDropped {
+        construct: String,
+        index: u32,
+        kind: String,
     },
     GateUpdated {
         gate_id: String,
@@ -579,6 +654,10 @@ enum WorkflowUiEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
         message: String,
+        /// Ticket of the `task_queued` wait this refusal ends, when the task
+        /// was refused after waiting for a slot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_ticket: Option<u64>,
     },
     BudgetUpdated {
         total: Option<u64>,
@@ -591,8 +670,10 @@ enum WorkflowUiEventKind {
 }
 
 mod usage;
+mod view;
 
 use usage::{WorkflowRunUsage, WorkflowTaskUsage, WorkflowTokenSource, sum_optional_usage};
+use view::{WorkflowTally, WorkflowTaskStopKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowTaskStartedEvent {
@@ -634,6 +715,10 @@ struct WorkflowTaskStartedEvent {
     workflow_task_label: Option<String>,
     /// 0-based admission order among children of this run (#4119).
     workflow_child_index: Option<u32>,
+    /// Ticket of the `task_queued` event this start ends, when the task had
+    /// to wait for a slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue_ticket: Option<u64>,
     /// Durable exact-Fleet routing receipt: the fixed member identity, its
     /// exact provider/model, the requested vs. selector vs. provider-effective
     /// reasoning, where the decision came from, and the Router's exact identity
@@ -650,8 +735,10 @@ impl WorkflowUiEventKind {
             Self::RunCompleted { .. } => "run_completed",
             Self::RunCancelled { .. } => "run_cancelled",
             Self::PhaseStarted { .. } => "phase_started",
+            Self::TaskQueued { .. } => "task_queued",
             Self::TaskStarted(_) => "task_started",
             Self::TaskCompleted { .. } => "task_completed",
+            Self::SlotDropped { .. } => "slot_dropped",
             Self::GateUpdated { .. } => "gate_updated",
             Self::HandoffPromoted { .. } => "handoff_promoted",
             Self::HandoffConsumed { .. } => "handoff_consumed",
@@ -1399,6 +1486,11 @@ async fn start_workflow(
                 workflow_goal: record.workflow_goal.clone(),
                 source_path: record.source_path.clone(),
                 token_budget: record.token_budget,
+                max_concurrent: Some(
+                    workflow_cfg
+                        .max_concurrent
+                        .min(WORKFLOW_MAX_CONCURRENT as u32),
+                ),
             },
         );
         record.push_event(started.clone());
@@ -1633,6 +1725,9 @@ fn cancel_workflow_run(
         state.mark_owner_missing(run_id);
         let mut failed = snapshot;
         failed.error = Some(format!("workflow cancellation journal failed: {err}"));
+        if let Some(controller) = controller.as_ref() {
+            write_run_report_artifact(&controller.driver.workspace, &failed);
+        }
         finish_workflow_controller(&state, &failed);
         return Err(ToolError::execution_failed(format!(
             "workflow cancellation journal failed: {err}"
@@ -1644,6 +1739,9 @@ fn cancel_workflow_run(
     // the live panel finalizes running rows and cannot remain visually failed.
     if let Some(controller) = controller {
         controller.driver.emit_ui_event(&cancelled_event);
+        // The receipt links the report, so write it first; the VM's own
+        // terminal path may rewrite it moments later.
+        write_run_report_artifact(&controller.driver.workspace, &snapshot);
     }
     finish_workflow_controller(&state, &snapshot);
     workflow_result_for(run_id, state, owner_session_id)
@@ -1851,12 +1949,18 @@ fn bind_exact_fleet_task_request(
             }),
     );
 
-    // Everything the spawn boundary will reject *predictably* is rejected here,
-    // while the task has still cost nothing. The write-scope contract is the
-    // one that bites: a write-capable member launched with no declared scope
-    // fails at `validate_spawn_write_contract`, which runs long after the
-    // Router has been paid for a decision about a task that could never run.
-    validate_exact_write_scope(&fleet, &binding, request)?;
+    // A member that resolves read-only under the live posture cannot hold a
+    // write claim, so any scope the script declared is dropped here rather
+    // than refused: the script cannot predict every member's resolved
+    // posture, and `validate_spawn_write_contract` would otherwise refuse the
+    // task after the Router had been paid. A write-capable member with no
+    // declared scope is left alone; the spawn boundary defaults it to the
+    // workspace root exactly as it does for a plain Agent spawn.
+    if binding.authority.write_authority == "read_only" {
+        request.write_roots.clear();
+        request.exact_files.clear();
+        request.coordination_contracts.clear();
+    }
     Ok(binding)
 }
 
@@ -1894,44 +1998,6 @@ fn orphaned_fleet_receipt_line(
         receipt.line(),
         error.replace('\n', " ")
     )
-}
-
-/// The write-scope half of the spawn contract, checked before anything costs.
-///
-/// Deliberately a mirror of the spawn-boundary rule rather than a replacement
-/// for it: the boundary stays authoritative (it is reachable by other callers),
-/// and this exists so an exact-Fleet task fails on the same terms *before* the
-/// Router call rather than after it.
-fn validate_exact_write_scope(
-    fleet: &str,
-    binding: &crate::fleet::exact::ExactMemberBinding,
-    request: &TaskRequest,
-) -> Result<(), DriverError> {
-    let declares_scope = !request.write_roots.is_empty()
-        || !request.exact_files.is_empty()
-        || !request.coordination_contracts.is_empty();
-
-    if binding.authority.write_authority == "read_only" {
-        if declares_scope {
-            return Err(DriverError::Rejected(format!(
-                "fleet `{fleet}`: member `{}` is read-only under the effective Runtime posture, so this \
-                 task may not declare write_roots, exact_files, or coordination_contracts.",
-                binding.member_id
-            )));
-        }
-        return Ok(());
-    }
-
-    if !declares_scope {
-        return Err(DriverError::Rejected(format!(
-            "fleet `{fleet}`: member `{}` is write-capable, so this task must declare \
-             write_roots, exact_files, or coordination_contracts before it can start. An \
-             unbounded write claim is refused at the spawn boundary, and this task would spend a \
-             reasoning-router call on its way to that refusal.",
-            binding.member_id
-        )));
-    }
-    Ok(())
 }
 
 /// **Phase two**: route an already admitted task.
@@ -2196,6 +2262,7 @@ async fn run_workflow_vm(
                         status: record.status,
                         error: record.error.clone(),
                         usage: run_usage.clone(),
+                        result_preview: record.result.as_ref().and_then(workflow_result_preview),
                     },
                 );
                 record.push_event(budget_event.clone());
@@ -2246,6 +2313,7 @@ async fn run_workflow_vm(
                         status: record.status,
                         error: record.error.clone(),
                         usage: record.usage.clone(),
+                        result_preview: record.result.as_ref().and_then(workflow_result_preview),
                     }
                 },
             );
@@ -2263,7 +2331,9 @@ async fn run_workflow_vm(
 
 mod report;
 
-use report::{bounded_raw_preview, write_run_report_artifact, write_schema_raw_artifact};
+use report::{
+    bounded_raw_preview, write_run_report_artifact, write_schema_raw_artifact, written_run_report,
+};
 
 fn session_workflow_config_store()
 -> &'static Mutex<HashMap<PathBuf, codewhale_config::WorkflowConfigToml>> {
@@ -2554,6 +2624,59 @@ fn bounded_run_record_value(
     }
 
     (value, bounds)
+}
+
+/// One readable line for what a run returned: the text itself, an object's
+/// own `summary`/`message`/`text`, or the slot names with the empty ones
+/// named — never raw JSON and never a bare "N field(s)". Bounded.
+pub(crate) fn workflow_result_preview(value: &Value) -> Option<String> {
+    const MAX: usize = 200;
+    let preview = match value {
+        Value::Null => return None,
+        Value::String(text) => text.split_whitespace().collect::<Vec<_>>().join(" "),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Array(items) => {
+            let empty = items.iter().filter(|item| item.is_null()).count();
+            let noun = if items.len() == 1 { "item" } else { "items" };
+            if empty > 0 {
+                format!("{} {noun}, {empty} empty", items.len())
+            } else {
+                format!("{} {noun}", items.len())
+            }
+        }
+        Value::Object(map) => {
+            if let Some(text) = ["summary", "message", "text"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str))
+                .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|text| !text.is_empty())
+            {
+                text
+            } else {
+                let filled: Vec<&str> = map
+                    .iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                let empty: Vec<&str> = map
+                    .iter()
+                    .filter(|(_, v)| v.is_null())
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                match (filled.is_empty(), empty.is_empty()) {
+                    (true, true) => return None,
+                    (false, true) => filled.join(", "),
+                    (true, false) => format!("empty: {}", empty.join(", ")),
+                    (false, false) => {
+                        format!("{} · empty: {}", filled.join(", "), empty.join(", "))
+                    }
+                }
+            }
+        }
+    };
+    let preview = preview.trim();
+    (!preview.is_empty()).then(|| truncate_chars(preview, MAX))
 }
 
 /// Char-boundary-safe truncation with an ellipsis (precedent:
@@ -3731,16 +3854,13 @@ impl RuntimeTaskRecord {
     ///
     /// `BudgetExceeded` is the named gap this exists to close: a child that
     /// dies of budget exhaustion is a failed task for the all-failed rule,
-    /// not an invisible one. `ReplayDiverged` means the leaf's replay did
-    /// not reproduce its recorded result — no output either. `Cancelled` is
+    /// not an invisible one. `Cancelled` is
     /// deliberately excluded: it is the run's own stop, not lost work, and
     /// run-level cancellation is finalized before this ledger is consulted.
     fn failed_for_ledger(&self) -> bool {
         matches!(
             self.status,
-            IrWorkflowRunStatus::Failed
-                | IrWorkflowRunStatus::BudgetExceeded
-                | IrWorkflowRunStatus::ReplayDiverged
+            IrWorkflowRunStatus::Failed | IrWorkflowRunStatus::BudgetExceeded
         )
     }
 }
@@ -3761,6 +3881,8 @@ struct SubAgentWorkflowDriver {
     child_ids: Arc<Mutex<Vec<String>>>,
     /// Monotonic 0-based child admission counter for `workflow_child_index`.
     child_counter: AtomicU32,
+    /// Tickets for `task_queued` events, so a start can name the wait it ends.
+    queue_tickets: AtomicU64,
     max_children: u32,
     /// Latest `phase(...)` title observed on this run (used when a task omits
     /// an explicit `phase` option).
@@ -3856,6 +3978,7 @@ impl SubAgentWorkflowDriver {
             completion_state: Arc::new(Mutex::new(CompletionState::default())),
             child_ids: Arc::new(Mutex::new(Vec::new())),
             child_counter: AtomicU32::new(0),
+            queue_tickets: AtomicU64::new(0),
             max_children: workflow_cfg.max_children.min(WORKFLOW_LIFETIME_CAP as u32),
             current_phase: Mutex::new(None),
             task_records: Arc::new(Mutex::new(HashMap::new())),
@@ -3998,11 +4121,23 @@ impl SubAgentWorkflowDriver {
         if let Some(obj) = value.as_object_mut() {
             obj.insert("run_id".to_string(), json!(self.run_id));
         }
-        let _ = tx.try_send(Event::WorkflowUi {
+        let ui_event = Event::WorkflowUi {
             owner_session_id: self.owner_session_id.clone(),
             run_id: self.run_id.clone(),
             event: value,
-        });
+        };
+        // A lost terminal event leaves a row or a whole run looking live
+        // forever; those wait for capacity. Progress stays lossy.
+        if matches!(
+            event.kind,
+            WorkflowUiEventKind::RunCompleted { .. }
+                | WorkflowUiEventKind::RunCancelled { .. }
+                | WorkflowUiEventKind::TaskCompleted { .. }
+        ) {
+            send_terminal_event(tx, ui_event);
+        } else {
+            let _ = tx.try_send(ui_event);
+        }
     }
 
     fn record_budget_snapshot(&self, snapshot: BudgetSnapshot) {
@@ -4195,6 +4330,7 @@ impl SubAgentWorkflowDriver {
         metadata: &WorkflowTaskSpawnMetadata,
         result: &crate::tools::subagent::SubAgentResult,
         fleet_receipt: Option<codewhale_workflow::FleetTaskReceipt>,
+        queue_ticket: Option<u64>,
     ) {
         // Prefer typed spawn metadata over request fields so panel/history never
         // need to re-derive labels from the child prompt (#4119).
@@ -4250,6 +4386,7 @@ impl SubAgentWorkflowDriver {
                 workflow_phase_id: metadata.workflow_phase_id.clone(),
                 workflow_task_label: metadata.workflow_task_label.clone(),
                 workflow_child_index: metadata.workflow_child_index,
+                queue_ticket,
                 fleet_receipt: fleet_receipt.clone(),
             })),
         ));
@@ -4328,6 +4465,7 @@ impl SubAgentWorkflowDriver {
             }
             if record.status == IrWorkflowRunStatus::Running {
                 let (status, output) = task_completion_status(completion);
+                let (reason, kind) = view::task_stop(completion);
                 record.status = status;
                 record.output = output;
                 terminal_event = Some(WorkflowUiEvent::new(
@@ -4335,6 +4473,8 @@ impl SubAgentWorkflowDriver {
                     WorkflowUiEventKind::TaskCompleted {
                         task_id: agent_id.to_string(),
                         status,
+                        reason,
+                        kind,
                         usage: record.usage.clone(),
                     },
                 ));
@@ -4359,6 +4499,7 @@ impl SubAgentWorkflowDriver {
         label: Option<String>,
         phase: Option<String>,
         message: String,
+        queue_ticket: Option<u64>,
     ) {
         let failure = WorkflowDispatchFailure {
             at_ms: now_ms(),
@@ -4378,6 +4519,7 @@ impl SubAgentWorkflowDriver {
                 label: failure.label.clone(),
                 phase: failure.phase.clone(),
                 message: failure.message.clone(),
+                queue_ticket,
             },
         );
         if let Ok(mut runs) = self.state.runs.lock()
@@ -4523,6 +4665,7 @@ impl SubAgentWorkflowDriver {
     async fn spawn_task_admitted(
         &self,
         mut request: TaskRequest,
+        queue_ticket: &mut Option<u64>,
     ) -> Result<SpawnedTask, DriverError> {
         self.ensure_admission_open()?;
         // Exact fleets resolve from the frozen snapshot; legacy role maps keep
@@ -4569,13 +4712,52 @@ impl SubAgentWorkflowDriver {
             )?;
             None
         };
-        // Wait for a concurrent slot (max 16 live children per run).
-        let permit = self
-            .concurrent_gate
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| DriverError::Rejected("workflow concurrent admission closed".into()))?;
+        // Take a concurrent slot (max 16 live children per run). A task that
+        // has to wait is announced first, so a surface can show it queued
+        // instead of leaving it invisible until a slot frees.
+        let permit = match self.concurrent_gate.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                return Err(DriverError::Rejected(
+                    "workflow concurrent admission closed".into(),
+                ));
+            }
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                let ticket = self.queue_tickets.fetch_add(1, Ordering::SeqCst);
+                *queue_ticket = Some(ticket);
+                self.record_run_event(WorkflowUiEvent::new(
+                    &self.owner_session_id,
+                    WorkflowUiEventKind::TaskQueued {
+                        ticket,
+                        label: request
+                            .label
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|label| !label.is_empty())
+                            .map(str::to_string),
+                        phase: request
+                            .phase
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|phase| !phase.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                self.current_phase
+                                    .lock()
+                                    .ok()
+                                    .and_then(|phase| phase.clone())
+                            }),
+                    },
+                ));
+                self.concurrent_gate
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        DriverError::Rejected("workflow concurrent admission closed".into())
+                    })?
+            }
+        };
         self.ensure_admission_open()?;
         let workflow_child_index = self
             .child_counter
@@ -4680,6 +4862,8 @@ impl SubAgentWorkflowDriver {
             &result.metadata,
             &result.result,
             fleet_receipt,
+            // Started: a later refusal no longer ends this wait.
+            queue_ticket.take(),
         );
         for artifact in handoffs.commit() {
             self.record_run_event(WorkflowUiEvent::new(
@@ -4724,9 +4908,10 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
                     .ok()
                     .and_then(|phase| phase.clone())
             });
-        let result = self.spawn_task_admitted(request).await;
+        let mut queue_ticket = None;
+        let result = self.spawn_task_admitted(request, &mut queue_ticket).await;
         if let Err(err) = &result {
-            self.record_dispatch_failure(label, phase, err.to_string());
+            self.record_dispatch_failure(label, phase, err.to_string(), queue_ticket);
         }
         result
     }
@@ -4753,7 +4938,7 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
                 phase,
                 message,
             } => {
-                self.record_dispatch_failure(label, phase, message);
+                self.record_dispatch_failure(label, phase, message, None);
                 return;
             }
             // R9: a dead fan-out is a status signal, not a narrated line —
@@ -4764,8 +4949,22 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
                 self.record_dead_fanout();
                 return;
             }
-            ProgressEvent::FanoutSlotDropped { .. } => {
+            ProgressEvent::FanoutSlotDropped {
+                construct,
+                kind,
+                slot,
+            } => {
                 self.record_dropped_slot();
+                // The per-slot log line already narrates the drop; this is
+                // its typed twin for surfaces that show slots.
+                self.record_run_event(WorkflowUiEvent::new(
+                    &self.owner_session_id,
+                    WorkflowUiEventKind::SlotDropped {
+                        construct,
+                        index: slot,
+                        kind,
+                    },
+                ));
                 return;
             }
             ProgressEvent::Log { message } => (
@@ -5172,9 +5371,7 @@ fn aggregate_ir_status(
         match status {
             IrWorkflowRunStatus::BudgetExceeded => return IrWorkflowRunStatus::BudgetExceeded,
             IrWorkflowRunStatus::Cancelled => return IrWorkflowRunStatus::Cancelled,
-            IrWorkflowRunStatus::Failed | IrWorkflowRunStatus::ReplayDiverged => {
-                return IrWorkflowRunStatus::Failed;
-            }
+            IrWorkflowRunStatus::Failed => return IrWorkflowRunStatus::Failed,
             IrWorkflowRunStatus::Running => saw_running = true,
             IrWorkflowRunStatus::Pending => saw_pending = true,
             IrWorkflowRunStatus::Succeeded => {}
@@ -5191,9 +5388,7 @@ fn aggregate_ir_status(
 
 fn mark_ir_status(execution: &mut IrWorkflowExecution, status: IrWorkflowRunStatus) {
     match status {
-        IrWorkflowRunStatus::Failed | IrWorkflowRunStatus::ReplayDiverged => {
-            execution.mark_failed()
-        }
+        IrWorkflowRunStatus::Failed => execution.mark_failed(),
         IrWorkflowRunStatus::Cancelled => execution.mark_cancelled(),
         IrWorkflowRunStatus::BudgetExceeded => execution.mark_budget_exceeded(),
         IrWorkflowRunStatus::Running => {
@@ -5320,8 +5515,16 @@ async fn completion_from_manager(
                 message: message.clone(),
             },
             SubAgentStatus::Cancelled => TaskCompletion::Cancelled,
+            // The checkpoint reason names the limit that stopped the agent
+            // (steps or wall time); the tally and panel read it from here.
             SubAgentStatus::BudgetExhausted => TaskCompletion::BudgetExhausted {
-                message: "sub-agent budget exhausted".to_string(),
+                message: snapshot
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.reason.trim())
+                    .filter(|reason| !reason.is_empty())
+                    .unwrap_or("agent stopped at a step or time limit")
+                    .to_string(),
             },
             SubAgentStatus::Running => unreachable!("guarded above"),
         };
@@ -5659,7 +5862,6 @@ fn host_task_state(status: IrWorkflowRunStatus) -> &'static str {
         IrWorkflowRunStatus::Failed => "failed",
         IrWorkflowRunStatus::Cancelled => "cancelled",
         IrWorkflowRunStatus::BudgetExceeded => "budget_exceeded",
-        IrWorkflowRunStatus::ReplayDiverged => "replay_diverged",
     }
 }
 
@@ -6900,10 +7102,20 @@ permissions = "read_only"
         assert_eq!(clean.write_authority.as_deref(), Some("read_only"));
         assert_eq!(clean.subagent_type, None);
         // A task allowlist can only narrow; it never removes Runtime denials.
+        // Asking for a tool the role denies is refused loudly (SHA-6734)
+        // instead of silently launching a child with nothing usable.
         let mut narrowed = exact_task_request("reviewer");
         narrowed.allowed_tools = Some(vec!["exec_shell".to_string()]);
+        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut narrowed)
+            .expect_err("a requested tool the Runtime denylist removes is refused");
+        let message = format!("{err:?}");
+        assert!(message.contains("would start with no tools"), "{message}");
+        assert!(message.contains("dropped [exec_shell]"), "{message}");
+        // A request the role allows still narrows the surface.
+        let mut narrowed = exact_task_request("reviewer");
+        narrowed.allowed_tools = Some(vec!["read_file".to_string()]);
         bind_exact_fleet_task_request(&operation, exact_session(), &mut narrowed)
-            .expect("allowlist narrows without overriding the Runtime denylist");
+            .expect("allowlist narrows within the role");
         assert_eq!(narrowed.write_authority.as_deref(), Some("read_only"));
         assert!(
             narrowed
@@ -7069,8 +7281,8 @@ permissions = "read_only"
         let operation = exact_workflow_with(AUDIT_FLEET, None);
         // The member declares `permissions = "read_only"`, and an undeclared
         // role name no longer hands the child a write-capable posture (#5575),
-        // so a declared write scope is now correctly refused at bind time.
-        // Ask for no write scope, which is what this member actually has.
+        // so a declared write scope would be dropped at bind time. Ask for no
+        // write scope, which is what this member actually has.
         let mut request = exact_task_request("auditor");
         let binding =
             bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
@@ -7103,41 +7315,51 @@ permissions = "read_only"
         );
     }
 
-    /// The spawn boundary refuses an unbounded write claim. A task that will
-    /// hit that refusal must be stopped while it is still free — before the
-    /// Router is asked anything — or the operator pays for a routing decision
-    /// about work that could never have started.
+    /// Binding never refuses a task over write scope. A write-capable member
+    /// with no declared scope binds unchanged, and the spawn boundary defaults
+    /// it to the workspace root just as it does for a plain Agent spawn; a
+    /// member that resolves read-only has any declared scope dropped, because
+    /// it could never hold that claim and the script cannot predict every
+    /// member's resolved posture.
     #[test]
-    fn a_predictably_invalid_write_scope_is_rejected_before_the_router_runs() {
+    fn exact_fleet_binding_defers_write_scope_to_the_spawn_boundary() {
         let router = crate::fleet::exact::StaticFleetRouter::new(r#"{"reasoning":"max"}"#);
         let operation = exact_workflow_with(EXACT_GLM_FLEET, Some(router.clone()));
 
-        // Write-capable member, no declared scope: refused at the spawn
-        // boundary, so refused here first.
+        // (a) Write-capable member, no declared scope: binds, scope untouched.
         let mut unbounded = exact_task_request("builder");
-        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut unbounded)
-            .expect_err("an unbounded write claim never reaches a spawn");
-        let message = format!("{err:?}");
-        assert!(message.contains("write_roots"), "{message}");
+        bind_exact_fleet_task_request(&operation, exact_session(), &mut unbounded)
+            .expect("an unscoped writer binds; the spawn boundary supplies '.'");
+        assert_ne!(unbounded.write_authority.as_deref(), Some("read_only"));
+        assert!(unbounded.write_roots.is_empty());
+        assert!(unbounded.exact_files.is_empty());
+        assert!(unbounded.coordination_contracts.is_empty());
 
-        // Read-only member declaring a write scope is the mirror error.
+        // (b) Read-only member declaring a write scope: the scope is dropped,
+        // not refused, so the spawn contract cannot trip over it later.
         let mut scoped_read_only = exact_task_request("reviewer");
+        scoped_read_only.write_roots = vec!["crates/tui".to_string()];
         scoped_read_only.exact_files = vec!["crates/tui/src/main.rs".to_string()];
-        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut scoped_read_only)
-            .expect_err("a read-only member may not claim files");
-        assert!(format!("{err:?}").contains("read-only"), "{err:?}");
-
-        // Neither spent a routing request.
+        scoped_read_only.coordination_contracts = vec!["api".to_string()];
+        bind_exact_fleet_task_request(&operation, exact_session(), &mut scoped_read_only)
+            .expect("a read-only member's declared scope is dropped, not refused");
         assert_eq!(
-            router.call_count(),
-            0,
-            "validation that the spawn will fail must precede the router call"
+            scoped_read_only.write_authority.as_deref(),
+            Some("read_only")
         );
+        assert!(scoped_read_only.write_roots.is_empty());
+        assert!(scoped_read_only.exact_files.is_empty());
+        assert!(scoped_read_only.coordination_contracts.is_empty());
 
-        // The same task with a declared scope binds cleanly.
+        // A declared scope on a writer is kept as written.
         let mut bounded = exact_write_task_request("builder");
+        let declared = bounded.write_roots.clone();
         bind_exact_fleet_task_request(&operation, exact_session(), &mut bounded)
             .expect("a bounded write claim is valid");
+        assert_eq!(bounded.write_roots, declared);
+
+        // Binding never contacts the router.
+        assert_eq!(router.call_count(), 0);
     }
 
     /// The parent posture wins over the saved Fleet, in the request the child
@@ -7252,6 +7474,7 @@ permissions = "read_only"
                 workflow_phase_id: None,
                 workflow_task_label: None,
                 workflow_child_index: None,
+                queue_ticket: None,
                 fleet_receipt: Some(receipt.clone()),
             })),
         );
@@ -11349,6 +11572,8 @@ FINAL RECEIPT
             WorkflowUiEventKind::TaskCompleted {
                 task_id: "child-1".to_string(),
                 status: IrWorkflowRunStatus::Succeeded,
+                reason: None,
+                kind: None,
                 usage: Some(WorkflowTaskUsage {
                     input_tokens: Some(128),
                     output_tokens: Some(32),
@@ -11404,6 +11629,7 @@ FINAL RECEIPT
                 status: WorkflowRunStatus::Completed,
                 error: None,
                 usage: None,
+                result_preview: None,
             },
         ))
         .expect("serialize plain run_completed");
@@ -11937,6 +12163,391 @@ FINAL RECEIPT
         assert_eq!(recorded, 1, "heartbeat must not grow the durable journal");
     }
 
+    fn event_channel_driver(
+        workspace: &Path,
+        capacity: usize,
+    ) -> (Arc<SubAgentWorkflowDriver>, mpsc::Receiver<Event>) {
+        let ctx = ToolContext::new(workspace.to_path_buf());
+        let manager = new_shared_subagent_manager(workspace.to_path_buf(), 2);
+        let (event_tx, event_rx) = mpsc::channel(capacity);
+        let runtime = SubAgentRuntime::new(
+            stub_client(),
+            "deepseek-v4-flash".to_string(),
+            ctx,
+            true,
+            Some(event_tx),
+            manager.clone(),
+        );
+        let state = WorkflowWorkspaceState::open(workspace);
+        let run_id = "workflow_event_truth".to_string();
+        state.runs.lock().expect("runs").insert(
+            run_id.clone(),
+            WorkflowRunRecord::new(
+                run_id.clone(),
+                Some("session-test".to_string()),
+                None,
+                None,
+                None,
+            ),
+        );
+        let driver = SubAgentWorkflowDriver::new(
+            run_id,
+            "session-test".to_string(),
+            manager,
+            runtime,
+            state,
+            None,
+            WorkflowFleetBinding::None,
+            Vec::new(),
+            workspace.to_path_buf(),
+        );
+        (driver, event_rx)
+    }
+
+    #[tokio::test]
+    async fn channel_full_then_run_completed_is_still_delivered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (driver, mut event_rx) = event_channel_driver(tmp.path(), 1);
+        let log = |message: &str| {
+            WorkflowUiEvent::new(
+                "session-test",
+                WorkflowUiEventKind::Log {
+                    message: message.to_string(),
+                },
+            )
+        };
+        driver.emit_ui_event(&log("fills the channel"));
+        driver.emit_ui_event(&log("progress is lossy when full"));
+        driver.emit_ui_event(&WorkflowUiEvent::new(
+            "session-test",
+            WorkflowUiEventKind::RunCompleted {
+                status: WorkflowRunStatus::Completed,
+                error: None,
+                usage: None,
+                result_preview: None,
+            },
+        ));
+        let mut types = Vec::new();
+        for _ in 0..2 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("terminal event waits for capacity instead of dropping")
+                .expect("event channel open");
+            let Event::WorkflowUi { event, .. } = event else {
+                panic!("unexpected engine event");
+            };
+            types.push(event["type"].as_str().expect("type").to_string());
+        }
+        assert_eq!(types, ["log", "run_completed"]);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "the second progress line was dropped, as before"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_slots_and_task_stops_are_typed_events() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (driver, mut event_rx) = event_channel_driver(tmp.path(), 32);
+        for slot in [1, 3] {
+            driver.progress(ProgressEvent::FanoutSlotDropped {
+                construct: "parallel".to_string(),
+                kind: "task".to_string(),
+                slot,
+            });
+        }
+        assert_eq!(driver.dropped_slot_count(), 2);
+        let mut dropped = Vec::new();
+        while let Ok(Event::WorkflowUi { event, .. }) = event_rx.try_recv() {
+            if event["type"] == "slot_dropped" {
+                dropped.push((event["index"].clone(), event["construct"].clone()));
+            }
+        }
+        assert_eq!(
+            dropped,
+            vec![(json!(1), json!("parallel")), (json!(3), json!("parallel"))]
+        );
+
+        driver.record_task_request(
+            "agent_limit",
+            &TaskRequest {
+                label: Some("evals".to_string()),
+                ..exact_task_request("reviewer")
+            },
+        );
+        driver.record_task_completion(
+            "agent_limit",
+            &TaskCompletion::BudgetExhausted {
+                message: "child step budget exhausted for task execution (limit: 8; used: 8)"
+                    .to_string(),
+            },
+            None,
+        );
+        let completed = loop {
+            let Ok(Event::WorkflowUi { event, .. }) = event_rx.try_recv() else {
+                panic!("task_completed was not streamed");
+            };
+            if event["type"] == "task_completed" {
+                break event;
+            }
+        };
+        assert_eq!(completed["status"], "budget_exceeded");
+        assert_eq!(completed["kind"], "steps");
+        assert!(
+            completed["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("limit: 8")),
+            "{completed}"
+        );
+    }
+
+    #[test]
+    fn receipt_summary_is_a_plain_sentence_with_the_report_path() {
+        let mut record = WorkflowRunRecord::new(
+            "workflow_d08d912f".to_string(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
+        record.status = WorkflowRunStatus::Degraded;
+        record.workflow_goal = Some("Compare Cline with Codewhale".to_string());
+        let started = |task_id: &str, label: &str| {
+            WorkflowUiEvent::at(
+                1,
+                "session-test",
+                WorkflowUiEventKind::TaskStarted(Box::new(WorkflowTaskStartedEvent {
+                    task_id: task_id.to_string(),
+                    label: Some(label.to_string()),
+                    role: None,
+                    profile: None,
+                    model: None,
+                    strength: None,
+                    thinking: None,
+                    requested_reasoning: None,
+                    effective_reasoning: None,
+                    resolved_role: None,
+                    resolved_profile: None,
+                    resolved_provider: "local".to_string(),
+                    resolved_model: "stub".to_string(),
+                    route_source: "session".to_string(),
+                    child_route: None,
+                    worktree: false,
+                    workspace: None,
+                    git_branch: None,
+                    parent_task_id: None,
+                    depth: 1,
+                    workflow_run_id: Some("workflow_d08d912f".to_string()),
+                    workflow_phase_id: Some("Survey".to_string()),
+                    workflow_task_label: None,
+                    workflow_child_index: Some(0),
+                    queue_ticket: None,
+                    fleet_receipt: None,
+                })),
+            )
+        };
+        let completed = |task_id: &str, completion: TaskCompletion| {
+            let (status, _) = task_completion_status(&completion);
+            let (reason, kind) = view::task_stop(&completion);
+            WorkflowUiEvent::at(
+                2,
+                "session-test",
+                WorkflowUiEventKind::TaskCompleted {
+                    task_id: task_id.to_string(),
+                    status,
+                    reason,
+                    kind,
+                    usage: None,
+                },
+            )
+        };
+        record.push_event(started("a", "loop-prompt"));
+        record.push_event(completed(
+            "a",
+            TaskCompletion::Completed {
+                text: "ok".to_string(),
+            },
+        ));
+        record.push_event(started("b", "tools-approval"));
+        record.push_event(completed(
+            "b",
+            TaskCompletion::BudgetExhausted {
+                message: "child wall-time budget exhausted during task execution".to_string(),
+            },
+        ));
+        record.result = Some(json!({"a": "ok", "b": null}));
+
+        let summary = workflow_receipt_summary(
+            &record,
+            &[],
+            Some(".codewhale/reports/workflow_d08d912f.md"),
+        );
+        let first_line = summary.lines().next().expect("sentence");
+        assert_eq!(
+            first_line,
+            "Workflow \"Compare Cline with Codewhale\" finished with gaps: 1 of 2 agents finished, \
+             1 failed (tools-approval: stopped at the time limit)."
+        );
+        assert!(summary.contains("\nReport: .codewhale/reports/workflow_d08d912f.md"));
+        assert!(!summary.contains("Degraded") && !summary.contains(" ended "));
+
+        let unreported = workflow_receipt_summary(&record, &[], None);
+        assert!(
+            unreported.contains("No report file was written; `workflow status workflow_d08d912f`"),
+            "{unreported}"
+        );
+    }
+
+    #[test]
+    fn receipt_counts_from_the_task_ledger_once_events_were_trimmed() {
+        let mut record = WorkflowRunRecord::new(
+            "workflow_trimmed".to_string(),
+            Some("session-test".to_string()),
+            None,
+            None,
+            None,
+        );
+        record.status = WorkflowRunStatus::Degraded;
+        record.workflow_goal = Some("Survey".to_string());
+        // Chatty run: logs push every task_started out of the retained tail.
+        for index in 0..(WORKFLOW_RUN_EVENTS_MAX_RETAINED + 50) {
+            record.push_event(WorkflowUiEvent::at(
+                1,
+                "session-test",
+                WorkflowUiEventKind::Log {
+                    message: format!("line {index}"),
+                },
+            ));
+        }
+        let budget = TaskCompletion::BudgetExhausted {
+            message: "child step budget exhausted".to_string(),
+        };
+        let (reason, kind) = view::task_stop(&budget);
+        record.push_event(WorkflowUiEvent::at(
+            2,
+            "session-test",
+            WorkflowUiEventKind::TaskCompleted {
+                task_id: "agent_mid".to_string(),
+                status: IrWorkflowRunStatus::BudgetExceeded,
+                reason,
+                kind,
+                usage: None,
+            },
+        ));
+        record.dispatch_failure_count = 1;
+        assert!(record.events_dropped > 0);
+
+        // Events alone still count the agent they name as stopped.
+        let events_only = workflow_receipt_summary(&record, &[], None);
+        assert!(
+            events_only.starts_with(
+                "Workflow \"Survey\" finished with gaps: 0 of 1 agent finished, 1 failed \
+                 (agent_mid: stopped at the step limit)."
+            ),
+            "{events_only}"
+        );
+
+        let task = |index: usize, status| RuntimeTaskRecord {
+            agent_id: format!("agent_{index}"),
+            label: None,
+            role: None,
+            status,
+            output: None,
+            schema_error: None,
+            usage: None,
+        };
+        let mut ledger: Vec<RuntimeTaskRecord> = (0..598)
+            .map(|index| task(index, IrWorkflowRunStatus::Succeeded))
+            .collect();
+        ledger.push(task(598, IrWorkflowRunStatus::BudgetExceeded));
+        ledger.push(task(599, IrWorkflowRunStatus::Failed));
+        let summary = workflow_receipt_summary(&record, &ledger, None);
+        assert!(
+            summary.starts_with(
+                "Workflow \"Survey\" finished with gaps: 598 of 601 agents finished, 2 failed, \
+                 1 could not start (agent_mid: stopped at the step limit; 2 more)."
+            ),
+            "{summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_receipt_links_the_written_report_and_keeps_event_names() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (tool, context, mut rx) = native_lifecycle_tool(tmp.path());
+        let state = shared_workflow_state(tmp.path());
+        let run_id = "workflow_report_link".to_string();
+        let driver = SubAgentWorkflowDriver::new(
+            run_id.clone(),
+            context.state_namespace.clone(),
+            tool.manager,
+            tool.runtime,
+            state.clone(),
+            None,
+            WorkflowFleetBinding::None,
+            Vec::new(),
+            tmp.path().to_path_buf(),
+        );
+        state.controllers.lock().expect("controllers").insert(
+            run_id.clone(),
+            Arc::new(
+                WorkflowRunController::new(driver, WorkflowRunCancel::new())
+                    .with_parent_completion(true),
+            ),
+        );
+        let mut record = WorkflowRunRecord::new(
+            run_id,
+            Some(context.state_namespace.clone()),
+            None,
+            None,
+            None,
+        );
+        record.status = WorkflowRunStatus::Degraded;
+        // Many long multibyte labels must not push the receipt past its cap.
+        for index in 0..40 {
+            let id = format!("agent_{index}");
+            record.push_event(WorkflowUiEvent::at(
+                1,
+                "session-test",
+                WorkflowUiEventKind::TaskDispatchFailed {
+                    label: Some(format!("{index}{}", "🦀".repeat(200))),
+                    phase: None,
+                    message: format!("{id}: {}", "🦀".repeat(500)),
+                    queue_ticket: None,
+                },
+            ));
+        }
+        record.error = Some("🦀".repeat(10_000));
+        record.result = Some(json!({"preview": "🦀".repeat(10_000)}));
+        write_run_report_artifact(tmp.path(), &record);
+        finish_workflow_controller(&state, &record);
+        let completion = rx.try_recv().expect("receipt enqueued");
+        assert!(
+            completion.payload.len() <= WORKFLOW_COMPLETION_MAX_BYTES,
+            "{} bytes",
+            completion.payload.len()
+        );
+        let receipt = terminal_workflow_receipt(&completion.payload);
+        assert_eq!(receipt["event"], "workflow.failed", "event names unchanged");
+        assert_eq!(receipt["status"], "degraded", "status carries the truth");
+        assert_eq!(
+            receipt["report"],
+            ".codewhale/reports/workflow_report_link.md"
+        );
+        assert!(
+            completion
+                .payload
+                .contains("\nReport: .codewhale/reports/workflow_report_link.md"),
+            "{}",
+            completion.payload
+        );
+        assert!(
+            completion
+                .payload
+                .contains("finished with gaps: 0 of 40 agents finished, 40 could not start")
+        );
+    }
+
     fn native_lifecycle_tool(
         workspace: &Path,
     ) -> (
@@ -12098,10 +12709,12 @@ FINAL RECEIPT
                 let _ = axum::serve(listener, app).await;
             });
             let config = crate::config::Config {
-                api_key: Some("test-key".to_string()),
-                base_url: Some(format!("http://{address}/v1")),
                 ..crate::config::Config::default()
-            };
+            }
+            .with_legacy_root(
+                Some("test-key".to_string()),
+                Some(format!("http://{address}/v1")),
+            );
             let context = ToolContext::new(tmp.path().to_path_buf());
             let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
             let (completion_tx, mut completion_rx) = mpsc::channel(16);
@@ -12362,6 +12975,53 @@ FINAL RECEIPT
     }
 
     #[tokio::test]
+    async fn explicit_cancel_receipt_links_the_report_it_wrote() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (mut tool, context, mut completion_rx) = native_lifecycle_tool(tmp.path());
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        tool.runtime.event_tx = Some(event_tx);
+        let started = tool
+            .execute(
+                json!({"action":"start", "script":"phase('spin'); while (true) {}"}),
+                &context,
+            )
+            .await
+            .expect("detached start");
+        let started: Value = serde_json::from_str(&started.content).expect("start json");
+        let run_id = started["run_id"].as_str().expect("run id").to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Event::WorkflowUi { event, .. } =
+                    event_rx.recv().await.expect("event channel")
+                    && event["type"] == "phase_started"
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("VM entered its phase");
+        tool.execute(json!({"action":"cancel", "run_id":run_id}), &context)
+            .await
+            .expect("cancel");
+        let completion =
+            tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+                .await
+                .expect("cancel receipt arrives")
+                .expect("parent inbox open");
+        let receipt = terminal_workflow_receipt(&completion.payload);
+        assert_eq!(receipt["status"], "cancelled");
+        let report = format!(".codewhale/reports/{run_id}.md");
+        assert_eq!(receipt["report"], report.as_str());
+        assert!(
+            completion.payload.contains(&format!("\nReport: {report}")),
+            "{}",
+            completion.payload
+        );
+        assert!(!completion.payload.contains("No report file was written"));
+    }
+
+    #[tokio::test]
     async fn native_cancel_closes_queued_admission_without_cancelling_parent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         set_session_workflow_config(
@@ -12379,12 +13039,36 @@ FINAL RECEIPT
             .acquire_owned()
             .await
             .expect("hold capacity");
-        let mut queued = Box::pin(driver.spawn_task(exact_task_request("reviewer")));
+        let mut queued = Box::pin(driver.spawn_task(TaskRequest {
+            label: Some("reviewer-slot".to_string()),
+            ..exact_task_request("reviewer")
+        }));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
+        // With cap 1 held, the waiting task is announced before any start.
+        let announced: Vec<Value> = shared_workflow_state(tmp.path())
+            .runs
+            .lock()
+            .expect("runs")
+            .get("workflow_native_fixture")
+            .expect("run")
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event_type(),
+                    "task_queued" | "task_started" | "task_dispatch_failed"
+                )
+            })
+            .map(|event| serde_json::to_value(event).expect("event json"))
+            .collect();
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert_eq!(announced[0]["type"], "task_queued");
+        assert_eq!(announced[0]["ticket"], 0);
+        assert_eq!(announced[0]["label"], "reviewer-slot");
         driver.force_cancel_all();
         drop(held);
         let error = match queued.await {
@@ -12526,6 +13210,14 @@ FINAL RECEIPT
                 .to_string()
                 .contains("workflow.max_children limit (1)"),
             "{second}"
+        );
+        // Both attempts found the one slot free, so neither was announced as
+        // waiting for it.
+        assert!(
+            driver.state.runs.lock().expect("runs")[&driver.run_id]
+                .events
+                .iter()
+                .all(|event| event.event_type() != "task_queued")
         );
         assert_eq!(driver.child_counter.load(Ordering::SeqCst), 1);
         assert!(driver.child_ids.lock().expect("children").is_empty());
@@ -12734,9 +13426,9 @@ FINAL RECEIPT
     fn stub_client() -> CodewhaleClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = crate::config::Config {
-            api_key: Some("test-key".to_string()),
             ..crate::config::Config::default()
-        };
+        }
+        .with_legacy_root(Some("test-key".to_string()), None);
         CodewhaleClient::new(&config).expect("stub client should construct")
     }
 
@@ -12830,10 +13522,12 @@ FINAL RECEIPT
         });
 
         let config = crate::config::Config {
-            api_key: Some("test-key".to_string()),
-            base_url: Some(format!("http://{addr}/v1")),
             ..crate::config::Config::default()
-        };
+        }
+        .with_legacy_root(
+            Some("test-key".to_string()),
+            Some(format!("http://{addr}/v1")),
+        );
         (
             CodewhaleClient::new(&config).expect("fake chat client"),
             calls,

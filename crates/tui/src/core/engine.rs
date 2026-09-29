@@ -39,6 +39,7 @@ use crate::route_runtime::resolve_runtime_route;
 use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
+use crate::snapshot::{WorkspaceSnapshotKind, WorkspaceSnapshotRef};
 use crate::tools::goal::{
     GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
 };
@@ -83,7 +84,7 @@ use super::ops::{
 };
 use super::session::Session;
 use super::tool_parser;
-use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
+use super::turn::{TurnContext, format_snapshot_label, post_turn_snapshot};
 use codewhale_models::Role;
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
@@ -135,9 +136,16 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
     }
 }
 
+/// The `<turn_meta>` line naming the permission posture a turn ran under
+/// (`permission_chip_label`). Receipts read it back from saved transcripts,
+/// so the writer and the reader share this prefix.
+pub(crate) const PERMISSION_POSTURE_LINE: &str = "Current permission posture: ";
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
 const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry\n\nThe Registry installs and connects a local MCP server when this session lacks a capability. It is a fallback for a capability you do not have, not a step before ordinary work.\n\nPrefer what is already available, in order: tools already in this catalog, the project's own scripts, tests, and dev tooling, and platform capabilities. Creating a file, reading a fixture, running a repo command, and checking your own output are ordinary work — do them directly.\n\nReach for the Registry once you have identified a specific capability that no available tool covers and that you would otherwise install or reimplement, such as a document or media converter, access to an external database or service, or a protocol client. Then call `registry_sync` with a `query` naming that capability; it scores the local Registry snapshot host-side and returns at most eight matches, so the full index never enters the conversation. When a returned server plausibly covers that capability, call `start_registry_mcp_server` with its exact name rather than installing or running its package command through the shell. If nothing matches, refine the query once, then continue with local tools.\n\nBoth Registry tools are deferred: load one with `tool_search` before its first call, and use the returned schema. If a call instead reports that it only loaded the schema, retry once with that schema. Do not go searching for them for work you can already do.";
-const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
+/// The one system prompt for an isolated Runtime Chat session. The engine owns
+/// it; the Runtime Chat relay sends the same text (plus any account chat
+/// instructions) so the two never drift apart (#6517).
+pub(crate) const ISOLATED_CHAT_SYSTEM_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This is an isolated chat-only session: no local project, workspace, memory, skill, account, credential, path, or runtime context is available or implied. Do not claim to inspect or change local files, run tools, or perform work execution.";
 
 pub(crate) fn sanitize_isolated_chat_attachments(mut text: String) -> String {
     let references = codewhale_core::media_attachment_references(&text);
@@ -369,6 +377,26 @@ pub struct EngineConfig {
     /// first init. `0` disables the cap. Resolved from
     /// `[snapshots] max_workspace_gb` × 1 GB at engine construction.
     pub snapshots_max_workspace_bytes: u64,
+    /// The host records every `Event::WorkspaceSnapshotTaken` receipt on the
+    /// running turn and resolves turn-scoped undo from them (the Runtime
+    /// API). The engine then:
+    ///
+    /// - takes the post-turn snapshot *before* `TurnComplete`, so its receipt
+    ///   belongs to the turn it closes — one arriving after `TurnComplete`
+    ///   would land after the turn settled, on the next turn, or nowhere once
+    ///   the engine is evicted;
+    /// - bounds every tool call that may write (any call not read-only) with
+    ///   a `tool` snapshot before it and a `post_tool` snapshot after it, so
+    ///   the spans in which the turn's own tools ran are known and a change
+    ///   made outside them (another thread, an editor) is never taken for the
+    ///   turn's;
+    /// - reports on each receipt the paths changed since the turn's previous
+    ///   one.
+    ///
+    /// Interactive hosts keep `false`: the TUI does not record receipts,
+    /// keeps the post-turn snapshot off its input path (#234), and snapshots
+    /// only before file-writing tools.
+    pub record_restore_points: bool,
     /// Post-edit LSP diagnostics injection (#136). When `None`, the engine
     /// constructs a disabled manager so the field is always present.
     pub lsp_config: Option<crate::lsp::LspConfig>,
@@ -452,6 +480,9 @@ pub struct EngineConfig {
     pub search_api_key: Option<String>,
     /// Optional DuckDuckGo-compatible HTML endpoint override.
     pub search_base_url: Option<String>,
+    /// `Config::search_native`: `None` lets provider-native search lead on
+    /// routes that offer it; `Some(false)` keeps the chosen provider first.
+    pub search_native: Option<bool>,
     /// Per-step DeepSeek API timeout for sub-agent `create_message` requests.
     /// Resolved from `[subagents] api_timeout_secs` (clamped to 1..=3600)
     /// once at engine construction, then threaded onto every
@@ -463,8 +494,8 @@ pub struct EngineConfig {
     pub stream_chunk_timeout: Duration,
     /// Cumulative wall-clock budget for one turn (R1). Counted across every
     /// model step of the turn, excluding time blocked on a human approval
-    /// decision. Resolved from `[tui].turn_wall_clock_secs`; always finite —
-    /// see [`turn_budget::resolve_turn_wall_clock`].
+    /// decision. Resolved from `[tui].turn_wall_clock_secs`; `Duration::MAX`
+    /// (no limit) by default — see [`turn_budget::resolve_turn_wall_clock`].
     pub turn_wall_clock: Duration,
     /// Per-step cap on accumulated streamed content, in bytes (R1). Resolved
     /// from `[tui].stream_max_content_mb`. Pre-R1 this was the hard-coded
@@ -487,8 +518,8 @@ pub struct EngineConfig {
     /// tool description.
     pub user_input_limits: crate::tools::user_input::UserInputLimits,
     /// Wait for a user-input answer before cancelling it (#6003). `None`
-    /// uses the built-in default (300s); `Some(Duration::ZERO)` waits
-    /// indefinitely.
+    /// or `Some(Duration::ZERO)` waits until the person answers or cancels.
+    /// A positive duration is one absolute deadline for that wait.
     pub user_input_timeout: Option<Duration>,
     /// Per-turn step allowance while a goal is active (#5994). Hosts opt in
     /// with their resolved `[goal] max_steps`; `None` keeps the ordinary
@@ -571,6 +602,7 @@ impl Default for EngineConfig {
             snapshots_enabled: true,
             snapshots_max_workspace_bytes:
                 crate::snapshot::DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT,
+            record_restore_points: false,
             lsp_config: None,
             runtime_services: RuntimeToolServices::default(),
             subagent_model_overrides: HashMap::new(),
@@ -600,6 +632,7 @@ impl Default for EngineConfig {
             search_provider: crate::config::SearchProvider::default(),
             search_api_key: None,
             search_base_url: None,
+            search_native: None,
             subagent_api_timeout: Duration::from_secs(
                 crate::config::DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
             ),
@@ -929,6 +962,11 @@ pub struct Engine {
     pub(super) cancel_reason: Arc<StdMutex<Option<CancelReason>>>,
     tool_exec_lock: Arc<RwLock<()>>,
     turn_counter: u64,
+    /// Tree of the running turn's latest restore-point snapshot, the base the
+    /// next receipt's `changed_paths` is computed against. `None` before a
+    /// turn's first snapshot and after one failed, so a span that cannot be
+    /// accounted for is reported as unknown rather than folded into the next.
+    restore_point_since: Option<crate::snapshot::SnapshotId>,
     /// Post-edit LSP diagnostics injection (#136). Populated unconditionally
     /// — when LSP is disabled in config, this is an inert manager that
     /// always returns `None` from `diagnostics_for`.
@@ -1376,6 +1414,41 @@ impl Engine {
         ))
     }
 
+    /// Where the user message just added sits in the session, for
+    /// [`Self::retract_unanswered_user_message`].
+    pub(super) fn mark_unanswered_user_message(&self) -> crate::core::turn::UnansweredUserMessage {
+        crate::core::turn::UnansweredUserMessage {
+            len: self.session.messages.len(),
+            revision: self.session.messages_revision,
+        }
+    }
+
+    /// Remove this turn's user message when nothing followed it — the request
+    /// was refused before any model output (#6566). The mark is the session
+    /// length and messages revision right after the message was added: an
+    /// append since (an answer, a tool call, a runtime note) changes the
+    /// length, and a rewrite (compaction, context recovery) changes the
+    /// revision even when the length happens to match, so either leaves the
+    /// session as it is rather than delete some other message.
+    pub(super) fn retract_unanswered_user_message(
+        &mut self,
+        mark: crate::core::turn::UnansweredUserMessage,
+    ) -> bool {
+        let messages = &self.session.messages;
+        if mark.len == 0
+            || messages.len() != mark.len
+            || self.session.messages_revision != mark.revision
+            || messages
+                .last()
+                .is_none_or(|message| message.role != Role::User)
+        {
+            return false;
+        }
+        self.session.messages.truncate_to(mark.len - 1);
+        self.session.bump_messages_revision();
+        true
+    }
+
     pub(super) fn decorate_auth_error_message(&self, message: String) -> String {
         let Some(hint) = self.api_key_env_only_recovery.as_ref() else {
             return message;
@@ -1620,6 +1693,13 @@ impl Engine {
             .filter(|registry| registry.workspace() == config.workspace)
             .cloned()
             .unwrap_or_else(|| Arc::new(crate::plugins::PluginRegistry::empty(&config.workspace)));
+        // Experimental extension host: start in the background, never on the
+        // first-prompt path. Its tools join at the next turn's rebuild.
+        if config.features.enabled(Feature::ExtensionHost) {
+            let manager = crate::extension_host::manager();
+            manager.begin_session();
+            manager.sync_in_background(Arc::clone(&plugin_registry));
+        }
 
         // Create clients for both providers
         let (codewhale_client, codewhale_client_error) = match CodewhaleClient::new(api_config) {
@@ -1635,9 +1715,7 @@ impl Engine {
             .map(|identity| (identity.key, identity.exact_id))
             .unwrap_or_else(|_| {
                 let key = api_config.provider_identity_for(api_provider);
-                let exact_id = (!(api_provider == ApiProvider::Custom
-                    && api_config.uses_legacy_literal_custom_route()))
-                .then(|| key.clone());
+                let exact_id = Some(key.clone());
                 (key, exact_id)
             });
         let api_key_env_only_recovery = Self::env_only_api_key_recovery_hint(api_config);
@@ -1702,7 +1780,7 @@ impl Engine {
             prompts::PromptHost::Headless
         };
         let system_prompt = if api_config.runtime_chat_isolated {
-            SystemPrompt::Text(ISOLATED_CHAT_ENGINE_PROMPT.to_string())
+            SystemPrompt::Text(ISOLATED_CHAT_SYSTEM_PROMPT.to_string())
         } else {
             prompts::system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
                 &config.workspace,
@@ -1880,6 +1958,7 @@ impl Engine {
             cancel_reason: cancel_reason.clone(),
             tool_exec_lock,
             turn_counter: 0,
+            restore_point_since: None,
             lsp_manager,
             pending_lsp_blocks: Vec::new(),
             sandbox_backend,
@@ -1974,23 +2053,15 @@ impl Engine {
             })
             .await;
 
-        if self.config.snapshots_enabled {
-            let pre_workspace = self.session.workspace.clone();
-            let pre_seq = self.turn_counter;
-            let pre_cap = self.config.snapshots_max_workspace_bytes;
-            let pre_prompt = snapshot_prompt.clone();
-            let pre_sid = self.session.id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                pre_turn_snapshot(
-                    &pre_workspace,
-                    pre_seq,
-                    pre_cap,
-                    Some(&pre_prompt),
-                    Some(&pre_sid),
-                )
-            })
-            .await;
-        }
+        // The command runs from this snapshot to the post-turn one, so the
+        // receipt names it as the call that span belongs to.
+        self.take_restore_point(
+            WorkspaceSnapshotKind::PreTurn,
+            format_snapshot_label("pre-turn", self.turn_counter, Some(&snapshot_prompt)),
+            Some(tool_id.as_str()),
+            None,
+        )
+        .await;
 
         self.emit_pending_snapshot_notices().await;
 
@@ -2047,6 +2118,7 @@ impl Engine {
                     self.tx_event.clone(),
                     Some(self.cancel_token.clone()),
                     tool_name.clone(),
+                    Some(tool_id.clone()),
                     tool_input.clone(),
                     self.session.workspace.clone(),
                     Some(&registry),
@@ -2095,6 +2167,9 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
+        self.post_turn_snapshot_before_complete(&snapshot_prompt)
+            .await;
+        let pending_post_turn = self.reserve_post_turn_snapshot();
         drop(turn_control);
         let _ = self
             .tx_event
@@ -2109,21 +2184,117 @@ impl Engine {
             })
             .await;
 
-        if self.config.snapshots_enabled {
-            let post_workspace = self.session.workspace.clone();
-            let post_seq = self.turn_counter;
-            let post_cap = self.config.snapshots_max_workspace_bytes;
-            let post_sid = self.session.id.clone();
-            crate::utils::spawn_blocking_supervised("post-shell-turn-snapshot", move || {
-                post_turn_snapshot(
-                    &post_workspace,
-                    post_seq,
-                    post_cap,
-                    Some(&snapshot_prompt),
-                    Some(&post_sid),
-                );
-            });
+        self.post_turn_snapshot_after_complete(
+            "post-shell-turn-snapshot",
+            snapshot_prompt,
+            pending_post_turn,
+        );
+    }
+
+    /// Take one workspace snapshot for the running turn and report it as an
+    /// `Event::WorkspaceSnapshotTaken` receipt. Returns whether it was taken.
+    ///
+    /// A snapshot that fails (or is gated off) reports nothing: the host then
+    /// has no such restore point for the turn and must say so rather than
+    /// guess one. With [`EngineConfig::record_restore_points`] the receipt
+    /// also carries the paths changed since the turn's previous snapshot,
+    /// and a failure leaves the next span unknown instead of merging it into
+    /// the one before.
+    pub(crate) async fn take_restore_point(
+        &mut self,
+        kind: WorkspaceSnapshotKind,
+        label: String,
+        tool_call_id: Option<&str>,
+        write_paths: Option<Vec<String>>,
+    ) -> bool {
+        if !self.config.snapshots_enabled {
+            return false;
         }
+        let record = self.config.record_restore_points;
+        let since = if record && kind != WorkspaceSnapshotKind::PreTurn {
+            self.restore_point_since.clone()
+        } else {
+            None
+        };
+        let workspace = self.session.workspace.clone();
+        let cap = self.config.snapshots_max_workspace_bytes;
+        let sid = self.session.id.clone();
+        let taken = tokio::task::spawn_blocking(move || {
+            super::turn::restore_point_snapshot(&workspace, &label, cap, Some(&sid), since.as_ref())
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((taken, changed)) = taken else {
+            self.restore_point_since = None;
+            return false;
+        };
+        if record {
+            self.restore_point_since = Some(taken.tree.clone());
+        }
+        let mut snapshot = WorkspaceSnapshotRef::new(kind, &taken, &self.session.id, tool_call_id);
+        snapshot.write_paths = write_paths;
+        snapshot.changed_paths = changed.map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        });
+        let _ = self
+            .tx_event
+            .send(Event::WorkspaceSnapshotTaken { snapshot })
+            .await;
+        true
+    }
+
+    /// With [`EngineConfig::record_restore_points`], take the post-turn
+    /// snapshot now — before `TurnComplete` — and report it.
+    async fn post_turn_snapshot_before_complete(&mut self, prompt: &str) {
+        if !self.config.record_restore_points {
+            return;
+        }
+        let label = format_snapshot_label("post-turn", self.turn_counter, Some(prompt));
+        self.take_restore_point(WorkspaceSnapshotKind::PostTurn, label, None, None)
+            .await;
+    }
+
+    /// Without [`EngineConfig::record_restore_points`], reserve the post-turn
+    /// snapshot [`Self::post_turn_snapshot_after_complete`] takes. Called
+    /// before `TurnComplete`, so a `/undo` the user types as soon as the
+    /// turn ends waits for that snapshot instead of racing it (#6644).
+    fn reserve_post_turn_snapshot(&self) -> Option<crate::snapshot::PendingPostTurnSnapshot> {
+        (self.config.snapshots_enabled && !self.config.record_restore_points)
+            .then(crate::snapshot::PendingPostTurnSnapshot::reserve)
+    }
+
+    /// Take the post-turn snapshot reserved by
+    /// [`Self::reserve_post_turn_snapshot`] fire-and-forget: `TurnComplete`
+    /// is already emitted, so the UI is unblocked and the user can type /
+    /// select / paste immediately (#234). The git work proceeds on the
+    /// blocking pool, and the reservation is released once it is done.
+    fn post_turn_snapshot_after_complete(
+        &self,
+        task: &'static str,
+        prompt: String,
+        pending: Option<crate::snapshot::PendingPostTurnSnapshot>,
+    ) {
+        let Some(pending) = pending else {
+            return;
+        };
+        let post_workspace = self.session.workspace.clone();
+        let post_seq = self.turn_counter;
+        let post_cap = self.config.snapshots_max_workspace_bytes;
+        let post_sid = self.session.id.clone();
+        crate::utils::spawn_blocking_supervised(task, move || {
+            post_turn_snapshot(
+                &post_workspace,
+                post_seq,
+                post_cap,
+                Some(&prompt),
+                Some(&post_sid),
+            );
+            drop(pending);
+        });
     }
 
     /// Apply a user/host mode-or-posture change to the live session.
@@ -2609,16 +2780,19 @@ impl Engine {
     ) -> bool {
         use crate::tools::subagent::{ChildApprovalOutcome, SubAgentManager};
         let (id, outcome) = match &decision {
-            super::engine::approval::ApprovalDecision::Approved { id } => {
+            super::engine::approval::ApprovalDecision::Approved { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Approved)
             }
-            super::engine::approval::ApprovalDecision::Denied { id } => {
+            super::engine::approval::ApprovalDecision::Denied { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
             // A child has no timeout outcome of its own (#6101); an expired
             // card is a deny for whichever call it was answering.
             super::engine::approval::ApprovalDecision::TimedOut { id } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
+            }
+            super::engine::approval::ApprovalDecision::Unavailable { id } => {
+                (id.clone(), ChildApprovalOutcome::Unavailable)
             }
             // A sandbox retry only exists for the parent's own tool call.
             super::engine::approval::ApprovalDecision::RetryWithPolicy { .. } => return false,
@@ -3142,18 +3316,22 @@ impl Engine {
                             .await;
                     }
                     Op::SetCompaction { config } => {
-                        // Hosts resend the compaction config on every route
-                        // or model sync. An unchanged config is not news; its
-                        // acknowledgement used to overwrite a real error in
-                        // the footer (U1).
-                        if self.config.compaction != config {
-                            let enabled = config.enabled;
-                            self.config.compaction = config;
+                        // Hosts resend the compaction config on every route,
+                        // model or session sync, and those syncs move the
+                        // model, window and thresholds without the user
+                        // touching the switch. Only the switch is news: an
+                        // acknowledgement for anything else used to overwrite
+                        // a real error in the footer (U1) and the "Resumed:"
+                        // receipt a session restore had just shown.
+                        let enabled = config.enabled;
+                        let switched = self.config.compaction.enabled != enabled;
+                        self.config.compaction = config;
+                        if switched {
                             let _ = self
                                 .tx_event
                                 .send(Event::status(format!(
-                                    "Auto-compaction {}",
-                                    if enabled { "enabled" } else { "disabled" }
+                                    "Make room automatically: {}",
+                                    if enabled { "on" } else { "off" }
                                 )))
                                 .await;
                         }
@@ -3362,6 +3540,7 @@ impl Engine {
                         let total_tokens = self.session.total_usage.input_tokens
                             + self.session.total_usage.output_tokens;
                         let snapshot = SessionSnapshot {
+                            session_id: self.session.id.clone(),
                             messages: self.session.messages.to_vec(),
                             total_tokens,
                             model: self.session.model.clone(),
@@ -3554,6 +3733,9 @@ impl Engine {
                     }
                     Op::SetSearchProvider { provider } => {
                         self.config.search_provider = provider;
+                        // A provider picked in-session is a pin; only an
+                        // explicit `[search] native = true` still leads.
+                        self.config.search_native.get_or_insert(false);
                     }
                     Op::Shutdown => {
                         break;
@@ -3727,9 +3909,43 @@ impl Engine {
         Some(format!("Active goal token budget: {token_budget}"))
     }
 
-    async fn add_session_message(&mut self, message: Message) {
+    async fn add_session_message(&mut self, mut message: Message) {
+        self.redact_tool_results_for_transcript(&mut message);
         self.session.add_message(message);
         self.emit_session_updated().await;
+    }
+
+    /// Scrub credentials from tool output once, as it enters the transcript
+    /// (B1). The transcript is what session JSON, the journal and every
+    /// later request are built from, so a token a tool printed is never
+    /// written to disk live. Honors the confirmed `[redaction] model_bound`
+    /// opt-out the same way the request boundary does.
+    fn redact_tool_results_for_transcript(&self, message: &mut Message) {
+        for block in &mut message.content {
+            let ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            *content = self.redact_tool_output_for_transcript(content);
+            for value in content_blocks.iter_mut().flatten() {
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                    && let Some(serde_json::Value::String(text)) = value.get_mut("text")
+                {
+                    *text = self.redact_tool_output_for_transcript(text);
+                }
+            }
+        }
+    }
+
+    fn redact_tool_output_for_transcript(&self, text: &str) -> String {
+        match self.codewhale_client.as_ref() {
+            Some(client) => client.redact_tool_output_for_transcript(text),
+            None => codewhale_config::persistence::redact_model_bound_secrets(text),
+        }
     }
 
     async fn add_interrupted_assistant_text(&mut self, text: &str) {
@@ -3847,7 +4063,7 @@ impl Engine {
             // `render_environment_block` for the prefix-cache rationale).
             format!("Current workspace: {}", self.config.workspace.display()),
             format!(
-                "Current permission posture: {}",
+                "{PERMISSION_POSTURE_LINE}{}",
                 approval_mode.permission_chip_label()
             ),
             format!(
@@ -4403,7 +4619,7 @@ impl Engine {
         let snapshot = match self.config.goal_state.lock() {
             Ok(mut state) => {
                 if state.is_active()
-                    && let Err(err) = state.mark_blocked(message.clone())
+                    && let Err(err) = state.mark_runtime_blocked(message.clone())
                 {
                     tracing::warn!("failed to mark goal continuation blocked: {err}");
                     return;
@@ -4431,6 +4647,37 @@ impl Engine {
         self.emit_session_updated().await;
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
         let _ = self.tx_event.send(Event::status(message)).await;
+    }
+
+    /// Resume the shared goal when its only blocker was a runtime stop and it
+    /// is the objective this turn names; publish the change like any other
+    /// goal transition.
+    async fn resume_runtime_blocked_goal(&mut self, objective: Option<&str>) -> bool {
+        let snapshot = match self.config.goal_state.lock() {
+            Ok(mut state) => {
+                if normalized_goal_objective(state.objective())
+                    != normalized_goal_objective(objective)
+                    || !state.resume_after_runtime_block()
+                {
+                    return false;
+                }
+                state.snapshot()
+            }
+            Err(err) => {
+                tracing::warn!("goal state lock poisoned while resuming a goal: {err}");
+                return false;
+            }
+        };
+        self.config.goal_status = GoalStatus::Active;
+        self.emit_session_updated().await;
+        let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+        let _ = self
+            .tx_event
+            .send(Event::status(
+                "Goal resumed: your message continues the work the earlier turn stopped",
+            ))
+            .await;
+        true
     }
 
     /// Pause a still-active goal with an inspectable reason and publish every
@@ -4654,7 +4901,6 @@ impl Engine {
                     Some(Vec::new()),
                     None,
                     Some(0),
-                    input_policy.approval_mode_for_session(),
                     tool_catalog::ToolMode::Direct,
                 ),
                 mcp_tool_names: Vec::new(),
@@ -4818,7 +5064,7 @@ impl Engine {
                 .with_mcp_pool(mcp_pool.clone())
                 .with_todos(self.config.todos.clone())
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
-                .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
+                .with_parent_compaction(&self.config.compaction)
                 .with_parent_mode(input_policy.mode)
                 .with_approval_receipt_store(self.approval_receipt_store.clone())
                 .with_permission_posture(
@@ -4864,8 +5110,23 @@ impl Engine {
         // Load plugin tools from the user's tools directory and apply any
         // config.toml overrides. Explicit overrides win over auto-discovered
         // scripts with the same tool name.
-        let plugin_tool_names =
+        let extension_host = self
+            .config
+            .features
+            .enabled(Feature::ExtensionHost)
+            .then(crate::extension_host::manager);
+        if let Some(manager) = &extension_host {
+            // Natives only: scripts are added next and must not count as built-ins.
+            manager.note_native_names(tool_registry.names());
+            manager.sync_in_background(Arc::clone(&self.plugin_registry));
+        }
+        let mut plugin_tool_names =
             configure_plugin_tools(&mut tool_registry, self.config.tools.as_ref());
+        // Extension tools go in last and never replace a name already present
+        // (`ToolRegistry::register` would overwrite it silently).
+        if let Some(manager) = &extension_host {
+            plugin_tool_names.extend(manager.install_tools(&mut tool_registry));
+        }
 
         let mcp_state = if self.config.features.enabled(Feature::Mcp) {
             if mcp_access.may_connect() {
@@ -4910,7 +5171,6 @@ impl Engine {
             allowed_tools,
             self.config.disallowed_tools.clone(),
             self.config.max_tool_calls,
-            input_policy.approval_mode_for_session(),
             // Model metadata wins once wired; today the hint is always None
             // and the [features] flags decide (model_registry follow-up).
             tool_catalog::requested_tool_mode(None, &self.config.features),
@@ -5089,6 +5349,21 @@ impl Engine {
             }
         }
 
+        // A person writing to a goal that only the runtime stopped (a failed
+        // or timed-out continuation) is continuing the work: resume it as a
+        // new revision instead of running a goalless turn against a stale
+        // blocker. Blockers the model or user reported stay until an explicit
+        // resume, and automated inputs never resume anything.
+        let goal_status = if provenance == UserInputProvenance::ExternalUser
+            && goal_status == GoalStatus::Blocked
+            && self
+                .resume_runtime_blocked_goal(goal_objective.as_deref())
+                .await
+        {
+            GoalStatus::Active
+        } else {
+            goal_status
+        };
         let input_policy = effective_input_policy(
             provenance,
             mode,
@@ -5283,28 +5558,15 @@ impl Engine {
         // Snapshot the workspace BEFORE we touch a single tool. Run the git
         // work on the blocking pool so the async runtime stays responsive;
         // failure is non-fatal (the helper logs at WARN).
-        if self.config.snapshots_enabled {
-            // Clone the user prompt now — `content` is moved into
-            // `user_text_message_with_turn_metadata_for_route` below, so we need
-            // a copy for both pre- and post-turn snapshot labels. The
-            // label carries a truncated first line so `/restore`
-            // listings are human-readable.
-            let snapshot_prompt = content.clone();
-            let pre_workspace = self.session.workspace.clone();
-            let pre_seq = self.turn_counter;
-            let pre_cap = self.config.snapshots_max_workspace_bytes;
-            let pre_sid = self.session.id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                pre_turn_snapshot(
-                    &pre_workspace,
-                    pre_seq,
-                    pre_cap,
-                    Some(&snapshot_prompt),
-                    Some(&pre_sid),
-                )
-            })
-            .await;
-        }
+        // The label carries a truncated first line of the prompt so
+        // `/restore` listings are human-readable.
+        self.take_restore_point(
+            WorkspaceSnapshotKind::PreTurn,
+            format_snapshot_label("pre-turn", self.turn_counter, Some(&content)),
+            None,
+            None,
+        )
+        .await;
 
         self.emit_pending_snapshot_notices().await;
 
@@ -5463,6 +5725,7 @@ impl Engine {
         };
         user_msg.content.splice(image_index..image_index, images);
         self.session.add_message(user_msg);
+        turn.unanswered_user_message = Some(self.mark_unanswered_user_message());
 
         self.emit_session_updated().await;
 
@@ -5642,6 +5905,9 @@ impl Engine {
                 .send(Event::ToolRequestSnapshot { snapshot })
                 .await;
         }
+        self.post_turn_snapshot_before_complete(&snapshot_prompt_post)
+            .await;
+        let pending_post_turn = self.reserve_post_turn_snapshot();
         drop(turn_control);
         // `event_sent` means the TurnComplete event reached the UI channel —
         // never that the user saw model output. (#6184: the old `delivered`
@@ -5667,27 +5933,13 @@ impl Engine {
             "engine turn completion settled"
         );
 
-        // Post-turn snapshot. Fire-and-forget: TurnComplete is already
-        // emitted, so the UI is unblocked and the user can type / select /
-        // paste immediately (#234). The git work proceeds on the blocking
-        // pool without forcing the engine loop to await it.
-        if self.config.snapshots_enabled {
-            // `snapshot_prompt_post` was cloned from `content` above,
-            // before `content` was moved into the session messages.
-            let post_workspace = self.session.workspace.clone();
-            let post_seq = self.turn_counter;
-            let post_cap = self.config.snapshots_max_workspace_bytes;
-            let post_sid = self.session.id.clone();
-            crate::utils::spawn_blocking_supervised("post-turn-snapshot", move || {
-                post_turn_snapshot(
-                    &post_workspace,
-                    post_seq,
-                    post_cap,
-                    Some(&snapshot_prompt_post),
-                    Some(&post_sid),
-                );
-            });
-        }
+        // Post-turn snapshot, unless it was already taken before
+        // TurnComplete (see `EngineConfig::record_restore_points`).
+        self.post_turn_snapshot_after_complete(
+            "post-turn-snapshot",
+            snapshot_prompt_post,
+            pending_post_turn,
+        );
 
         // ── Background advisor watcher (#3982) ────────────────────────────
         // Fire-and-forget: TurnComplete is already emitted. The advisor
@@ -6008,7 +6260,7 @@ impl Engine {
         .with_mcp_pool(self.mcp_pool.clone())
         .with_todos(self.config.todos.clone())
         .with_parent_completion_tx(self.tx_subagent_completion.clone())
-        .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
+        .with_parent_compaction(&self.config.compaction)
         .with_parent_mode(mode)
         .with_approval_receipt_store(self.approval_receipt_store.clone())
         .with_permission_posture(
@@ -6151,7 +6403,9 @@ impl Engine {
         ctx.search_api_key = self.config.search_api_key.clone();
         ctx.search_base_url = self.config.search_base_url.clone();
         ctx.route_capabilities = route.capabilities;
-        if route.capabilities.server_side_web_search.is_supported() {
+        if route.capabilities.server_side_web_search.is_supported()
+            && self.config.search_native != Some(false)
+        {
             ctx.provider_native_search = route
                 .client
                 .as_ref()
@@ -7123,6 +7377,25 @@ impl Engine {
         self.refresh_system_prompt_from_context_with_reason(&context, reason);
     }
 
+    // KV-cache effect: append-only user history. SessionUpdated persists this
+    // warning even when an explicit prompt rebuild replaces the system prefix.
+    fn record_project_trust_warning(&mut self) {
+        let warning = crate::skills::untrusted_project_skills_warning(&self.session.workspace);
+        let previous = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| crate::runtime_handoff::is_workspace_trust_message(message));
+        if warning.is_none() && previous.is_none() {
+            return;
+        }
+        let message = crate::runtime_handoff::workspace_trust_runtime_message(warning.as_deref());
+        if previous != Some(&message) {
+            self.session.add_message(message);
+        }
+    }
+
     /// Recompose the stable system prompt from current context. When the bytes
     /// actually change (hash differs), record `reason` as the declared cause
     /// so the turn loop's prefix check re-pins the KV-cache prefix under a
@@ -7135,6 +7408,7 @@ impl Engine {
         context: &NextTurnPromptContext,
         reason: &str,
     ) {
+        self.record_project_trust_warning();
         let stable_prompt = self.compose_stable_system_prompt(context);
 
         let stable_hash = system_prompt_hash(stable_prompt.as_ref());
@@ -7168,6 +7442,7 @@ impl Engine {
         &mut self,
         context: &NextTurnPromptContext,
     ) -> Option<String> {
+        self.record_project_trust_warning();
         if self.session.system_prompt_override {
             return None;
         }
@@ -7221,7 +7496,7 @@ impl Engine {
         context: &NextTurnPromptContext,
     ) -> Option<SystemPrompt> {
         if self.api_config.runtime_chat_isolated {
-            return Some(SystemPrompt::Text(ISOLATED_CHAT_ENGINE_PROMPT.to_string()));
+            return Some(SystemPrompt::Text(ISOLATED_CHAT_SYSTEM_PROMPT.to_string()));
         }
         let user_memory_block = crate::native_memory::native_prompt_block_traced(
             self.config.memory_enabled,
@@ -7440,9 +7715,9 @@ pub(crate) fn auto_review_plan_decision_for_context(
     let plan_decision = if context.approval_mode == ApprovalMode::Auto
         && context.tool_name == REQUEST_USER_INPUT_NAME
     {
-        // This synthetic tool does not execute user work. Let the turn loop
-        // return its ordinary autonomous guidance result instead of treating
-        // a hallucinated question as an unknown external action.
+        // A question executes no user work and changes no state. Auto-Review
+        // reviews tool approvals only, so let the turn loop ask the user
+        // instead of treating the question as an unknown external action.
         AutoReviewPlanDecision::Allow
     } else {
         match decision.action {
@@ -7515,18 +7790,26 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
-    if policy_tool_name != "exec_shell" {
+    // Task tools that hand a command string to the shell answer to the same
+    // shell deny and ask rules. Their own approval requirement stays: a shell
+    // allow rule does not waive it.
+    let runs_shell_command = matches!(policy_tool_name, "task_shell_start" | "task_gate_run");
+    if policy_tool_name != "exec_shell" && !runs_shell_command {
         return None;
     }
     let command = tool_input.get("command").and_then(Value::as_str)?;
-    tool_ask_rule_decision_for_context(
+    let decision = tool_ask_rule_decision_for_context(
         exec_policy_engine,
-        policy_tool_name,
+        "exec_shell",
         command,
         None,
         workspace,
         approval_mode,
-    )
+    );
+    if runs_shell_command && matches!(decision, Some(ToolAskRuleDecision::Allow)) {
+        return None;
+    }
+    decision
 }
 
 pub(super) fn file_tool_ask_rule_decision(
@@ -7657,7 +7940,7 @@ fn file_tool_permission_paths(tool_name: &str, input: &Value) -> Option<Vec<Stri
 /// Target paths when a call is one of the canonical workspace file-write
 /// tools (`write_file` / `edit_file` / `apply_patch`), `None` for any other
 /// tool. Feeds the in-workspace write carve-out (#5185).
-fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
+pub(crate) fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
     let canonical = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     if !matches!(canonical, "write_file" | "edit_file" | "apply_patch") {
         return None;
@@ -7702,8 +7985,15 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     config: EngineConfig,
     api_config: &Config,
     authoritative_route_config: Arc<parking_lot::RwLock<Config>>,
+    model_client: Option<SharedModelClient>,
 ) -> (EngineHandle, tokio::task::JoinHandle<()>) {
-    let (mut engine, handle) = Engine::new(config, api_config);
+    // `model_client` replaces only the model I/O boundary (see
+    // `Engine::new_with_model_client`); hosts pass `None` for the provider
+    // client the route resolves.
+    let (mut engine, handle) = match model_client {
+        Some(client) => Engine::new_with_model_client(config, api_config, client),
+        None => Engine::new(config, api_config),
+    };
     engine.authoritative_route_config = Some(authoritative_route_config);
 
     let worker = spawn_supervised(
@@ -7738,6 +8028,9 @@ pub(crate) enum MockApprovalEvent {
     TimedOut {
         id: String,
     },
+    Unavailable {
+        id: String,
+    },
     RetryWithPolicy {
         id: String,
         policy: crate::sandbox::SandboxPolicy,
@@ -7747,14 +8040,26 @@ pub(crate) enum MockApprovalEvent {
 #[cfg(test)]
 impl MockEngineHandle {
     pub(crate) async fn recv_approval_event(&mut self) -> Option<MockApprovalEvent> {
-        match self.rx_approval.recv().await? {
-            ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
-            ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
-            ApprovalDecision::TimedOut { id } => Some(MockApprovalEvent::TimedOut { id }),
-            ApprovalDecision::RetryWithPolicy { id, policy } => {
-                Some(MockApprovalEvent::RetryWithPolicy { id, policy })
+        self.recv_approval_decision().await.map(|(event, _)| event)
+    }
+
+    /// The next decision and who the host said made it (`None` for a
+    /// timeout or an unavailable request, which name their own cause).
+    pub(crate) async fn recv_approval_decision(
+        &mut self,
+    ) -> Option<(
+        MockApprovalEvent,
+        Option<crate::approval_log::ApprovalDecider>,
+    )> {
+        Some(match self.rx_approval.recv().await? {
+            ApprovalDecision::Approved { id, by } => (MockApprovalEvent::Approved { id }, Some(by)),
+            ApprovalDecision::Denied { id, by } => (MockApprovalEvent::Denied { id }, Some(by)),
+            ApprovalDecision::TimedOut { id } => (MockApprovalEvent::TimedOut { id }, None),
+            ApprovalDecision::Unavailable { id } => (MockApprovalEvent::Unavailable { id }, None),
+            ApprovalDecision::RetryWithPolicy { id, policy, by } => {
+                (MockApprovalEvent::RetryWithPolicy { id, policy }, Some(by))
             }
-        }
+        })
     }
 
     pub(crate) async fn recv_user_input_submission(
@@ -8245,7 +8550,7 @@ pub(crate) mod turn_heartbeat;
 pub(crate) mod turn_loop;
 pub(crate) use dispatch::{
     FLEET_FINAL_REPORT_NOTICE, FLEET_NO_PROGRESS_STOP, FLEET_STRATEGY_SWITCH_NOTICE,
-    FleetDenialAction, FleetDenialBatch, FleetDenialGuard,
+    FleetDenialAction, FleetDenialBatch, FleetDenialGuard, content_without_approval_note,
 };
 pub(crate) use token_estimate_cache::TokenEstimateCache;
 
@@ -8268,12 +8573,13 @@ use self::dispatch::{
 use self::dispatch::{format_tool_error, should_parallelize_tool_batch};
 #[cfg(test)]
 use self::lsp_hooks::edited_paths_for_tool;
+pub(crate) use self::streaming::FAKE_WRAPPER_NOTICE;
 #[cfg(test)]
 use self::streaming::TOOL_CALL_START_MARKERS;
 #[cfg(test)]
 use self::streaming::filter_tool_call_delta;
 use self::streaming::{
-    ContentBlockKind, FAKE_WRAPPER_NOTICE, MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES,
+    ContentBlockKind, MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES,
     MAX_TRANSPARENT_STREAM_RETRIES, StreamResume, StreamRetryBudget, ToolCallDeltaFilterState,
     ToolUseState, contains_fake_tool_wrapper, filter_tool_call_delta_with_state,
     flush_tool_call_delta_state, should_resume_after_network_drop, should_resume_after_sleep,

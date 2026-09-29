@@ -17,8 +17,6 @@ mod zai;
 
 mod kimi;
 
-const MAX_NATIVE_ANSWER_CHARS: usize = 4_000;
-
 #[derive(Clone)]
 pub(crate) struct ProviderNativeSearchClient {
     pub(super) inner: CodewhaleClient,
@@ -43,7 +41,23 @@ pub(crate) struct ProviderNativeCitation {
 pub(crate) struct ProviderNativeSearchResponse {
     pub(crate) answer: Option<String>,
     pub(crate) citations: Vec<ProviderNativeCitation>,
+    /// The provider stopped the answer at its output limit (#6508).
+    pub(crate) truncated: bool,
 }
+
+/// What the Anthropic and MiMo adapters requested before #6508, kept for a
+/// model whose output ceiling the catalogue does not document.
+const PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS: u32 = 2_048;
+
+/// Ceiling on the output a native-search request asks for (#6508). These are
+/// single-shot, non-streaming requests: nothing arrives until the whole answer
+/// is generated, so web_search gives the attempt enough time to generate what
+/// was asked for (`tools::web_search::native_answer_time_budget`). The clamp
+/// bounds that wait: at the budget's assumed generation rate, 8,192 tokens is
+/// about four minutes before a stalled provider falls back to another backend.
+/// It is not a context or API limit; the model's own output ceiling still
+/// applies beneath it.
+const NATIVE_SEARCH_MAX_OUTPUT_TOKENS: u32 = 8_192;
 
 impl ProviderNativeSearchClient {
     #[must_use]
@@ -71,6 +85,44 @@ impl ProviderNativeSearchClient {
     #[must_use]
     pub(crate) fn model(&self) -> &str {
         &self.inner.default_model
+    }
+
+    /// Output tokens to request for a native search answer: the search
+    /// model's route ceiling up to [`NATIVE_SEARCH_MAX_OUTPUT_TOKENS`]. When
+    /// the catalogue does not document that ceiling, keep `fallback` (the
+    /// value this adapter always sent) rather than risk a provider rejecting
+    /// a larger request.
+    #[must_use]
+    pub(super) fn answer_output_tokens(&self, fallback: u32) -> u32 {
+        let model = &self.inner.default_model;
+        let route_cap = self.inner.effective_max_output_tokens(model);
+        let documented = matches!(
+            crate::route_budget::output_ceiling_source(self.inner.api_provider, model),
+            crate::route_budget::OutputCeilingSource::Documented(_)
+        );
+        let wanted = if documented {
+            NATIVE_SEARCH_MAX_OUTPUT_TOKENS
+        } else {
+            fallback
+        };
+        wanted.min(route_cap)
+    }
+
+    /// Output tokens this client asks for per native-search answer, or `None`
+    /// for adapters that leave the answer length to the provider's default
+    /// (the Responses and Z.ai adapters). web_search sizes the attempt's time
+    /// budget from this, so the request and the wait cannot disagree.
+    #[must_use]
+    pub(crate) fn requested_answer_output_tokens(&self) -> Option<u32> {
+        match self.inner.api_provider {
+            ApiProvider::Anthropic | ApiProvider::XiaomiMimo => {
+                Some(self.answer_output_tokens(PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS))
+            }
+            ApiProvider::Moonshot => {
+                Some(self.answer_output_tokens(kimi::PRIOR_NATIVE_SEARCH_MAX_COMPLETION_TOKENS))
+            }
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -144,17 +196,18 @@ impl ProviderNativeSearchClient {
                 request,
                 ResponsesSearchDialect::Deepseek,
             ),
-            ApiProvider::Anthropic => {
-                let route_cap = self
-                    .inner
-                    .effective_max_output_tokens(&self.inner.default_model);
-                build_anthropic_search_body(
-                    &self.inner.default_model,
-                    request,
-                    2_048_u32.min(route_cap),
-                )
-            }
-            ApiProvider::XiaomiMimo => build_mimo_search_body(&self.inner.default_model, request),
+            ApiProvider::Anthropic => build_anthropic_search_body(
+                &self.inner.default_model,
+                request,
+                self.requested_answer_output_tokens()
+                    .unwrap_or(PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS),
+            ),
+            ApiProvider::XiaomiMimo => build_mimo_search_body(
+                &self.inner.default_model,
+                request,
+                self.requested_answer_output_tokens()
+                    .unwrap_or(PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS),
+            ),
             ApiProvider::Zai => zai::build_body(request, &self.inner.base_url)?,
             _ => bail!("active provider has no native web-search adapter"),
         };
@@ -326,7 +379,11 @@ fn build_anthropic_search_body(
     })
 }
 
-fn build_mimo_search_body(model: &str, request: &ProviderNativeSearchRequest) -> Value {
+fn build_mimo_search_body(
+    model: &str,
+    request: &ProviderNativeSearchRequest,
+    max_completion_tokens: u32,
+) -> Value {
     json!({
         "model": model,
         "messages": [{ "role": "user", "content": search_prompt(request) }],
@@ -337,7 +394,7 @@ fn build_mimo_search_body(model: &str, request: &ProviderNativeSearchRequest) ->
             "limit": request.max_results,
         }],
         "tool_choice": "auto",
-        "max_completion_tokens": 2_048,
+        "max_completion_tokens": max_completion_tokens,
         "stream": false,
         "thinking": { "type": "disabled" },
     })
@@ -413,9 +470,17 @@ fn parse_responses_search(payload: &Value) -> ProviderNativeSearchResponse {
             push_citation(&mut citations, parsed);
         }
     }
+    // A Responses reply cut at its output limit is `incomplete` with reason
+    // `max_output_tokens`; the text it did return is a partial answer.
+    let truncated = payload.get("status").and_then(Value::as_str) == Some("incomplete")
+        && payload
+            .pointer("/incomplete_details/reason")
+            .and_then(Value::as_str)
+            == Some("max_output_tokens");
     ProviderNativeSearchResponse {
-        answer: bounded_answer(answer_parts),
+        answer: joined_answer(answer_parts),
         citations,
+        truncated,
     }
 }
 
@@ -464,8 +529,9 @@ fn parse_anthropic_search(payload: &Value) -> ProviderNativeSearchResponse {
         }
     }
     ProviderNativeSearchResponse {
-        answer: bounded_answer(answer_parts),
+        answer: joined_answer(answer_parts),
         citations,
+        truncated: payload.get("stop_reason").and_then(Value::as_str) == Some("max_tokens"),
     }
 }
 
@@ -506,9 +572,18 @@ fn parse_mimo_search(payload: &Value) -> ProviderNativeSearchResponse {
         }
     }
     ProviderNativeSearchResponse {
-        answer: bounded_answer(answer.into_iter().collect()),
+        answer: joined_answer(answer.into_iter().collect()),
         citations,
+        truncated: finish_reason_is_length(payload.pointer("/choices/0")),
     }
+}
+
+/// A Chat Completions choice that stopped at its output limit.
+fn finish_reason_is_length(choice: Option<&Value>) -> bool {
+    choice
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        == Some("length")
 }
 
 fn citation_from_value(
@@ -621,21 +696,13 @@ fn fallback_title(url: &str) -> String {
         .unwrap_or_else(|| "Web source".to_string())
 }
 
-fn bounded_answer(parts: Vec<String>) -> Option<String> {
+/// Join the answer parts whole. No per-adapter cap: the provider already
+/// bounded its output tokens, and the engine's route budget bounds what
+/// reaches the model inline while keeping the rest recoverable (#6508).
+fn joined_answer(parts: Vec<String>) -> Option<String> {
     let joined = parts.join("\n\n");
     let trimmed = joined.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.chars().count() <= MAX_NATIVE_ANSWER_CHARS {
-        return Some(trimmed.to_string());
-    }
-    let mut bounded = trimmed
-        .chars()
-        .take(MAX_NATIVE_ANSWER_CHARS.saturating_sub(1))
-        .collect::<String>();
-    bounded.push('…');
-    Some(bounded)
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -732,12 +799,103 @@ mod tests {
 
     #[test]
     fn mimo_payload_forces_bounded_web_search_plugin() {
-        let body = build_mimo_search_body("mimo-v2.5-pro", &request());
+        let body = build_mimo_search_body("mimo-v2.5-pro", &request(), 8_192);
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert_eq!(body["tools"][0]["force_search"], true);
         assert_eq!(body["tools"][0]["limit"], 3);
-        assert_eq!(body["max_completion_tokens"], 2_048);
+        assert_eq!(body["max_completion_tokens"], 8_192);
         assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    fn anthropic_client(model: &str) -> ProviderNativeSearchClient {
+        let config = Config {
+            provider: Some("anthropic".to_string()),
+            providers: Some(ProvidersConfig {
+                anthropic: ProviderConfig {
+                    api_key: Some("anthropic-test-key".to_string()),
+                    base_url: Some("https://api.anthropic.com".to_string()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        ProviderNativeSearchClient::new(CodewhaleClient::new(&config).expect("Anthropic client"))
+            .expect("Anthropic native adapter")
+    }
+
+    #[test]
+    fn answer_output_tokens_is_the_model_ceiling_up_to_the_clamp() {
+        // #6508: native answers were requested at 2,048 tokens and silently
+        // cut. A catalogued model now gets its route ceiling, up to the clamp.
+        let client = anthropic_client("claude-opus-4-8");
+        let route_cap = client.inner.effective_max_output_tokens("claude-opus-4-8");
+        assert!(route_cap > PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS);
+        assert_eq!(
+            client.answer_output_tokens(PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS),
+            NATIVE_SEARCH_MAX_OUTPUT_TOKENS.min(route_cap)
+        );
+        // web_search budgets time from the same number the body carries.
+        assert_eq!(
+            client.requested_answer_output_tokens(),
+            Some(NATIVE_SEARCH_MAX_OUTPUT_TOKENS.min(route_cap))
+        );
+
+        // A model the catalogue does not describe keeps the old request size
+        // rather than risk a rejection.
+        let unknown = anthropic_client("claude-unlisted-test-model");
+        assert_eq!(
+            unknown.answer_output_tokens(PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS),
+            PRIOR_NATIVE_SEARCH_OUTPUT_TOKENS
+        );
+    }
+
+    #[test]
+    fn anthropic_stop_reason_max_tokens_sets_truncated() {
+        let cut = parse_anthropic_search(&json!({
+            "stop_reason": "max_tokens",
+            "content": [{ "type": "text", "text": "Partial answer" }]
+        }));
+        assert!(cut.truncated);
+        assert_eq!(cut.answer.as_deref(), Some("Partial answer"));
+
+        let whole = parse_anthropic_search(&json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "Whole answer" }]
+        }));
+        assert!(!whole.truncated);
+    }
+
+    #[test]
+    fn responses_incomplete_max_output_tokens_sets_truncated() {
+        let payload = |status: &str, reason: &str| {
+            json!({
+                "status": status,
+                "incomplete_details": { "reason": reason },
+                "output": [{
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "Partial answer" }]
+                }]
+            })
+        };
+        assert!(parse_responses_search(&payload("incomplete", "max_output_tokens")).truncated);
+        assert!(!parse_responses_search(&payload("incomplete", "content_filter")).truncated);
+        assert!(!parse_responses_search(&payload("completed", "")).truncated);
+    }
+
+    #[test]
+    fn mimo_finish_reason_length_sets_truncated() {
+        let payload = |finish_reason: &str| {
+            json!({
+                "choices": [{
+                    "finish_reason": finish_reason,
+                    "message": { "content": "Partial answer" }
+                }]
+            })
+        };
+        assert!(parse_mimo_search(&payload("length")).truncated);
+        assert!(!parse_mimo_search(&payload("stop")).truncated);
     }
 
     #[test]
@@ -768,6 +926,21 @@ mod tests {
         assert_eq!(parsed.citations.len(), 2);
         assert_eq!(parsed.citations[0].title, "Source A");
         assert_eq!(parsed.citations[1].url, "https://example.org/b");
+    }
+
+    #[test]
+    fn long_native_answers_are_returned_whole() {
+        let long = format!("{} end-of-answer", "grounded sentence. ".repeat(600));
+        assert!(long.chars().count() > 10_000);
+        let payload = json!({
+            "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": long.clone() }]
+            }]
+        });
+        let parsed = parse_responses_search(&payload);
+        assert_eq!(parsed.answer.as_deref(), Some(long.trim()));
+        assert!(parsed.answer.unwrap().ends_with("end-of-answer"));
     }
 
     #[test]

@@ -31,6 +31,12 @@ pub enum ErrorSeverity {
     Critical,
 }
 
+/// Error code for a provider credential rejection (401-class) that arrived
+/// before any model output, after the engine took the turn's question back
+/// out of the session (#6566). Hosts that see it return the text to the
+/// person to send again; nothing else about the authentication error changes.
+pub const CREDENTIAL_REJECTED_UNSENT_CODE: &str = "llm_auth_rejected_unsent";
+
 /// Unified envelope used when crossing subsystem boundaries.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ErrorEnvelope {
@@ -115,6 +121,7 @@ impl ErrorEnvelope {
     /// Non-recoverable internal error — missing client, spawn failure, etc.
     /// Flips the session into offline mode.
     #[must_use]
+    #[cfg(test)]
     pub fn fatal(message: impl Into<String>) -> Self {
         Self::new(
             ErrorCategory::Internal,
@@ -151,24 +158,13 @@ impl ErrorEnvelope {
 
     /// Recoverable network / transport hiccup.
     #[must_use]
+    #[cfg(test)]
     pub fn network(message: impl Into<String>) -> Self {
         Self::new(
             ErrorCategory::Network,
             ErrorSeverity::Warning,
             true,
             "network_transient",
-            message,
-        )
-    }
-
-    /// Tool execution failure.
-    #[must_use]
-    pub fn tool(message: impl Into<String>) -> Self {
-        Self::new(
-            ErrorCategory::Tool,
-            ErrorSeverity::Error,
-            true,
-            "tool_failed",
             message,
         )
     }
@@ -461,7 +457,7 @@ impl From<ToolError> for ErrorEnvelope {
                 "tool_path_escape",
                 format!("Path escapes workspace: {}", path.display()),
             ),
-            ToolError::ExecutionFailed { message } => Self::new(
+            ToolError::ExecutionFailed { message, .. } => Self::new(
                 ErrorCategory::Tool,
                 ErrorSeverity::Error,
                 true,
