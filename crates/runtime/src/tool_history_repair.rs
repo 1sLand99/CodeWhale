@@ -93,10 +93,7 @@ fn repair_tool_call_pairs_inner(
             pending_call_ids = message
                 .content
                 .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolUse { .. } => Some(block),
-                    _ => None,
-                })
+                .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
                 .collect();
             pending_call_message = (!pending_call_ids.is_empty()).then_some(message_index);
             retained_for_pending.clear();

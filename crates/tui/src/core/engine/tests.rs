@@ -209,13 +209,22 @@ fn recorded_snapshot_receipts_bracket_the_turn_and_its_file_writes() {
             .expect("turn events")
         {
             match event {
+                Event::ToolCallStarted {
+                    id,
+                    model_call: Some(model_call),
+                    ..
+                } => {
+                    uuid::Uuid::parse_str(&id).expect("host execution id");
+                    assert_ne!(id, model_call.provider_id);
+                    assert!(local_ids.insert(model_call.provider_id, id).is_none());
+                }
                 Event::ToolCallComplete {
                     id,
                     result,
                     model_call: Some(model_call),
                     ..
                 } => {
-                    local_ids.insert(model_call.provider_id.clone(), id);
+                    assert_eq!(local_ids.get(&model_call.provider_id), Some(&id));
                     completions.insert(model_call.provider_id, result.expect("tool result"));
                 }
                 Event::WorkspaceSnapshotTaken { snapshot } => receipts.push(snapshot),
@@ -230,6 +239,8 @@ fn recorded_snapshot_receipts_bracket_the_turn_and_its_file_writes() {
 
         assert!(completions.get("call-write").expect("write ran").success);
         assert!(completions.get("call-read").expect("read ran").success);
+        assert_eq!(local_ids.len(), 2);
+        assert_ne!(local_ids["call-write"], local_ids["call-read"]);
         // Every receipt, post-turn included, arrived before TurnComplete.
         assert_eq!(
             receipts
@@ -269,9 +280,8 @@ fn recorded_snapshot_receipts_bracket_the_turn_and_its_file_writes() {
             .expect("snapshot repo");
         let listed = repo.list(usize::MAX).unwrap();
         assert!(
-            listed.iter().any(
-                |snapshot| receipts[1].matches(snapshot) && snapshot.label == "tool:call-write"
-            ),
+            listed.iter().any(|snapshot| receipts[1].matches(snapshot)
+                && snapshot.label == format!("tool:{}", local_ids["call-write"])),
             "the tool receipt names a live snapshot"
         );
         let delta = repo
