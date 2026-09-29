@@ -10,16 +10,32 @@ function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) return sourceFiles(path);
-    return /\.(ts|tsx)$/.test(entry.name) ? [path] : [];
+    return /\.(m?[jt]sx?)$/.test(entry.name) ? [path] : [];
   });
 }
 
+// `export const runtime = "edge"`, `runtime: 'experimental-edge'`, and so on.
+// Route segment config only takes effect in app/ files, so that is the scan.
+const EDGE_RUNTIME =
+  /(?:\bexport\s+const\s+runtime\s*=|\bruntime\s*:)\s*["'](?:experimental-)?edge["']/;
+
 describe("/api/product-telemetry", () => {
+  it("recognizes edge and experimental-edge declarations", () => {
+    for (const source of [
+      'export const runtime = "edge";',
+      "export const runtime = 'experimental-edge';",
+      'export const config = { runtime: "edge" };',
+    ]) {
+      expect(EDGE_RUNTIME.test(source), source).toBe(true);
+    }
+    expect(EDGE_RUNTIME.test('export const runtime = "nodejs";')).toBe(false);
+  });
+
   // @opennextjs/cloudflare does not support the edge runtime; the deployed
   // telemetry route answered every request with a 500 while it declared it.
   it("no app route or page opts into the edge runtime", () => {
     const edge = sourceFiles(APP_DIR).filter((file) =>
-      /export\s+const\s+runtime\s*=\s*["']edge["']/.test(readFileSync(file, "utf8")),
+      EDGE_RUNTIME.test(readFileSync(file, "utf8")),
     );
     expect(edge).toEqual([]);
   });
