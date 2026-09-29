@@ -17,7 +17,7 @@ use crate::tools::user_input::UserInputRequest;
 use codewhale_models::{Message, SystemPrompt, Tool, Usage};
 
 /// Final status for a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOutcomeStatus {
     Completed,

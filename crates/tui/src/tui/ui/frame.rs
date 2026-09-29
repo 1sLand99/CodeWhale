@@ -1227,6 +1227,7 @@ pub(crate) fn build_session_snapshot(
     app.sync_cost_to_metadata(&mut session.metadata);
     session.context_references = app.session_context_references.clone();
     session.artifacts = app.session_artifacts.clone();
+    session.turn_outcomes = app.session_turn_outcomes.clone();
     session.work_state = work_state;
     session.last_auto_route = app.auto_route_for_persistence();
     session.window_title.clone_from(&app.window_title);
