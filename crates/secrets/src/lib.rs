@@ -527,6 +527,12 @@ struct ReadOnlyFileKeyringStore {
 struct FileSecretsBlob {
     #[serde(default)]
     entries: HashMap<String, String>,
+    /// Set once the legacy `~/.deepseek` store has been copied into this one.
+    /// The copy is one-shot: afterwards a key the user deletes here stays
+    /// deleted instead of being re-imported from the legacy file on the next
+    /// launch, and read-only lookup stops falling back to the legacy file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    legacy_deepseek_migrated: bool,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -586,17 +592,27 @@ impl FileKeyringStore {
             return Ok(());
         }
 
+        let primary_store = Self::new(primary.to_path_buf());
+        if primary_store.load_unlocked()?.legacy_deepseek_migrated {
+            return Ok(());
+        }
+
         let legacy_store = Self::new(legacy.to_path_buf());
         let legacy_blob = legacy_store.load_unlocked()?;
         if legacy_blob.entries.is_empty() {
             return Ok(());
         }
 
-        let primary_store = Self::new(primary.to_path_buf());
         primary_store.mutate(|primary_blob| {
+            // Re-check under the write lock: a concurrent process may have
+            // completed the copy, and the user may since have deleted keys.
+            if primary_blob.legacy_deepseek_migrated {
+                return Ok(());
+            }
             for (key, value) in legacy_blob.entries {
                 primary_blob.entries.entry(key).or_insert(value);
             }
+            primary_blob.legacy_deepseek_migrated = true;
             Ok(())
         })
     }
@@ -689,13 +705,18 @@ impl ReadOnlyFileKeyringStore {
 
 impl KeyringStore for ReadOnlyFileKeyringStore {
     fn get(&self, key: &str) -> Result<Option<String>, SecretsError> {
-        match self.primary.get(key)? {
-            Some(value) => Ok(Some(value)),
-            None => self
-                .legacy
-                .as_ref()
-                .map_or(Ok(None), |legacy| legacy.get(key)),
+        let primary = self.primary.load_unlocked()?;
+        if let Some(value) = primary.entries.get(key) {
+            return Ok(Some(value.clone()));
         }
+        // Once the legacy store has been migrated, a key absent from the
+        // primary was deleted there; the legacy copy is stale, not a fallback.
+        if primary.legacy_deepseek_migrated {
+            return Ok(None);
+        }
+        self.legacy
+            .as_ref()
+            .map_or(Ok(None), |legacy| legacy.get(key))
     }
 
     fn set(&self, _key: &str, _value: &str) -> Result<(), SecretsError> {
@@ -1982,6 +2003,46 @@ mod tests {
             primary_store.get("openrouter").unwrap().as_deref(),
             Some("primary-openrouter")
         );
+    }
+
+    #[test]
+    fn file_default_path_migration_is_one_shot_so_deleted_keys_stay_deleted() {
+        let _lock = env_lock();
+        clear_known_envs();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", tmp.path());
+        let _userprofile = EnvVarGuard::set("USERPROFILE", tmp.path());
+        let _backend = EnvVarGuard::set(SECRET_BACKEND_ENV, "file");
+        let legacy = tmp
+            .path()
+            .join(".deepseek")
+            .join("secrets")
+            .join("secrets.json");
+        FileKeyringStore::new(&legacy)
+            .set("openrouter", "legacy-openrouter")
+            .unwrap();
+
+        let primary_store = FileKeyringStore::new(FileKeyringStore::default_path().unwrap());
+        assert_eq!(
+            primary_store.get("openrouter").unwrap().as_deref(),
+            Some("legacy-openrouter"),
+            "the first launch still copies legacy entries"
+        );
+
+        primary_store.delete("openrouter").unwrap();
+        let resolved = FileKeyringStore::default_path().unwrap();
+        assert_eq!(resolved, primary_store.path());
+        assert_eq!(
+            primary_store.get("openrouter").unwrap(),
+            None,
+            "a deleted key must not be re-imported from the legacy store"
+        );
+        assert_eq!(
+            Secrets::auto_detect_read_only().get("openrouter").unwrap(),
+            None,
+            "read-only lookup must not fall back to a migrated legacy store"
+        );
+        assert!(legacy.exists(), "migration never deletes legacy data");
     }
 
     #[test]
