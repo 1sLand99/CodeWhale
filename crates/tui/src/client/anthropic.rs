@@ -257,7 +257,7 @@ impl CodewhaleClient {
     ) -> Result<reqwest::Response> {
         let url = self.messages_transport_url(url);
         let open_req = super::stream_entry::StreamOpenRequest::new(
-            super::stream_entry::stream_open_timeout(),
+            self.stream_open_timeout,
             self.stream_idle_timeout,
         );
         let opened = super::stream_entry::open_sse_response(&open_req, |policy| {

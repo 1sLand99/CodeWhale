@@ -1811,6 +1811,26 @@ pub struct TuiConfig {
     /// seconds. Omitted or `0` resolve to the default (1800); explicit
     /// values clamp to `10..=86_400`.
     pub stream_max_duration_secs: Option<u64>,
+    /// #6700: whole-request re-issues after a failed stream — a stream that
+    /// never opened (#6699), died before content, or dropped mid-stream.
+    /// Omitted resolves to the default (3); `0` disables them; values clamp
+    /// to `0..=10`.
+    pub stream_max_resumes: Option<u32>,
+    /// #6700: in-stream re-requests while nothing has streamed yet (#103).
+    /// Omitted resolves to the default (2); `0` disables them; values clamp
+    /// to `0..=10`.
+    pub stream_max_transparent_retries: Option<u32>,
+    /// #6700: recoverable errors tolerated within one stream before it
+    /// ends. Omitted or `0` resolves to the default (5); other values clamp
+    /// to `1..=50`.
+    pub stream_max_errors: Option<u32>,
+    /// #6700: wait for SSE response headers, in seconds. Omitted or `0`
+    /// fall back to `CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`, then 45; values
+    /// clamp to `5..=300`.
+    pub stream_open_timeout_secs: Option<u64>,
+    /// #6700: TCP/TLS connect timeout for the model HTTP client, in seconds.
+    /// Omitted or `0` resolve to the default (30); values clamp to `1..=300`.
+    pub connect_timeout_secs: Option<u64>,
     /// Ordered list of footer items the user wants visible. `None` (the field
     /// missing from `config.toml`) means "use the built-in default order"; an
     /// empty `Some(vec![])` means "show nothing in the footer".
@@ -8057,6 +8077,38 @@ impl Config {
                     .and_then(|cfg| cfg.stream_max_duration_secs),
             ),
         )
+    }
+
+    /// #6700: resolved stream retry budgets (`[tui].stream_max_resumes`,
+    /// `stream_max_transparent_retries`, `stream_max_errors`).
+    #[must_use]
+    pub fn stream_retry_limits(&self) -> crate::core::engine::turn_budget::StreamRetryLimits {
+        let tui = self.tui.as_ref();
+        crate::core::engine::turn_budget::resolve_stream_retry_limits(
+            tui.and_then(|cfg| cfg.stream_max_resumes),
+            tui.and_then(|cfg| cfg.stream_max_transparent_retries),
+            tui.and_then(|cfg| cfg.stream_max_errors),
+        )
+    }
+
+    /// #6700: resolved wait for SSE response headers.
+    #[must_use]
+    pub fn stream_open_timeout(&self) -> std::time::Duration {
+        crate::client::resolve_stream_open_timeout(
+            self.tui
+                .as_ref()
+                .and_then(|cfg| cfg.stream_open_timeout_secs),
+        )
+    }
+
+    /// #6700: resolved TCP/TLS connect timeout for the model HTTP client.
+    #[must_use]
+    pub fn connect_timeout(&self) -> std::time::Duration {
+        let secs = match self.tui.as_ref().and_then(|cfg| cfg.connect_timeout_secs) {
+            None | Some(0) => DEFAULT_CONNECT_TIMEOUT_SECS,
+            Some(secs) => secs.clamp(MIN_CONNECT_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS),
+        };
+        std::time::Duration::from_secs(secs)
     }
 
     /// Raw sub-agent model override map. Values are validated at spawn time

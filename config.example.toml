@@ -1169,6 +1169,15 @@ stream_chunk_timeout_secs = 900 # optional SSE idle timeout per chunk (0 = defau
 # Stream budgets remain finite; 0 selects their default.
 stream_max_content_mb = 10   # per-step cap on streamed content (0 = default, 1-512)
 stream_max_duration_secs = 1800 # per-step cap on one stream's duration (0 = default, 10-86400)
+# Stream retry budgets and transport timeouts. Every failed stream — one that
+# never opened, died before content, or dropped mid-stream — spends
+# stream_max_resumes. For the two retry counts 0 disables that retry kind;
+# stream_max_errors is a finite budget, so 0 selects its default.
+# stream_max_resumes = 3             # re-issue a failed stream's request (0 = off, 0-10)
+# stream_max_transparent_retries = 2 # in-stream re-request before any content (0 = off, 0-10)
+# stream_max_errors = 5              # recoverable errors tolerated per stream (0 = default, 1-50)
+# stream_open_timeout_secs = 45      # response-header wait (0 = env/default, 5-300)
+# connect_timeout_secs = 30          # TCP/TLS connect timeout (0 = default, 1-300)
 osc8_links = true            # emit OSC 8 escapes around URLs (Cmd+click in iTerm2/Ghostty/Kitty/WezTerm/Terminal.app 13+); set false for terminals that misrender
 # What the bottom chrome shows. Each key is one thing on screen: `mode` is the
 # posture bar's plan/act/operate chip, everything else is a segment of the
