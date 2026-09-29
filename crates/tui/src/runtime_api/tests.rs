@@ -311,6 +311,7 @@ fn saved_session_with_blocks(blocks: Vec<codewhale_models::ContentBlock>) -> Sav
         work_state: None,
         window_title: None,
         last_auto_route: None,
+        turn_outcomes: Vec::new(),
     }
 }
 

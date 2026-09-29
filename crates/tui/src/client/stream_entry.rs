@@ -20,24 +20,36 @@ use crate::llm_client::LlmError;
 /// the per-chunk idle timeout: it covers connection setup and upstream header
 /// return only, never model thinking time after streaming has started.
 pub(crate) const DEFAULT_STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
+/// Accepted response-header wait range, in seconds.
+pub(crate) const MIN_STREAM_OPEN_TIMEOUT_SECS: u64 = 5;
+pub(crate) const MAX_STREAM_OPEN_TIMEOUT_SECS: u64 = 300;
 
-/// Env override (`CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`, legacy
-/// `DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS`) for the response-header wait,
-/// shared by every streaming adapter.
-pub(crate) fn stream_open_timeout() -> Duration {
-    stream_open_timeout_from_env(
-        std::env::var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS")
-            .or_else(|_| std::env::var("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS"))
-            .ok()
-            .as_deref(),
-    )
+/// Resolve the response-header wait shared by every streaming adapter.
+///
+/// A positive `[tui].stream_open_timeout_secs` wins (#6700); omitted or `0`
+/// falls back to the env override (`CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`,
+/// legacy `DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS`), then the 45s default. Every
+/// source clamps to `5..=300`.
+#[must_use]
+pub(crate) fn resolve_stream_open_timeout(configured_secs: Option<u64>) -> Duration {
+    match configured_secs {
+        Some(secs) if secs > 0 => Duration::from_secs(
+            secs.clamp(MIN_STREAM_OPEN_TIMEOUT_SECS, MAX_STREAM_OPEN_TIMEOUT_SECS),
+        ),
+        _ => stream_open_timeout_from_env(
+            std::env::var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS")
+                .or_else(|_| std::env::var("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS"))
+                .ok()
+                .as_deref(),
+        ),
+    }
 }
 
 pub(crate) fn stream_open_timeout_from_env(value: Option<&str>) -> Duration {
     let secs = value
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_STREAM_OPEN_TIMEOUT.as_secs())
-        .clamp(5, 300);
+        .clamp(MIN_STREAM_OPEN_TIMEOUT_SECS, MAX_STREAM_OPEN_TIMEOUT_SECS);
     Duration::from_secs(secs)
 }
 
@@ -205,17 +217,41 @@ fn should_retry_error_with_h1(policy: StreamHttpPolicy, err: &anyhow::Error) -> 
         return false;
     }
 
-    if let Some(llm_error) = err.downcast_ref::<LlmError>() {
-        return matches!(llm_error, LlmError::NetworkError(_) | LlmError::Timeout(_));
-    }
+    typed_open_transport_failure(err)
+        .unwrap_or_else(|| should_retry_with_h1(policy, &format!("{err:#}")))
+}
 
-    if let Some(reqwest_error) = err.downcast_ref::<reqwest::Error>() {
-        return reqwest_error.is_connect()
-            || reqwest_error.is_timeout()
-            || reqwest_error.is_request();
-    }
+/// Classify `err` by its types alone, searching the whole context chain: an
+/// adapter's `.context("... request failed")` must not hide the transport
+/// cause (#6711). `Some(true)` for a typed `LlmError::NetworkError`/`Timeout`
+/// or a reqwest connect/timeout/request error that carries no HTTP status;
+/// `Some(false)` for any other typed `LlmError` or reqwest error; `None` when
+/// the chain holds neither type.
+fn typed_open_transport_failure(err: &anyhow::Error) -> Option<bool> {
+    err.chain().find_map(|cause| {
+        if let Some(llm_error) = cause.downcast_ref::<LlmError>() {
+            return Some(matches!(
+                llm_error,
+                LlmError::NetworkError(_) | LlmError::Timeout(_)
+            ));
+        }
+        cause.downcast_ref::<reqwest::Error>().map(|reqwest_error| {
+            reqwest_error.status().is_none()
+                && (reqwest_error.is_connect()
+                    || reqwest_error.is_timeout()
+                    || reqwest_error.is_request())
+        })
+    })
+}
 
-    should_retry_with_h1(policy, &format!("{err:#}"))
+/// Whether a failed stream open is a real transport failure: the request
+/// never received response headers (#6699). Decided by type only: an untyped
+/// error, such as an adapter's `HTTP 500 ...` rejection whose provider body
+/// happens to mention a connection or timeout, is a provider answer and is
+/// never classified as a transport failure here.
+#[must_use]
+pub(crate) fn is_stream_open_transport_failure(err: &anyhow::Error) -> bool {
+    typed_open_transport_failure(err).unwrap_or(false)
 }
 
 /// Preserve provider-semantic failures returned by the H1 attempt. Only a
@@ -818,6 +854,24 @@ mod tests {
         assert_eq!(
             stream_open_timeout_from_env(Some("999")),
             Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn configured_stream_open_timeout_wins_and_clamps() {
+        // Positive config values never consult the env, so these are
+        // deterministic regardless of the test process environment.
+        assert_eq!(
+            resolve_stream_open_timeout(Some(90)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            resolve_stream_open_timeout(Some(1)),
+            Duration::from_secs(MIN_STREAM_OPEN_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            resolve_stream_open_timeout(Some(u64::MAX)),
+            Duration::from_secs(MAX_STREAM_OPEN_TIMEOUT_SECS)
         );
     }
 

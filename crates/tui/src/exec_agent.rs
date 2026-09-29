@@ -603,6 +603,8 @@ pub(crate) async fn run_exec_agent(
         turn_wall_clock: execution_config.turn_wall_clock(),
         stream_max_content_bytes: execution_config.stream_max_content_bytes(),
         stream_max_duration: execution_config.stream_max_duration(),
+        stream_retry_limits: execution_config.stream_retry_limits(),
+        stream_open_timeout: execution_config.stream_open_timeout(),
         subagent_heartbeat_timeout: std::time::Duration::from_secs(
             execution_config.subagent_heartbeat_timeout_secs_for_provider(effective_provider),
         ),

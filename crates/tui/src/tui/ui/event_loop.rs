@@ -1357,18 +1357,31 @@ pub(super) fn present_turn_failure(
     status: crate::core::events::TurnOutcomeStatus,
     error: Option<&str>,
 ) {
-    let Some(error) = error else { return };
-    if app.turn_error_posted {
-        return;
+    let failed = matches!(status, crate::core::events::TurnOutcomeStatus::Failed);
+    // What the transcript shows for this turn's failure: the error cell an
+    // earlier `Event::Error` already posted, or the notice added here.
+    let shown = if app.turn_error_posted {
+        app.turn_error_notice.clone()
+    } else if let Some(error) = error {
+        let notice = format!("{}: {error}", app.tr(MessageId::NotificationTurnFailed));
+        if failed {
+            app.add_message(HistoryCell::Error {
+                message: notice.clone(),
+                severity: crate::error_taxonomy::ErrorSeverity::Warning,
+            });
+        }
+        app.set_sticky_status(notice.clone(), StatusToastLevel::Error, None);
+        Some(notice)
+    } else {
+        None
+    };
+    // Persist the failure with the session (redacted), so resume, export,
+    // and the Runtime API can say why the turn stopped after the TUI closes.
+    if failed && let Some(shown) = shown {
+        let outcome =
+            crate::session_manager::SavedTurnOutcome::failed(&shown, app.api_messages.len());
+        crate::session_manager::push_turn_outcome(&mut app.session_turn_outcomes, outcome);
     }
-    let notice = format!("{}: {error}", app.tr(MessageId::NotificationTurnFailed));
-    if matches!(status, crate::core::events::TurnOutcomeStatus::Failed) {
-        app.add_message(HistoryCell::Error {
-            message: notice.clone(),
-            severity: crate::error_taxonomy::ErrorSeverity::Warning,
-        });
-    }
-    app.set_sticky_status(notice, StatusToastLevel::Error, None);
 }
 
 async fn dispatch_session_composer_submit(
@@ -2519,6 +2532,7 @@ pub(crate) async fn run_event_loop(
                         app.is_loading = true;
                         app.offline_mode = false;
                         app.turn_error_posted = false;
+                        app.turn_error_notice = None;
                         app.lsp_repair = crate::tui::app::LspRepairState::default();
                         app.prompt_suggestion = None;
                         app.prompt_suggestion_gen
