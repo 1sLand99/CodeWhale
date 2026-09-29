@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::install::{DEFAULT_MAX_SIZE_BYTES, INSTALLED_FROM_MARKER, TRUSTED_MARKER};
+use super::install::{DEFAULT_MAX_SIZE_BYTES, is_reserved_root_metadata};
 
 pub const PACKAGE_DIGEST_MAX_BYTES: u64 = DEFAULT_MAX_SIZE_BYTES;
 pub const PACKAGE_DIGEST_MAX_FILES: usize = 256;
@@ -106,13 +106,9 @@ fn walk(
             return Err(PackageDigestError::SymlinkPresent);
         }
 
-        if name == INSTALLED_FROM_MARKER
-            || name == TRUSTED_MARKER
-            || name == ".system-installed-version"
-            || name.ends_with(".bak")
-            || name.ends_with(".tmp")
-            || name.starts_with('.')
-        {
+        // Only local bookkeeping at the package root is outside the receipt.
+        // Hidden files and backup/temp names can contain executable payloads.
+        if depth == 0 && is_reserved_root_metadata(Path::new(name)) {
             continue;
         }
 
@@ -149,4 +145,67 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
         let _ = write!(&mut out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::audit::{self, SkillAuditMode, TrustState};
+    use crate::skills::install::{INSTALLED_FROM_MARKER, TRUSTED_MARKER, write_trust_v2};
+
+    #[test]
+    fn hidden_and_backup_payload_changes_stale_the_trust_receipt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let package = tmp.path().join(".codewhale/skills/demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("SKILL.md"),
+            "---\nname: demo\ndescription: test\n---\nbody",
+        )
+        .unwrap();
+        let payloads = [
+            ".hidden",
+            ".hidden-dir/run.sh",
+            "script.bak",
+            "script.tmp",
+            "nested/.trusted",
+        ];
+        for relative in payloads {
+            let path = package.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "safe").unwrap();
+        }
+        let digest = compute_package_digest(&package).unwrap();
+        write_trust_v2(&package, &digest).unwrap();
+        let initial = audit::scan(tmp.path(), None, SkillAuditMode::OwnedOnly, None);
+        assert_eq!(initial.skills.len(), 1);
+        assert_eq!(
+            initial.skills[0].trust,
+            TrustState::TrustedForDigest(digest.clone())
+        );
+        for relative in payloads {
+            fs::write(package.join(relative), "evil").unwrap();
+            assert_ne!(
+                compute_package_digest(&package).unwrap(),
+                digest,
+                "{relative}"
+            );
+            let changed = audit::scan(tmp.path(), None, SkillAuditMode::OwnedOnly, None);
+            assert_eq!(
+                changed.skills[0].trust,
+                TrustState::TrustStale,
+                "{relative}"
+            );
+            fs::write(package.join(relative), "safe").unwrap();
+        }
+        // These root files are local bookkeeping, not executable payload.
+        for marker in [
+            INSTALLED_FROM_MARKER,
+            TRUSTED_MARKER,
+            ".system-installed-version",
+        ] {
+            fs::write(package.join(marker), "local metadata").unwrap();
+            assert_eq!(compute_package_digest(&package).unwrap(), digest);
+        }
+    }
 }

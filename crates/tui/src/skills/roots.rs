@@ -296,20 +296,6 @@ impl SkillRootCatalog {
                 "registry-cache",
                 false,
             );
-        } else {
-            // Match legacy fallback when HOME is unavailable.
-            push_descriptor(
-                &mut roots,
-                &mut precedence,
-                SkillRootKind::CodeWhaleGlobal,
-                SkillRootAccess::WritableOwned,
-                SkillScope::Global,
-                PathBuf::from("/tmp/codewhale/skills"),
-                true,
-                true,
-                "global-codewhale-fallback",
-                true,
-            );
         }
 
         if let Some(configured) = configured_skills_dir {
@@ -765,6 +751,22 @@ mod tests {
 
     fn write_dir(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn unavailable_home_has_no_ambient_global_or_cache_root() {
+        let tmp = TempDir::new().unwrap();
+        let catalog = SkillRootCatalog::build(tmp.path(), None, None);
+        assert!(
+            catalog
+                .roots
+                .iter()
+                .all(|root| root.scope == SkillScope::Project)
+        );
+        let owned = catalog.owned_writable_roots();
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].kind, SkillRootKind::CodeWhaleProject);
+        assert_eq!(owned[0].path, tmp.path().join(".codewhale/skills"));
     }
 
     #[test]

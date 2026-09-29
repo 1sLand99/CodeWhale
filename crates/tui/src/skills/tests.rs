@@ -1,5 +1,52 @@
 use tempfile::TempDir;
 
+#[test]
+fn frontmatter_handles_bom_exact_fences_and_plain_continuations() {
+    let content = "\u{feff}---\r\nname: demo\r\ndescription: Deploy apps --- safely\r\n  for X or Y: really\r\ninvocation: user\r\n---\r\n# Body\r\n";
+    let (metadata, body) = super::parse_frontmatter(content).unwrap().unwrap();
+    assert_eq!(metadata["name"], "demo");
+    assert_eq!(
+        metadata["description"],
+        "Deploy apps --- safely for X or Y: really"
+    );
+    assert_eq!(metadata.len(), 3, "continuation text is not a new key");
+    assert_eq!(body.trim(), "# Body");
+    assert!(
+        super::parse_frontmatter("---not a fence\n# Body")
+            .unwrap()
+            .is_none()
+    );
+    assert!(super::parse_frontmatter("---\nname: demo\ndescription: inline --- only").is_err());
+}
+
+#[test]
+fn frontmatter_block_indentation_is_character_safe_and_keeps_nested_fences() {
+    for indicator in ["|", ">"] {
+        let content = format!(
+            "---\nname: demo\ndescription: {indicator}\n  first\n\u{3000}wide\n \u{a0}mixed\n  ---\n    nested\n---\nbody"
+        );
+        let (metadata, body) = super::parse_frontmatter(&content).unwrap().unwrap();
+        let expected = if indicator == "|" {
+            "first\nwide\nmixed\n---\n  nested"
+        } else {
+            "first wide mixed ---   nested"
+        };
+        assert_eq!(metadata["description"], expected);
+        assert_eq!(body.trim(), "body");
+    }
+}
+
+#[test]
+fn unavailable_home_fallbacks_are_fresh_nonexistent_paths() {
+    let first = super::unavailable_home_root();
+    let second = super::unavailable_home_root();
+    assert_ne!(first, second);
+    assert!(!first.exists());
+    assert!(!second.exists());
+    assert!(first.starts_with(std::env::temp_dir()));
+    assert_ne!(first, std::path::Path::new("/tmp/codewhale"));
+}
+
 fn create_skill_dir(tmpdir: &TempDir, skill_name: &str, skill_content: &str) {
     let skill_dir = tmpdir.path().join("skills").join(skill_name);
     std::fs::create_dir_all(&skill_dir).unwrap();

@@ -192,9 +192,18 @@ pub fn default_skills_dir() -> PathBuf {
         }
     }
     crate::config::effective_home_dir().map_or_else(
-        || PathBuf::from("/tmp/codewhale/skills"),
+        || unavailable_home_root().join("skills"),
         |p| p.join(".codewhale").join("skills"),
     )
+}
+
+// Match plugin discovery's fail-closed fallback: never discover or write to
+// a predictable shared temporary path when the user's home is unavailable.
+fn unavailable_home_root() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        ".codewhale-home-unavailable-{}",
+        uuid::Uuid::new_v4().simple()
+    ))
 }
 
 /// Global agentskills.io-compatible skills directory (`~/.agents/skills`).
@@ -774,20 +783,29 @@ pub(crate) type Frontmatter<'a> = (HashMap<String, String>, &'a str);
 pub(crate) fn parse_frontmatter(
     content: &str,
 ) -> std::result::Result<Option<Frontmatter<'_>>, String> {
-    if !content.trim_start().starts_with("---") {
+    let content = content
+        .strip_prefix('\u{feff}')
+        .unwrap_or(content)
+        .trim_start();
+    let opening = content.split_inclusive('\n').next().unwrap_or_default();
+    if opening.trim_end() != "---" {
         return Ok(None);
     }
-    let start = content
-        .find("---")
-        .ok_or_else(|| "missing frontmatter opening delimiter".to_string())?;
-    let rest = &content[start + 3..];
+    let rest = &content[opening.len()..];
+    let mut offset = 0;
     let end = rest
-        .find("---")
+        .split_inclusive('\n')
+        .find_map(|line| {
+            let start = offset;
+            offset += line.len();
+            (line.trim_end() == "---").then_some(start)
+        })
         .ok_or_else(|| "missing frontmatter closing delimiter".to_string())?;
     let frontmatter = &rest[..end];
     let body = &rest[end + 3..];
 
     let mut metadata = HashMap::new();
+    let indentation = |line: &str| line.chars().take_while(|ch| ch.is_whitespace()).count();
     let lines: Vec<&str> = frontmatter.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -812,7 +830,7 @@ pub(crate) fn parse_frontmatter(
                     "clip"
                 };
                 // Determine the base indentation from the key line
-                let base_indent = raw.len() - raw.trim_start().len();
+                let base_indent = indentation(raw);
                 let mut block_lines: Vec<&str> = Vec::new();
                 let mut content_indent: Option<usize> = None;
                 i += 1;
@@ -824,7 +842,7 @@ pub(crate) fn parse_frontmatter(
                         i += 1;
                         continue;
                     }
-                    let line_indent = raw_line.len() - raw_line.trim_start().len();
+                    let line_indent = indentation(raw_line);
                     if line_indent > base_indent {
                         // Track content indent from the first non-empty
                         // line so we strip only that one level of
@@ -848,9 +866,10 @@ pub(crate) fn parse_frontmatter(
                         if raw.is_empty() {
                             ""
                         } else {
-                            let indent = raw.len() - raw.trim_start().len();
+                            let indent = indentation(raw);
                             let strip = std::cmp::min(indent, content_indent);
-                            &raw[strip..]
+                            let byte = raw.char_indices().nth(strip).map_or(raw.len(), |(i, _)| i);
+                            &raw[byte..]
                         }
                     })
                     .collect();
@@ -933,8 +952,24 @@ pub(crate) fn parse_frontmatter(
                     }
                     _ => value,
                 };
-                metadata.insert(key.trim().to_ascii_lowercase(), unquoted.to_string());
                 i += 1;
+                let mut text = unquoted.to_string();
+                // Wrapped plain scalars continue at a deeper indentation.
+                // A colon in that continuation belongs to the value, not a
+                // new metadata key. Quoted/flow values retain their grammar.
+                if !value.is_empty() && !value.starts_with(['"', '\'', '[', '{']) {
+                    while let Some(next) = lines.get(i) {
+                        if next.trim().is_empty() || indentation(next) <= indentation(raw) {
+                            break;
+                        }
+                        if !next.trim_start().starts_with('#') {
+                            text.push(' ');
+                            text.push_str(next.trim());
+                        }
+                        i += 1;
+                    }
+                }
+                metadata.insert(key.trim().to_ascii_lowercase(), text);
             }
         } else {
             i += 1;
