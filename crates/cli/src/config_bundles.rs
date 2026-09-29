@@ -1314,7 +1314,11 @@ fn save_candidate(
 }
 
 fn apply_config_value(config: &mut ConfigToml, key: &str, value: &toml::Value) -> Result<()> {
-    if key == "auth.mode" || key == "hook_sinks.unix_socket_path" || key.starts_with("providers.") {
+    if codewhale_config::config_toml_choices(key).is_some()
+        || key == "auth.mode"
+        || key == "hook_sinks.unix_socket_path"
+        || key.starts_with("providers.")
+    {
         return config.set_value(key, &render_toml_value(value)?);
     }
 
@@ -1626,7 +1630,7 @@ kind = "codewhale.portable-config"
 name = "team-baseline"
 
 [preferences]
-verbosity = "quiet"
+verbosity = "concise"
 telemetry = false
 
 [global]
@@ -1972,7 +1976,7 @@ schema_version = 1
 kind = "codewhale.portable-config"
 
 [preferences]
-verbosity = "quiet"
+verbosity = "concise"
 log_level = "debug"
 
 [global]
@@ -2031,10 +2035,10 @@ schema_version = 1
 kind = "codewhale.portable-config"
 
 [preferences]
-verbosity = "quiet"
+verbosity = "concise"
 
 [global]
-verbosity = "verbose"
+verbosity = "normal"
 "#;
         let bundle = parse_bundle_str(text, "collision.toml").expect("bundle parses");
         let plan = plan_import(&bundle, &store.config, BundleScope::Global);
@@ -2052,8 +2056,8 @@ verbosity = "verbose"
             .expect_err("ambiguous flat key must fail closed");
         let rendered = error.to_string();
         assert!(rendered.contains("conflicting"), "{error:#}");
-        assert!(!rendered.contains("quiet"), "{error:#}");
-        assert!(!rendered.contains("verbose"), "{error:#}");
+        assert!(!rendered.contains("concise"), "{error:#}");
+        assert!(!rendered.contains("normal"), "{error:#}");
         assert_eq!(
             std::fs::read(store.path()).expect("config after refused import"),
             before,
@@ -2411,7 +2415,7 @@ verbosity = "verbose"
         ).unwrap();
         let mut store = ConfigStore::load(Some(path.clone())).unwrap();
         for (entries, expected_model) in [
-            ("verbosity = 'quiet'\n", "LiteralOldModel"),
+            ("verbosity = 'concise'\n", "LiteralOldModel"),
             (
                 "provider = 'OpenAI'\nmodel = 'LiteralNewModel'\nlog_level = 'debug'\n",
                 "LiteralNewModel",
@@ -2465,7 +2469,7 @@ verbosity = "verbose"
         ).unwrap();
         let mut store = ConfigStore::load(Some(path.clone())).unwrap();
         for (entries, expected_model) in [
-            ("verbosity = 'quiet'\n", "deepseek-v4-pro"),
+            ("verbosity = 'concise'\n", "deepseek-v4-pro"),
             (
                 "'providers.deepseek_cn.model' = 'deepseek-v4-flash'\n",
                 "deepseek-v4-flash",
@@ -2542,7 +2546,7 @@ verbosity = "verbose"
     fn immediate_mutating_imports_create_distinct_no_clobber_backups() {
         let dir = tempfile::tempdir().expect("config dir");
         let path = dir.path().join("config.toml");
-        let original = b"verbosity = \"quiet\"\n";
+        let original = b"verbosity = \"concise\"\n";
         std::fs::write(&path, original).expect("seed config");
         #[cfg(unix)]
         {
@@ -2557,7 +2561,7 @@ schema_version = 1
 kind = "codewhale.portable-config"
 
 [global]
-verbosity = "verbose"
+verbosity = "normal"
 "#,
             "first.toml",
         )
@@ -2622,6 +2626,86 @@ log_level = "trace"
     }
 
     #[test]
+    fn closed_choice_imports_refuse_before_backup_or_write() {
+        for key in ["approval_policy", "sandbox_mode", "verbosity"] {
+            for value in [
+                toml::Value::String("misspelled-choice".into()),
+                toml::Value::Boolean(true),
+            ] {
+                for existing in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("config.toml");
+                    let original = b"# Preserve this document exactly\nverbosity = 'normal'\n";
+                    if existing {
+                        std::fs::write(&path, original).unwrap();
+                    }
+                    let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+                    let before = toml::to_string(&store.config).unwrap();
+                    let mut bundle = sample_bundle();
+                    bundle.preferences.entries.clear();
+                    bundle.global.entries.clear();
+                    bundle.preferences.entries.insert(key.into(), value.clone());
+                    // Even an earlier valid candidate edit must not reach the store.
+                    bundle
+                        .preferences
+                        .entries
+                        .insert("allow_shell".into(), toml::Value::Boolean(false));
+                    let error = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+                        .expect_err("closed choice must fail before the transaction");
+                    assert!(error.to_string().contains(key), "{error:#}");
+                    assert_eq!(toml::to_string(&store.config).unwrap(), before);
+                    assert_eq!(path.exists(), existing);
+                    if existing {
+                        assert_eq!(std::fs::read(&path).unwrap(), original);
+                    }
+                    assert!(
+                        std::fs::read_dir(dir.path())
+                            .unwrap()
+                            .all(|entry| { entry.unwrap().path() == path }),
+                        "refusal must not create a backup or another file"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closed_choice_imports_accept_reader_values_without_revalidating_old_fields() {
+        for (key, value) in [
+            ("approval_policy", " On-Request "),
+            ("sandbox_mode", " WORKSPACE-WRITE "),
+            ("verbosity", " CONCISE "),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            // Loading and unrelated round trips still preserve legacy text; only
+            // the value being written gets the shared closed-choice validation.
+            let original = "# Preserve old fields\nverbosity = 'quiet'\n";
+            std::fs::write(&path, original).unwrap();
+            let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            let mut bundle = sample_bundle();
+            bundle.preferences.entries.clear();
+            bundle.global.entries.clear();
+            bundle
+                .preferences
+                .entries
+                .insert(key.into(), toml::Value::String(value.into()));
+            let receipt =
+                apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path()).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(receipt.backup_path.unwrap()).unwrap(),
+                original
+            );
+            let reloaded = ConfigStore::load(Some(path)).unwrap();
+            assert_eq!(reloaded.config.get_value(key).as_deref(), Some(value));
+            if key != "verbosity" {
+                assert_eq!(reloaded.config.verbosity.as_deref(), Some("quiet"));
+            }
+        }
+    }
+
+    #[test]
     fn non_no_op_import_creates_a_missing_config_without_a_backup() {
         let dir = tempfile::tempdir().expect("config dir");
         let path = dir.path().join("config.toml");
@@ -2642,7 +2726,7 @@ log_level = "trace"
             "no prior file means no backup"
         );
         let reloaded = ConfigStore::load(Some(path)).expect("created config reloads");
-        assert_eq!(reloaded.config.verbosity.as_deref(), Some("quiet"));
+        assert_eq!(reloaded.config.verbosity.as_deref(), Some("concise"));
         assert_eq!(reloaded.config.log_level.as_deref(), Some("debug"));
     }
 
@@ -2746,7 +2830,7 @@ log_level = "debug"
         let mut store = isolated_store();
         store
             .config
-            .set_value("verbosity", "quiet")
+            .set_value("verbosity", "concise")
             .expect("set verbosity");
         store
             .config
@@ -2917,7 +3001,7 @@ telemetry = true
 
         let dir = tempfile::tempdir().expect("config dir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        std::fs::write(&path, "verbosity = \"concise\"\n").expect("seed config");
         let before = std::fs::read(&path).expect("config before refusal");
         let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
         apply_bundle(&opt_in_bundle, &mut store, BundleScope::Global, dir.path())
@@ -3507,13 +3591,13 @@ allowed_tools = ["read_file"]
 
         let dir = tempfile::tempdir().expect("config dir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        std::fs::write(&path, "verbosity = \"concise\"\n").expect("seed config");
         let before = std::fs::read(&path).expect("config before import");
         let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
         apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
             .expect_err("remaining local authority import must fail");
         assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
-        assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+        assert_eq!(store.config.verbosity.as_deref(), Some("concise"));
 
         let config: ConfigToml = toml::from_str(
             r#"
@@ -3712,7 +3796,7 @@ args = ["--stdio", "--synthetic"]
 
         let dir = tempfile::tempdir().expect("config dir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        std::fs::write(&path, "verbosity = \"concise\"\n").expect("seed config");
         let before = std::fs::read(&path).expect("config before imports");
         let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
         for (name, body) in [
@@ -3745,7 +3829,7 @@ args = ["--stdio"]
             apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
                 .expect_err("LSP executable authority import must fail");
             assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
-            assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+            assert_eq!(store.config.verbosity.as_deref(), Some("concise"));
         }
     }
 
@@ -3845,13 +3929,13 @@ label = "safe-nested-workspace-label"
 
         let dir = tempfile::tempdir().expect("config dir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        std::fs::write(&path, "verbosity = \"concise\"\n").expect("seed config");
         let before = std::fs::read(&path).expect("config before import");
         let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
         apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
             .expect_err("machine-bound authority import must fail");
         assert_eq!(std::fs::read(path).expect("config after refusal"), before);
-        assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+        assert_eq!(store.config.verbosity.as_deref(), Some("concise"));
     }
 
     #[test]
@@ -3902,7 +3986,7 @@ label = "safe-nested-workspace-label"
     #[test]
     fn exported_bundle_reimports_cleanly() {
         let mut store = isolated_store();
-        store.config.set_value("verbosity", "quiet").expect("set");
+        store.config.set_value("verbosity", "concise").expect("set");
         store.save().expect("save");
 
         let bundle = export_bundle(

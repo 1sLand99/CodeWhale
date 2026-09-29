@@ -2940,6 +2940,7 @@ impl ConfigToml {
         if let Some(alias) = self.root_alias_key(key) {
             return self.set_value(&alias, value);
         }
+        check_config_toml_choice(key, value)?;
         if notifications::in_namespace(key) {
             let setting = notifications::NotificationSetting::required(key)?;
             let update = notifications::NotificationConfigUpdate::parse(setting, value)?;
@@ -3734,7 +3735,7 @@ pub fn config_toml_choices(key: &str) -> Option<&'static [&'static str]> {
 }
 
 /// Refuse a value the config.toml loader would reject for a closed-vocabulary
-/// root key, so `config set` cannot write a file the TUI then fails to load.
+/// root key, so shared setters cannot write a file the TUI then fails to load.
 pub fn check_config_toml_choice(key: &str, value: &str) -> Result<()> {
     let Some(choices) = config_toml_choices(key) else {
         return Ok(());
@@ -3748,6 +3749,7 @@ pub fn check_config_toml_choice(key: &str, value: &str) -> Result<()> {
     } else {
         ""
     };
+    let value = codewhale_secrets::redact::redact_secrets(value);
     bail!(
         "invalid value '{value}' for '{key}': config.toml accepts {}.{settings_note} \
          No value was changed.\nfix: codewhale config set {key} {}",

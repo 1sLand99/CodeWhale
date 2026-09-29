@@ -4795,7 +4795,7 @@ fn config_store_preserves_builtin_shadowing_custom_and_regional_selectors() {
             assert_eq!(route.base_url, "https://gateway.example/v1");
             assert_eq!(route.model, "Exact-Model");
         }
-        store.config.set_value("verbosity", "quiet").unwrap();
+        store.config.set_value("verbosity", "concise").unwrap();
         store.save().unwrap();
         let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["provider"].as_str(), Some(selector));
@@ -4865,7 +4865,7 @@ fn kindless_table_mirroring_a_builtin_alias_keeps_the_builtin_route() {
     assert_eq!(store.config.provider_id(), "deepseek-cn");
     assert!(store.config.named_custom_provider_id().is_none());
     // An unrelated typed save leaves the inert extras table untouched.
-    store.config.set_value("verbosity", "quiet").unwrap();
+    store.config.set_value("verbosity", "concise").unwrap();
     store.save().unwrap();
     let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(saved["provider"].as_str(), Some("deepseek-cn"));
@@ -9773,6 +9773,35 @@ fn retired_output_mode_key_still_loads_and_survives_a_typed_save() {
 }
 
 #[test]
+fn closed_choice_writes_validate_before_mutation_and_redact_pasted_credentials() {
+    let mut config = ConfigToml::default();
+    let token = ["sk-live-", "Z7qX4mNb2Vc9Lk3PwR8t"].concat();
+    for key in ["approval_policy", "sandbox_mode", "verbosity"] {
+        for choice in config_toml_choices(key).unwrap() {
+            let value = format!(" {} ", choice.to_ascii_uppercase());
+            config
+                .set_value(key, &value)
+                .expect("reader accepts normalized choice");
+            assert_eq!(config.get_value(key).as_deref(), Some(value.as_str()));
+        }
+        let before = toml::to_string(&config).unwrap();
+        for value in ["misspelled-choice", token.as_str()] {
+            let error = config.set_value(key, value).expect_err("invalid choice");
+            let message = error.to_string();
+            assert!(message.contains(key), "{message}");
+            assert!(message.contains("fix: codewhale config set"), "{message}");
+            assert!(!message.contains(&token), "{message}");
+            assert!(message.contains(if value == token { "[redacted]" } else { value }));
+            assert_eq!(
+                toml::to_string(&config).unwrap(),
+                before,
+                "{key} changed on refusal"
+            );
+        }
+    }
+}
+
+#[test]
 fn declared_setting_writes_keep_schema_type_and_refuse_bad_values() {
     let mut config = ConfigToml::default();
     config.set_value("allow_shell", "off").unwrap();
@@ -10004,7 +10033,7 @@ api_key = "sk-table"
 
         let mut store = ConfigStore::load(Some(path.clone())).unwrap();
         assert!(store.legacy_root_migration().has_pending_moves());
-        store.config.set_value("verbosity", "high").unwrap();
+        store.config.set_value("verbosity", "normal").unwrap();
         store.save().unwrap();
 
         let raw = raw_table(&path);
@@ -10055,7 +10084,7 @@ api_key = "sk-table"
             store.legacy_root_migration().unresolved_conflicts().count(),
             2
         );
-        store.config.set_value("verbosity", "high").unwrap();
+        store.config.set_value("verbosity", "normal").unwrap();
         store.save().unwrap();
         let raw = raw_table(&path);
         assert_eq!(
