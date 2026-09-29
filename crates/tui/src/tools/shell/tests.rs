@@ -366,23 +366,69 @@ fn execution_receipt_is_bounded_and_reports_truthful_state() {
 
 /// #6689: a settled foreground run records the command and directory the
 /// process manager spawned, on success and on failure, and background runs
-/// carry no receipt.
+/// carry no receipt. The workspace is opened through a symlink so the default
+/// directory and an explicit `cwd` would otherwise be spelled differently.
 #[cfg(unix)]
 #[tokio::test]
 async fn foreground_shell_results_carry_the_spawned_execution_receipt() {
     let tmp = tempdir().unwrap();
-    std::fs::create_dir(tmp.path().join("child")).unwrap();
-    let mut context = ToolContext::new(tmp.path().to_path_buf())
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(real.join("child")).unwrap();
+    let workspace = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &workspace).unwrap();
+    let mut context = ToolContext::new(workspace.clone())
         .with_elevated_sandbox_policy(ExecutionSandboxPolicy::DangerFullAccess);
     context.auto_approve = true;
-    let child = tmp.path().join("child").canonicalize().unwrap();
-    let receipt_cwd = |receipt: &Value| {
-        Path::new(receipt["cwd"].as_str().expect("cwd"))
-            .canonicalize()
-            .unwrap()
-    };
-
     let tool = BashTool::new("Bash");
+
+    // No completion hook registered: nothing reads a receipt, so none rides
+    // along in the metadata the Runtime API persists.
+    let unobserved = tool
+        .execute(json!({"command": "pwd"}), &context)
+        .await
+        .unwrap();
+    assert!(
+        unobserved
+            .metadata
+            .as_ref()
+            .unwrap()
+            .get("execution_receipt")
+            .is_none()
+    );
+
+    let hooks = crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![crate::hooks::Hook::new(
+                crate::hooks::HookEvent::ToolCallAfter,
+                "true",
+            )],
+            ..crate::hooks::HooksConfig::default()
+        },
+        workspace.clone(),
+    );
+    context.runtime.hook_executor = Some(std::sync::Arc::new(hooks));
+    // Exact strings, not re-canonicalized: both spellings must already agree.
+    let real = real.canonicalize().unwrap();
+    let real_str = real.to_str().unwrap();
+    let child_str = real.join("child");
+    let child_str = child_str.to_str().unwrap();
+
+    let default_dir = tool
+        .execute(json!({"command": "pwd"}), &context)
+        .await
+        .unwrap();
+    let explicit_dir = tool
+        .execute(json!({"command": "pwd", "cwd": "."}), &context)
+        .await
+        .unwrap();
+    for result in [&default_dir, &explicit_dir] {
+        assert_eq!(
+            result.metadata.as_ref().unwrap()["execution_receipt"]["cwd"],
+            real_str
+        );
+    }
+
     let command = "printf effective; printf diagnostic >&2; exit 7";
     let result = tool
         .execute(json!({"command": command, "cwd": "child"}), &context)
@@ -390,8 +436,7 @@ async fn foreground_shell_results_carry_the_spawned_execution_receipt() {
         .unwrap();
     let receipt = &result.metadata.as_ref().unwrap()["execution_receipt"];
     assert_eq!(receipt["command"], command);
-    assert!(Path::new(receipt["cwd"].as_str().unwrap()).is_absolute());
-    assert_eq!(receipt_cwd(receipt), child);
+    assert_eq!(receipt["cwd"], child_str);
     assert_eq!(receipt["stdout"], "effective");
     assert_eq!(receipt["stderr"], "diagnostic");
     assert_eq!(receipt["exit_code"], 7);
@@ -444,7 +489,7 @@ async fn foreground_shell_results_carry_the_spawned_execution_receipt() {
     assert_eq!(receipt["command"], "printf partial; exit 3");
     assert_eq!(receipt["exit_code"], 3);
     assert_eq!(receipt["state"], "completed");
-    assert_eq!(receipt_cwd(receipt), tmp.path().canonicalize().unwrap());
+    assert_eq!(receipt["cwd"], real_str);
 }
 
 #[cfg(unix)]
@@ -3929,6 +3974,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         lifecycle_seq: 0,
         last_lifecycle_status: None,
         last_lifecycle_bytes: 0,
+        wait_failed: false,
     };
 
     let started = std::time::Instant::now();

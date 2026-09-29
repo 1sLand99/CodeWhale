@@ -1127,6 +1127,9 @@ pub struct BackgroundShell {
     lifecycle_seq: u64,
     last_lifecycle_status: Option<ShellStatus>,
     last_lifecycle_bytes: usize,
+    /// The terminal status came from a failed `try_wait`, not an observed
+    /// exit or signal. Such a run gets no execution receipt (#6689).
+    wait_failed: bool,
 }
 
 #[derive(Clone)]
@@ -1297,6 +1300,7 @@ impl BackgroundShell {
                 Ok(None) => false, // Still running
                 Err(_) => {
                     self.status = ShellStatus::Failed;
+                    self.wait_failed = true;
                     self.heavy_permit.take();
                     self.collect_output();
                     true
@@ -2023,6 +2027,7 @@ impl ShellManager {
                 lifecycle_seq: 0,
                 last_lifecycle_status: None,
                 last_lifecycle_bytes: 0,
+                wait_failed: false,
             },
         );
     }
@@ -2879,6 +2884,7 @@ impl ShellManager {
             lifecycle_seq: 0,
             last_lifecycle_status: None,
             last_lifecycle_bytes: 0,
+            wait_failed: false,
         };
 
         #[cfg(unix)]
@@ -4807,10 +4813,20 @@ async fn execute_foreground_via_background(
         // #6689: the receipt identity is what the manager recorded for this
         // spawn — the admitted command and the directory handed to the OS —
         // never the before-hook request. Only pipe-backed, unsandboxed local
-        // runs qualify: a PTY, the hardened read-only argv rewrite, an OS
-        // sandbox wrapper, and Windows shell prefixes all change what the
-        // process actually executes relative to this string.
-        if !cfg!(windows) && !tty && !direct_argv && !spawned.sandboxed && !spawned.sandbox_denied {
+        // runs through a POSIX-style `<shell> <flag> <source>` dispatcher
+        // qualify: a PTY, the hardened read-only argv rewrite, an OS sandbox
+        // wrapper, Windows shell prefixes, and a PowerShell dispatcher (even
+        // `$SHELL=pwsh` on Unix, which wraps the source or runs it from a temp
+        // `-File`) all change what the process executes relative to this string.
+        if !cfg!(windows)
+            && !tty
+            && !direct_argv
+            && !spawned.sandboxed
+            && !spawned.sandbox_denied
+            && !crate::shell_dispatcher::global_dispatcher()
+                .kind()
+                .is_powershell()
+        {
             *receipt_identity = Some(ShellExecutionIdentity {
                 command: process.command.clone(),
                 cwd: process.working_dir.clone(),
@@ -4880,6 +4896,16 @@ async fn execute_foreground_via_background(
             if manager.poll_status(&task_id)? == ShellStatus::Running {
                 None
             } else {
+                // #6689: a status from a failed wait is neither an observed
+                // exit nor an interruption, so the receipt is left out rather
+                // than reporting a guessed state.
+                if manager
+                    .processes
+                    .get(&task_id)
+                    .is_none_or(|shell| shell.wait_failed)
+                {
+                    *receipt_identity = None;
+                }
                 let snapshot = manager.get_output(&task_id, false, 0)?;
                 // Ordering matters: the snapshot is taken before the
                 // acknowledgement releases the retained bytes.
@@ -6050,6 +6076,13 @@ impl ToolSpec for BashTool {
 
         let mut lifecycle_warning = None;
         let mut receipt_identity = None;
+        // #6689: the receipt exists for completion hooks to read. Without one
+        // registered it would only ride along in tool metadata, which the
+        // Runtime API persists and emits for every call.
+        let wants_receipt = context.runtime.hook_executor.as_ref().is_some_and(|hooks| {
+            hooks.has_hooks_for_event(crate::hooks::HookEvent::ToolCallAfter)
+                || hooks.has_hooks_for_event(crate::hooks::HookEvent::OnError)
+        });
         let result = if interactive {
             let mut manager = context
                 .shell_manager
@@ -6136,6 +6169,18 @@ impl ToolSpec for BashTool {
                 &mut receipt_identity,
             )
             .await
+        };
+        // One spelling per directory. An explicit `cwd` reaches the spawn
+        // already canonicalized by `resolve_path`; the default workspace
+        // arrives as the session opened it, possibly through a symlink.
+        // Resolve both the same way, off the runtime thread. A directory that
+        // no longer resolves when the run settles gets no receipt.
+        let receipt_identity = match receipt_identity.filter(|_| wants_receipt) {
+            Some(identity) => tokio::fs::canonicalize(&identity.cwd)
+                .await
+                .ok()
+                .map(|cwd| ShellExecutionIdentity { cwd, ..identity }),
+            None => None,
         };
 
         match result {

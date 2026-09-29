@@ -329,7 +329,7 @@ any rewrite.
 | Field | Meaning |
 | --- | --- |
 | `command` | the admitted shell source handed to the shell, not the shell executable or its argv wrapper |
-| `cwd` | the absolute directory the process started in, as passed to the OS (symlinks are not resolved) |
+| `cwd` | the canonical absolute path of the directory the process started in: symlinks are resolved, so a directory has one spelling whether or not the call passed `cwd`; it is resolved when the run settles |
 | `state` | `completed` for an observed exit, including a nonzero one; `interrupted` for a signal, kill, cancel, or timeout |
 | `scope` | always `local` in schema 1 |
 | `exit_code` | the observed integer, or `null`; never synthesized from `state` |
@@ -340,15 +340,21 @@ any rewrite.
 The rules are conservative:
 
 - **Exact or absent.** `command` and `cwd` are never truncated. If either is
-  over 8 KiB, contains NUL, or the directory is relative or not UTF-8, the
-  receipt is left out. Previews shrink until the serialized JSON fits 32 KiB;
+  over 8 KiB, contains NUL, or the directory is relative, not UTF-8, or no
+  longer resolves, the receipt is left out. So is a run whose end the shell
+  tool could not observe (the OS wait itself failed): its state is unknown,
+  and the receipt does not guess it. Previews shrink until the serialized JSON fits 32 KiB;
   if it still cannot fit, the receipt is left out rather than cut.
 - **Absence means nothing.** It implies neither success nor failure.
-- **Scope.** Only a settled, pipe-backed, unsandboxed, local foreground run
-  gets a receipt. Background launches, a foreground run moved to `/jobs`,
+- **Scope.** A receipt is built only while a `tool_call_after` or `on_error`
+  hook is configured, and only for a settled, pipe-backed, unsandboxed, local
+  foreground run. Background launches, a foreground run moved to `/jobs`,
   PTY (`tty` / `combined_output`) and interactive sessions, OS-sandboxed and
   external-backend execution, the read-only shell's hardened argv, Windows,
-  and calls refused before execution have none.
+  a PowerShell shell on any platform (it wraps the source or runs it from a
+  temporary script), and calls refused before execution have none.
+- **Hooks only.** The receipt is not kept in the durable Runtime API item
+  record; that record already carries the tool output.
 - It is set for a failed run as well as a passing one, so `on_error` for a
   failed shell call carries it too. Every other variable is unchanged.
 

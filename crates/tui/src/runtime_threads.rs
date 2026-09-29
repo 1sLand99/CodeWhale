@@ -14413,6 +14413,12 @@ impl RuntimeThreadManager {
                                         }
                                         obj.insert("tool_result_for".to_string(), json!(id));
                                         obj.insert("is_error".to_string(), json!(!output.success));
+                                        // The shell execution receipt (#6689) is
+                                        // for completion hooks, which already
+                                        // read it from the live result; it
+                                        // repeats output previews `detail`
+                                        // holds, so it is never persisted.
+                                        obj.remove("execution_receipt");
                                     }
                                     // Failed calls count too: a large error
                                     // output spills like any other.
