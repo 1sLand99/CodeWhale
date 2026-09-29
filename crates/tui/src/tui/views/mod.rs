@@ -8622,6 +8622,60 @@ base_url = "https://api.xiaomimimo.com/v1"
         }
     }
 
+    /// ASCII-safe terminals: every settings row kind (toggle, choice, number,
+    /// text, action, read-only) and the panel chrome around it must narrow
+    /// to ASCII through the backend's cell adapter. `✎` used to pass through
+    /// untouched on every editable number/text row.
+    #[test]
+    fn config_panel_every_row_kind_renders_ascii_through_the_adapter() {
+        let _guard = ConfigSettingsEnvGuard::new("theme = \"terminal\"\n");
+        let app = create_test_app();
+        let mut view = ConfigView::new_for_app(&app);
+        let mut kinds_seen = Vec::new();
+        for category in ConfigCategory::ALL {
+            view.category = category;
+            view.select_first_visible_row();
+            let items = view.visible_items();
+            for item in &items {
+                if let ConfigListItem::Row(idx) = item {
+                    let kind = view.editor_kind(&view.rows[*idx]);
+                    if !kinds_seen.contains(&kind) {
+                        kinds_seen.push(kind);
+                    }
+                }
+            }
+            // Tall enough that the whole category paints without scrolling.
+            let height = u16::try_from(items.len() + 16).unwrap_or(u16::MAX);
+            let area = Rect::new(0, 0, 120, height);
+            let mut buf = Buffer::empty(area);
+            view.render(area, &mut buf);
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    let mut cell = buf[(x, y)].clone();
+                    crate::tui::color_compat::adapt_cell_symbol_for_ascii(&mut cell);
+                    assert!(
+                        cell.symbol().is_ascii(),
+                        "{category:?} ({x},{y}): {:?} has no ASCII fallback",
+                        buf[(x, y)].symbol()
+                    );
+                }
+            }
+        }
+        for kind in [
+            SettingKind::Boolean,
+            SettingKind::Choice,
+            SettingKind::Integer,
+            SettingKind::Text,
+            SettingKind::Action,
+            SettingKind::ReadOnly,
+        ] {
+            assert!(
+                kinds_seen.contains(&kind),
+                "no settings row of kind {kind:?} was rendered"
+            );
+        }
+    }
+
     /// Slice C: cell-exact goldens for Edit Theme with the underwater
     /// default open — title, scope/current lanes, the 14 theme rows, and
     /// the Apply/Cancel controls. Empty settings mean the editor opens on
