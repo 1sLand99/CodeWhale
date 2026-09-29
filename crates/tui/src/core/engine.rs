@@ -506,6 +506,17 @@ pub struct EngineConfig {
     /// from `[tui].stream_max_duration_secs`. Pre-R1 this was the hard-coded
     /// `STREAM_MAX_DURATION_SECS`.
     pub stream_max_duration: Duration,
+    /// Stream-level retry budgets (#6700): whole-request resumes (also spent
+    /// by stream-open failures, #6699), in-stream transparent retries, and
+    /// the per-stream error streak. Resolved from `[tui].stream_max_resumes`,
+    /// `[tui].stream_max_transparent_retries` and `[tui].stream_max_errors`;
+    /// the defaults are the historical compiled-in values.
+    pub stream_retry_limits: turn_budget::StreamRetryLimits,
+    /// Bounded wait for SSE response headers (#6700). Resolved from
+    /// `[tui].stream_open_timeout_secs`, then
+    /// `CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`; only the awaiting-model
+    /// heartbeat bound reads it here — the client owns the real timeout.
+    pub stream_open_timeout: Duration,
     /// No-progress heartbeat timeout for live sub-agents. Used by the manager
     /// and parent wait loop to auto-cancel stuck children before they exhaust
     /// the sub-agent slot pool indefinitely (#2614).
@@ -642,6 +653,8 @@ impl Default for EngineConfig {
             turn_wall_clock: turn_budget::resolve_turn_wall_clock(None),
             stream_max_content_bytes: turn_budget::DEFAULT_STREAM_MAX_CONTENT_BYTES,
             stream_max_duration: Duration::from_secs(turn_budget::DEFAULT_STREAM_MAX_DURATION_SECS),
+            stream_retry_limits: turn_budget::StreamRetryLimits::default(),
+            stream_open_timeout: crate::client::resolve_stream_open_timeout(None),
             subagent_heartbeat_timeout: Duration::from_secs(
                 crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
             ),
@@ -8579,12 +8592,15 @@ use self::streaming::TOOL_CALL_START_MARKERS;
 #[cfg(test)]
 use self::streaming::filter_tool_call_delta;
 use self::streaming::{
-    ContentBlockKind, MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES,
-    MAX_TRANSPARENT_STREAM_RETRIES, StreamResume, StreamRetryBudget, ToolCallDeltaFilterState,
-    ToolUseState, contains_fake_tool_wrapper, filter_tool_call_delta_with_state,
-    flush_tool_call_delta_state, should_resume_after_network_drop, should_resume_after_sleep,
+    ContentBlockKind, StreamResume, StreamRetryBudget, ToolCallDeltaFilterState, ToolUseState,
+    contains_fake_tool_wrapper, filter_tool_call_delta_with_state, flush_tool_call_delta_state,
+    should_resume_after_network_drop, should_resume_after_sleep,
     should_resume_interactive_after_network_drop, should_transparently_retry_stream,
     sleep_gap_detected, stream_read_error_user_message,
+};
+#[cfg(test)]
+use self::streaming::{
+    MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES, MAX_TRANSPARENT_STREAM_RETRIES,
 };
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, EXECUTE_TOOLS_TOOL_NAME, JS_EXECUTION_TOOL_NAME,

@@ -350,6 +350,9 @@ pub struct CodewhaleClient {
     test_messages_transport_base_url: Option<String>,
     pub(super) reasoning_stream_style: Option<String>,
     pub(super) stream_idle_timeout: Duration,
+    /// Bounded wait for SSE response headers, resolved once from
+    /// `[tui].stream_open_timeout_secs` / `CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`.
+    pub(super) stream_open_timeout: Duration,
 }
 
 const CONNECTION_FAILURE_THRESHOLD: u32 = 2;
@@ -638,6 +641,7 @@ impl Clone for CodewhaleClient {
             test_messages_transport_base_url: self.test_messages_transport_base_url.clone(),
             reasoning_stream_style: self.reasoning_stream_style.clone(),
             stream_idle_timeout: self.stream_idle_timeout,
+            stream_open_timeout: self.stream_open_timeout,
         }
     }
 }
@@ -1585,6 +1589,8 @@ impl CodewhaleClient {
         validate_base_url_security(&base_url, config.allow_insecure_http())?;
         let retry = config.retry_policy();
         let stream_idle_timeout = Duration::from_secs(config.stream_chunk_timeout_secs());
+        let stream_open_timeout = config.stream_open_timeout();
+        let connect_timeout = config.connect_timeout();
         let http_headers = config.http_headers();
         let auth_disabled =
             auth_mode_disables_api_key(config.auth_mode_for_provider(api_provider).as_deref());
@@ -1640,6 +1646,7 @@ impl CodewhaleClient {
             wire_format,
             auth_disabled,
             false,
+            connect_timeout,
         )?
         .build()?;
         let models_http_client = Self::http_client_builder_with_auth_mode(
@@ -1650,6 +1657,7 @@ impl CodewhaleClient {
             wire_format,
             auth_disabled,
             false,
+            connect_timeout,
         )?
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
@@ -1664,6 +1672,7 @@ impl CodewhaleClient {
             wire_format,
             auth_disabled,
             true,
+            connect_timeout,
         )?
         .build()?;
 
@@ -1706,6 +1715,7 @@ impl CodewhaleClient {
             test_messages_transport_base_url: None,
             reasoning_stream_style,
             stream_idle_timeout,
+            stream_open_timeout,
         })
     }
 
@@ -2000,6 +2010,7 @@ impl CodewhaleClient {
             provider_default_wire_format(api_provider),
             false,
             false,
+            Duration::from_secs(crate::config::DEFAULT_CONNECT_TIMEOUT_SECS),
         )?
         .build()
         .map_err(Into::into)
@@ -2013,6 +2024,7 @@ impl CodewhaleClient {
         wire_format: WireFormat,
         auth_disabled: bool,
         force_http1: bool,
+        connect_timeout: Duration,
     ) -> Result<reqwest::ClientBuilder> {
         let headers = build_default_headers(
             api_key,
@@ -2025,7 +2037,7 @@ impl CodewhaleClient {
         let mut builder = crate::tls::reqwest_client_builder()
             .default_headers(headers)
             .user_agent(client_user_agent(api_provider))
-            .connect_timeout(Duration::from_secs(30))
+            .connect_timeout(connect_timeout)
             .tcp_keepalive(Some(Duration::from_secs(30)))
             .http2_keep_alive_interval(Some(Duration::from_secs(15)))
             .http2_keep_alive_timeout(Duration::from_secs(20))
@@ -5428,9 +5440,11 @@ pub(crate) mod system_one;
 /// byte before the client itself times out (#6184): the header wait plus the
 /// first-byte bound. The engine heartbeat uses it as its awaiting-model bound.
 #[must_use]
-pub(crate) fn stream_first_response_bound(idle: Duration) -> Duration {
-    stream_entry::stream_open_timeout().saturating_add(stream_entry::first_byte_timeout(idle))
+pub(crate) fn stream_first_response_bound(open: Duration, idle: Duration) -> Duration {
+    open.saturating_add(stream_entry::first_byte_timeout(idle))
 }
+
+pub(crate) use stream_entry::resolve_stream_open_timeout;
 mod wire;
 
 // Retain the crate-visible accounting helpers at the existing client seam.

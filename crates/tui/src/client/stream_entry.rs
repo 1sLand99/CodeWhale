@@ -20,24 +20,36 @@ use crate::llm_client::LlmError;
 /// the per-chunk idle timeout: it covers connection setup and upstream header
 /// return only, never model thinking time after streaming has started.
 pub(crate) const DEFAULT_STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
+/// Accepted response-header wait range, in seconds.
+pub(crate) const MIN_STREAM_OPEN_TIMEOUT_SECS: u64 = 5;
+pub(crate) const MAX_STREAM_OPEN_TIMEOUT_SECS: u64 = 300;
 
-/// Env override (`CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`, legacy
-/// `DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS`) for the response-header wait,
-/// shared by every streaming adapter.
-pub(crate) fn stream_open_timeout() -> Duration {
-    stream_open_timeout_from_env(
-        std::env::var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS")
-            .or_else(|_| std::env::var("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS"))
-            .ok()
-            .as_deref(),
-    )
+/// Resolve the response-header wait shared by every streaming adapter.
+///
+/// A positive `[tui].stream_open_timeout_secs` wins (#6700); omitted or `0`
+/// falls back to the env override (`CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`,
+/// legacy `DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS`), then the 45s default. Every
+/// source clamps to `5..=300`.
+#[must_use]
+pub(crate) fn resolve_stream_open_timeout(configured_secs: Option<u64>) -> Duration {
+    match configured_secs {
+        Some(secs) if secs > 0 => Duration::from_secs(
+            secs.clamp(MIN_STREAM_OPEN_TIMEOUT_SECS, MAX_STREAM_OPEN_TIMEOUT_SECS),
+        ),
+        _ => stream_open_timeout_from_env(
+            std::env::var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS")
+                .or_else(|_| std::env::var("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS"))
+                .ok()
+                .as_deref(),
+        ),
+    }
 }
 
 pub(crate) fn stream_open_timeout_from_env(value: Option<&str>) -> Duration {
     let secs = value
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_STREAM_OPEN_TIMEOUT.as_secs())
-        .clamp(5, 300);
+        .clamp(MIN_STREAM_OPEN_TIMEOUT_SECS, MAX_STREAM_OPEN_TIMEOUT_SECS);
     Duration::from_secs(secs)
 }
 
@@ -644,6 +656,24 @@ mod tests {
         assert_eq!(
             stream_open_timeout_from_env(Some("999")),
             Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn configured_stream_open_timeout_wins_and_clamps() {
+        // Positive config values never consult the env, so these are
+        // deterministic regardless of the test process environment.
+        assert_eq!(
+            resolve_stream_open_timeout(Some(90)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            resolve_stream_open_timeout(Some(1)),
+            Duration::from_secs(MIN_STREAM_OPEN_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            resolve_stream_open_timeout(Some(u64::MAX)),
+            Duration::from_secs(MAX_STREAM_OPEN_TIMEOUT_SECS)
         );
     }
 

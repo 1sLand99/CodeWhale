@@ -1004,10 +1004,13 @@ impl Engine {
         // dies mid-stream and either nothing useful was streamed (#103
         // Phase 3), the host slept mid-turn (#2990), or a host hit a
         // mid-stream network drop (v0.9.4 Terminal-Bench P0), we re-issue
-        // the request up to MAX_STREAM_RETRIES times before surfacing the
-        // failure to the user. `StreamRetryBudget` enforces that bound in
-        // mechanism — `authorize()` is the only way to spend a resume.
-        let mut stream_retry_budget = StreamRetryBudget::default();
+        // the request up to `[tui].stream_max_resumes` times (default
+        // MAX_STREAM_RETRIES) before surfacing the failure to the user. A
+        // stream that never opened (#6699) spends the same budget.
+        // `StreamRetryBudget` enforces that bound in mechanism —
+        // `authorize()` is the only way to spend a resume.
+        let mut stream_retry_budget =
+            StreamRetryBudget::with_limit(self.config.stream_retry_limits.max_resumes);
         // The user hears about images the route cannot see once per turn,
         // not once per step and not for images replayed from history.
         let mut image_omission_notified = false;
@@ -1926,7 +1929,36 @@ impl Engine {
                     let display_message = self.decorate_auth_error_message(
                         initial_stream_error_user_message(&self.config.locale_tag, &e),
                     );
-                    let mut envelope = crate::error_taxonomy::envelope_for_llm_error(e, message);
+                    let mut envelope =
+                        crate::error_taxonomy::envelope_for_llm_error(e, message.clone());
+                    // #6699: the request never became a stream (connect
+                    // failure, response-header stall). The transport layer
+                    // already spent its own retries; re-issue the identical
+                    // request from here through the same bounded resume
+                    // budget every other stream failure spends. Nothing
+                    // streamed, so there is no fragment to keep or discard,
+                    // and no error event is emitted for an attempt that is
+                    // retried — an exhausted budget falls through to the
+                    // normal failure below.
+                    if envelope.recoverable
+                        && matches!(
+                            envelope.category,
+                            ErrorCategory::Network | ErrorCategory::Timeout
+                        )
+                        && !self.cancel_token.is_cancelled()
+                        && let Some(attempt) = stream_retry_budget.authorize()
+                    {
+                        turn.stop_diagnostics.stream_resumes =
+                            turn.stop_diagnostics.stream_resumes.saturating_add(1);
+                        if attempt == 2 {
+                            let _ = self.tx_event.send(Event::status("Reconnecting…")).await;
+                        }
+                        crate::logging::warn(format!(
+                            "Stream failed to open (attempt {attempt}/{}); retrying request: {message}",
+                            stream_retry_budget.limit()
+                        ));
+                        continue;
+                    }
                     envelope.message = display_message.clone();
                     // #6566: no model saw the question. Take it back out of
                     // the session before reporting, so the next request does
@@ -2118,6 +2150,7 @@ impl Engine {
             if let Some(resume) = pending_resume
                 && let Some(attempt) = stream_retry_budget.authorize()
             {
+                let limit = stream_retry_budget.limit();
                 turn.stop_diagnostics.stream_resumes =
                     turn.stop_diagnostics.stream_resumes.saturating_add(1);
                 // A quick recovery needs no user action. If it persists,
@@ -2129,7 +2162,7 @@ impl Engine {
                 match resume {
                     StreamResume::AfterSleep => {
                         crate::logging::warn(format!(
-                            "Resuming after system sleep (attempt {attempt}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
+                            "Resuming after system sleep (attempt {attempt}/{limit}); discarding partial output and retrying request"
                         ));
                         // Finalize any partially-rendered assistant cell so
                         // the retried stream renders fresh instead of
@@ -2141,7 +2174,7 @@ impl Engine {
                     }
                     StreamResume::HeadlessNetworkDrop => {
                         crate::logging::warn(format!(
-                            "Resuming headless turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
+                            "Resuming headless turn after mid-stream network drop (attempt {attempt}/{limit}); discarding partial output and retrying request"
                         ));
                     }
                     StreamResume::InteractiveNetworkDrop => {
@@ -2194,11 +2227,11 @@ impl Engine {
                             // that claim is what minted the fake `[runtime]`
                             // user turn in session 1589c05d.
                             crate::logging::warn(format!(
-                                "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); only hidden reasoning streamed — no partial reply to preserve, retrying request"
+                                "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{limit}); only hidden reasoning streamed — no partial reply to preserve, retrying request"
                             ));
                         } else {
                             crate::logging::warn(format!(
-                                "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); preserving partial reply and retrying request"
+                                "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{limit}); preserving partial reply and retrying request"
                             ));
                             // Finalize the partial text cell so the UI stops
                             // streaming and the retried content lands in a
@@ -2224,7 +2257,7 @@ impl Engine {
                     }
                     StreamResume::NoContentStreamDeath => {
                         crate::logging::warn(format!(
-                            "Stream died with no content (attempt {attempt}/{MAX_STREAM_RETRIES}); retrying request"
+                            "Stream died with no content (attempt {attempt}/{limit}); retrying request"
                         ));
                     }
                 }
@@ -5613,6 +5646,7 @@ impl Engine {
         let max_duration = self.config.stream_max_duration;
         let max_duration_secs = max_duration.as_secs();
         let max_content_bytes = self.config.stream_max_content_bytes;
+        let retry_limits = self.config.stream_retry_limits;
 
         // Process stream events
         loop {
@@ -5738,6 +5772,7 @@ impl Engine {
                     if should_resume_after_sleep(
                         sleep_gap_detected(last_progress_mono.elapsed(), wall_elapsed),
                         drop_resumes_spent,
+                        retry_limits.max_resumes,
                         self.cancel_token.is_cancelled(),
                     ) {
                         crate::logging::warn(format!(
@@ -5755,11 +5790,13 @@ impl Engine {
                     if should_transparently_retry_stream(
                         any_content_received,
                         transparent_stream_retries,
+                        retry_limits.max_transparent_retries,
                         self.cancel_token.is_cancelled(),
                     ) {
                         transparent_stream_retries = transparent_stream_retries.saturating_add(1);
                         crate::logging::info(format!(
-                            "Transparent stream retry {transparent_stream_retries}/{MAX_TRANSPARENT_STREAM_RETRIES} (no content received yet): {message}",
+                            "Transparent stream retry {transparent_stream_retries}/{} (no content received yet): {message}",
+                            retry_limits.max_transparent_retries,
                         ));
                         // Drop the failed stream before issuing the new
                         // request to release the underlying connection.
@@ -5826,6 +5863,7 @@ impl Engine {
                         !self.config.terminal_chrome_enabled,
                         network_class_error,
                         drop_resumes_spent,
+                        retry_limits.max_resumes,
                         self.cancel_token.is_cancelled(),
                     ) {
                         crate::logging::warn(format!(
@@ -5855,6 +5893,7 @@ impl Engine {
                         any_content_received,
                         tool_uses.is_empty(),
                         drop_resumes_spent,
+                        retry_limits.max_resumes,
                         self.cancel_token.is_cancelled(),
                     ) {
                         crate::logging::warn(format!(
@@ -5879,7 +5918,7 @@ impl Engine {
                     // the bounded retry tail.
                     let terminal = !envelope.recoverable;
                     let _ = self.tx_event.send(Event::error(envelope)).await;
-                    if terminal || stream_errors >= MAX_STREAM_ERRORS_BEFORE_FAIL {
+                    if terminal || stream_errors >= retry_limits.max_errors {
                         break;
                     }
                     continue;
@@ -6555,8 +6594,11 @@ fn stream_chunk_timeout_budget(config: &EngineConfig) -> (u64, Duration) {
 /// event: the client's own open + first-byte bounds, plus grace so the
 /// client's timeout fires (and is retried) before the watchdog reports.
 fn awaiting_model_bound(config: &EngineConfig) -> Duration {
-    crate::client::stream_first_response_bound(config.stream_chunk_timeout)
-        .saturating_add(super::turn_heartbeat::STALL_BOUND_GRACE)
+    crate::client::stream_first_response_bound(
+        config.stream_open_timeout,
+        config.stream_chunk_timeout,
+    )
+    .saturating_add(super::turn_heartbeat::STALL_BOUND_GRACE)
 }
 
 /// Whether a per-tool pre-execution snapshot should be taken before running
