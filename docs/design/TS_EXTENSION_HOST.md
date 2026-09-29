@@ -33,9 +33,16 @@ Rust manager, owner registry, attachment snapshots, and approval gate:
 - Old-generation callbacks and recovery tickets cannot mutate a newer host.
   Planned shutdown is not a crash. Native-entry, staged-byte, persisted-state,
   approval-grant and platform sandbox rules remain unchanged.
+- Two incomplete, leaking, malformed or failed teardowns in ten minutes request
+  one planned restart. The existing monitor waits until reconciliation and
+  all non-heartbeat requests are idle, then atomically closes request admission
+  before retiring the process tree. Current valid owners replay with fresh
+  tokens; calls are never replayed. This maintenance neither consumes nor
+  resets the unexpected-crash budget. Late old-process outcomes cannot dirty
+  the replacement.
 
-This slice does **not** add dirty-teardown idle restarts, per-owner author logs,
-`exec.cwd`, `.mts` entries, commands, hooks, MCP, `core/call`, or sandbox parity.
+This slice does **not** add per-owner author logs, `exec.cwd`, `.mts` entries,
+commands, hooks, MCP, `core/call`, or sandbox parity.
 Those remain subsequent work. The following phase-1 section is its historical
 receipt, including the earlier lack of heartbeat/restart.
 

@@ -1218,6 +1218,251 @@ fn crash_budget_is_bounded_and_expires_only_with_the_window() {
 }
 
 #[test]
+fn dirty_teardown_window_is_bounded_and_a_requested_restart_waits_for_idle() {
+    let options = super::SupervisionOptions::default();
+    let mut state = super::SupervisionState::default();
+    let now = Instant::now();
+    state.record_dirty_teardown(now, &options);
+    assert!(!state.dirty_restart_pending);
+    state.record_dirty_teardown(now + options.dirty_window, &options);
+    assert!(!state.dirty_restart_pending, "the first event expired");
+    state.record_dirty_teardown(
+        now + options.dirty_window + Duration::from_secs(1),
+        &options,
+    );
+    assert!(state.dirty_restart_pending);
+    for second in 2..100 {
+        state.record_dirty_teardown(
+            now + options.dirty_window + Duration::from_secs(second),
+            &options,
+        );
+    }
+    assert_eq!(state.dirty_teardowns.len(), 2);
+    state.record_dirty_teardown(now + options.dirty_window * 3, &options);
+    assert!(
+        state.dirty_restart_pending,
+        "an idle request does not expire"
+    );
+    assert!(state.crashes.is_empty());
+}
+
+#[tokio::test]
+async fn idle_retirement_seals_admission_and_does_not_wait_for_heartbeat() {
+    use futures_util::FutureExt;
+
+    let Some(node) = node_for_tests("idle admission") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["slow-tool"]).await;
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    let host = manager.shared.ready_host().unwrap();
+    let registration = manager.shared.registry.lock().unwrap().live_tools()[0].clone();
+    let (_, call) = host
+        .start_request(
+            protocol::CoreRequest::ToolCall(protocol::ToolCallParams {
+                handle: registration.handle,
+                call_id: "idle-admission".into(),
+                input: json!({"ms": 100}),
+                deadline_ms: 5000,
+            }),
+            Some(registration.owner.plugin_id),
+        )
+        .unwrap();
+    assert!(!host.terminate_if_idle(super::DIRTY_RESTART_REASON));
+    assert!(call.await.unwrap().is_ok());
+    // No await between admission and retirement: this heartbeat is still in
+    // the pending map, but it does not make the process busy.
+    let (_, _heartbeat) = host
+        .start_request(protocol::CoreRequest::Ping, None)
+        .unwrap();
+    assert!(host.terminate_if_idle(super::DIRTY_RESTART_REASON));
+    assert!(manager.shared.ready_host().is_none());
+    assert!(matches!(manager.status(), HostStatus::Restarting { .. }));
+    // Poll without yielding to the exit watcher. A reconcile in this exact
+    // gap must not start activation on the sealed process and falsely fail
+    // a valid receipt before replay.
+    assert!(manager.ensure_host(true).now_or_never().unwrap().is_err());
+    assert_eq!(
+        manager.owner_state(&plugin_id(&fixture, "slow-tool")),
+        Some(OwnerState::Active)
+    );
+    assert!(matches!(
+        host.start_request(protocol::CoreRequest::Ping, None),
+        Err(super::supervisor::HostCallError::Exited(_))
+    ));
+    assert!(!host.terminate_if_idle(super::DIRTY_RESTART_REASON));
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn two_dirty_teardowns_wait_for_a_live_call_then_replay_without_spending_crash_budget() {
+    let Some(node) = node_for_tests("dirty teardown") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["dirty-dispose", "slow-tool"]).await;
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    // An existing unexpected crash must survive planned maintenance.
+    manager
+        .shared
+        .supervision
+        .lock()
+        .unwrap()
+        .record_crash(Instant::now(), &manager.shared.options.supervision);
+    engine.set_plugins(fixture.disable("dirty-dispose"));
+    engine.sync().await.unwrap();
+    assert_eq!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .dirty_teardowns
+            .len(),
+        1
+    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        manager.spawn_attempts(),
+        1,
+        "one dirty event is insufficient"
+    );
+
+    let mut enabled = discover_with_config(&fixture.config);
+    enabled.enable("dirty-dispose").unwrap();
+    engine.set_plugins(Arc::new(enabled));
+    engine.sync().await.unwrap();
+    let old = host_tool(&engine, fixture.workspace(), "slow_wait");
+    let host = manager.shared.ready_host().unwrap();
+    let registration = manager.shared.registry.lock().unwrap().live_tools()[0].clone();
+    let (_, call) = host
+        .start_request(
+            protocol::CoreRequest::ToolCall(protocol::ToolCallParams {
+                handle: registration.handle,
+                call_id: "survives-dirty-teardown".into(),
+                input: json!({"ms": 4000}),
+                deadline_ms: 10000,
+            }),
+            Some(registration.owner.plugin_id.clone()),
+        )
+        .unwrap();
+    engine.set_plugins(fixture.disable("dirty-dispose"));
+    engine.sync().await.unwrap();
+    assert!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .dirty_restart_pending
+    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(manager.spawn_attempts(), 1, "a live call defers retirement");
+    let completed = tokio::time::timeout(Duration::from_secs(10), call)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed["structured"]["waited"], 4000);
+    wait_host(&manager, || {
+        manager.spawn_attempts() == 2 && manager.live_tool_names().contains(&"slow_wait".into())
+    })
+    .await;
+    assert_eq!(manager.shared.supervision.lock().unwrap().crashes.len(), 1);
+    assert!(
+        !manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .dirty_restart_pending
+    );
+    let replayed = manager.shared.registry.lock().unwrap().live_tools()[0].clone();
+    assert_ne!(registration.owner, replayed.owner);
+    assert_ne!(registration.handle, replayed.handle);
+    assert!(matches!(
+        old.execute(json!({"ms": 1}), &ToolContext::new(fixture.workspace()))
+            .await,
+        Err(ToolError::NotAvailable { .. })
+    ));
+    // A delayed outcome from the retired process cannot dirty its replacement.
+    manager.shared.record_dirty_teardown(&host);
+    assert!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .dirty_teardowns
+            .is_empty()
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_activation_cleanup_also_records_a_dirty_teardown() {
+    let Some(node) = node_for_tests("failed activation teardown") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["clash-script"]).await;
+    native_bundle(
+        &fixture.config.user_plugins_dir,
+        "failed-disposal",
+        "index.mjs",
+        &["index.mjs"],
+    );
+    std::fs::write(
+        fixture.config.user_plugins_dir.join("failed-disposal/index.mjs"),
+        "export const name = 'failed-disposal';\nexport function apply(ctx) {\n  ctx.effect(() => () => new Promise(() => {}), 'unfinished activation cleanup');\n  throw new Error('fixture activation failure');\n}\n",
+    ).unwrap();
+    let mut plugins = discover_with_config(&fixture.config);
+    plugins.trust("failed-disposal").unwrap();
+    plugins.enable("failed-disposal").unwrap();
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(Arc::new(plugins));
+    tokio::time::timeout(Duration::from_secs(15), engine.sync())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        manager.owner_state(&plugin_id(&fixture, "failed-disposal")),
+        Some(OwnerState::Failed(_))
+    ));
+    assert_eq!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .dirty_teardowns
+            .len(),
+        1
+    );
+    assert!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .crashes
+            .is_empty()
+    );
+    assert_eq!(manager.spawn_attempts(), 1);
+    assert!(
+        manager
+            .live_tool_names()
+            .contains(&"fixture_script_tool".into())
+    );
+    manager.shutdown().await;
+}
+
+#[test]
 fn host_exit_preserves_failed_receipts_and_blames_only_the_activating_owner() {
     let mut registry = OwnerRegistry::new();
     let active = registry.begin_owner(

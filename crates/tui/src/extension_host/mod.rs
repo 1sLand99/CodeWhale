@@ -33,9 +33,9 @@
 //! * Heartbeat and bounded automatic restart preserve the shared crash budget
 //!   across engine creation and replay. Dead-host calls fail with a typed
 //!   error and are never replayed. Three crashes in five minutes require an
-//!   explicit plugin change/reload to retry. A teardown that times
-//!   out or reports leaks is logged in `/plugin`; the plugin's leftover
-//!   JavaScript keeps running until the host process ends.
+//!   explicit plugin change/reload to retry. Two dirty teardowns within ten
+//!   minutes retire the process once non-heartbeat calls are idle, without
+//!   resetting or consuming the unexpected-crash budget.
 //! * One host per engine process and one trust tier. On macOS (Seatbelt) the
 //!   host has no direct network, and cannot read the Codewhale home (except
 //!   the bundle, its data dir and plugin code), the Codex and DSH credential
@@ -97,6 +97,7 @@ use crate::plugins::types::PluginAuthority;
 const BUNDLE: &[u8] = include_bytes!("../../extension-host/dist/codewhale-extension-host.mjs");
 const BUNDLE_FILE_NAME: &str = "codewhale-extension-host.mjs";
 const MAX_DIAGNOSTICS: usize = 64;
+const DIRTY_RESTART_REASON: &str = "planned restart after repeated dirty teardowns";
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
@@ -177,6 +178,8 @@ pub struct SupervisionOptions {
     pub crash_window: Duration,
     pub crash_limit: usize,
     pub start_retry_cooldown: Duration,
+    pub dirty_window: Duration,
+    pub dirty_limit: usize,
 }
 
 impl Default for SupervisionOptions {
@@ -189,6 +192,8 @@ impl Default for SupervisionOptions {
             crash_window: Duration::from_secs(5 * 60),
             crash_limit: 3,
             start_retry_cooldown: Duration::from_secs(60),
+            dirty_window: Duration::from_secs(10 * 60),
+            dirty_limit: 2,
         }
     }
 }
@@ -200,9 +205,28 @@ struct SupervisionState {
     launch_failed: bool,
     retry_ticket: u64,
     policy: bool,
+    dirty_teardowns: VecDeque<Instant>,
+    dirty_restart_pending: bool,
+    planned_restart: Option<u64>,
 }
 
 impl SupervisionState {
+    fn record_dirty_teardown(&mut self, now: Instant, options: &SupervisionOptions) {
+        while self
+            .dirty_teardowns
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= options.dirty_window)
+        {
+            self.dirty_teardowns.pop_front();
+        }
+        self.dirty_teardowns.push_back(now);
+        let limit = options.dirty_limit.max(1);
+        self.dirty_restart_pending |= self.dirty_teardowns.len() >= limit;
+        while self.dirty_teardowns.len() > limit {
+            self.dirty_teardowns.pop_front();
+        }
+    }
+
     fn record_crash(&mut self, now: Instant, options: &SupervisionOptions) -> bool {
         while self
             .crashes
@@ -278,6 +302,46 @@ pub(crate) struct ManagerShared {
 }
 
 impl ManagerShared {
+    async fn deactivate_owner(&self, host: &Arc<HostProcess>, owner: &OwnerRef) {
+        let diagnostic = match host
+            .request_with_deadline(
+                CoreRequest::Deactivate(DeactivateParams {
+                    owner: owner.clone(),
+                }),
+                None,
+                DISPOSE_DEADLINE + Duration::from_millis(500),
+            )
+            .await
+            .map(serde_json::from_value::<DeactivateResult>)
+        {
+            Ok(Ok(ack)) if ack.disposed && ack.leaked.is_empty() => return,
+            Ok(Ok(ack)) => format!(
+                "extension `{}` teardown incomplete (disposed: {}, leaked: {:?})",
+                owner.plugin_id, ack.disposed, ack.leaked
+            ),
+            Ok(Err(error)) => format!(
+                "extension `{}` teardown answer malformed: {error}",
+                owner.plugin_id
+            ),
+            Err(error) => format!("extension `{}` teardown failed: {error}", owner.plugin_id),
+        };
+        self.diagnostic(diagnostic);
+        self.record_dirty_teardown(host);
+    }
+
+    fn record_dirty_teardown(&self, host: &Arc<HostProcess>) {
+        let slot = self.host.lock().expect("host lock");
+        if !matches!(&*slot, HostSlot::Ready(current) | HostSlot::Unresponsive(current)
+            if Arc::ptr_eq(current, host))
+        {
+            return;
+        }
+        self.supervision
+            .lock()
+            .expect("supervision lock")
+            .record_dirty_teardown(Instant::now(), &self.options.supervision);
+    }
+
     fn diagnostic(&self, message: String) {
         tracing::info!(target: "extension_host", "{message}");
         let mut diagnostics = self.diagnostics.lock().expect("diagnostics lock");
@@ -289,7 +353,9 @@ impl ManagerShared {
 
     fn ready_host(&self) -> Option<Arc<HostProcess>> {
         match &*self.host.lock().expect("host lock") {
-            HostSlot::Ready(host) if !host.has_exited() => Some(Arc::clone(host)),
+            HostSlot::Ready(host) if !host.has_exited() && !host.is_retiring() => {
+                Some(Arc::clone(host))
+            }
             _ => None,
         }
     }
@@ -414,7 +480,14 @@ impl HostEvents for Events {
                 return;
             }
             let mut supervision = shared.supervision.lock().expect("supervision lock");
-            let restart = supervision.record_crash(Instant::now(), &shared.options.supervision);
+            let planned = supervision.planned_restart.take() == Some(host_generation)
+                && reason == DIRTY_RESTART_REASON;
+            let restart = if planned {
+                supervision.retry_ticket += 1;
+                true
+            } else {
+                supervision.record_crash(Instant::now(), &shared.options.supervision)
+            };
             shared
                 .registry
                 .lock()
@@ -489,6 +562,29 @@ fn set_host_health(shared: &ManagerShared, generation: u64, unresponsive: bool) 
     true
 }
 
+fn restart_dirty_host_when_idle(
+    shared: &ManagerShared,
+    host: &Arc<HostProcess>,
+    generation: u64,
+) -> bool {
+    // Reconciliation owns activation/deactivation between wire requests too.
+    let Ok(_serial) = shared.sync_lock.try_lock() else {
+        return false;
+    };
+    let slot = shared.host.lock().expect("host lock");
+    if shared.host_generation.load(Ordering::SeqCst) != generation
+        || !matches!(&*slot, HostSlot::Ready(current) if Arc::ptr_eq(current, host))
+    {
+        return false;
+    }
+    let mut supervision = shared.supervision.lock().expect("supervision lock");
+    if !supervision.dirty_restart_pending || !host.terminate_if_idle(DIRTY_RESTART_REASON) {
+        return false;
+    }
+    supervision.planned_restart = Some(generation);
+    true
+}
+
 /// A monitor never owns the manager. Dropping the manager or changing host
 /// generation stops its monitor; pending calls are never retried here.
 fn monitor_host(shared: &Arc<ManagerShared>, host: &Arc<HostProcess>, generation: u64) {
@@ -503,6 +599,9 @@ fn monitor_host(shared: &Arc<ManagerShared>, host: &Arc<HostProcess>, generation
                 return;
             };
             if shared.host_generation.load(Ordering::SeqCst) != generation || host.has_exited() {
+                return;
+            }
+            if restart_dirty_host_when_idle(&shared, &host, generation) {
                 return;
             }
             drop(shared);
@@ -601,6 +700,9 @@ impl ExtensionHostManager {
         match &*self.shared.host.lock().expect("host lock") {
             HostSlot::Idle => HostStatus::Idle,
             HostSlot::Starting => HostStatus::Starting,
+            HostSlot::Ready(host) if host.is_retiring() => HostStatus::Restarting {
+                reason: DIRTY_RESTART_REASON.to_string(),
+            },
             HostSlot::Ready(host) => HostStatus::Ready {
                 pid: host.pid,
                 node_version: host.node_version.get().cloned().unwrap_or_default(),
@@ -911,31 +1013,7 @@ impl ExtensionHostManager {
             shared.diagnostic(format!("extension `{}` revoked", owner.plugin_id));
             if let Some(host) = &host {
                 host.revoke_calls_of(&owner.plugin_id);
-                match host
-                    .request_with_deadline(
-                        CoreRequest::Deactivate(DeactivateParams {
-                            owner: owner.clone(),
-                        }),
-                        None,
-                        DISPOSE_DEADLINE + std::time::Duration::from_millis(500),
-                    )
-                    .await
-                    .map(serde_json::from_value::<DeactivateResult>)
-                {
-                    Ok(Ok(ack)) if ack.disposed && ack.leaked.is_empty() => {}
-                    Ok(Ok(ack)) => shared.diagnostic(format!(
-                        "extension `{}` teardown incomplete (disposed: {}, leaked: {:?})",
-                        owner.plugin_id, ack.disposed, ack.leaked
-                    )),
-                    Ok(Err(error)) => shared.diagnostic(format!(
-                        "extension `{}` teardown answer malformed: {error}",
-                        owner.plugin_id
-                    )),
-                    Err(error) => shared.diagnostic(format!(
-                        "extension `{}` teardown failed: {error}",
-                        owner.plugin_id
-                    )),
-                }
+                shared.deactivate_owner(host, &owner).await;
             }
         }
 
@@ -1022,13 +1100,7 @@ impl ExtensionHostManager {
                     "extension `{}` failed to activate: {reason}",
                     want.plugin_name
                 ));
-                let _ = host
-                    .request_with_deadline(
-                        CoreRequest::Deactivate(DeactivateParams { owner }),
-                        None,
-                        DISPOSE_DEADLINE,
-                    )
-                    .await;
+                shared.deactivate_owner(host, &owner).await;
             }
         }
     }
@@ -1038,7 +1110,9 @@ impl ExtensionHostManager {
         let generation = {
             let mut slot = shared.host.lock().expect("host lock");
             match &*slot {
-                HostSlot::Ready(host) if !host.has_exited() => return Ok(Arc::clone(host)),
+                HostSlot::Ready(host) if !host.has_exited() && !host.is_retiring() => {
+                    return Ok(Arc::clone(host));
+                }
                 HostSlot::Ready(_) | HostSlot::Unresponsive(_) => {
                     return Err("extension host is unavailable; waiting for supervision".into());
                 }
@@ -1056,6 +1130,9 @@ impl ExtensionHostManager {
             supervision.last_start = Some(Instant::now());
             supervision.policy = policy;
             supervision.launch_failed = false;
+            supervision.dirty_teardowns.clear();
+            supervision.dirty_restart_pending = false;
+            supervision.planned_restart = None;
             shared.host_generation.fetch_add(1, Ordering::SeqCst) + 1
         };
         shared.spawn_attempts.fetch_add(1, Ordering::SeqCst);

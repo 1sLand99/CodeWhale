@@ -20,7 +20,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -236,6 +236,7 @@ struct PendingCall {
     /// Plugin whose revocation cancels this call.
     owner: Option<String>,
     revoked: bool,
+    heartbeat: bool,
 }
 
 #[derive(Default)]
@@ -252,6 +253,9 @@ pub(crate) struct HostProcess {
     tree: Arc<crate::process_tree::ProcessTree>,
     outbound: mpsc::Sender<Vec<u8>>,
     pending: Arc<Mutex<HashMap<u64, PendingCall>>>,
+    /// Admission checks and sealing hold `pending`; the manager also reads
+    /// this flag to avoid activation while the exit callback is still pending.
+    admission_closed: AtomicBool,
     next_id: AtomicU64,
     stderr_tail: Arc<Mutex<VecDeque<u8>>>,
     exited: tokio::sync::watch::Receiver<bool>,
@@ -415,6 +419,7 @@ impl HostProcess {
             let tree = Arc::clone(&tree);
             tokio::spawn(async move {
                 let reason = tokio::select! {
+                    biased;
                     status = child.wait() => match status {
                         Ok(status) => format!("exited with {status}"),
                         Err(error) => format!("wait failed: {error}"),
@@ -450,6 +455,7 @@ impl HostProcess {
             tree,
             outbound,
             pending,
+            admission_closed: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             stderr_tail,
             exited: exited_rx,
@@ -532,6 +538,27 @@ impl HostProcess {
         let _ = self.kill.try_send(reason);
     }
 
+    pub(crate) fn is_retiring(&self) -> bool {
+        self.admission_closed.load(Ordering::Acquire)
+    }
+
+    /// Seal admission and retire this process only if no non-heartbeat call
+    /// is pending. The same lock guards admission in `start_request`.
+    pub(crate) fn terminate_if_idle(&self, reason: &str) -> bool {
+        let pending = self.pending.lock().expect("pending lock");
+        if self.has_exited()
+            || self.admission_closed.load(Ordering::Relaxed)
+            || pending.values().any(|call| !call.heartbeat)
+        {
+            return false;
+        }
+        if self.kill.try_send(reason.to_string()).is_err() {
+            return false;
+        }
+        self.admission_closed.store(true, Ordering::Release);
+        true
+    }
+
     pub(crate) fn stderr_tail(&self) -> String {
         tail_string(&self.stderr_tail)
     }
@@ -562,6 +589,9 @@ impl HostProcess {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("pending lock");
+            if self.admission_closed.load(Ordering::Relaxed) {
+                return Err(HostCallError::Exited("host is restarting".to_string()));
+            }
             // Reserve one control request for the single heartbeat monitor,
             // so saturated tool calls cannot make a healthy host look hung.
             if pending.len() >= protocol::MAX_INFLIGHT && !matches!(request, CoreRequest::Ping) {
@@ -573,6 +603,7 @@ impl HostProcess {
                     tx,
                     owner,
                     revoked: false,
+                    heartbeat: matches!(request, CoreRequest::Ping),
                 },
             );
         }
