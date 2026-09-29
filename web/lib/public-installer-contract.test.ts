@@ -185,11 +185,11 @@ describe.skipIf(process.platform === "win32")("public installer compatibility co
   });
 
   it.each([
-    ["/bin/zsh", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.zshrc`, "source ~/.zshrc"],
-    ["/bin/bash", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.bashrc`, "source ~/.bashrc"],
-    ["/bin/bash", "Darwin", `echo 'export PATH="INSTALL:$PATH"' >> ~/.bash_profile`, "source ~/.bash_profile"],
+    ["/bin/zsh", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.zshrc`, ". ~/.zshrc"],
+    ["/bin/bash", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.bashrc`, ". ~/.bashrc"],
+    ["/bin/bash", "Darwin", `echo 'export PATH="INSTALL:$PATH"' >> ~/.bash_profile`, ". ~/.bash_profile"],
     ["/usr/bin/fish", "Linux", `fish_add_path "INSTALL"`, "this fish shell"],
-    ["/bin/dash", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.profile`, "source ~/.profile"],
+    ["/bin/dash", "Linux", `echo 'export PATH="INSTALL:$PATH"' >> ~/.profile`, ". ~/.profile"],
   ] as const)(
     "prints the persistent PATH line for %s on %s without editing a profile",
     (shell, os, persist, reload) => {
@@ -204,6 +204,22 @@ describe.skipIf(process.platform === "win32")("public installer compatibility co
       expect(existsSync(path.join(installDir, "..", "home"))).toBe(false);
     },
   );
+
+  it.skipIf(!existsSync("/bin/dash"))("the printed profile and reload commands work in dash", () => {
+    const { installDir, result } = installFixture(false, { shell: "/bin/dash", os: "Linux" });
+    const persist = result.stdout.split("\n").find((line) => line.trim().startsWith("echo 'export PATH="));
+    const reload = result.stdout.match(/Then run: (.+?)   \(or open a new terminal\)/)?.[1];
+    expect(persist).toBeDefined();
+    expect(reload).toBeDefined();
+    const home = path.join(installDir, "..", "home");
+    mkdirSync(home, { recursive: true });
+    const applied = spawnSync("/bin/dash", ["-c", `set -e\n${persist}\n${reload}\ncommand -v codewhale`], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home },
+    });
+    expect(applied.status, applied.stderr).toBe(0);
+    expect(applied.stdout.trim()).toBe(path.join(realpathSync(installDir), "codewhale"));
+  });
 
   it("writes the default directory as $HOME/.local/bin in the persistent line", () => {
     const { result } = installFixture(false, { installUnderHome: true });

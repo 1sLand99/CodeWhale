@@ -159,7 +159,7 @@ PATH selects no codewhale command; this install is /home/you/.local/bin/codewhal
 …
 Put /home/you/.local/bin first on PATH in future shells (run once; this installer does not edit shell profiles):
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-Then run: source ~/.bashrc   (or open a new terminal)
+Then run: . ~/.bashrc   (or open a new terminal)
 …
 ```
 
@@ -1586,4 +1586,3 @@ Use one of these paths:
    binaries from the [Releases page](https://github.com/Hmbown/CodeWhale/releases),
    place them in a directory on `PATH`, and make them executable. See
    [Section 6](#3-manual-download-from-github-releases).
-
