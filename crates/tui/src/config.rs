@@ -7317,9 +7317,7 @@ impl Config {
                     .unwrap_or("https://app.codewhale.net/settings?section=api")
             ),
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-                anyhow::bail!(deepseek_missing_key_message(
-                    crate::integrations::dsh::detect::dsh_present()
-                ))
+                anyhow::bail!(deepseek_missing_key_message())
             }
             ApiProvider::SiliconflowCn => anyhow::bail!(
                 "SiliconFlow China API key not found. Get a key: {}. Run 'codewhale auth set --provider siliconflow-CN', \
@@ -10724,29 +10722,21 @@ pub(crate) fn is_kimi_code_membership_model(model: &str) -> bool {
         .any(|id| model.eq_ignore_ascii_case(id))
 }
 
-/// Missing-key guidance for DeepSeek. Built from lines so indentation
-/// survives (a `\` string continuation strips it). The DeepSeek Harness
-/// bullet appears only when `dsh` is on PATH or its credentials file exists.
-fn deepseek_missing_key_message(dsh_detected: bool) -> String {
-    let mut lines = vec![
-        "DeepSeek API key not found.",
-        "",
-        "1. Get a key:  https://platform.deepseek.com/api_keys",
-        "2. Save it (works in every folder, no OS prompts):",
-        "     codewhale auth set --provider deepseek",
-        "",
-        "Alternatives:",
-        "  • export DEEPSEEK_API_KEY=<your-key>   (current shell only)",
-        "    zsh: exports in ~/.zshrc reach only interactive shells; use ~/.zshenv.",
-        "  • api_key = \"<your-key>\"  in ~/.codewhale/config.toml",
-    ];
-    if dsh_detected {
-        lines.extend([
-            "  • already configured DeepSeek Harness? grant read-only access:",
-            "      codewhale auth external-consent --provider deepseek --mode read-only",
-        ]);
-    }
-    lines.join("\n")
+/// Keep the recovery command visible in small terminals. The optional DSH
+/// advice is conditional prose: producing an error must not inspect PATH or
+/// another application's credential file on the runtime thread.
+fn deepseek_missing_key_message() -> &'static str {
+    concat!(
+        "DeepSeek API key not found.\n",
+        "Save a key for every folder:\n",
+        "  codewhale auth set --provider deepseek\n",
+        "Get a key: https://platform.deepseek.com/api_keys\n",
+        "Or export DEEPSEEK_API_KEY=<your-key> (this shell only).\n",
+        "zsh: ~/.zshrc is interactive only; use ~/.zshenv.\n",
+        "Or set api_key in ~/.codewhale/config.toml.\n",
+        "If you already use DeepSeek Harness, grant read-only access:\n",
+        "  codewhale auth external-consent --provider deepseek --mode read-only"
+    )
 }
 
 /// The Moonshot direct-platform roster, as one fact. Mirror of

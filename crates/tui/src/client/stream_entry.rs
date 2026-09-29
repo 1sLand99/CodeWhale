@@ -236,7 +236,7 @@ fn h1_fallback_error(err: anyhow::Error) -> anyhow::Error {
     let mut message = format!("SSE stream request failed after HTTP/1.1 fallback: {detail}.");
     // The HTTP/1.1 hint only helps when the protocol or TLS layer failed; it
     // is noise for a refused connection or an unknown host.
-    if is_protocol_or_tls_failure(&detail) {
+    if has_tls_cause(&err) || is_protocol_or_tls_failure(&detail) {
         message.push_str(
             " `codewhale doctor` can still pass when non-streaming requests work; \
              on Windows or proxy networks, try `CODEWHALE_FORCE_HTTP1=1` and rerun `codewhale`.",
@@ -262,7 +262,7 @@ fn connect_failure_summary(err: &anyhow::Error) -> Option<String> {
         causes.push('\n');
         source = cause.source();
     }
-    if is_protocol_or_tls_failure(&causes) {
+    if has_tls_cause(err) || is_protocol_or_tls_failure(&causes) {
         return None;
     }
     let target = reqwest_error
@@ -297,6 +297,20 @@ fn connect_failure_summary(err: &anyhow::Error) -> Option<String> {
         format!("Cannot reach {target} or the configured proxy ({why})")
     } else {
         format!("Cannot reach {target} ({why})")
+    })
+}
+
+fn has_tls_cause(err: &anyhow::Error) -> bool {
+    err.chain().any(|mut cause| {
+        // hyper-rustls wraps tokio-rustls's IO error in another IO error;
+        // Error::source skips those inners, so inspect get_ref explicitly.
+        while let Some(inner) = cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+        {
+            cause = inner;
+        }
+        cause.is::<rustls::Error>()
     })
 }
 

@@ -15548,25 +15548,19 @@ fn config_set_provider_typo_reuses_the_invalid_provider_wording() {
 }
 
 #[test]
-fn deepseek_missing_key_message_keeps_indentation_and_gates_the_harness_bullet() {
-    let plain = deepseek_missing_key_message(false);
+fn deepseek_missing_key_message_keeps_commands_copyable_and_harness_advice_conditional() {
+    let plain = deepseek_missing_key_message();
     assert!(
-        plain.contains("\n     codewhale auth set --provider deepseek\n"),
+        plain.contains("\n  codewhale auth set --provider deepseek\n"),
         "{plain}"
     );
     assert!(
-        plain.contains(
-            "\n    zsh: exports in ~/.zshrc reach only interactive shells; use ~/.zshenv.\n"
-        ),
+        plain.contains("If you already use DeepSeek Harness, grant read-only access:"),
         "{plain}"
     );
-    assert!(!plain.contains("DeepSeek Harness"), "{plain}");
-    let with_dsh = deepseek_missing_key_message(true);
     assert!(
-        with_dsh.ends_with(
-            "\n      codewhale auth external-consent --provider deepseek --mode read-only"
-        ),
-        "{with_dsh}"
+        plain.ends_with("\n  codewhale auth external-consent --provider deepseek --mode read-only"),
+        "{plain}"
     );
 }
 
