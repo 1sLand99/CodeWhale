@@ -37,6 +37,7 @@ notes, and relevant issue/PR comments.
 - **[aboimpinto](https://github.com/aboimpinto)** — restored a green Linux full-workspace test gate without loosening any test, twice ([#6581](https://github.com/Hmbown/Codewhale/pull/6581), [#6666](https://github.com/Hmbown/Codewhale/pull/6666)).
 - **[dajiaohuang](https://github.com/dajiaohuang)** — validated `config set` values against the settings schema ([#6568](https://github.com/Hmbown/Codewhale/pull/6568)).
 - **[Water-Run](https://github.com/Water-Run)** — ingested namespaced model-only catalog entries so models present only in the canonical `models` map reach the offering list ([#6400](https://github.com/Hmbown/Codewhale/pull/6400)), and retired the blanket dead-code allowance and its unused feature stages, tightening the budget to match ([#6402](https://github.com/Hmbown/Codewhale/pull/6402)).
+- **[wuisabel-gif](https://github.com/wuisabel-gif)** — designed the `tool_call_after` execution-receipt contract and its tests on a reference branch, which landed re-implemented on the current hook seam ([#6689](https://github.com/Hmbown/Codewhale/issues/6689), [#6713](https://github.com/Hmbown/Codewhale/pull/6713)).
 
 **Reports and reproductions**
 
