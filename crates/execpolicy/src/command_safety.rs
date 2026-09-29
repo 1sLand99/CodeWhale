@@ -629,8 +629,9 @@ fn readonly_tokens_admitted(trimmed: &str) -> bool {
 ///   `-ok`, `-okdir`, `-fprintf`, `-fls`, `-fprint`, `-fprint0`);
 /// - `sed -n '<range>p` — numeric line-range print only, no script verbs
 ///   (`w`/`r`/`e`/`s`) can appear in a two-token range script;
-/// - `npm view|show|info <pkg>` — registry reads, matching the scout role's
-///   network-capable read-only posture;
+/// - `npm view|show|info <pkg> [field…] [--json]` — default-registry reads,
+///   matching the scout role's network-capable read-only posture; no other
+///   npm option and no URL, git or path package spec;
 /// - pure text filters `sort`, `uniq`, `cut`, `tr`, `comm` as pipeline
 ///   stages, and literal `echo`/`printf` separators.
 ///
@@ -1103,7 +1104,7 @@ fn agent_segment_verdict(segment: &str) -> Result<(), ReadonlyRejection> {
                 )
             }
         }
-        "npm" if !is_agent_readonly_npm(&tokens) => ReadonlyRejection::new(
+        "npm" if !is_agent_npm_registry_read(&tokens) => ReadonlyRejection::new(
             "subcommand",
             "only `npm view`, `npm show` and `npm info` are admitted",
         ),
@@ -1410,11 +1411,28 @@ fn is_agent_readonly_literal_print(tokens: &[String]) -> bool {
     }
 }
 
-fn is_agent_readonly_npm(tokens: &[String]) -> bool {
+fn is_agent_npm_registry_read(tokens: &[String]) -> bool {
     matches!(
         tokens.get(1).map(String::as_str),
         Some("view" | "show" | "info")
     )
+}
+
+/// `npm view|show|info <pkg> [field…] [--json]` against the default
+/// registry. The network policy checks `registry.npmjs.org`
+/// ([`NetworkRead::Npm`]), so every option that could move the request
+/// elsewhere or write a file (`--registry`, `--userconfig`, `--proxy`,
+/// `--cache`, …) is refused, as is a package spec that names a URL, a git
+/// or file source, or a local path.
+fn is_agent_readonly_npm(tokens: &[String]) -> bool {
+    is_agent_npm_registry_read(tokens)
+        && tokens[2..].iter().all(|token| {
+            if token.starts_with('-') {
+                token == "--json"
+            } else {
+                !token.contains(':') && !token.starts_with(['.', '/', '~', '\\'])
+            }
+        })
 }
 
 #[rustfmt::skip] // Keep one auditable policy row per command instead of vertically exploding strings.
@@ -3021,6 +3039,15 @@ mod tests {
             readonly_network_reads("cd a && cd b && npm view x"),
             vec![NetworkRead::Npm]
         );
+        assert_eq!(
+            readonly_network_reads("npm view @scope/pkg@^1 dist.tarball --json"),
+            vec![NetworkRead::Npm]
+        );
+        // A read aimed at another registry is not a read of the host the
+        // network policy checks, so it is not admitted at all.
+        assert!(
+            readonly_network_reads("npm view x --registry=https://registry.example/").is_empty()
+        );
         for command in [
             "git status",
             "rg gh",
@@ -3094,6 +3121,15 @@ mod tests {
             ("git -c core.pager=x log", "option", "-c"),
             ("gh pr create", "subcommand", "gh pr create"),
             ("npm install x", "subcommand", "npm view"),
+            (
+                "npm view lodash --registry=https://registry.example/",
+                "option",
+                "`npm`",
+            ),
+            ("npm view x --cache=/tmp/x", "option", "`npm`"),
+            ("npm view x --userconfig /tmp/e", "option", "`npm`"),
+            ("npm view https://registry.example/x.tgz", "option", "`npm`"),
+            ("npm view ../pkg", "option", "`npm`"),
             ("sort -o out f", "option", "`sort`"),
             // #6675: a word-leading unquoted `*` is refused by the lexer
             // before the echo literal rule sees it.
