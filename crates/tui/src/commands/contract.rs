@@ -2538,6 +2538,65 @@ fn installer_settings() -> (NetworkPolicy, u64, String) {
     (network, max_size, registry_url)
 }
 
+/// Resolve the cache destination before loading settings or entering the network bridge.
+fn sync_registry_to_cache(cache_dir: Option<PathBuf>) -> Result<SkillSyncOutcome, String> {
+    use crate::skills::install::{SkillSyncOutcome as TuiSyncOutcome, SyncResult};
+    let cache_dir =
+        cache_dir.ok_or_else(|| "global skill mutations require a home directory".to_string())?;
+    let (network, max_size, registry_url) = installer_settings();
+    let result = run_async(async move {
+        crate::skills::install::sync_registry(&network, &registry_url, &cache_dir, max_size).await
+    });
+    match result {
+        Ok(SyncResult::RegistryDenied(host)) => Ok(SkillSyncOutcome::RegistryDenied(host)),
+        Ok(SyncResult::RegistryNeedsApproval(host)) => {
+            Ok(SkillSyncOutcome::RegistryNeedsApproval(host))
+        }
+        Ok(SyncResult::Done { outcomes }) => {
+            let total = outcomes.len();
+            let mut downloaded = 0usize;
+            let mut fresh = 0usize;
+            let mut failed = 0usize;
+            let entries = outcomes
+                .into_iter()
+                .map(|outcome| match outcome {
+                    TuiSyncOutcome::Downloaded { name, path } => {
+                        downloaded += 1;
+                        SkillSyncEntry::Downloaded {
+                            name,
+                            path: path.display().to_string(),
+                        }
+                    }
+                    TuiSyncOutcome::Fresh { name } => {
+                        fresh += 1;
+                        SkillSyncEntry::Fresh { name }
+                    }
+                    TuiSyncOutcome::Failed { name, reason } => {
+                        failed += 1;
+                        SkillSyncEntry::Failed { name, reason }
+                    }
+                    TuiSyncOutcome::Denied { name, host } => {
+                        failed += 1;
+                        SkillSyncEntry::Denied { name, host }
+                    }
+                    TuiSyncOutcome::NeedsApproval { name, host } => {
+                        failed += 1;
+                        SkillSyncEntry::NeedsApproval { name, host }
+                    }
+                })
+                .collect();
+            Ok(SkillSyncOutcome::Done {
+                total,
+                downloaded,
+                fresh,
+                failed,
+                entries,
+            })
+        }
+        Err(err) => Err(format_registry_error("Sync failed", &err)),
+    }
+}
+
 /// Inspect an anyhow chain and surface a one-line hint pointing at the most
 /// common cause of a registry fetch failure (DNS, refused, TLS, HTTP status,
 /// timeout). Mirrors `groups/skills/skills.rs::registry_fetch_error_hint`.
@@ -2959,61 +3018,7 @@ impl CommandSkillGroupContext for SkillGroupAdapter<'_> {
     }
 
     fn sync_registry(&mut self) -> Result<SkillSyncOutcome, String> {
-        use crate::skills::install::{SkillSyncOutcome as TuiSyncOutcome, SyncResult};
-        let (network, max_size, registry_url) = installer_settings();
-        let cache_dir = crate::skills::install::default_cache_skills_dir();
-        let result = run_async(async move {
-            crate::skills::install::sync_registry(&network, &registry_url, &cache_dir, max_size)
-                .await
-        });
-        match result {
-            Ok(SyncResult::RegistryDenied(host)) => Ok(SkillSyncOutcome::RegistryDenied(host)),
-            Ok(SyncResult::RegistryNeedsApproval(host)) => {
-                Ok(SkillSyncOutcome::RegistryNeedsApproval(host))
-            }
-            Ok(SyncResult::Done { outcomes }) => {
-                let total = outcomes.len();
-                let mut downloaded = 0usize;
-                let mut fresh = 0usize;
-                let mut failed = 0usize;
-                let entries = outcomes
-                    .into_iter()
-                    .map(|outcome| match outcome {
-                        TuiSyncOutcome::Downloaded { name, path } => {
-                            downloaded += 1;
-                            SkillSyncEntry::Downloaded {
-                                name,
-                                path: path.display().to_string(),
-                            }
-                        }
-                        TuiSyncOutcome::Fresh { name } => {
-                            fresh += 1;
-                            SkillSyncEntry::Fresh { name }
-                        }
-                        TuiSyncOutcome::Failed { name, reason } => {
-                            failed += 1;
-                            SkillSyncEntry::Failed { name, reason }
-                        }
-                        TuiSyncOutcome::Denied { name, host } => {
-                            failed += 1;
-                            SkillSyncEntry::Denied { name, host }
-                        }
-                        TuiSyncOutcome::NeedsApproval { name, host } => {
-                            failed += 1;
-                            SkillSyncEntry::NeedsApproval { name, host }
-                        }
-                    })
-                    .collect();
-                Ok(SkillSyncOutcome::Done {
-                    total,
-                    downloaded,
-                    fresh,
-                    failed,
-                    entries,
-                })
-            }
-            Err(err) => Err(format_registry_error("Sync failed", &err)),
-        }
+        sync_registry_to_cache(crate::skills::install::default_cache_skills_dir())
     }
 
     fn run_review(&mut self) -> Result<ReviewOutcome, String> {
@@ -4493,6 +4498,17 @@ mod tests {
         crate::test_support::test_app_with_options(crate::test_support::test_tui_options(
             PathBuf::from("."),
         ))
+    }
+
+    #[test]
+    fn skill_registry_sync_without_home_refuses_before_the_network_bridge() {
+        // No Tokio runtime is present: entering run_async would panic rather
+        // than downloading a registry into an undiscoverable temporary root.
+        let result = sync_registry_to_cache(None);
+        assert_eq!(
+            result.unwrap_err(),
+            "global skill mutations require a home directory"
+        );
     }
 
     /// A 1x1 PNG for media adapter tests.
