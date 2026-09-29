@@ -126,7 +126,7 @@ web/
 │   ├── whale.tsx               shared Codewhale mark
 │   ├── ticker.tsx              live wire: merges, issues, releases + handles
 │   ├── feed-card.tsx           one issue/PR card
-│   ├── locale-switcher.tsx     N-locale dropdown with partial badges
+│   ├── locale-switcher.tsx     N-locale dropdown; partial packs grouped last
 │   └── install-*.tsx           install page blocks (binary, code block, tiles)
 ├── lib/
 │   ├── types.ts                shared types

@@ -13356,6 +13356,8 @@ impl RuntimeThreadManager {
                 turn_wall_clock: cfg.turn_wall_clock(),
                 stream_max_content_bytes: cfg.stream_max_content_bytes(),
                 stream_max_duration: cfg.stream_max_duration(),
+                stream_retry_limits: cfg.stream_retry_limits(),
+                stream_open_timeout: cfg.stream_open_timeout(),
                 subagent_heartbeat_timeout: std::time::Duration::from_secs(
                     cfg.subagent_heartbeat_timeout_secs_for_provider(provider),
                 ),
@@ -14696,6 +14698,12 @@ impl RuntimeThreadManager {
                                         }
                                         obj.insert("tool_result_for".to_string(), json!(id));
                                         obj.insert("is_error".to_string(), json!(!output.success));
+                                        // The shell execution receipt (#6689) is
+                                        // for completion hooks, which already
+                                        // read it from the live result; it
+                                        // repeats output previews `detail`
+                                        // holds, so it is never persisted.
+                                        obj.remove("execution_receipt");
                                     }
                                     // Failed calls count too: a large error
                                     // output spills like any other.

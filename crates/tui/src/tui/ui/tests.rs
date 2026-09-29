@@ -2524,6 +2524,47 @@ fn failed_workflow_run_raises_a_sticky_error() {
 }
 
 #[test]
+fn failed_workflow_toast_names_the_agents_cause_not_the_aggregate() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".to_string());
+    let events = [
+        serde_json::json!({"type": "run_started", "at_ms": 1, "workflow_goal": "Audit"}),
+        serde_json::json!({"type": "task_started", "at_ms": 2, "task_id": "t1", "label": "a"}),
+        serde_json::json!({"type": "task_started", "at_ms": 2, "task_id": "t2", "label": "b"}),
+        serde_json::json!({
+            "type": "task_completed", "at_ms": 300, "task_id": "t1", "status": "failed",
+            "reason": "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Top up."
+        }),
+        serde_json::json!({
+            "type": "task_completed", "at_ms": 300, "task_id": "t2", "status": "failed",
+            "reason": "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Top up."
+        }),
+        serde_json::json!({
+            "type": "run_completed", "at_ms": 356, "status": "failed",
+            "error": "no task produced a result: all 2 task(s) failed and 1 fan-out(s) lost every slot"
+        }),
+    ];
+    for event in &events {
+        assert!(apply_owned_workflow_ui_event(
+            &mut app,
+            "session-a",
+            "workflow-auth",
+            event,
+        ));
+    }
+    let sticky = app.sticky_status.as_ref().expect("failed run is loud");
+    // The toast text still passes the key-based secret redactor, which masks
+    // whatever follows an `Authorization …:` key; the cause's name survives.
+    assert!(
+        sticky.text.contains("Authorization failed")
+            && !sticky.text.contains("no task produced a result")
+            && !sticky.text.contains("[auth]"),
+        "the toast must carry the same cause as the workbar: {:?}",
+        sticky.text
+    );
+}
+
+#[test]
 fn successful_workflow_run_raises_no_failure_toast() {
     let mut app = create_test_app();
     app.current_session_id = Some("session-a".to_string());
@@ -8949,6 +8990,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         work_state: None,
         window_title: None,
         last_auto_route: None,
+        turn_outcomes: Vec::new(),
     }
 }
 
@@ -17839,6 +17881,82 @@ fn an_engine_stopped_turn_keeps_its_reason_in_the_transcript() {
             .history
             .iter()
             .any(|cell| matches!(cell, HistoryCell::Error { .. }))
+    );
+}
+
+/// Founder run 2026-09-28: two turns ended `Failed` and the session record
+/// kept only the user prompts, so the reason was gone once the TUI closed.
+/// The failure the transcript showed is persisted (redacted) with the session
+/// and replayed in place on resume.
+#[test]
+fn a_failed_turn_reason_is_persisted_and_replayed_on_resume() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let mut app = create_test_app();
+    app.api_messages_mut()
+        .push(text_message("user", "first question"));
+    app.api_messages_mut()
+        .push(text_message("assistant", "first answer"));
+    app.api_messages_mut()
+        .push(text_message("user", "second question"));
+    let reason = "provider rejected the request: invalid key sk-live1234567890abcdef";
+    super::event_loop::present_turn_failure(
+        &mut app,
+        crate::core::events::TurnOutcomeStatus::Failed,
+        Some(reason),
+    );
+    let shown = app
+        .history
+        .iter()
+        .find_map(|cell| match cell {
+            HistoryCell::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("the failure is in the live transcript");
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    assert_eq!(snapshot.turn_outcomes.len(), 1);
+    let outcome = &snapshot.turn_outcomes[0];
+    assert_eq!(
+        outcome.status,
+        crate::core::events::TurnOutcomeStatus::Failed
+    );
+    assert_eq!(outcome.after_message_count, 3);
+    assert!(outcome.error.contains("provider rejected the request"));
+    assert!(
+        !outcome.error.contains("sk-live1234567890abcdef"),
+        "the persisted reason is redacted: {}",
+        outcome.error
+    );
+    assert_eq!(
+        outcome.error,
+        codewhale_secrets::redact::redact_secrets(&shown),
+        "the record is what the live transcript showed"
+    );
+
+    // Survives a disk round trip and comes back in place on resume.
+    manager.save_session(&snapshot).expect("save");
+    let loaded = manager
+        .load_session(&snapshot.metadata.id)
+        .expect("load session");
+    assert_eq!(loaded.turn_outcomes, snapshot.turn_outcomes);
+    let mut resumed = create_test_app();
+    apply_loaded_session(&mut resumed, &mut Config::default(), &loaded).expect("resume");
+    assert_eq!(resumed.session_turn_outcomes, loaded.turn_outcomes);
+    let replayed = resumed
+        .history
+        .iter()
+        .position(
+            |cell| matches!(cell, HistoryCell::Error { message, .. } if *message == outcome.error),
+        )
+        .expect("the failure is replayed on resume");
+    assert!(
+        matches!(
+            &resumed.history[replayed - 1],
+            HistoryCell::User { content } if content.contains("second question")
+        ),
+        "the failure is replayed after the prompt it failed on"
     );
 }
 
