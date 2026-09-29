@@ -144,6 +144,7 @@ use codewhale_runtime::{
     retry_status, safe_label, session_tree, skill_state, sleep_guard, tool_history_repair,
     workspace_discovery,
 };
+mod diagnostics_reports;
 mod todo_snapshot;
 mod tool_inspection;
 mod tool_output_receipts;
