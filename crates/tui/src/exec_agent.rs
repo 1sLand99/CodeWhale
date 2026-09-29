@@ -812,10 +812,12 @@ pub(crate) async fn run_exec_agent(
     let mut ends_with_newline = false;
     // One absolute host deadline includes every autonomous child fan-in turn;
     // child-specific shorter deadlines remain enforced by their runtime.
-    let mut events = ExecAgentEvents::new(
-        engine_handle.clone(),
-        exec_turn_started_at + execution_config.turn_wall_clock(),
-    );
+    // The default wall clock is unbounded (`Duration::MAX`); a century
+    // stands in for "never" without overflowing `Instant`.
+    let exec_deadline = exec_turn_started_at
+        .checked_add(execution_config.turn_wall_clock())
+        .unwrap_or_else(|| exec_turn_started_at + Duration::from_secs(100 * 365 * 86_400));
+    let mut events = ExecAgentEvents::new(engine_handle.clone(), exec_deadline);
     loop {
         let Some(event) = events.next().await else {
             break;

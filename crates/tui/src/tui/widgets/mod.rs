@@ -600,9 +600,6 @@ impl ChatWidget {
 
         app.viewport.last_transcript_area = Some(transcript_area);
         app.viewport.last_transcript_padding_top = 0;
-        let detail_target_cell = (!app.viewport.transcript_selection.is_active())
-            .then(|| app.detail_cell_index_for_viewport(top, visible_lines, line_meta))
-            .flatten();
 
         let end = (top + visible_lines).min(total_lines);
         let mut lines = if total_lines == 0 {
@@ -655,16 +652,12 @@ impl ChatWidget {
             app.last_send_at = None;
         }
 
-        if let Some(target_cell) = detail_target_cell {
-            apply_detail_target_highlight(
-                &mut lines,
-                top,
-                target_cell,
-                line_meta,
-                &app.collapsed_cell_map,
-            );
-        }
-
+        // No background "highlight" for the Alt+V detail target: it used to
+        // paint the target cell's spans `Color::Reset`, which is invisible on
+        // terminal-owned themes and a black hole on painted surfaces
+        // (Underwater, Shoreline): the cell's text sat on the terminal's own
+        // background, and CJK trailing columns left black remnants when the
+        // cell scrolled (#6704). The footer's `Alt+V:details` hint names it.
         apply_selection(&mut lines, top, app);
 
         if let Some(pin) = pinned_prompt {
@@ -3687,30 +3680,6 @@ fn apply_selection(lines: &mut [Line<'static>], top: usize, app: &App) {
     }
 }
 
-fn apply_detail_target_highlight(
-    lines: &mut [Line<'static>],
-    top: usize,
-    target_cell: usize,
-    line_meta: &[TranscriptLineMeta],
-    original_index_map: &[usize],
-) {
-    let highlight_bg = Color::Reset;
-    for (idx, line) in lines.iter_mut().enumerate() {
-        let line_index = top + idx;
-        if let Some(TranscriptLineMeta::CellLine { cell_index, .. }) = line_meta.get(line_index)
-            && original_index_map
-                .get(*cell_index)
-                .copied()
-                .unwrap_or(*cell_index)
-                == target_cell
-        {
-            for span in &mut line.spans {
-                span.style = span.style.bg(highlight_bg);
-            }
-        }
-    }
-}
-
 /// Apply a brief background tint to the last user message's visible lines.
 fn apply_send_flash(
     lines: &mut [Line<'static>],
@@ -4935,15 +4904,15 @@ mod tests {
     use super::{
         ACTIVE_REVISION_DOMAIN, ApprovalWidget, COMPOSER_PANEL_HEIGHT, COMPOSER_PLACEHOLDER,
         ChatWidget, ComposerWidget, Renderable, SlashMenuEntry, active_composer_submit_rect,
-        active_entry_revision, apply_detail_target_highlight, apply_selection_to_line,
-        apply_send_flash, approval_palette, approval_truncation_hint, build_empty_state_lines,
-        composer_content_geometry, composer_empty_hint_text, composer_height, composer_inner_area,
-        composer_max_height, composer_submit_hint, composer_top_padding, cursor_row_col,
-        empty_composer_visual_rows, enclosed_composer_panel_fits, fish_flee_offset, fish_heading,
-        fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
-        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
-        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
-        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
+        active_entry_revision, apply_selection_to_line, apply_send_flash, approval_palette,
+        approval_truncation_hint, build_empty_state_lines, composer_content_geometry,
+        composer_empty_hint_text, composer_height, composer_inner_area, composer_max_height,
+        composer_submit_hint, composer_top_padding, cursor_row_col, empty_composer_visual_rows,
+        enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
+        history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
+        push_command_entry, receipt_is_settling, revision_in_domain, should_render_empty_state,
+        slash_completion_hints, tool_run_summary_revision, wrap_input_lines,
+        wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::tui::active_cell::ActiveCell;
@@ -5231,20 +5200,37 @@ mod tests {
         );
     }
 
+    /// #6704: the Alt+V detail target (here a visible error cell) must not
+    /// punch the terminal's own background through a painted surface. Its
+    /// text used to be forced to `Color::Reset`, which Windows Terminal shows
+    /// as black under the Underwater theme's navy water.
     #[test]
-    fn detail_highlight_uses_original_index_map_for_collapsed_rows() {
-        let mut lines = vec![Line::from("tool group")];
-        let line_meta = vec![TranscriptLineMeta::CellLine {
-            cell_index: 0,
-            line_in_cell: 0,
-            copy_prefix_width: 0,
-            copy_separator_after: crate::tui::ui_text::CopyLineSeparator::Newline,
-        }];
-        let original_index_map = vec![4];
+    fn detail_target_text_keeps_the_painted_surface() {
+        let mut app = create_test_app();
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
+        app.ui_theme = palette::UNDERWATER_UI_THEME;
+        app.add_message(HistoryCell::User {
+            content: "run the check".to_string(),
+        });
+        app.add_message(HistoryCell::Error {
+            message: "验证失败 detail target".to_string(),
+            severity: crate::error_taxonomy::ErrorSeverity::Error,
+        });
 
-        apply_detail_target_highlight(&mut lines, 0, 4, &line_meta, &original_index_map);
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+        ChatWidget::new_with_ocean_elapsed(&mut app, area, 0).render(area, &mut buf);
 
-        assert_eq!(lines[0].spans[0].style.bg, Some(Color::Reset));
+        let rendered = buffer_text(&buf, area);
+        assert!(rendered.contains("detail target"), "{rendered}");
+        let holes = (area.y..area.bottom())
+            .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+            .filter(|&pos| buf[pos].bg == Color::Reset)
+            .collect::<Vec<_>>();
+        assert!(
+            holes.is_empty(),
+            "cells fell through to the terminal background at {holes:?}:\n{rendered}"
+        );
     }
 
     #[test]
