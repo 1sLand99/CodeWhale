@@ -1,5 +1,8 @@
 # 共享命令/控制平面契约
 
+> 英文原文：[COMMAND_CONTROL_PLANE.md](../COMMAND_CONTROL_PLANE.md)。
+> 最后与英文同步日期（last synced with English revision）：2026-09-27。
+
 Issue #1888 和 #4022。
 
 Codewhale 在三个表面上暴露同一套生命周期操作：输入到输入区（composer）的斜杠命令、
