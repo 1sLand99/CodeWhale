@@ -8,8 +8,9 @@
 //! The frozen baseline fixtures under `fixtures/diagnostics/` were captured
 //! from the untouched implementation at `origin/main`
 //! `922679d6c0afe4556f3e5bc59073eb8e4cf93e07`. They are hand-reviewed source,
-//! never regenerated from the migrated implementation. The documented clock
-//! fields and owned temporary paths are the only comparison normalisations.
+//! never regenerated from the migrated implementation. Only clock fields and
+//! owned temporary paths are normalised. Context expectations account for the
+//! host's platform/shell in the frozen environment block and its token subtotal.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -97,6 +98,15 @@ pub(crate) fn fixture(name: &str) -> String {
 #[track_caller]
 pub(crate) fn assert_fixture(name: &str, actual: &str) {
     let expected = fixture(name);
+    let expected = if name.starts_with("context_") {
+        context_fixture_for_host(
+            &expected,
+            std::env::consts::OS,
+            crate::shell_dispatcher::global_dispatcher().kind().binary(),
+        )
+    } else {
+        expected
+    };
     let (_, expected) = expected
         .split_once('\n')
         .unwrap_or_else(|| panic!("baseline fixture {name} is missing its provenance header"));
@@ -104,6 +114,38 @@ pub(crate) fn assert_fixture(name: &str, actual: &str) {
         expected, actual,
         "baseline parity drift in {name}; captured output changed"
     );
+}
+
+/// The captured Linux environment contributes 21 tokens to the 2367 total.
+/// Keep its text frozen independently of the production prompt renderer, but
+/// substitute real host facts: Windows/pwsh.exe contributes 22, for example.
+/// Never derive expectations from the report being tested or erase its counts.
+fn context_fixture_for_host(expected: &str, platform: &str, shell: &str) -> String {
+    let environment =
+        format!("## Environment\n\n- lang: en\n- platform: {platform}\n- shell: {shell}");
+    let tokens = environment.chars().count().div_ceil(3);
+    let total = 2367 - 21 + tokens;
+    expected
+        .replace(
+            "EnvironmentBlock: Runtime environment [<workspace>] - 21 tokens",
+            &format!("EnvironmentBlock: Runtime environment [<workspace>] - {tokens} tokens"),
+        )
+        .replace(
+            "Runtime environment (21)",
+            &format!("Runtime environment ({tokens})"),
+        )
+        .replace(
+            "\"estimated_tokens\": 21,",
+            &format!("\"estimated_tokens\": {tokens},"),
+        )
+        .replace(
+            "Source-entry total: 2367 tokens",
+            &format!("Source-entry total: {total} tokens"),
+        )
+        .replace(
+            "\"total_estimated_tokens\": 2367,",
+            &format!("\"total_estimated_tokens\": {total},"),
+        )
 }
 
 /// Replace the RFC-3339 `generated_at` report stamp so two captures of the same
@@ -131,9 +173,30 @@ pub(crate) fn normalize_harness_paths(
     skills: &Path,
     memory: &Path,
 ) -> String {
-    raw.replace(&workspace.display().to_string(), "<workspace>")
-        .replace(&skills.display().to_string(), "<skills>")
-        .replace(&memory.display().to_string(), "<memory>")
+    fn replace_path(raw: &str, path: &str, placeholder: &str) -> String {
+        let json = serde_json::to_string(path).expect("serialize fixture path");
+        raw.replace(&json[1..json.len() - 1], placeholder)
+            .replace(path, placeholder)
+    }
+    let workspace = workspace.display().to_string();
+    let mut normalized = raw.to_string();
+    // Path::join adds a native separator before this slash-containing suffix.
+    // Replace the whole owned path first, including JSON-escaped Windows paths.
+    for separator in ['/', '\\'] {
+        normalized = replace_path(
+            &normalized,
+            &format!("{workspace}{separator}.codewhale/handoff.md"),
+            "<workspace>/.codewhale/handoff.md",
+        );
+    }
+    for (path, placeholder) in [
+        (workspace, "<workspace>"),
+        (skills.display().to_string(), "<skills>"),
+        (memory.display().to_string(), "<memory>"),
+    ] {
+        normalized = replace_path(&normalized, &path, placeholder);
+    }
+    normalized
 }
 
 /// Replace the trailing per-turn age cell in `/cache` history rows so a slow
@@ -201,4 +264,50 @@ fn normalisers_replace_only_documented_volatile_fields() {
     let aged = normalize_cache_ages(rows);
     assert!(aged.contains("75.0%           —   <age>\n"), "{aged}");
     assert!(aged.contains("footer: sum_write: 0"), "{aged}");
+}
+
+#[test]
+fn context_expectations_preserve_counts_for_each_host() {
+    for name in [
+        "context_report.txt",
+        "context_json.txt",
+        "context_summary.txt",
+        "context_prompt_json.txt",
+    ] {
+        let baseline = fixture(name);
+        assert_eq!(
+            context_fixture_for_host(&baseline, "linux", "/bin/bash"),
+            baseline
+        );
+        // These literals reproduce the two changes seen in the Windows CI log.
+        let windows = baseline
+            .replace("- 21 tokens", "- 22 tokens")
+            .replace("environment (21)", "environment (22)")
+            .replace("\"estimated_tokens\": 21,", "\"estimated_tokens\": 22,")
+            .replace("2367", "2368");
+        let expected = context_fixture_for_host(&baseline, "windows", "pwsh.exe");
+        assert_eq!(expected, windows, "{name}");
+        assert_ne!(expected, baseline, "{name} must retain the host difference");
+        // A regression in another source or the environment count still fails.
+        assert_ne!(expected, windows.replace("1803", "1804"));
+        assert_ne!(expected, windows.replace("22", "23"));
+    }
+}
+
+#[test]
+fn windows_paths_normalize_in_text_and_json_without_changing_other_data() {
+    let workspace = Path::new(r"C:\Users\runner\Temp\fixture\workspace");
+    let skills = Path::new(r"C:\Users\runner\Temp\fixture\skills");
+    let memory = Path::new(r"C:\Users\runner\Temp\fixture\memory.md");
+    let handoff = format!("{}\\.codewhale/handoff.md", workspace.display());
+    let raw = format!(
+        "handoff [{handoff}]\n{{\"handoff\":{},\"skills\":{},\"memory\":{},\"tokens\":22,\"other\":\"C:\\\\unrelated\"}}",
+        serde_json::to_string(&handoff).unwrap(),
+        serde_json::to_string(&skills.display().to_string()).unwrap(),
+        serde_json::to_string(&memory.display().to_string()).unwrap(),
+    );
+    assert_eq!(
+        normalize_harness_paths(&raw, workspace, skills, memory),
+        "handoff [<workspace>/.codewhale/handoff.md]\n{\"handoff\":\"<workspace>/.codewhale/handoff.md\",\"skills\":\"<skills>\",\"memory\":\"<memory>\",\"tokens\":22,\"other\":\"C:\\\\unrelated\"}"
+    );
 }
