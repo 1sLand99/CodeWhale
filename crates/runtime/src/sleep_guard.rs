@@ -260,6 +260,28 @@ mod tests {
         );
     }
 
+    /// macOS: the guard a turn really takes must watch this process. The
+    /// test above proves `-w` ends caffeinate with a stand-in owner; this one
+    /// proves `hold` passes it, and passes our own pid.
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn a_held_guard_watches_the_process_that_holds_it() {
+        let guard = SleepGuard::hold();
+        let pid = guard
+            .inhibitor_pid()
+            .expect("this platform starts an inhibitor");
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "args=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let args = String::from_utf8_lossy(&ps.stdout);
+        assert_eq!(
+            args.trim(),
+            format!("caffeinate -i -w {}", std::process::id()),
+            "the inhibitor must end with the process whose turn it holds"
+        );
+    }
+
     #[tokio::test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     async fn holding_twice_holds_two_independent_inhibitors() {
