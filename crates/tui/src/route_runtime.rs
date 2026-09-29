@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 use codewhale_config::route::{
-    LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteLimits, RouteRequest,
-    RouteResolver, SourcedLimitOverride, WireModelId,
+    LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteError, RouteLimits,
+    RouteRequest, RouteResolver, SourcedLimitOverride, WireModelId,
 };
 use serde::Serialize;
 
@@ -473,6 +473,7 @@ pub(crate) fn resolve_declared_model_candidate(
         None,
         &resolver,
         false,
+        false,
     )
 }
 
@@ -495,7 +496,31 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
         provider_reported_context,
         &RouteResolver::new(),
         false,
+        false,
     )
+}
+
+/// #6705: OpenCode Zen is the one model-aware route whose protocol roster
+/// comes from the Models.dev snapshot, and only the provider-lake resolver
+/// carries that snapshot. There, an unproven Zen model may simply be newer than
+/// the loaded catalog, so name the refresh that can prove it. Anywhere else a
+/// refresh cannot change the answer and is not offered.
+fn route_error_text(
+    provider: ApiProvider,
+    resolver_reads_models_dev: bool,
+    err: &RouteError,
+) -> String {
+    let text = err.to_string();
+    match err {
+        RouteError::UnsupportedModelProtocol { endpoint_key, .. }
+            if resolver_reads_models_dev
+                && provider == ApiProvider::OpencodeZen
+                && endpoint_key == "unproven" =>
+        {
+            format!("{text}, or refresh the Models.dev catalog with `codewhale models --update`")
+        }
+        _ => text,
+    }
 }
 
 fn resolve_route_candidate_with_catalog_resolver(
@@ -508,6 +533,7 @@ fn resolve_route_candidate_with_catalog_resolver(
     provider_reported_context: Option<ProviderReportedKimiCodeContext>,
     resolver: &RouteResolver,
     endpoint_catalog_authoritative: bool,
+    resolver_reads_models_dev: bool,
 ) -> Result<RouteCandidateResolution, String> {
     let effective_base_url = base_url_override
         .as_deref()
@@ -536,7 +562,8 @@ fn resolve_route_candidate_with_catalog_resolver(
             resolver.resolve(request)
         }
     };
-    let resolved = resolve(&base_request).map_err(|err| err.to_string())?;
+    let route_error = |err: RouteError| route_error_text(provider, resolver_reads_models_dev, &err);
+    let resolved = resolve(&base_request).map_err(route_error)?;
     let plan = plan_limit_overrides(
         provider,
         &resolved,
@@ -551,7 +578,7 @@ fn resolve_route_candidate_with_catalog_resolver(
             limit_overrides: plan.overrides,
             ..base_request
         })
-        .map_err(|err| err.to_string())?
+        .map_err(route_error)?
     };
     Ok(RouteCandidateResolution {
         candidate,
@@ -867,6 +894,7 @@ pub(crate) fn resolve_runtime_route_for_identity(
             None,
             &catalog.resolver,
             catalog.endpoint_catalog_authoritative,
+            true,
         )?
     } else {
         resolve_route_candidate_with_context_metadata(
@@ -2426,6 +2454,42 @@ mod tests {
         assert_eq!(
             route.candidate.endpoint().base_url,
             "http://gpu.internal.example:8000/v1"
+        );
+    }
+
+    /// #6705: only the lake-backed OpenCode Zen route reads a refreshed
+    /// Models.dev catalog, so only it is told to refresh.
+    #[test]
+    fn catalog_refresh_remedy_is_scoped_to_the_lake_backed_zen_route() {
+        let unproven = |provider: &str| RouteError::UnsupportedModelProtocol {
+            provider: provider.into(),
+            model: "new-model".to_string(),
+            endpoint_key: "unproven".to_string(),
+        };
+        let remedy = "codewhale models --update";
+        assert!(
+            route_error_text(ApiProvider::OpencodeZen, true, &unproven("opencode-zen"))
+                .contains(remedy)
+        );
+        // OpenCode Go's roster is compiled, and a bundled-only resolver
+        // never sees the refreshed catalog.
+        assert!(
+            !route_error_text(ApiProvider::OpencodeGo, true, &unproven("opencode-go"))
+                .contains(remedy)
+        );
+        assert!(
+            !route_error_text(ApiProvider::OpencodeZen, false, &unproven("opencode-zen"))
+                .contains(remedy)
+        );
+        let deprecated = RouteError::UnsupportedModelProtocol {
+            provider: "opencode-zen".into(),
+            model: "claude-2-retired".to_string(),
+            endpoint_key: "deprecated".to_string(),
+        };
+        let text = route_error_text(ApiProvider::OpencodeZen, true, &deprecated);
+        assert!(
+            text.contains("deprecated") && !text.contains(remedy),
+            "{text}"
         );
     }
 }
