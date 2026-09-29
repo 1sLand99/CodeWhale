@@ -239,6 +239,14 @@ test("zoom binds a child raster that keeps parent scale and shifted origin", asy
   assert.deepEqual({ x: last.args.target.x, y: last.args.target.y }, { x: 55, y: 55 });
 });
 
+test("screenshot and zoom never forward a caller-named source file", async () => {
+  await tool("screenshot", { source: "/etc/hosts" });
+  assert.equal(Object.hasOwn(calls("screenshot").at(-1).args, "source"), false);
+  const z = await tool("zoom", { region: [0, 0, 10, 10], source: "/etc/hosts" });
+  assert.equal(z.ok, true, JSON.stringify(z.error));
+  assert.equal(Object.hasOwn(calls("zoom").at(-1).args, "source"), false);
+});
+
 test("zoom without a bound raster fails with no_raster", async () => {
   // Fresh computer id has no raster — hdc "pad" registered with no state.
   const reg = await tool("computer_register", { computer: "pad", transport: "hdc" });

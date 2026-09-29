@@ -149,7 +149,7 @@ fn discover_repo_constitution(workspace: &Path) -> Option<(PathBuf, RepoConstitu
             path.push(component);
         }
         if context_candidate_exists(&path) {
-            let constitution = load_context_file(&path)
+            let constitution = load_context_file(&current, &path)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<RepoConstitution>(&raw).ok())?;
             return Some((path, constitution));
@@ -304,7 +304,7 @@ pub(crate) fn load_repo_constitution_block(
             path.push(component);
         }
         if context_candidate_exists(&path) {
-            match load_context_file(&path) {
+            match load_context_file(&current, &path) {
                 Ok(raw) => match serde_json::from_str::<RepoConstitution>(&raw) {
                     Ok(constitution) if !constitution.is_empty() => {
                         if let Some(version) = constitution.schema_version

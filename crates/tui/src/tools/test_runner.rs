@@ -17,8 +17,6 @@ use super::spec::{
 
 use crate::dependencies::ExternalTool;
 
-const MAX_OUTPUT_CHARS: usize = 40_000;
-
 /// Tool for running `cargo test` in the workspace root.
 pub struct RunTestsTool;
 
@@ -104,35 +102,34 @@ impl ToolSpec for RunTestsTool {
         let command_str = format_command(&workdir, &args);
         let output = run_cargo(&workdir, &args)?;
 
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stdout_raw = String::from_utf8_lossy(&output.stdout);
-        let stderr_raw = String::from_utf8_lossy(&output.stderr);
-        let stdout = truncate_with_note(&stdout_raw, MAX_OUTPUT_CHARS);
-        let stderr = truncate_with_note(&stderr_raw, MAX_OUTPUT_CHARS);
-
-        let result = RunTestsOutput {
+        // The whole output: the end of a cargo run is where the failures and
+        // the `test result:` line are. Size is the engine's one recoverable
+        // budget (#6508), so the failure summary sees everything.
+        run_tests_result(RunTestsOutput {
             success: output.status.success(),
-            exit_code,
-            stdout,
-            stderr,
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             command: command_str,
-        };
-
-        let mut tool_result =
-            ToolResult::json(&result).map_err(|e| ToolError::execution_failed(e.to_string()))?;
-        if let Some(summary) = summarize_cargo_failure(
-            &result.command,
-            &result.stdout,
-            &result.stderr,
-            Some(result.exit_code),
-        ) {
-            tool_result = tool_result.with_metadata(json!({
-                "summary": summary.summary,
-                "cargo_failure_summary": summary.to_metadata_value(),
-            }));
-        }
-        Ok(tool_result)
+        })
     }
+}
+
+fn run_tests_result(result: RunTestsOutput) -> Result<ToolResult, ToolError> {
+    let mut tool_result =
+        ToolResult::json(&result).map_err(|e| ToolError::execution_failed(e.to_string()))?;
+    if let Some(summary) = summarize_cargo_failure(
+        &result.command,
+        &result.stdout,
+        &result.stderr,
+        Some(result.exit_code),
+    ) {
+        tool_result = tool_result.with_metadata(json!({
+            "summary": summary.summary,
+            "cargo_failure_summary": summary.to_metadata_value(),
+        }));
+    }
+    Ok(tool_result)
 }
 
 // === Helpers ===
@@ -144,6 +141,9 @@ fn run_cargo(workspace: &Path, args: &[String]) -> Result<std::process::Output, 
         ));
     };
     cmd.args(args).current_dir(workspace);
+    // `cargo test` builds and runs workspace code; do not hand it parent
+    // credentials.
+    crate::child_env::apply_to_command(&mut cmd, std::iter::empty::<(&str, &str)>());
     cmd.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             ToolError::not_available("cargo is not installed or not in PATH")
@@ -162,34 +162,6 @@ fn format_command(workspace: &Path, args: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(" ")
     )
-}
-
-fn truncate_with_note(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let end = char_boundary_index(text, max_chars);
-    let truncated = &text[..end];
-    let omitted_chars = text
-        .chars()
-        .count()
-        .saturating_sub(truncated.chars().count());
-    let note = format!(
-        "\n\n[output truncated to {max_chars} characters; {omitted_chars} characters omitted]"
-    );
-    format!("{truncated}{note}")
-}
-
-fn char_boundary_index(text: &str, max_chars: usize) -> usize {
-    if max_chars == 0 {
-        return 0;
-    }
-    for (count, (idx, _)) in text.char_indices().enumerate() {
-        if count == max_chars {
-            return idx;
-        }
-    }
-    text.len()
 }
 
 #[cfg(test)]
@@ -318,10 +290,36 @@ mod tests {
     }
 
     #[test]
-    fn truncation_adds_note() {
-        let long = "x".repeat(MAX_OUTPUT_CHARS + 128);
-        let truncated = truncate_with_note(&long, MAX_OUTPUT_CHARS);
-        assert!(truncated.contains("output truncated"));
+    fn long_failing_output_comes_back_whole_and_the_summary_sees_its_end() {
+        // #6508: stdout used to be cut at 40,000 characters, so the model
+        // read passing tests and never saw which one failed, and the failure
+        // summary ran on the truncated text.
+        let stdout = format!(
+            "{}test tools::git::tests::diff_keeps_the_last_file ... FAILED\n\ntest result: FAILED. 3000 passed; 1 failed; 0 ignored",
+            "test tools::ok ... ok\n".repeat(3_000)
+        );
+        assert!(stdout.chars().count() > 40_000);
+        let result = run_tests_result(RunTestsOutput {
+            success: false,
+            exit_code: 101,
+            stdout: stdout.clone(),
+            stderr: String::new(),
+            command: "(cd /repo && cargo test)".to_string(),
+        })
+        .expect("result");
+
+        let parsed: Value = serde_json::from_str(&result.content).expect("json");
+        assert_eq!(parsed["stdout"], json!(stdout));
+        let summary = result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("summary"))
+            .and_then(Value::as_str)
+            .expect("failure summary");
+        assert!(
+            summary.contains("diff_keeps_the_last_file"),
+            "summary: {summary}"
+        );
     }
 
     /// A child parked at a workspace root that is not the project root (the
@@ -377,5 +375,46 @@ mod tests {
         let message = missing.to_string();
         assert!(message.contains("not an existing directory"), "{message}");
         assert!(message.contains("drop `cwd`"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_cargo_does_not_inherit_parent_secret_env() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        use std::os::unix::fs::PermissionsExt;
+        if !cargo_available() {
+            return;
+        }
+        let _env_lock = lock_test_env();
+        let bin = tempdir().expect("bin dir");
+        // cargo resolves `cargo envprobe` to a `cargo-envprobe` on PATH, which
+        // lets the test observe the environment cargo hands its children.
+        let probe = bin.path().join("cargo-envprobe");
+        fs::write(
+            &probe,
+            "#!/bin/sh\nprintf 'secret=%s target=%s' \"${CODEWHALE_TEST_CARGO_SECRET-unset}\" \"${CARGO_TARGET_DIR-unset}\"\n",
+        )
+        .expect("write probe");
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("chmod probe");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![bin.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&path));
+        let _path = EnvVarGuard::set("PATH", std::env::join_paths(paths).expect("join PATH"));
+        let _secret = EnvVarGuard::set("CODEWHALE_TEST_CARGO_SECRET", "cargo-secret-value");
+        // Non-secret build configuration still reaches cargo.
+        let _target = EnvVarGuard::set("CARGO_TARGET_DIR", "/tmp/codewhale-fixture-target");
+        let workspace = tempdir().expect("workspace");
+
+        let output = run_cargo(workspace.path(), &["envprobe".to_string()]).expect("cargo runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            stdout.trim(),
+            "secret=unset target=/tmp/codewhale-fixture-target"
+        );
     }
 }

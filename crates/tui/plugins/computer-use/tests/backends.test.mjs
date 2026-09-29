@@ -78,11 +78,13 @@ test("harmony: get_app_state flattens dumpLayout with indices and actions", asyn
   assert.ok(ok.actions.includes("click"));
 });
 
-test("harmony: screenshot pulls the file and reports panel dimensions", async () => {
+test("harmony: screenshot pulls the file and reports panel dimensions", async (t) => {
   const { exec } = harmonyFixtureExec();
   const mod = await import("../src/backends/harmonyos.mjs");
   const b = mod.create({ exec });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-hm-test-"));
+  const oldRec = process.env.CODEWHALE_CU_RECORDINGS_DIR; process.env.CODEWHALE_CU_RECORDINGS_DIR = dir;
+  t.after(() => { if (oldRec === undefined) delete process.env.CODEWHALE_CU_RECORDINGS_DIR; else process.env.CODEWHALE_CU_RECORDINGS_DIR = oldRec; });
   const shot = await b.screenshot({ path: path.join(dir, "shot.jpeg") });
   assert.equal(shot.pixels.w, 168);
   assert.equal(shot.pixels.h, 120);

@@ -624,6 +624,20 @@ pub(crate) async fn switch_provider(
         previous_api_key_env_only: app.api_key_env_only,
     });
 
+    // A session-local switch keeps the same ownership rule the persisted
+    // writers apply (`reconcile_root_model_aliases`): the root alias the
+    // outgoing route was using moves onto that route's own leaf, so coming
+    // back lands on it instead of the catalog default. Every failure path
+    // below restores `previous_config`.
+    if let Some((outgoing, value)) = config
+        .active_provider_identity(target)
+        .ok()
+        .and_then(|incoming| config.root_model_alias_owned_by_outgoing(&incoming))
+    {
+        config.set_provider_model_override(outgoing.provider, Some(value));
+        config.default_text_model = None;
+    }
+
     let resolved_route = match resolve_runtime_route(config, target, model_override.as_deref()) {
         Ok(route) => route,
         Err(reason) => {
@@ -705,6 +719,15 @@ pub(crate) async fn switch_provider(
         || previous_identity != target_identity
         || previous_model != new_model;
     app.set_provider_identity_record(target_identity_record);
+    // Launch computed "needs a key" for the launch provider. A switch to a
+    // route that has its credential answers that, even when the user left the
+    // picker with Esc first; otherwise the stale flag keeps the info line on
+    // "model not connected" and keeps local-Ollama adoption armed against the
+    // provider the user just chose. An auth-failure rollback restores it.
+    app.onboarding_needs_api_key = !crate::config::has_api_key(config);
+    if !app.onboarding_needs_api_key {
+        app.onboarding_missing_key_recovery = false;
+    }
     app.billing_presentation = crate::route_billing::for_route(config, target);
     app.max_subagents = config
         .max_subagents_for_provider(target)

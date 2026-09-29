@@ -648,6 +648,9 @@ fn requires_raw_shell(name: &str) -> bool {
             | "code_execution"
             | "js_execution"
             | "rlm_eval"
+            // Launching an MCP server spawns an arbitrary local process.
+            | "start_mcp_server"
+            | "start_registry_mcp_server"
     )
 }
 

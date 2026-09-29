@@ -39,6 +39,7 @@ use crate::route_runtime::resolve_runtime_route;
 use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
+use crate::snapshot::{WorkspaceSnapshotKind, WorkspaceSnapshotRef};
 use crate::tools::goal::{
     GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
 };
@@ -83,7 +84,7 @@ use super::ops::{
 };
 use super::session::Session;
 use super::tool_parser;
-use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
+use super::turn::{TurnContext, format_snapshot_label, post_turn_snapshot};
 use codewhale_models::Role;
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
@@ -135,6 +136,10 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
     }
 }
 
+/// The `<turn_meta>` line naming the permission posture a turn ran under
+/// (`permission_chip_label`). Receipts read it back from saved transcripts,
+/// so the writer and the reader share this prefix.
+pub(crate) const PERMISSION_POSTURE_LINE: &str = "Current permission posture: ";
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
 const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry\n\nThe Registry installs and connects a local MCP server when this session lacks a capability. It is a fallback for a capability you do not have, not a step before ordinary work.\n\nPrefer what is already available, in order: tools already in this catalog, the project's own scripts, tests, and dev tooling, and platform capabilities. Creating a file, reading a fixture, running a repo command, and checking your own output are ordinary work — do them directly.\n\nReach for the Registry once you have identified a specific capability that no available tool covers and that you would otherwise install or reimplement, such as a document or media converter, access to an external database or service, or a protocol client. Then call `registry_sync` with a `query` naming that capability; it scores the local Registry snapshot host-side and returns at most eight matches, so the full index never enters the conversation. When a returned server plausibly covers that capability, call `start_registry_mcp_server` with its exact name rather than installing or running its package command through the shell. If nothing matches, refine the query once, then continue with local tools.\n\nBoth Registry tools are deferred: load one with `tool_search` before its first call, and use the returned schema. If a call instead reports that it only loaded the schema, retry once with that schema. Do not go searching for them for work you can already do.";
 /// The one system prompt for an isolated Runtime Chat session. The engine owns
@@ -372,6 +377,26 @@ pub struct EngineConfig {
     /// first init. `0` disables the cap. Resolved from
     /// `[snapshots] max_workspace_gb` × 1 GB at engine construction.
     pub snapshots_max_workspace_bytes: u64,
+    /// The host records every `Event::WorkspaceSnapshotTaken` receipt on the
+    /// running turn and resolves turn-scoped undo from them (the Runtime
+    /// API). The engine then:
+    ///
+    /// - takes the post-turn snapshot *before* `TurnComplete`, so its receipt
+    ///   belongs to the turn it closes — one arriving after `TurnComplete`
+    ///   would land after the turn settled, on the next turn, or nowhere once
+    ///   the engine is evicted;
+    /// - bounds every tool call that may write (any call not read-only) with
+    ///   a `tool` snapshot before it and a `post_tool` snapshot after it, so
+    ///   the spans in which the turn's own tools ran are known and a change
+    ///   made outside them (another thread, an editor) is never taken for the
+    ///   turn's;
+    /// - reports on each receipt the paths changed since the turn's previous
+    ///   one.
+    ///
+    /// Interactive hosts keep `false`: the TUI does not record receipts,
+    /// keeps the post-turn snapshot off its input path (#234), and snapshots
+    /// only before file-writing tools.
+    pub record_restore_points: bool,
     /// Post-edit LSP diagnostics injection (#136). When `None`, the engine
     /// constructs a disabled manager so the field is always present.
     pub lsp_config: Option<crate::lsp::LspConfig>,
@@ -469,8 +494,8 @@ pub struct EngineConfig {
     pub stream_chunk_timeout: Duration,
     /// Cumulative wall-clock budget for one turn (R1). Counted across every
     /// model step of the turn, excluding time blocked on a human approval
-    /// decision. Resolved from `[tui].turn_wall_clock_secs`; always finite —
-    /// see [`turn_budget::resolve_turn_wall_clock`].
+    /// decision. Resolved from `[tui].turn_wall_clock_secs`; `Duration::MAX`
+    /// (no limit) by default — see [`turn_budget::resolve_turn_wall_clock`].
     pub turn_wall_clock: Duration,
     /// Per-step cap on accumulated streamed content, in bytes (R1). Resolved
     /// from `[tui].stream_max_content_mb`. Pre-R1 this was the hard-coded
@@ -577,6 +602,7 @@ impl Default for EngineConfig {
             snapshots_enabled: true,
             snapshots_max_workspace_bytes:
                 crate::snapshot::DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT,
+            record_restore_points: false,
             lsp_config: None,
             runtime_services: RuntimeToolServices::default(),
             subagent_model_overrides: HashMap::new(),
@@ -936,6 +962,11 @@ pub struct Engine {
     pub(super) cancel_reason: Arc<StdMutex<Option<CancelReason>>>,
     tool_exec_lock: Arc<RwLock<()>>,
     turn_counter: u64,
+    /// Tree of the running turn's latest restore-point snapshot, the base the
+    /// next receipt's `changed_paths` is computed against. `None` before a
+    /// turn's first snapshot and after one failed, so a span that cannot be
+    /// accounted for is reported as unknown rather than folded into the next.
+    restore_point_since: Option<crate::snapshot::SnapshotId>,
     /// Post-edit LSP diagnostics injection (#136). Populated unconditionally
     /// — when LSP is disabled in config, this is an inert manager that
     /// always returns `None` from `diagnostics_for`.
@@ -1927,6 +1958,7 @@ impl Engine {
             cancel_reason: cancel_reason.clone(),
             tool_exec_lock,
             turn_counter: 0,
+            restore_point_since: None,
             lsp_manager,
             pending_lsp_blocks: Vec::new(),
             sandbox_backend,
@@ -2021,23 +2053,15 @@ impl Engine {
             })
             .await;
 
-        if self.config.snapshots_enabled {
-            let pre_workspace = self.session.workspace.clone();
-            let pre_seq = self.turn_counter;
-            let pre_cap = self.config.snapshots_max_workspace_bytes;
-            let pre_prompt = snapshot_prompt.clone();
-            let pre_sid = self.session.id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                pre_turn_snapshot(
-                    &pre_workspace,
-                    pre_seq,
-                    pre_cap,
-                    Some(&pre_prompt),
-                    Some(&pre_sid),
-                )
-            })
-            .await;
-        }
+        // The command runs from this snapshot to the post-turn one, so the
+        // receipt names it as the call that span belongs to.
+        self.take_restore_point(
+            WorkspaceSnapshotKind::PreTurn,
+            format_snapshot_label("pre-turn", self.turn_counter, Some(&snapshot_prompt)),
+            Some(tool_id.as_str()),
+            None,
+        )
+        .await;
 
         self.emit_pending_snapshot_notices().await;
 
@@ -2143,6 +2167,9 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
+        self.post_turn_snapshot_before_complete(&snapshot_prompt)
+            .await;
+        let pending_post_turn = self.reserve_post_turn_snapshot();
         drop(turn_control);
         let _ = self
             .tx_event
@@ -2157,21 +2184,117 @@ impl Engine {
             })
             .await;
 
-        if self.config.snapshots_enabled {
-            let post_workspace = self.session.workspace.clone();
-            let post_seq = self.turn_counter;
-            let post_cap = self.config.snapshots_max_workspace_bytes;
-            let post_sid = self.session.id.clone();
-            crate::utils::spawn_blocking_supervised("post-shell-turn-snapshot", move || {
-                post_turn_snapshot(
-                    &post_workspace,
-                    post_seq,
-                    post_cap,
-                    Some(&snapshot_prompt),
-                    Some(&post_sid),
-                );
-            });
+        self.post_turn_snapshot_after_complete(
+            "post-shell-turn-snapshot",
+            snapshot_prompt,
+            pending_post_turn,
+        );
+    }
+
+    /// Take one workspace snapshot for the running turn and report it as an
+    /// `Event::WorkspaceSnapshotTaken` receipt. Returns whether it was taken.
+    ///
+    /// A snapshot that fails (or is gated off) reports nothing: the host then
+    /// has no such restore point for the turn and must say so rather than
+    /// guess one. With [`EngineConfig::record_restore_points`] the receipt
+    /// also carries the paths changed since the turn's previous snapshot,
+    /// and a failure leaves the next span unknown instead of merging it into
+    /// the one before.
+    pub(crate) async fn take_restore_point(
+        &mut self,
+        kind: WorkspaceSnapshotKind,
+        label: String,
+        tool_call_id: Option<&str>,
+        write_paths: Option<Vec<String>>,
+    ) -> bool {
+        if !self.config.snapshots_enabled {
+            return false;
         }
+        let record = self.config.record_restore_points;
+        let since = if record && kind != WorkspaceSnapshotKind::PreTurn {
+            self.restore_point_since.clone()
+        } else {
+            None
+        };
+        let workspace = self.session.workspace.clone();
+        let cap = self.config.snapshots_max_workspace_bytes;
+        let sid = self.session.id.clone();
+        let taken = tokio::task::spawn_blocking(move || {
+            super::turn::restore_point_snapshot(&workspace, &label, cap, Some(&sid), since.as_ref())
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((taken, changed)) = taken else {
+            self.restore_point_since = None;
+            return false;
+        };
+        if record {
+            self.restore_point_since = Some(taken.tree.clone());
+        }
+        let mut snapshot = WorkspaceSnapshotRef::new(kind, &taken, &self.session.id, tool_call_id);
+        snapshot.write_paths = write_paths;
+        snapshot.changed_paths = changed.map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        });
+        let _ = self
+            .tx_event
+            .send(Event::WorkspaceSnapshotTaken { snapshot })
+            .await;
+        true
+    }
+
+    /// With [`EngineConfig::record_restore_points`], take the post-turn
+    /// snapshot now — before `TurnComplete` — and report it.
+    async fn post_turn_snapshot_before_complete(&mut self, prompt: &str) {
+        if !self.config.record_restore_points {
+            return;
+        }
+        let label = format_snapshot_label("post-turn", self.turn_counter, Some(prompt));
+        self.take_restore_point(WorkspaceSnapshotKind::PostTurn, label, None, None)
+            .await;
+    }
+
+    /// Without [`EngineConfig::record_restore_points`], reserve the post-turn
+    /// snapshot [`Self::post_turn_snapshot_after_complete`] takes. Called
+    /// before `TurnComplete`, so a `/undo` the user types as soon as the
+    /// turn ends waits for that snapshot instead of racing it (#6644).
+    fn reserve_post_turn_snapshot(&self) -> Option<crate::snapshot::PendingPostTurnSnapshot> {
+        (self.config.snapshots_enabled && !self.config.record_restore_points)
+            .then(crate::snapshot::PendingPostTurnSnapshot::reserve)
+    }
+
+    /// Take the post-turn snapshot reserved by
+    /// [`Self::reserve_post_turn_snapshot`] fire-and-forget: `TurnComplete`
+    /// is already emitted, so the UI is unblocked and the user can type /
+    /// select / paste immediately (#234). The git work proceeds on the
+    /// blocking pool, and the reservation is released once it is done.
+    fn post_turn_snapshot_after_complete(
+        &self,
+        task: &'static str,
+        prompt: String,
+        pending: Option<crate::snapshot::PendingPostTurnSnapshot>,
+    ) {
+        let Some(pending) = pending else {
+            return;
+        };
+        let post_workspace = self.session.workspace.clone();
+        let post_seq = self.turn_counter;
+        let post_cap = self.config.snapshots_max_workspace_bytes;
+        let post_sid = self.session.id.clone();
+        crate::utils::spawn_blocking_supervised(task, move || {
+            post_turn_snapshot(
+                &post_workspace,
+                post_seq,
+                post_cap,
+                Some(&prompt),
+                Some(&post_sid),
+            );
+            drop(pending);
+        });
     }
 
     /// Apply a user/host mode-or-posture change to the live session.
@@ -2657,10 +2780,10 @@ impl Engine {
     ) -> bool {
         use crate::tools::subagent::{ChildApprovalOutcome, SubAgentManager};
         let (id, outcome) = match &decision {
-            super::engine::approval::ApprovalDecision::Approved { id } => {
+            super::engine::approval::ApprovalDecision::Approved { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Approved)
             }
-            super::engine::approval::ApprovalDecision::Denied { id } => {
+            super::engine::approval::ApprovalDecision::Denied { id, .. } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
             // A child has no timeout outcome of its own (#6101); an expired
@@ -3786,9 +3909,43 @@ impl Engine {
         Some(format!("Active goal token budget: {token_budget}"))
     }
 
-    async fn add_session_message(&mut self, message: Message) {
+    async fn add_session_message(&mut self, mut message: Message) {
+        self.redact_tool_results_for_transcript(&mut message);
         self.session.add_message(message);
         self.emit_session_updated().await;
+    }
+
+    /// Scrub credentials from tool output once, as it enters the transcript
+    /// (B1). The transcript is what session JSON, the journal and every
+    /// later request are built from, so a token a tool printed is never
+    /// written to disk live. Honors the confirmed `[redaction] model_bound`
+    /// opt-out the same way the request boundary does.
+    fn redact_tool_results_for_transcript(&self, message: &mut Message) {
+        for block in &mut message.content {
+            let ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            *content = self.redact_tool_output_for_transcript(content);
+            for value in content_blocks.iter_mut().flatten() {
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                    && let Some(serde_json::Value::String(text)) = value.get_mut("text")
+                {
+                    *text = self.redact_tool_output_for_transcript(text);
+                }
+            }
+        }
+    }
+
+    fn redact_tool_output_for_transcript(&self, text: &str) -> String {
+        match self.codewhale_client.as_ref() {
+            Some(client) => client.redact_tool_output_for_transcript(text),
+            None => codewhale_config::persistence::redact_model_bound_secrets(text),
+        }
     }
 
     async fn add_interrupted_assistant_text(&mut self, text: &str) {
@@ -3906,7 +4063,7 @@ impl Engine {
             // `render_environment_block` for the prefix-cache rationale).
             format!("Current workspace: {}", self.config.workspace.display()),
             format!(
-                "Current permission posture: {}",
+                "{PERMISSION_POSTURE_LINE}{}",
                 approval_mode.permission_chip_label()
             ),
             format!(
@@ -5401,28 +5558,15 @@ impl Engine {
         // Snapshot the workspace BEFORE we touch a single tool. Run the git
         // work on the blocking pool so the async runtime stays responsive;
         // failure is non-fatal (the helper logs at WARN).
-        if self.config.snapshots_enabled {
-            // Clone the user prompt now — `content` is moved into
-            // `user_text_message_with_turn_metadata_for_route` below, so we need
-            // a copy for both pre- and post-turn snapshot labels. The
-            // label carries a truncated first line so `/restore`
-            // listings are human-readable.
-            let snapshot_prompt = content.clone();
-            let pre_workspace = self.session.workspace.clone();
-            let pre_seq = self.turn_counter;
-            let pre_cap = self.config.snapshots_max_workspace_bytes;
-            let pre_sid = self.session.id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                pre_turn_snapshot(
-                    &pre_workspace,
-                    pre_seq,
-                    pre_cap,
-                    Some(&snapshot_prompt),
-                    Some(&pre_sid),
-                )
-            })
-            .await;
-        }
+        // The label carries a truncated first line of the prompt so
+        // `/restore` listings are human-readable.
+        self.take_restore_point(
+            WorkspaceSnapshotKind::PreTurn,
+            format_snapshot_label("pre-turn", self.turn_counter, Some(&content)),
+            None,
+            None,
+        )
+        .await;
 
         self.emit_pending_snapshot_notices().await;
 
@@ -5761,6 +5905,9 @@ impl Engine {
                 .send(Event::ToolRequestSnapshot { snapshot })
                 .await;
         }
+        self.post_turn_snapshot_before_complete(&snapshot_prompt_post)
+            .await;
+        let pending_post_turn = self.reserve_post_turn_snapshot();
         drop(turn_control);
         // `event_sent` means the TurnComplete event reached the UI channel —
         // never that the user saw model output. (#6184: the old `delivered`
@@ -5786,27 +5933,13 @@ impl Engine {
             "engine turn completion settled"
         );
 
-        // Post-turn snapshot. Fire-and-forget: TurnComplete is already
-        // emitted, so the UI is unblocked and the user can type / select /
-        // paste immediately (#234). The git work proceeds on the blocking
-        // pool without forcing the engine loop to await it.
-        if self.config.snapshots_enabled {
-            // `snapshot_prompt_post` was cloned from `content` above,
-            // before `content` was moved into the session messages.
-            let post_workspace = self.session.workspace.clone();
-            let post_seq = self.turn_counter;
-            let post_cap = self.config.snapshots_max_workspace_bytes;
-            let post_sid = self.session.id.clone();
-            crate::utils::spawn_blocking_supervised("post-turn-snapshot", move || {
-                post_turn_snapshot(
-                    &post_workspace,
-                    post_seq,
-                    post_cap,
-                    Some(&snapshot_prompt_post),
-                    Some(&post_sid),
-                );
-            });
-        }
+        // Post-turn snapshot, unless it was already taken before
+        // TurnComplete (see `EngineConfig::record_restore_points`).
+        self.post_turn_snapshot_after_complete(
+            "post-turn-snapshot",
+            snapshot_prompt_post,
+            pending_post_turn,
+        );
 
         // ── Background advisor watcher (#3982) ────────────────────────────
         // Fire-and-forget: TurnComplete is already emitted. The advisor
@@ -7244,6 +7377,25 @@ impl Engine {
         self.refresh_system_prompt_from_context_with_reason(&context, reason);
     }
 
+    // KV-cache effect: append-only user history. SessionUpdated persists this
+    // warning even when an explicit prompt rebuild replaces the system prefix.
+    fn record_project_trust_warning(&mut self) {
+        let warning = crate::skills::untrusted_project_skills_warning(&self.session.workspace);
+        let previous = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| crate::runtime_handoff::is_workspace_trust_message(message));
+        if warning.is_none() && previous.is_none() {
+            return;
+        }
+        let message = crate::runtime_handoff::workspace_trust_runtime_message(warning.as_deref());
+        if previous != Some(&message) {
+            self.session.add_message(message);
+        }
+    }
+
     /// Recompose the stable system prompt from current context. When the bytes
     /// actually change (hash differs), record `reason` as the declared cause
     /// so the turn loop's prefix check re-pins the KV-cache prefix under a
@@ -7256,6 +7408,7 @@ impl Engine {
         context: &NextTurnPromptContext,
         reason: &str,
     ) {
+        self.record_project_trust_warning();
         let stable_prompt = self.compose_stable_system_prompt(context);
 
         let stable_hash = system_prompt_hash(stable_prompt.as_ref());
@@ -7289,6 +7442,7 @@ impl Engine {
         &mut self,
         context: &NextTurnPromptContext,
     ) -> Option<String> {
+        self.record_project_trust_warning();
         if self.session.system_prompt_override {
             return None;
         }
@@ -7636,18 +7790,26 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
-    if policy_tool_name != "exec_shell" {
+    // Task tools that hand a command string to the shell answer to the same
+    // shell deny and ask rules. Their own approval requirement stays: a shell
+    // allow rule does not waive it.
+    let runs_shell_command = matches!(policy_tool_name, "task_shell_start" | "task_gate_run");
+    if policy_tool_name != "exec_shell" && !runs_shell_command {
         return None;
     }
     let command = tool_input.get("command").and_then(Value::as_str)?;
-    tool_ask_rule_decision_for_context(
+    let decision = tool_ask_rule_decision_for_context(
         exec_policy_engine,
-        policy_tool_name,
+        "exec_shell",
         command,
         None,
         workspace,
         approval_mode,
-    )
+    );
+    if runs_shell_command && matches!(decision, Some(ToolAskRuleDecision::Allow)) {
+        return None;
+    }
+    decision
 }
 
 pub(super) fn file_tool_ask_rule_decision(
@@ -7778,7 +7940,7 @@ fn file_tool_permission_paths(tool_name: &str, input: &Value) -> Option<Vec<Stri
 /// Target paths when a call is one of the canonical workspace file-write
 /// tools (`write_file` / `edit_file` / `apply_patch`), `None` for any other
 /// tool. Feeds the in-workspace write carve-out (#5185).
-fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
+pub(crate) fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
     let canonical = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     if !matches!(canonical, "write_file" | "edit_file" | "apply_patch") {
         return None;
@@ -7823,8 +7985,15 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     config: EngineConfig,
     api_config: &Config,
     authoritative_route_config: Arc<parking_lot::RwLock<Config>>,
+    model_client: Option<SharedModelClient>,
 ) -> (EngineHandle, tokio::task::JoinHandle<()>) {
-    let (mut engine, handle) = Engine::new(config, api_config);
+    // `model_client` replaces only the model I/O boundary (see
+    // `Engine::new_with_model_client`); hosts pass `None` for the provider
+    // client the route resolves.
+    let (mut engine, handle) = match model_client {
+        Some(client) => Engine::new_with_model_client(config, api_config, client),
+        None => Engine::new(config, api_config),
+    };
     engine.authoritative_route_config = Some(authoritative_route_config);
 
     let worker = spawn_supervised(
@@ -7871,15 +8040,26 @@ pub(crate) enum MockApprovalEvent {
 #[cfg(test)]
 impl MockEngineHandle {
     pub(crate) async fn recv_approval_event(&mut self) -> Option<MockApprovalEvent> {
-        match self.rx_approval.recv().await? {
-            ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
-            ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
-            ApprovalDecision::TimedOut { id } => Some(MockApprovalEvent::TimedOut { id }),
-            ApprovalDecision::Unavailable { id } => Some(MockApprovalEvent::Unavailable { id }),
-            ApprovalDecision::RetryWithPolicy { id, policy } => {
-                Some(MockApprovalEvent::RetryWithPolicy { id, policy })
+        self.recv_approval_decision().await.map(|(event, _)| event)
+    }
+
+    /// The next decision and who the host said made it (`None` for a
+    /// timeout or an unavailable request, which name their own cause).
+    pub(crate) async fn recv_approval_decision(
+        &mut self,
+    ) -> Option<(
+        MockApprovalEvent,
+        Option<crate::approval_log::ApprovalDecider>,
+    )> {
+        Some(match self.rx_approval.recv().await? {
+            ApprovalDecision::Approved { id, by } => (MockApprovalEvent::Approved { id }, Some(by)),
+            ApprovalDecision::Denied { id, by } => (MockApprovalEvent::Denied { id }, Some(by)),
+            ApprovalDecision::TimedOut { id } => (MockApprovalEvent::TimedOut { id }, None),
+            ApprovalDecision::Unavailable { id } => (MockApprovalEvent::Unavailable { id }, None),
+            ApprovalDecision::RetryWithPolicy { id, policy, by } => {
+                (MockApprovalEvent::RetryWithPolicy { id, policy }, Some(by))
             }
-        }
+        })
     }
 
     pub(crate) async fn recv_user_input_submission(

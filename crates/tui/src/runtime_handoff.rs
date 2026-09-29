@@ -148,6 +148,28 @@ pub(crate) fn operate_contract_runtime_message() -> Message {
     runtime_handoff_message_with_meta(OPERATE_CONTRACT_EVENT.to_string(), RUNTIME_TURN_META)
 }
 
+const WORKSPACE_TRUST_EVENT_PREFIX: &str =
+    "<codewhale:runtime_event kind=\"workspace_trust\" visibility=\"internal\">\n";
+
+/// Volatile workspace state belongs in logged user history, after the frozen prefix.
+pub(crate) fn workspace_trust_runtime_message(warning: Option<&str>) -> Message {
+    let text = warning.unwrap_or("The earlier skipped-project-skills warning no longer applies: no project skill directories are currently blocked by workspace trust.");
+    runtime_handoff_message_with_meta(
+        format!("{WORKSPACE_TRUST_EVENT_PREFIX}{text}\n</codewhale:runtime_event>"),
+        RUNTIME_TURN_META,
+    )
+}
+
+pub(crate) fn is_workspace_trust_message(message: &Message) -> bool {
+    message.role == Role::User
+        && matches!(message.content.as_slice(), [
+            ContentBlock::Text { text, cache_control: None },
+            ContentBlock::Text { text: meta, cache_control: None },
+        ] if text.starts_with(WORKSPACE_TRUST_EVENT_PREFIX)
+            && text.ends_with("\n</codewhale:runtime_event>")
+            && is_handoff_turn_meta(meta, "runtime"))
+}
+
 #[cfg(test)]
 pub(crate) fn legacy_operate_contract_runtime_message() -> Message {
     runtime_handoff_message_with_meta(LEGACY_OPERATE_CONTRACT_EVENT.to_string(), RUNTIME_TURN_META)
@@ -656,7 +678,10 @@ Authority: non-authoritative runtime checkpoint"
 /// its metadata carries no provenance line at all. Someone quoting an envelope
 /// while asking about it is not matched no matter how many blocks they send.
 pub(crate) fn is_internal_runtime_handoff(message: &Message) -> bool {
-    if is_agent_topology_checkpoint(message) || is_operate_contract_message(message) {
+    if is_agent_topology_checkpoint(message)
+        || is_operate_contract_message(message)
+        || is_workspace_trust_message(message)
+    {
         return true;
     }
     if message.role != "user" {
@@ -1127,7 +1152,7 @@ pub(crate) fn is_runtime_owned_user_message(message: &Message) -> bool {
 /// historical leading shape. Requiring a separate prompt block prevents a
 /// user who submits `<turn_meta>…</turn_meta>` as ordinary text from minting
 /// authority.
-fn turn_metadata_text(message: &Message) -> Option<(usize, &str)> {
+pub(crate) fn turn_metadata_text(message: &Message) -> Option<(usize, &str)> {
     if message.content.len() < 2 {
         return None;
     }
@@ -1268,6 +1293,8 @@ mod tests {
             duration_ms: 0,
             started_at: None,
             from_prior_session: false,
+            idle_ms: None,
+            heartbeat_timeout_ms: None,
         }
     }
 

@@ -738,47 +738,13 @@ fn active_turn_has_running_tool(app: &App) -> bool {
 // Per-turn notification composition (settings, message body, summary)
 // moved to `tui/notifications.rs` alongside the dispatch primitives.
 
-async fn tool_result_content_for_api_message(
-    app: &App,
-    id: &str,
-    name: &str,
-    output: &ToolResult,
-) -> String {
-    let raw = output.content.trim();
-    if raw.is_empty() {
-        return String::new();
-    }
-
-    if matches!(
-        name,
-        "run_tests" | "run_verifiers" | "task_gate_run" | "tasks"
-    ) {
-        return crate::core::engine::compact_tool_result_for_route(
-            app.api_provider,
-            &app.model,
-            app.active_route_limits,
-            name,
-            output,
-        );
-    }
-
-    if raw.chars().count() > crate::tool_output_receipts::RAW_TOOL_OUTPUT_RECEIPT_THRESHOLD_CHARS {
-        let messages = live_tool_receipt_messages(app, id, raw, output.success);
-        let artifacts = app.session_artifacts.clone();
-        let raw = raw.to_string();
-        match tokio::task::spawn_blocking(move || {
-            compact_live_tool_receipt(messages, artifacts, raw)
-        })
-        .await
-        {
-            Ok(Some(receipt)) => return receipt,
-            Ok(None) => {}
-            Err(err) => {
-                crate::logging::warn(format!("live tool-output receipt compaction failed: {err}"));
-            }
-        }
-    }
-
+/// The TUI's copy of a tool result for its API-message mirror. It is the same
+/// view the engine gives the model (#6508): whole within the route's inline
+/// budget, otherwise cut around a footer that names the saved full output.
+/// A separate receipt here used to replace anything over 12,000 characters
+/// with a 240-character preview, and that copy is what `SyncSession` sends
+/// back to the engine.
+fn tool_result_content_for_api_message(app: &App, name: &str, output: &ToolResult) -> String {
     crate::core::engine::compact_tool_result_for_route(
         app.api_provider,
         &app.model,
@@ -1010,6 +976,15 @@ async fn execute_command_input(
     }
 
     let result = commands::execute(input, app);
+    // The NOTES view reads the notes file off the render path on the
+    // workspace-context tick; a `/note` change refreshes it at once (#6565).
+    if input
+        .split_whitespace()
+        .next()
+        .is_some_and(|command| command.eq_ignore_ascii_case("/note"))
+    {
+        workspace_context::refresh_now(app, Instant::now());
+    }
     // After /logout: clear the in-memory api_key fields so the next
     // onboarding round entering a new key doesn't see the stale value
     // (#343). The on-disk side is handled by clear_api_key() inside
@@ -1262,7 +1237,7 @@ pub(crate) fn prefill_jobs_cancel_all_if_tasks_sidebar(app: &mut App) -> bool {
         || !app
             .task_panel
             .iter()
-            .any(|task| task.id.starts_with("shell_") && task.status == "running")
+            .any(crate::tui::background_indicator::is_live_shell_entry)
     {
         return false;
     }
@@ -1298,20 +1273,80 @@ pub(crate) fn clamp_event_poll_timeout(timeout: Duration) -> Duration {
     timeout.max(MIN_EVENT_POLL_TIMEOUT)
 }
 
-/// Decide whether an `AgentComplete` event should fire a subagent-completion
-/// desktop notification, per the `[notifications].subagent_completion` mode.
+/// Announce the background work that finished since the last notice, when
+/// the `[notifications].subagent_completion` mode says it is time (#6565).
+///
+/// Finite work still live (running agents that are not suspect ghosts, a
+/// running workflow, queued or running durable tasks that are not stale)
+/// holds a `final-only`
+/// batch; a running background shell never does. `parent_idle` forces the
+/// parent-turn half of the rule open, for the moment a turn completes.
 /// `settings()` still has the final say (method=off / condition=never).
-fn should_notify_subagent_completion(
-    mode: crate::config::SubagentCompletionNotification,
-    has_other_running_subagents: bool,
-    workflow_tool_running: bool,
-) -> bool {
-    use crate::config::SubagentCompletionNotification as Mode;
-    match mode {
-        Mode::Off => false,
-        Mode::Always => true,
-        Mode::FinalOnly => !has_other_running_subagents && !workflow_tool_running,
+pub(crate) fn flush_background_finished(app: &mut App, config: &Config, parent_idle: bool) {
+    use crate::tui::background_finished::{background_finished_payload, ready_to_flush};
+    if app.background_finished.is_empty() {
+        return;
     }
+    let mode = config.notifications_config().subagent_completion;
+    let finite_work_live = session_state::live_running_agent_count(app, Instant::now()) > 0
+        || frame::workflow_tool_is_running(app)
+        || app.task_panel.iter().any(|entry| {
+            // A stale entry (a recovered task whose ownership is unverified)
+            // is not known to be running and could hold the batch forever,
+            // the same reason suspect ghost agents are left out.
+            !entry.stale
+                && entry.kind != TaskPanelEntryKind::Shell
+                && matches!(entry.status.as_str(), "queued" | "running")
+        });
+    let parent_busy = app.is_loading && !parent_idle;
+    if !ready_to_flush(
+        mode,
+        &app.background_finished,
+        finite_work_live,
+        parent_busy,
+    ) {
+        return;
+    }
+    let batch = std::mem::take(&mut app.background_finished);
+    if mode == crate::config::SubagentCompletionNotification::Off {
+        return;
+    }
+    let Some((method, threshold, include_summary)) = notifications::settings(config) else {
+        return;
+    };
+    let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
+    let notices: Vec<&[crate::tui::background_finished::FinishedWork]> =
+        if mode == crate::config::SubagentCompletionNotification::Always {
+            batch.chunks(1).collect()
+        } else {
+            vec![batch.as_slice()]
+        };
+    for items in notices {
+        let elapsed = items
+            .iter()
+            .map(|item| item.elapsed)
+            .max()
+            .unwrap_or_default();
+        if let Some(payload) = background_finished_payload(app.ui_locale, items, include_summary) {
+            notifications::notify_done(method, in_tmux, &payload, threshold, elapsed);
+        }
+    }
+}
+
+/// Settle the background-finished batch when the parent turn ends (#6565).
+///
+/// A completed turn sends its own notice, which covers the shells and tasks
+/// that finished while it ran, so those are dropped rather than announced a
+/// second time. Whatever else was held for the turn is then flushed.
+pub(crate) fn settle_background_finished_at_turn_end(
+    app: &mut App,
+    config: &Config,
+    turn_completed: bool,
+) {
+    if turn_completed {
+        crate::tui::background_finished::drop_reported_by_turn(&mut app.background_finished);
+    }
+    flush_background_finished(app, config, true);
 }
 
 // Keyboard-shortcut predicates moved to `tui/key_shortcuts.rs`.

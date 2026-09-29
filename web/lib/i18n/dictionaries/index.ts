@@ -15,6 +15,7 @@
 import type {
   ChangelogDict,
   ChromeDict,
+  ContributeDict,
   ComputerUseDict,
   DocsAuthDict,
   DocsComputersDict,
@@ -112,6 +113,8 @@ import { faq as enFaq } from "./en/faq";
 import { faq as zhFaq } from "./zh/faq";
 import { roadmap as enRoadmap } from "./en/roadmap";
 import { roadmap as zhRoadmap } from "./zh/roadmap";
+import { contribute as enContribute } from "./en/contribute";
+import { contribute as zhContribute } from "./zh/contribute";
 import { chrome as zhChrome } from "./zh/chrome";
 import { home as zhHome } from "./zh/home";
 import { chrome as jaChrome } from "./ja/chrome";
@@ -307,9 +310,9 @@ const DOCS_VOCABULARY: Record<string, DocsVocabularyDict> = {
 
 /**
  * Shared surface states, the changelog page, the two legal pages, the digest
- * page, the FAQ and the roadmap follow the same optional per-locale rule as
- * the docs page dictionaries: English is the reference, every other locale
- * falls back to it at lookup time.
+ * page, the FAQ, the roadmap and the contribute page follow the same optional
+ * per-locale rule as the docs page dictionaries: English is the reference,
+ * every other locale falls back to it at lookup time.
  */
 const STATES: Record<string, StatesDict> = {
   zh: zhStates,
@@ -337,6 +340,10 @@ const FAQ: Record<string, FaqDict> = {
 
 const ROADMAP: Record<string, RoadmapDict> = {
   zh: zhRoadmap,
+};
+
+const CONTRIBUTE: Record<string, ContributeDict> = {
+  zh: zhContribute,
 };
 
 export function getChrome(locale: string): ChromeDict {
@@ -451,6 +458,10 @@ export function getRoadmap(locale: string): RoadmapDict {
   return ROADMAP[locale] ?? enRoadmap;
 }
 
+export function getContribute(locale: string): ContributeDict {
+  return CONTRIBUTE[locale] ?? enContribute;
+}
+
 /**
  * Select one side of a legacy `{ en, zh }` content pair by locale. This is
  * the transitional bridge for `web/lib/content/` modules that still carry
@@ -496,6 +507,7 @@ export const EN_LEGAL_PRIVACY = enLegalPrivacy;
 export const EN_DIGEST = enDigest;
 export const EN_FAQ = enFaq;
 export const EN_ROADMAP = enRoadmap;
+export const EN_CONTRIBUTE = enContribute;
 
 /** Interpolate `{name}` tokens in a dictionary template. Unknown tokens are
  * left intact so a template/variable drift is visible in review, not silent. */

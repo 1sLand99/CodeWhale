@@ -576,18 +576,17 @@ model = "Other-X"
         .collect();
         let path = home.path().join("config.toml");
 
-        // The incoming route owns its own leaf, so the outgoing root fallback
-        // is inert saved state. A CLI switch must not delete it, and switching
-        // back must still find it.
+        // The outgoing route was resolving the root fallback as its own
+        // model, so a CLI switch moves it onto that route's leaf (never
+        // deletes it), and switching back must still find it.
         std::fs::write(
             &path,
             "route_preferences_version = 1\nprovider = \"zai\"\ndefault_text_model = \"GLM-4.6\"\n[providers.deepseek]\nmodel = \"deepseek-v4-pro\"\n",
         )?;
         set(&path, "provider", "deepseek")?;
-        assert_eq!(
-            document(&path)["default_text_model"].as_str(),
-            Some("GLM-4.6")
-        );
+        let doc = document(&path);
+        assert!(doc.get("default_text_model").is_none());
+        assert_eq!(doc["providers"]["zai"]["model"].as_str(), Some("GLM-4.6"));
         let switched = Config::load(Some(path.clone()), None)
             .expect("a CLI provider switch must remain loadable");
         assert_eq!(switched.api_provider(), ApiProvider::Deepseek);

@@ -318,7 +318,6 @@ Supported keys in the project overlay (top-level fields only):
 | `reasoning_effort` | force `"high"` / `"max"` for a complex repo |
 | `approval_policy` | only values that tighten the user's current permission posture |
 | `sandbox_mode` | only values that tighten the user's current sandbox posture |
-| `notes_path` | keep notes in-repo |
 | `max_subagents` | clamp sub-agent concurrency for a constrained repo (clamped to 1..=128) |
 | `allow_shell` | `false` can disable shell access; `true` is ignored |
 
@@ -327,7 +326,7 @@ maintainer is most likely to want to standardize across contributors.
 Credential, endpoint, provider-selection, MCP config, hooks, skills,
 retry, hotbar bindings, and `instructions = [...]` settings stay user-global.
 If a repo-local config declares `api_key`, `base_url`, `providers`, `provider`,
-`mcp_config_path`, `hotbar`, `allow_shell = true`, or `instructions`,
+`mcp_config_path`, `notes_path`, `hotbar`, `allow_shell = true`, or `instructions`,
 Codewhale ignores that key and keeps the user's global setting.
 
 The consolidated `codewhale` runtime uses one config file for DeepSeek auth
@@ -2513,6 +2512,10 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `notifications.sound_file`: custom local WAV path for `sound = "file"` or legacy
   `completion_sound = "file"`.
 - `notifications.subagent_completion`: `always`, `final-only` (default), `off`.
+  Covers all background work that finishes: sub-agents, background shells and
+  durable tasks. `final-only` sends one notice naming everything that finished
+  once no agent, workflow or durable task is still running; a running shell
+  (a dev server, a watcher) never holds it back. `always` sends one per item.
 - `notifications.quiet`: boolean, default `false`.
 - `notifications.events`: six boolean categories, all enabled by default; see below.
 - `notifications.completion_sound`: legacy completion cue, default `off`, with the
@@ -2543,7 +2546,7 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `tui.stream_chunk_timeout_secs` (int, optional, default `900`): per-SSE-chunk idle timeout for streamed model responses. Slow local or compatible servers can raise this with `/config stream_chunk_timeout_secs <seconds>`; `0` maps to the default and explicit values must be `1..=3600`. The legacy `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var is still honored when this key is omitted.
 - `tui.osc8_links` (bool, optional, default on for macOS/Linux, off for Windows): emit OSC 8 escape sequences around URLs in transcript output so supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty, WezTerm, Alacritty, recent gnome-terminal/konsole) can open them with the terminal's link gesture—usually Cmd-click on macOS and Ctrl-click on Linux/Windows. Terminals without OSC 8 support render the plain label and ignore the escape. The escapes are emitted out-of-band (not inside buffer cells), so column corruption is not a concern; set `false` only for terminals that misrender the OSC 8 terminator itself. Windows legacy consoles default off; opt in with `true`.
 - `tui.max_model_steps` (int, optional, default uncapped): optional model-step ceiling for one ordinary turn. Omission or `0` leaves model steps uncapped; explicit positive values are clamped to `1..=100000`. Headless `exec` and Fleet workers also have no implicit model-step ceiling; `exec --max-turns N` and positive worker budgets still apply. At ~80% of an explicit step budget the model gets one soft-landing notice; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` after one bounded final-report response when needed. Cumulative wall-clock and per-stream limits remain independent. Active interactive goal turns use `goal.max_steps` instead (default `1000`); see the Goal loop section below.
-- `tui.turn_wall_clock_secs` (int, optional, default `3600`): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Clamped to `30..=86400` (24 hours is the documented ceiling); `0` resolves to the default. When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
+- `tui.turn_wall_clock_secs` (int, optional, default: no limit): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Omitted or `0` means no limit; positive values clamp to `30..=86400` (24 hours is the ceiling). When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
 - `transcript.prose_measure` (positive integer, optional, default absent = full width): wrap cap, in columns, for prose cells — user messages, assistant answers, and reasoning/thinking blocks — in the live transcript (#5436). Absent (or `0`) spends the full content width, consistent with tool/status cells and the #5322 wide-frame decision; the former 105-column prose rail is gone. Set a positive whole number (e.g. `prose_measure = 120` under `[transcript]`) to restore a bounded reading measure on ultrawide terminals. Narrow terminals always keep their content width — the cap clamps from above only. Tool, diff, and status cells never inherit this cap. Invalid values (negative or non-integer) are rejected at startup with a `transcript.prose_measure` config error. Resolved once per render pass, so the main transcript cache and the full-screen overlay always agree on the effective width.
 - `hooks` (optional): lifecycle hooks configuration (see `config.example.toml`).
 - `features.*` (optional): feature flag overrides (see below).
@@ -3391,3 +3394,31 @@ The config value itself is forgiving: `true`/`false`, `"on"`/`"off"`, and
 A confirmed opt-out still sends your configured API keys to the provider you
 are already talking to. Only use it when the model must read and edit files
 that contain real credentials.
+
+### Stored sessions
+
+The masking runs once, when tool output enters the transcript, so saved
+session files (`~/.codewhale/sessions/*.json` and their checkpoints) and
+Runtime API thread items (their text and tool metadata) do not store a
+credential-shaped value from tool output. With the confirmed opt-out above,
+tool output is stored as the model saw it.
+
+Not yet masked: large outputs spilled to `~/.codewhale/tool_outputs`, shell
+completion evidence artifacts, and tool-call *inputs* (for example a
+`curl -H "Authorization: Bearer …"` command line). `doctor` and
+`scrub-secrets` do not check those either.
+
+Sessions saved by builds before this change may still hold credentials in
+their tool output; nothing rewrites them automatically. `codewhale doctor`
+reports them under **Stored Sessions** (it checks the newest 50 files), and
+this command finds and masks them across every saved session:
+
+```sh
+codewhale sessions scrub-secrets          # report only
+codewhale sessions scrub-secrets --apply  # rewrite the affected files
+```
+
+`--apply` rewrites each file under the same per-session lock a save takes,
+so it never loses a concurrent save. A session that is still open can write
+its in-memory copy back on its next save, so close open sessions first, and
+rotate any credential that was exposed — masking a stored copy cannot un-leak it.
