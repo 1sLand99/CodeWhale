@@ -135,18 +135,34 @@ fn strip_control_chars_in_strings(s: &str) -> String {
     out
 }
 
-/// Strip trailing commas before `}` or `]`.
+/// Strip trailing commas before `}` or `]` (optionally across whitespace)
+/// and at end of input. String-aware: a `,}` or `,]` inside a string value
+/// is content, e.g. source code in a `write` call, and is left untouched.
 fn strip_trailing_commas(s: &str) -> String {
-    // Repeatedly replace ",}" and ",]" until stable (handles nested cases).
-    let mut out = s.to_string();
-    loop {
-        let prev = out.clone();
-        out = out.replace(",}", "}").replace(",]", "]");
-        // Handle trailing comma at end of string
-        out = out.trim_end_matches(',').to_string();
-        if out == prev {
-            break;
+    let mut out = String::with_capacity(s.len());
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, ch) in s.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == ',' {
+            let next = s[i + 1..]
+                .trim_start_matches(|c: char| c.is_whitespace() || c == ',')
+                .chars()
+                .next();
+            if matches!(next, None | Some('}' | ']')) {
+                continue;
+            }
         }
+        out.push(ch);
     }
     out
 }
@@ -377,5 +393,25 @@ mod tests {
         let r = repair(r#"{"a": 1,"#).unwrap();
         assert_eq!(r.value, json!({"a": 1}));
         assert!(r.structure_synthesized);
+    }
+
+    #[test]
+    fn trailing_comma_repair_leaves_string_content_alone() {
+        // Object-level trailing comma forces the repair path; the `,}` and
+        // `,]` inside `content` are the model's code and must survive.
+        let raw = r#"{"path":"a.js","content":"const o = {a:1,};\nlet v = [1,2,];\n",}"#;
+        let r = repair(raw).unwrap();
+        assert_eq!(
+            r.value,
+            json!({"path": "a.js", "content": "const o = {a:1,};\nlet v = [1,2,];\n"})
+        );
+        assert!(!r.structure_synthesized);
+    }
+
+    #[test]
+    fn trailing_comma_before_whitespace_and_closer_is_stripped() {
+        let r = repair("{\"a\": [1, 2 ,\n ],\n}").unwrap();
+        assert_eq!(r.value, json!({"a": [1, 2]}));
+        assert!(!r.structure_synthesized);
     }
 }
