@@ -26,6 +26,7 @@ export const RELEASE_CONTRIBUTORS: string[] = [
   "@dajiaohuang",
   "@Water-Run",
   "@wuisabel-gif",
+  "@SparkofSpike",
 ];
 
 /**

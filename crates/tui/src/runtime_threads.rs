@@ -13356,6 +13356,8 @@ impl RuntimeThreadManager {
                 turn_wall_clock: cfg.turn_wall_clock(),
                 stream_max_content_bytes: cfg.stream_max_content_bytes(),
                 stream_max_duration: cfg.stream_max_duration(),
+                stream_retry_limits: cfg.stream_retry_limits(),
+                stream_open_timeout: cfg.stream_open_timeout(),
                 subagent_heartbeat_timeout: std::time::Duration::from_secs(
                     cfg.subagent_heartbeat_timeout_secs_for_provider(provider),
                 ),

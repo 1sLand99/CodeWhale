@@ -152,7 +152,7 @@ jobs:
             # heavy by default. .github/scripts/release-workflows.test.js
             # fails if an include_str!/include_bytes! target classifies light.
             case "${path}" in
-              scripts/release/npm-wrapper-smoke.js|scripts/mobile-smoke.sh|scripts/check-provider-registry.py)
+              scripts/release/npm-wrapper-smoke.js|scripts/mobile-smoke.sh|scripts/check-provider-registry.py|scripts/check-config-example.py)
                 heavy=true
                 ;;
               crates/*|docs/HOOKS.md|docs/KEYBINDINGS.md|docs/TELEMETRY.md|docs/FLEET_WORKFLOW_TUTORIAL.md|docs/zh_hans/FLEET.md|docs/2512.24601v2.pdf|docs/cloud-facts/*|docs/examples/*)
@@ -490,7 +490,9 @@ jobs:
         run: sccache --show-stats
       - name: Check provider registry drift
         if: needs.changes.outputs.heavy == 'true'
-        run: python3 scripts/check-provider-registry.py
+        run: |
+          python3 scripts/check-provider-registry.py
+          python3 scripts/check-config-example.py
       - name: Check the offline model seed is generated
         if: needs.changes.outputs.heavy == 'true'
         # crates/config/assets/models_dev.bundled.json is rendered from

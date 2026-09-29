@@ -32,7 +32,10 @@ use std::path::Path;
 /// Generation 15 points `help` and `pdf` at the model-visible `read`/`bash`
 /// tools instead of the hidden compatibility `File` tool; exact
 /// generation-14 bodies allow safe upgrades.
-const BUNDLED_SKILL_VERSION: &str = "15";
+/// Generation 16 has `plugin-creator` scaffold `plugin.json` and describe
+/// `native` entries under the experimental extension host; the exact
+/// generation-15 body allows a safe upgrade.
+const BUNDLED_SKILL_VERSION: &str = "16";
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -138,6 +141,10 @@ const SUPERSEDED_BODIES: &[(&str, &str)] = &[
     (
         "plugin-creator",
         include_str!("../../assets/skills/plugin-creator/SKILL.generation-13.md"),
+    ),
+    (
+        "plugin-creator",
+        include_str!("../../assets/skills/plugin-creator/SKILL.generation-15.md"),
     ),
     (
         "help",

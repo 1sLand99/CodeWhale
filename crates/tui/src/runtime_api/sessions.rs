@@ -32,6 +32,10 @@ pub(super) struct SessionDetailResponse {
     pub(super) metadata: SessionMetadata,
     pub(super) messages: Vec<Value>,
     pub(super) system_prompt: Option<String>,
+    /// Turns that ended `Failed`, with the redacted reason the transcript
+    /// showed. Absent when none did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) turn_outcomes: Vec<crate::session_manager::SavedTurnOutcome>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1104,6 +1108,7 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
         metadata: session.metadata,
         messages,
         system_prompt: session.system_prompt,
+        turn_outcomes: session.turn_outcomes,
     }
 }
 
