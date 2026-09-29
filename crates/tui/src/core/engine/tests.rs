@@ -27244,6 +27244,99 @@ async fn extension_tool_is_deferred_gated_and_attributed_on_the_model_path() {
     manager.shutdown().await;
 }
 
+/// Engines in one process share the extension host, but an engine with no
+/// plugin snapshot of its own (an isolated chat falls back to an empty
+/// registry) must not revoke the plugins another engine is using, neither when
+/// it starts nor at its turn builds.
+#[tokio::test]
+async fn an_isolated_chat_engine_never_revokes_another_engines_extension() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let Some(node) = crate::extension_host::tests::node_for_tests(
+        "an_isolated_chat_engine_never_revokes_another_engines_extension",
+    ) else {
+        return;
+    };
+    let _policy = crate::plugins::activation::TestPolicyGuard::extension_host(true);
+    let fixture = crate::extension_host::tests::FixturePlugins::new(&["slow-tool"]).await;
+    let plugin_id = fixture
+        .registry()
+        .get("slow-tool")
+        .expect("fixture plugin")
+        .id
+        .as_str()
+        .to_string();
+    let manager = fixture.manager(node);
+    let _manager = crate::extension_host::TestManagerGuard::install(Arc::clone(&manager));
+    let config = Config::default();
+
+    // The workspace engine activates the plugin in the background.
+    let mut workspace_config = deterministic_engine_config(fixture.workspace());
+    workspace_config.features.enable(Feature::ExtensionHost);
+    workspace_config.plugin_registry = Some(fixture.registry());
+    let idle_client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+    let (workspace_engine, _workspace_handle) =
+        Engine::new_with_model_client(workspace_config, &config, idle_client);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while manager.owner_state(&plugin_id)
+        != Some(crate::extension_host::registry::OwnerState::Active)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the workspace engine never activated its plugin: {:?}",
+            manager.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // An isolated chat starts and runs a turn in the same process.
+    let chat_dir = tempdir().expect("chat dir");
+    let mut chat_config = deterministic_engine_config(chat_dir.path());
+    chat_config.features.enable(Feature::ExtensionHost);
+    chat_config.plugin_registry = None;
+    let chat_client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("hello")]));
+    let (chat_engine, chat_handle) =
+        Engine::new_with_model_client(chat_config, &config, chat_client);
+    let task = tokio::spawn(chat_engine.run());
+    chat_handle
+        .send(external_user_message_op("hi", AppMode::Agent, &config))
+        .await
+        .expect("send turn");
+    {
+        let mut rx = chat_handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the chat turn")
+                .expect("engine event stream closed");
+            if let Event::TurnComplete { .. } = event {
+                break;
+            }
+        }
+    }
+    // Give any reconcile the chat engine kicked time to finish.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    assert_eq!(
+        manager.owner_state(&plugin_id),
+        Some(crate::extension_host::registry::OwnerState::Active),
+        "the isolated chat revoked the workspace engine's plugin: {:?}",
+        manager.diagnostics()
+    );
+    assert!(
+        !manager.diagnostics().iter().any(|d| d.contains("revoked")),
+        "{:?}",
+        manager.diagnostics()
+    );
+    assert_eq!(manager.spawn_attempts(), 1);
+    chat_handle.send(Op::Shutdown).await.expect("shutdown chat");
+    task.await.expect("chat engine task");
+    drop(workspace_engine);
+    manager.shutdown().await;
+}
+
 /// Extension host phase 1, acceptance 7: with the flag off the engine never
 /// touches the extension host, even when a native plugin is installed.
 #[tokio::test]
