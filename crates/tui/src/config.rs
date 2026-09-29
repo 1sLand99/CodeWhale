@@ -5219,52 +5219,40 @@ impl Config {
             )
             .into());
         }
-        if let Some(policy) = self.approval_policy.as_deref() {
-            let normalized = policy.trim().to_ascii_lowercase();
-            if !matches!(
-                normalized.as_str(),
-                "on-request" | "untrusted" | "never" | "auto" | "suggest"
-            ) {
+        // One vocabulary with `codewhale config set`, which refuses the same
+        // values before writing them (`codewhale_config::config_toml_choices`).
+        for (key, value, replacement, env_var) in [
+            (
+                "approval_policy",
+                self.approval_policy.as_deref(),
+                "on-request",
+                Some("CODEWHALE_APPROVAL_POLICY"),
+            ),
+            ("verbosity", self.verbosity.as_deref(), "normal", None),
+            (
+                "sandbox_mode",
+                self.sandbox_mode.as_deref(),
+                "workspace-write",
+                Some("CODEWHALE_SANDBOX_MODE"),
+            ),
+        ] {
+            let (Some(value), Some(choices)) = (value, codewhale_config::config_toml_choices(key))
+            else {
+                continue;
+            };
+            if !choices.contains(&value.trim().to_ascii_lowercase().as_str()) {
+                let expected = match choices.split_last() {
+                    Some((last, [])) => (*last).to_string(),
+                    Some((last, [only])) => format!("{only} or {last}"),
+                    Some((last, rest)) => format!("{}, or {last}", rest.join(", ")),
+                    None => String::new(),
+                };
+                let displayed_value = codewhale_secrets::redact::redact_secrets(value);
                 return Err(SafeConfigDiagnostic::invalid_value(
-                    "approval_policy",
-                    policy,
-                    "on-request, untrusted, never, auto, or suggest",
-                    user_config_fix(
-                        "approval_policy",
-                        "on-request",
-                        Some("CODEWHALE_APPROVAL_POLICY"),
-                    ),
-                )
-                .into());
-            }
-        }
-        if let Some(v) = self.verbosity.as_deref() {
-            let normalized = v.trim().to_ascii_lowercase();
-            if !matches!(normalized.as_str(), "normal" | "concise") {
-                return Err(SafeConfigDiagnostic::invalid_value(
-                    "verbosity",
-                    v,
-                    "normal or concise",
-                    user_config_fix("verbosity", "normal", None),
-                )
-                .into());
-            }
-        }
-        if let Some(mode) = self.sandbox_mode.as_deref() {
-            let normalized = mode.trim().to_ascii_lowercase();
-            if !matches!(
-                normalized.as_str(),
-                "read-only" | "workspace-write" | "danger-full-access" | "external-sandbox"
-            ) {
-                return Err(SafeConfigDiagnostic::invalid_value(
-                    "sandbox_mode",
-                    mode,
-                    "read-only, workspace-write, danger-full-access, or external-sandbox",
-                    user_config_fix(
-                        "sandbox_mode",
-                        "workspace-write",
-                        Some("CODEWHALE_SANDBOX_MODE"),
-                    ),
+                    key,
+                    &displayed_value,
+                    &expected,
+                    user_config_fix(key, replacement, env_var),
                 )
                 .into());
             }
