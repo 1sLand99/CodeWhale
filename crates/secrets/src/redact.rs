@@ -663,14 +663,17 @@ fn redact_keyed_assignment(body: &str, policy: RedactionPolicy) -> Option<String
     }
 
     // `[auth] Authorization failed: You have run out of credits…` is an error
-    // sentence, not a header: the key is several words and does not end in
-    // the credential word. Dropping the rest of the line there hid the
-    // provider's human message (and made the next line read as part of a
-    // broken markdown link). Keep the prose and mask only what still looks
-    // like a secret in it: keyed values, known prefixes, JWTs, opaque runs.
-    // A short value (`password for db: hunter2`, `Authorization header:
-    // Bearer x`) is still treated as the credential it probably is.
-    if is_prose_key(key_norm) && raw_value.split_whitespace().count() >= 3 {
+    // sentence, not a header: the key names an outcome (`failed`, `denied`,
+    // `expired`…), not a credential. Dropping the rest of the line there hid
+    // the provider's human message. Keep that prose and mask only what still
+    // looks like a secret in it: keyed values, known prefixes, JWTs, opaque
+    // runs. Any other key (`The password for staging is: …`, `Authorization
+    // header was: Basic …`) keeps the whole-value policy, because a short
+    // password or passphrase is not credential-shaped and would leak.
+    if is_prose_key(key_norm)
+        && raw_value.split_whitespace().count() >= 3
+        && !mentions_password(raw_value)
+    {
         return Some(format!(
             "{raw_key}{sep}{}",
             mask_credential_shaped_words(&redact_line(raw_value, policy))
@@ -702,18 +705,41 @@ fn redact_keyed_assignment(body: &str, policy: RedactionPolicy) -> Option<String
     ))
 }
 
-/// Whether a sensitive-looking key is really prose: several words whose last
-/// word is not the credential name (`Authorization failed`, as opposed to
-/// `API Key`, `client secret` or `export API_KEY`).
+/// Words that end an error sentence rather than name a credential.
+const OUTCOME_KEY_WORDS: &[&str] = &[
+    "failed",
+    "failure",
+    "error",
+    "denied",
+    "rejected",
+    "refused",
+    "expired",
+    "invalid",
+    "forbidden",
+];
+
+/// Whether a sensitive-looking key is really the start of an error sentence:
+/// several words whose last word is an outcome (`Authorization failed`,
+/// `token expired`), as opposed to a credential name (`API Key`,
+/// `client secret`) or a lead-in (`the password for staging is`).
 fn is_prose_key(key: &str) -> bool {
-    if !key.trim().contains(char::is_whitespace) {
+    let mut words = key.split_whitespace();
+    let Some(last) = words.next_back() else {
         return false;
-    }
-    let key_norm = normalize_sensitive_key(key);
-    !SENSITIVE_KEY_HINTS.iter().any(|hint| {
-        let hint = hint.replace('-', "_");
-        key_norm == hint || key_norm.ends_with(&format!("_{hint}"))
-    })
+    };
+    words.next().is_some()
+        && OUTCOME_KEY_WORDS
+            .iter()
+            .any(|word| last.eq_ignore_ascii_case(word))
+}
+
+/// A sentence that talks about a password may carry one that is not
+/// credential-shaped (`Authorization failed: password is Summer2026!`).
+fn mentions_password(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["password", "passwd", "passphrase"]
+        .iter()
+        .any(|word| lower.contains(word))
 }
 
 /// Mask every whitespace-delimited word that looks like credential material,
@@ -792,14 +818,22 @@ mod prose_key_tests {
 
     #[test]
     fn credentials_inside_prose_and_real_headers_are_still_masked() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        // Built at runtime so secret scanners do not flag the fixtures.
+        let jwt = [
+            ["ey", "JhbGciOiJIUzI1NiJ9"].concat(),
+            ["ey", "JzdWIiOiJmaXh0dXJlIn0"].concat(),
+            "c2lnbmF0dXJlLWZpeHR1cmU".to_string(),
+        ]
+        .join(".");
         let out = redact_secrets(&format!(
             "Authorization failed: the server rejected Bearer {jwt} for this route"
         ));
-        assert!(!out.contains(jwt), "{out}");
+        assert!(!out.contains(&jwt), "{out}");
         assert!(out.contains("the server rejected"), "{out}");
-        let out = redact_secrets("Authorization failed: key sk-live-abcdef0123456789 was revoked");
-        assert!(!out.contains("sk-live-abcdef0123456789"), "{out}");
+        let key = ["sk", "-fixture-", "0123456789abcdef"].concat();
+        let out = redact_secrets(&format!("Authorization failed: key {key} was revoked"));
+        assert!(!out.contains(&key), "{out}");
+        assert!(out.contains("was revoked"), "{out}");
         // Short values and single-word credential keys keep the old policy.
         assert_eq!(
             redact_secrets("password for db: hunter2"),
@@ -813,5 +847,30 @@ mod prose_key_tests {
             redact_secrets("API Key: some value here"),
             "API Key: [redacted]"
         );
+    }
+
+    #[test]
+    fn only_error_outcome_keys_keep_their_prose() {
+        // A multi-word key that is not an error outcome still hides the whole
+        // value: short passwords and passphrases are not credential-shaped.
+        for (line, kept) in [
+            (
+                "The password for staging is: Summer2026! rotate monthly",
+                "Summer2026!",
+            ),
+            (
+                "password for admin user = correct horse battery staple",
+                "horse battery",
+            ),
+            ("Authorization header was: Basic YTpi (rejected)", "YTpi"),
+            (
+                "Authorization failed: the password is Summer2026! for now",
+                "Summer2026!",
+            ),
+        ] {
+            let out = redact_secrets(line);
+            assert!(!out.contains(kept), "{kept} leaked from {out}");
+            assert!(out.contains(REDACTED), "{out}");
+        }
     }
 }

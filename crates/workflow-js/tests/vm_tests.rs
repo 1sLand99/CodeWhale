@@ -2553,31 +2553,43 @@ async fn tools_call_cap_rejects_runaway_loops() {
 #[test]
 fn absolute_cwd_inside_the_workspace_normalizes_and_outside_is_refused() {
     use codewhale_workflow_js::{normalize_task_cwd, normalize_task_cwd_in};
-    use std::path::Path;
-    let workspace = Path::new("/Volumes/VIXinSSD/CW");
+    // Platform-absolute paths: `/Volumes/…` is not absolute on Windows.
+    let base = std::env::temp_dir();
+    let workspace = base.join("cw-cwd-fixture");
+    let inside = workspace.join("codewhale");
     assert_eq!(
-        normalize_task_cwd_in("/Volumes/VIXinSSD/CW/codewhale", Some(workspace)).unwrap(),
+        normalize_task_cwd_in(inside.to_str().unwrap(), Some(&workspace)).unwrap(),
         "codewhale"
     );
     assert_eq!(
-        normalize_task_cwd_in("/Volumes/VIXinSSD/CW/", Some(workspace)).unwrap(),
+        normalize_task_cwd_in(
+            inside.join("crates").join("tui").to_str().unwrap(),
+            Some(&workspace)
+        )
+        .unwrap(),
+        "codewhale/crates/tui"
+    );
+    let with_separator = format!("{}{}", workspace.display(), std::path::MAIN_SEPARATOR);
+    assert_eq!(
+        normalize_task_cwd_in(&with_separator, Some(&workspace)).unwrap(),
         "."
     );
     assert_eq!(
-        normalize_task_cwd_in("crates/tui", Some(workspace)).unwrap(),
+        normalize_task_cwd_in("crates/tui", Some(&workspace)).unwrap(),
         normalize_task_cwd("crates/tui").unwrap()
     );
     for outside in [
-        "/Volumes/VIXinSSD/CW-other/codewhale",
-        "/etc",
-        "/Volumes/VIXinSSD/CW/../secrets",
+        base.join("cw-cwd-fixture-other").join("codewhale"),
+        base.clone(),
+        workspace.join("..").join("secrets"),
     ] {
-        let error = normalize_task_cwd_in(outside, Some(workspace)).unwrap_err();
+        let error = normalize_task_cwd_in(outside.to_str().unwrap(), Some(&workspace)).unwrap_err();
         assert!(
             error.contains("outside the workspace") || error.contains("parent traversal"),
-            "{outside}: {error}"
+            "{}: {error}",
+            outside.display()
         );
     }
-    let error = normalize_task_cwd_in("/Volumes/VIXinSSD/CW/codewhale", None).unwrap_err();
+    let error = normalize_task_cwd_in(inside.to_str().unwrap(), None).unwrap_err();
     assert!(error.contains("bounded repo-relative paths"), "{error}");
 }

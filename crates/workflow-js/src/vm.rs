@@ -1355,13 +1355,20 @@ pub fn normalize_task_cwd_in(
             workspace.display()
         )
     })?;
-    let relative = relative
-        .to_str()
-        .ok_or_else(|| "task(): cwd entries must be bounded repo-relative paths".to_string())?;
-    if relative.is_empty() {
+    // Rejoin with `/` so a Windows remainder (`a\\b`) lowers to the same
+    // repo-relative form; a non-UTF-8 component is refused.
+    let mut segments = Vec::new();
+    for component in relative.components() {
+        let segment = component
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| "task(): cwd entries must be bounded repo-relative paths".to_string())?;
+        segments.push(segment);
+    }
+    if segments.is_empty() {
         return Ok(".".to_string());
     }
-    normalize_task_cwd(relative)
+    normalize_task_cwd(&segments.join("/"))
 }
 
 fn normalize_task_paths(

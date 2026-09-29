@@ -8191,22 +8191,29 @@ export default workflow({
     fn leaf_absolute_cwd_inside_the_workspace_lowers_repo_relative() {
         // Founder run: a plan leaf with cwd "/Volumes/VIXinSSD/CW/codewhale"
         // was refused although it named the workspace's own checkout.
+        // Platform-absolute paths: `/Volumes/…` is not absolute on Windows.
+        let workspace = std::env::temp_dir().join("cw-leaf-fixture");
         let leaf: LeafSpec = serde_json::from_value(json!({
             "id": "engine-readiness",
             "prompt": "Audit release readiness",
             "agent_type": "review",
             "mode": "read_only",
-            "cwd": "/Volumes/VIXinSSD/CW/codewhale"
+            "cwd": workspace.join("codewhale").to_str().unwrap()
         }))
         .expect("leaf");
-        let workspace = Path::new("/Volumes/VIXinSSD/CW");
-        let source = leaf_task_options_expression(&leaf, None, false, Some(workspace)).unwrap();
+        let source = leaf_task_options_expression(&leaf, None, false, Some(&workspace)).unwrap();
         assert!(source.contains("cwd: \"codewhale\""), "{source}");
-        assert!(!source.contains("/Volumes"), "{source}");
+        assert!(!source.contains("cw-leaf-fixture"), "{source}");
 
         let mut outside = leaf.clone();
-        outside.cwd = Some("/Volumes/VIXinSSD/other".to_string());
-        let error = leaf_task_options_expression(&outside, None, false, Some(workspace))
+        outside.cwd = Some(
+            std::env::temp_dir()
+                .join("cw-leaf-fixture-other")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        let error = leaf_task_options_expression(&outside, None, false, Some(&workspace))
             .unwrap_err()
             .to_string();
         assert!(error.contains("outside the workspace"), "{error}");

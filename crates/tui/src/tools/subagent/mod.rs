@@ -3760,6 +3760,10 @@ pub struct SubAgentManager {
     /// later spawns of the same pin go straight to the parent route instead
     /// of each failing first; a new session re-tries the pin.
     refused_routes: HashMap<String, String>,
+    /// Children whose requests moved to another route before any work, by
+    /// agent id, so the task's failure text blames the route that failed.
+    /// Taken when the task settles.
+    rerouted_requests: HashMap<String, ReroutedRequest>,
 }
 
 /// One child request waiting on a person (approvals C2). The store is the
@@ -4244,6 +4248,7 @@ impl SubAgentManager {
             child_approval_seq: 0,
             reported_pending: HashSet::new(),
             refused_routes: HashMap::new(),
+            rerouted_requests: HashMap::new(),
         }
     }
 
@@ -6030,14 +6035,28 @@ impl SubAgentManager {
     /// (`role.replacement` for an approved route, `session.fallback` for a
     /// refused saved-profile pin), and a note naming the original route,
     /// reason and outcome.
+    ///
+    /// `next` is the runtime the child's requests now use; its route origin
+    /// is kept so a failure on that route names it.
     fn record_route_replacement(
         &mut self,
         worker_id: &str,
-        provider_id: String,
-        model_id: String,
+        next: &SubAgentRuntime,
         source: SpawnRouteSource,
         note: String,
     ) {
+        let provider_id = runtime_provider_id(next);
+        let model_id = next.model.clone();
+        if let Some(origin) = next.route_origin.clone() {
+            self.rerouted_requests.insert(
+                worker_id.to_string(),
+                ReroutedRequest {
+                    model: model_id.clone(),
+                    provider: next.client.api_provider(),
+                    origin,
+                },
+            );
+        }
         if let Some(record) = self.worker_records.get_mut(worker_id) {
             record.spec.model.clone_from(&model_id);
             if let Some(route) = record.spec.child_route.as_mut() {
@@ -6965,6 +6984,18 @@ impl SubAgentManager {
                 )
             })?;
         }
+        // Resume skips the spawn's route binding, so rebuild where the saved
+        // route came from; a failure then names that source, not a guess.
+        runtime.route_origin = child_route
+            .as_ref()
+            .and_then(route_origin_from_receipt)
+            .map(Arc::new);
+        // A child moved before any work (session fallback or approved
+        // replacement) resumes on the route its receipt names; the launch
+        // model would pair the old pin's model with the new provider.
+        let model = child_route
+            .as_ref()
+            .map_or(model, |route| route.model_id.clone());
         let saved_manifest = self
             .worker_records
             .get(&agent_id)
@@ -12531,18 +12562,35 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
     };
 
     let agent_id = task.agent_id.clone();
+    // A request that moved before any work failed (if it failed) on its new
+    // route: blame that route, not the one it left.
+    let rerouted = task
+        .manager_handle
+        .write()
+        .await
+        .rerouted_requests
+        .remove(&agent_id);
     let failure_error = result.as_ref().err().map(|err| {
         crate::logging::warn(format!(
             "sub-agent {} model request failed: {err:#}",
             task.agent_id
         ));
-        annotate_child_model_error_with_origin(
-            &subagent_failure_message(err),
-            &task.runtime.model,
-            task.runtime.client.api_provider(),
-            &task.runtime.worker_profile.model,
-            task.runtime.route_origin.as_deref(),
-        )
+        match rerouted.as_ref() {
+            Some(rerouted) => annotate_child_model_error_with_origin(
+                &subagent_failure_message(err),
+                &rerouted.model,
+                rerouted.provider,
+                &ModelRoute::Inherit,
+                Some(&rerouted.origin),
+            ),
+            None => annotate_child_model_error_with_origin(
+                &subagent_failure_message(err),
+                &task.runtime.model,
+                task.runtime.client.api_provider(),
+                &task.runtime.worker_profile.model,
+                task.runtime.route_origin.as_deref(),
+            ),
+        }
     });
 
     // #5529: a wall-time task error must still name the work the child left
@@ -14581,6 +14629,13 @@ async fn run_subagent(
                                         ));
                                         let mut next = runtime.clone();
                                         parent.install(&mut next);
+                                        next.route_origin = Some(Arc::new(spawn_route_origin(
+                                            SpawnRouteSource::SessionFallback,
+                                            runtime.worker_profile.role.as_str(),
+                                            None,
+                                            parent.label.clone(),
+                                            Some(&note),
+                                        )));
                                         {
                                             let mut manager = runtime.manager.write().await;
                                             manager.record_refused_route(
@@ -14589,8 +14644,7 @@ async fn run_subagent(
                                             );
                                             manager.record_route_replacement(
                                                 &agent_id,
-                                                parent.provider_id.clone(),
-                                                parent.model.clone(),
+                                                &next,
                                                 SpawnRouteSource::SessionFallback,
                                                 note.clone(),
                                             );
@@ -14641,21 +14695,18 @@ async fn run_subagent(
                                                         note.push_str(&skipped_replacements.join("; "));
                                                     }
                                                     let note: String = note.chars().take(480).collect();
-                                                    let provider_id = next
-                                                        .api_config
-                                                        .as_ref()
-                                                        .map(|config| {
-                                                            config.provider_identity_for(
-                                                                next.client.api_provider(),
-                                                            )
-                                                        })
-                                                        .unwrap_or_else(|| {
-                                                            next.client.api_provider().as_str().to_string()
-                                                        });
+                                                    let mut next = next;
+                                                    next.route_origin =
+                                                        Some(Arc::new(spawn_route_origin(
+                                                            SpawnRouteSource::RoleReplacement,
+                                                            runtime.worker_profile.role.as_str(),
+                                                            None,
+                                                            runtime_route_label(&next),
+                                                            Some(&note),
+                                                        )));
                                                     runtime.manager.write().await.record_route_replacement(
                                                         &agent_id,
-                                                        provider_id,
-                                                        next.model.clone(),
+                                                        &next,
                                                         SpawnRouteSource::RoleReplacement,
                                                         note.clone(),
                                                     );
@@ -16580,6 +16631,21 @@ impl SpawnRouteSource {
             Self::RoleReplacement => "role.replacement",
         }
     }
+
+    fn parse(value: &str) -> Option<Self> {
+        [
+            Self::AgentProfileModel,
+            Self::RolePin,
+            Self::TaskModel,
+            Self::TaskModelStrength,
+            Self::RoleDefault,
+            Self::RunModel,
+            Self::SessionFallback,
+            Self::RoleReplacement,
+        ]
+        .into_iter()
+        .find(|source| source.as_str() == value)
+    }
 }
 
 /// `provider/model` of the route a runtime would send its next request on,
@@ -16605,7 +16671,6 @@ pub(crate) struct ParentRoute {
     model: String,
     reasoning_effort: Option<String>,
     reasoning_effort_auto: bool,
-    provider_id: String,
     label: String,
 }
 
@@ -16617,7 +16682,6 @@ impl ParentRoute {
             model: runtime.model.clone(),
             reasoning_effort: runtime.reasoning_effort.clone(),
             reasoning_effort_auto: runtime.reasoning_effort_auto,
-            provider_id: runtime_provider_id(runtime),
             label: runtime_route_label(runtime),
         }
     }
@@ -16647,34 +16711,28 @@ pub(crate) struct SpawnRouteOrigin {
     parent: Option<ParentRoute>,
 }
 
-fn saved_profile_change_hint(member: &crate::fleet::profile::AgentProfile) -> String {
-    let editor = format!("change it in /fleet members (Enter on \"{}\")", member.id);
-    if member.source.as_os_str().is_empty() {
-        editor
-    } else {
-        format!(
-            "{editor} or edit `provider`/`model` in {}",
-            member.source.display()
-        )
+fn saved_profile_change_hint(profile_id: &str, profile_file: Option<&std::path::Path>) -> String {
+    let editor = format!("change it in /fleet members (Enter on \"{profile_id}\")");
+    match profile_file.filter(|path| !path.as_os_str().is_empty()) {
+        Some(path) => format!("{editor} or edit `provider`/`model` in {}", path.display()),
+        None => editor,
     }
 }
 
+/// The saved profile a route came from: its id and, when known, its file.
+type RouteProfile<'a> = (&'a str, Option<&'a std::path::Path>);
+
 fn spawn_route_origin(
     source: SpawnRouteSource,
-    request: &SpawnRequest,
-    member: Option<&crate::fleet::profile::AgentProfile>,
+    role: &str,
+    profile: Option<RouteProfile<'_>>,
     route: String,
     fallback_note: Option<&str>,
 ) -> SpawnRouteOrigin {
-    let role = request
-        .assignment
-        .role
-        .as_deref()
-        .unwrap_or_else(|| request.agent_type.as_str());
-    let (source, change) = match (source, member) {
-        (SpawnRouteSource::AgentProfileModel, Some(member)) => (
-            format!("saved agent profile \"{}\" pins {route}", member.id),
-            saved_profile_change_hint(member),
+    let (source, change) = match (source, profile) {
+        (SpawnRouteSource::AgentProfileModel, Some((id, file))) => (
+            format!("saved agent profile \"{id}\" pins {route}"),
+            saved_profile_change_hint(id, file),
         ),
         (SpawnRouteSource::RolePin, _) => (
             format!("config.toml role pin for \"{role}\" routes {route}"),
@@ -16694,12 +16752,16 @@ fn spawn_route_origin(
             format!("the configured default model for role \"{role}\" routes {route}"),
             format!("edit the \"{role}\" default under [subagents] in config.toml"),
         ),
-        (SpawnRouteSource::SessionFallback, _) => (
+        // The route the child moved to after its own was refused or
+        // unusable: blame this route, and still point at the original.
+        (SpawnRouteSource::SessionFallback | SpawnRouteSource::RoleReplacement, _) => (
+            match fallback_note {
+                Some(note) => format!("{route}, taken because {note}"),
+                None => format!("fallback route {route}"),
+            },
             format!(
-                "{} (now {route})",
-                fallback_note.unwrap_or("session fallback")
+                "{route} failed too; check that provider's sign-in, credits, or access, and fix the original route the note names"
             ),
-            "fix or change the saved route named above".to_string(),
         ),
         _ => (
             format!("inherited from the parent route {route}"),
@@ -16713,6 +16775,29 @@ fn spawn_route_origin(
         route,
         parent: None,
     }
+}
+
+/// A resumed child's route origin, rebuilt from its saved route receipt: the
+/// resume does not re-run the spawn's route binding, but its failures must
+/// still name the real source instead of guessing from the resolved model.
+fn route_origin_from_receipt(receipt: &ChildRouteReceipt) -> Option<SpawnRouteOrigin> {
+    let source = SpawnRouteSource::parse(&receipt.route_source)?;
+    Some(spawn_route_origin(
+        source,
+        &receipt.canonical_role,
+        receipt.resolved_profile_id.as_deref().map(|id| (id, None)),
+        format!("{}/{}", receipt.provider_id, receipt.model_id),
+        receipt.fallback_note.as_deref(),
+    ))
+}
+
+/// The route a child's requests moved to before any work (a refused
+/// saved-profile pin on the parent route, or an approved replacement), so a
+/// failure there is reported against that route, not the one it left.
+pub(crate) struct ReroutedRequest {
+    model: String,
+    provider: crate::config::ApiProvider,
+    origin: Arc<SpawnRouteOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17034,10 +17119,15 @@ async fn bind_spawn_model_route(
         selection.source
     };
     let bound = runtime_route_label(runtime);
+    let role = request
+        .assignment
+        .role
+        .as_deref()
+        .unwrap_or_else(|| request.agent_type.as_str());
     let mut origin = spawn_route_origin(
         source,
-        request,
-        member,
+        role,
+        member.map(|member| (member.id.as_str(), Some(member.source.as_path()))),
         bound.clone(),
         fallback_note.as_deref(),
     );
@@ -17067,9 +17157,13 @@ async fn bind_spawn_model_route(
             .collect();
             crate::logging::warn(format!("sub-agent route fallback: {note}"));
             parent_route.install(runtime);
-            origin.source.clone_from(&note);
-            origin.route.clone_from(&parent_route.label);
-            runtime.route_origin = Some(Arc::new(origin));
+            runtime.route_origin = Some(Arc::new(spawn_route_origin(
+                SpawnRouteSource::SessionFallback,
+                role,
+                None,
+                parent_route.label.clone(),
+                Some(&note),
+            )));
             return Ok((
                 ModelRoute::Inherit,
                 SpawnRouteSource::SessionFallback,
@@ -20242,7 +20336,9 @@ fn annotate_child_model_error_with_origin(
             provider_name_for_error(provider),
             route_source_label(route),
             if matches!(route, ModelRoute::Fixed(_)) {
-                "remove the explicit child model override or adjust child-agent model config"
+                // Fixed covers task `model` arguments, saved profiles and
+                // config pins alike; without an origin, name them all.
+                "change the child's pinned model (the task's `model` argument, a saved agent profile in /fleet members, or a config.toml role pin) or adjust child-agent model config"
             } else {
                 "check that provider's access or adjust child-agent model config"
             },
