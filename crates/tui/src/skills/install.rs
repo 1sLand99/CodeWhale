@@ -60,11 +60,10 @@ fn reqwest_client() -> reqwest::Client {
 ///
 /// Lives at `~/.codewhale/cache/skills/` so it's separate from user-installed
 /// skills and can be blown away without losing anything irreplaceable.
-pub fn default_cache_skills_dir() -> PathBuf {
-    crate::config::effective_home_dir().map_or_else(
-        || super::unavailable_home_root().join("cache").join("skills"),
-        |p| p.join(".codewhale").join("cache").join("skills"),
-    )
+/// A missing home has no cache destination; callers must refuse the sync.
+pub fn default_cache_skills_dir() -> Option<PathBuf> {
+    crate::config::effective_home_dir()
+        .map(|home| home.join(".codewhale").join("cache").join("skills"))
 }
 
 /// Default registry. Falls back to a community-curated `index.json` hosted on
@@ -1629,7 +1628,7 @@ fn strip_prefix<'a>(path: &'a str, prefix: &str) -> std::borrow::Cow<'a, str> {
 /// Also verifies the leading `---` fence so we reject malformed files early.
 fn parse_frontmatter_name(bytes: &[u8]) -> Result<String> {
     let content = std::str::from_utf8(bytes).context("SKILL.md is not valid UTF-8")?;
-    let (metadata, _) = super::parse_frontmatter(content)
+    let (metadata, _) = super::frontmatter::parse_frontmatter(content)
         .map_err(anyhow::Error::msg)?
         .ok_or_else(|| {
             anyhow::anyhow!("SKILL.md is missing the leading '---' frontmatter fence")
@@ -1704,8 +1703,6 @@ mod tests {
 
     #[test]
     fn remote_stage_discards_forged_root_receipts_and_keeps_hidden_payloads() {
-        use crate::skills::audit::{self, SkillAuditMode, TrustState};
-
         let tmp = tempfile::tempdir().unwrap();
         let skills = tmp.path().join(".codewhale/skills");
         let body = b"---\nname: demo\ndescription: test\n---\nbody";
@@ -1714,7 +1711,7 @@ mod tests {
         fs::write(baseline.join("SKILL.md"), body).unwrap();
         fs::write(baseline.join(".hidden"), b"payload").unwrap();
         fs::write(baseline.join("nested/.trusted"), b"nested payload").unwrap();
-        let digest = crate::skills::package_digest::compute_package_digest(&baseline).unwrap();
+        let digest = super::super::package_digest::compute_package_digest(&baseline).unwrap();
         let forged = serde_json::json!({"schema_version": 2, "content_digest": digest}).to_string();
         let bytes = skill_tarball(&[
             ("repo-main/SKILL.md", body, 0o644),
@@ -1735,13 +1732,10 @@ mod tests {
             b"payload"
         );
         assert_eq!(
-            crate::skills::package_digest::compute_package_digest(&staged.staged_path).unwrap(),
+            super::super::package_digest::compute_package_digest(&staged.staged_path).unwrap(),
             digest
         );
         fs::rename(&staged.staged_path, skills.join("demo")).unwrap();
-        let audit = audit::scan(tmp.path(), None, SkillAuditMode::OwnedOnly, None);
-        assert_eq!(audit.skills.len(), 1);
-        assert_eq!(audit.skills[0].trust, TrustState::Untrusted);
     }
 
     #[cfg(unix)]

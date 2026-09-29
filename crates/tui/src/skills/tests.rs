@@ -2064,3 +2064,63 @@ fn project_skills_require_workspace_trust() {
         registry.warnings()
     );
 }
+
+#[test]
+fn hidden_and_backup_payload_changes_stale_the_trust_receipt() {
+    use super::audit::{self, SkillAuditMode, TrustState};
+    use super::install::{INSTALLED_FROM_MARKER, TRUSTED_MARKER, write_trust_v2};
+    use super::package_digest::compute_package_digest;
+    use std::fs;
+    let tmp = tempfile::tempdir().unwrap();
+    let package = tmp.path().join(".codewhale/skills/demo");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("SKILL.md"),
+        "---\nname: demo\ndescription: test\n---\nbody",
+    )
+    .unwrap();
+    let payloads = [
+        ".hidden",
+        ".hidden-dir/run.sh",
+        "script.bak",
+        "script.tmp",
+        "nested/.trusted",
+    ];
+    for relative in payloads {
+        let path = package.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "safe").unwrap();
+    }
+    let digest = compute_package_digest(&package).unwrap();
+    write_trust_v2(&package, &digest).unwrap();
+    let initial = audit::scan(tmp.path(), None, SkillAuditMode::OwnedOnly, None);
+    assert_eq!(initial.skills.len(), 1);
+    assert_eq!(
+        initial.skills[0].trust,
+        TrustState::TrustedForDigest(digest.clone())
+    );
+    for relative in payloads {
+        fs::write(package.join(relative), "evil").unwrap();
+        assert_ne!(
+            compute_package_digest(&package).unwrap(),
+            digest,
+            "{relative}"
+        );
+        let changed = audit::scan(tmp.path(), None, SkillAuditMode::OwnedOnly, None);
+        assert_eq!(
+            changed.skills[0].trust,
+            TrustState::TrustStale,
+            "{relative}"
+        );
+        fs::write(package.join(relative), "safe").unwrap();
+    }
+    // These root files are local bookkeeping, not executable payload.
+    for marker in [
+        INSTALLED_FROM_MARKER,
+        TRUSTED_MARKER,
+        ".system-installed-version",
+    ] {
+        fs::write(package.join(marker), "local metadata").unwrap();
+        assert_eq!(compute_package_digest(&package).unwrap(), digest);
+    }
+}
