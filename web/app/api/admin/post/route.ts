@@ -165,21 +165,24 @@ export async function POST(req: Request) {
     if (draft.posted || resolution?.state === "posted" || resolution?.state === "posting") {
       return NextResponse.json({ error: "draft already posted" }, { status: 409 });
     }
-    // A repeated discard (double click) is a no-op, not an error.
+    // A repeated discard (double click) is a no-op, not an error: whether the
+    // first one already finished or is still running.
     if (resolution?.state === "discarded") return discarded();
     // Hold the same claim a post takes, so a discard and a post of one draft
     // do not both run.
     let result: DraftClaimResult;
     try {
-      result = await claimDraft(env.CURATED_KV, parsedKey.type, parsedKey.id);
+      result = await claimDraft(env, parsedKey.type, parsedKey.id, "discard");
     } catch (e) {
       return NextResponse.json({ error: `could not claim draft: ${String(e)}` }, { status: 500 });
     }
     if (!result.ok) {
       if (result.reason === "resolved" && result.resolution.state === "discarded") return discarded();
+      if (result.reason === "held" && result.holder === "discard") return discarded();
       return claimRefused(result);
     }
     const claim = result.claim;
+    let recorded = false;
     try {
       // The marker stops the next cron run from regenerating this draft.
       await markDraftResolved(env.CURATED_KV, parsedKey.type, parsedKey.id, "discarded");
@@ -187,11 +190,12 @@ export async function POST(req: Request) {
       if (draft.type === "digest") {
         await deleteDigestRecord(env.CURATED_KV, draft.id);
       }
+      recorded = true;
     } catch (e) {
       return NextResponse.json({ error: `discard failed: ${String(e)}` }, { status: 500 });
     } finally {
       // The marker (or, if it failed, the draft) now carries the decision.
-      await releaseDraftClaim(env.CURATED_KV, claim).catch(() => undefined);
+      await releaseDraftClaim(env.CURATED_KV, claim, { recorded }).catch(() => undefined);
     }
     if (draft.type === "digest") revalidateDigestPage();
     return discarded();
@@ -217,7 +221,7 @@ export async function POST(req: Request) {
     }
     let result: DraftClaimResult;
     try {
-      result = await claimDraft(env.CURATED_KV, parsedKey.type, parsedKey.id);
+      result = await claimDraft(env, parsedKey.type, parsedKey.id, "post");
     } catch (e) {
       return NextResponse.json({ error: `could not claim draft: ${String(e)}` }, { status: 500 });
     }
@@ -240,7 +244,7 @@ export async function POST(req: Request) {
         await markDraftResolved(env.CURATED_KV, parsedKey.type, parsedKey.id, "posted");
         // The marker now carries the decision, so a later claim sees it; a
         // reopened draft (new activity clears the marker) is postable again.
-        await releaseDraftClaim(env.CURATED_KV, heldClaim).catch(() => undefined);
+        await releaseDraftClaim(env.CURATED_KV, heldClaim, { recorded: true }).catch(() => undefined);
         await env.CURATED_KV?.put(draftKey, JSON.stringify(draft), { expirationTtl: 60 * 60 * 24 * 7 });
         return undefined;
       } catch (e) {

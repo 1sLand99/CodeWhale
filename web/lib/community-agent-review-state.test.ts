@@ -32,6 +32,7 @@ import {
   type AgentDraft,
 } from "./community-agent";
 import { runDigest, runDupes, runTriage } from "./community-agent-tasks";
+import { FakeDraftClaimLock } from "./draft-claim-lock.fake";
 
 /** In-memory KV that pages like Cloudflare KV (max 1000 keys per list call). */
 class FakeKv {
@@ -138,9 +139,10 @@ async function act(kv: FakeKv, fields: Record<string, unknown>): Promise<Respons
   return adminPost(adminRequest(postBody({ ...fields, reviewedSha256 })));
 }
 
-function useAdminEnv(kv: FakeKv) {
+function stubAdminEnv(kv: FakeKv, lock?: FakeDraftClaimLock) {
   mocks.getAgentEnv.mockResolvedValue({
     CURATED_KV: kv,
+    ...(lock ? { DRAFT_CLAIM_LOCK: lock } : {}),
     MAINTAINER_TOKEN: "configured",
     MAINTAINER_GITHUB_PAT: "ghp_test",
     GITHUB_REPO: "Hmbown/CodeWhale",
@@ -213,7 +215,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     expect(staged).toMatchObject({ approved: false });
     expect(isPublishedDigest(staged)).toBe(false);
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
     const res = await act(kv, { action: "post", draftKey, lang: "en" });
@@ -231,7 +233,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
     await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
     const res = await act(kv, { action: "post", draftKey, lang: "zh" });
@@ -245,7 +247,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
     await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
     expect((await act(kv, { action: "post", draftKey, lang: "en" })).status).toBe(200);
@@ -261,7 +263,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
     await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
     const res = await act(kv, { action: "post", draftKey, lang: "en", editedBody: "# Edited" });
@@ -280,7 +282,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
     await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const draftKey = onlyKey(kv, "draft:digest:");
     const res = await act(kv, { action: "discard", draftKey });
     await expect(res.json()).resolves.toMatchObject({ ok: true, action: "discarded" });
@@ -298,7 +300,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     mocks.agentChat.mockResolvedValue({ content: JSON.stringify(DIGEST_MODEL_OUTPUT), usage: { input: 1, output: 1 } });
     await runDigest({ CURATED_KV: kv, DEEPSEEK_API_KEY: "k" });
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub(422);
     const draftKey = onlyKey(kv, "draft:digest:");
     const res = await act(kv, { action: "post", draftKey, lang: "en" });
@@ -329,7 +331,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     expect(JSON.parse(kv.values.get(draftKey)!).bodyEn).toContain("Digest B");
     expect(kv.values.get(recordKey)).toBe(recordA);
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const bodies: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       bodies.push(String(init?.body));
@@ -355,7 +357,7 @@ describe("weekly digest publication requires maintainer approval", () => {
     const recordKey = onlyKey(kv, "digest:weekly-");
     kv.values.set(recordKey, JSON.stringify({ ...JSON.parse(kv.values.get(recordKey)!), extra: "<script>" }));
 
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub();
     const draftKey = onlyKey(kv, "draft:digest:");
     await expect((await act(kv, { action: "post", draftKey, lang: "zh" })).json()).resolves.toMatchObject({
@@ -404,7 +406,7 @@ describe("resolved drafts are not resurrected by the cron", () => {
   it("does not redraft a discarded triage item", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const res = await act(kv, { action: "discard", draftKey: "draft:triage:42" });
     expect(res.status).toBe(200);
 
@@ -417,7 +419,7 @@ describe("resolved drafts are not resurrected by the cron", () => {
   it("does not turn a posted triage draft back into a pending one after the issue updates", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub();
     const res = await act(kv, { action: "post", draftKey: "draft:triage:42", lang: "en" });
     expect(res.status).toBe(200);
@@ -432,7 +434,7 @@ describe("resolved drafts are not resurrected by the cron", () => {
   it("drafts again when the item has new activity well after the maintainer's decision", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub();
     expect((await act(kv, { action: "post", draftKey: "draft:triage:42" })).status).toBe(200);
 
@@ -467,7 +469,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("refuses to post a draft that is already posted", async () => {
     const kv = new FakeKv();
     kv.values.set("draft:triage:42", JSON.stringify(draft({ posted: true })));
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
 
     const res = await act(kv, { action: "post", draftKey: "draft:triage:42" });
@@ -478,7 +480,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("returns ok when saving state fails after GitHub accepted the comment, and a retry does not post twice", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
     kv.failPutsMatching = /^draft:triage:42$/;
 
@@ -494,7 +496,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("releases the claim when GitHub rejects the post so the maintainer can retry", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub(422);
 
     const failed = await act(kv, { action: "post", draftKey: "draft:triage:42" });
@@ -511,7 +513,7 @@ describe("admin post action is idempotent and bounded", () => {
     async (status) => {
       const kv = new FakeKv();
       await saveDraft(kv, draft());
-      useAdminEnv(kv);
+      stubAdminEnv(kv);
       const posts = stubGitHub(status);
 
       const failed = await act(kv, { action: "post", draftKey: "draft:triage:42" });
@@ -529,7 +531,7 @@ describe("admin post action is idempotent and bounded", () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
     kv.yieldEachOp = true;
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
 
     const results = await Promise.all([
@@ -591,7 +593,7 @@ describe("admin post action is idempotent and bounded", () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
     kv.yieldEachOp = true;
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = raceAfterAbsenceChecks(kv);
 
     const results = await Promise.all([
@@ -607,7 +609,7 @@ describe("admin post action is idempotent and bounded", () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
     kv.yieldEachOp = true;
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = raceAfterAbsenceChecks(kv);
 
     const [post, discard] = await Promise.all([
@@ -625,7 +627,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("claims without KV list, whose results can lag writes by up to a minute", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
     // A stale listing that never shows claim keys must not affect the claim.
     const realList = kv.list.bind(kv);
@@ -643,7 +645,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("answers a claim it cannot read back as retryable, not as a lost race, and the retry posts", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
     // The first read-back of the request's own claim misses the write.
     const realGet = kv.get.bind(kv);
@@ -666,7 +668,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("refuses a post while another request's claim is visible, and leaves that claim alone", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
     kv.values.set("draft-claim:triage:42", "other-request");
 
@@ -681,7 +683,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("treats a repeated discard as a no-op, including one that sees the marker only at claim time", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     stubGitHub();
 
     const first = await act(kv, { action: "discard", draftKey: "draft:triage:42" });
@@ -711,7 +713,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("refuses an action on a draft regenerated after the page loaded, before calling GitHub", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft({ bodyEn: "reviewed A" }));
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const shownA = await reviewedBodyHash("reviewed A");
     // The cron regenerates the pending draft while the admin page shows A.
     await saveDraft(kv, draft({ bodyEn: "unseen B", generatedAt: "2026-01-02T00:00:00.000Z" }));
@@ -730,7 +732,7 @@ describe("admin post action is idempotent and bounded", () => {
   it("requires the reviewed-text hash", async () => {
     const kv = new FakeKv();
     await saveDraft(kv, draft());
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const posts = stubGitHub();
 
     const res = await adminPost(adminRequest(postBody({ action: "post", draftKey: "draft:triage:42" })));
@@ -740,7 +742,7 @@ describe("admin post action is idempotent and bounded", () => {
 
   it("answers malformed JSON with a JSON 400", async () => {
     const kv = new FakeKv();
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
 
     const res = await adminPost(adminRequest("{not json"));
     expect(res.status).toBe(400);
@@ -749,7 +751,7 @@ describe("admin post action is idempotent and bounded", () => {
 
   it("counts streamed body bytes instead of trusting a missing Content-Length", async () => {
     const kv = new FakeKv();
-    useAdminEnv(kv);
+    stubAdminEnv(kv);
     const chunk = new TextEncoder().encode("x".repeat(40_000));
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -761,6 +763,126 @@ describe("admin post action is idempotent and bounded", () => {
 
     const res = await adminPost(adminRequest(stream));
     expect(res.status).toBe(413);
+  });
+});
+
+describe("admin claims with the DRAFT_CLAIM_LOCK Durable Object bound", () => {
+  const KEY = "draft:triage:42";
+
+  async function lockedAdmin(status = 201) {
+    const kv = new FakeKv();
+    await saveDraft(kv, draft());
+    kv.yieldEachOp = true;
+    const lock = new FakeDraftClaimLock();
+    stubAdminEnv(kv, lock);
+    const claimKeysWritten: string[] = [];
+    kv.beforePut = async (key) => {
+      if (key.startsWith("draft-claim:")) claimKeysWritten.push(key);
+    };
+    const posts = stubGitHub(status);
+    return { kv, lock, posts, claimKeysWritten };
+  }
+
+  /** What a location whose KV has not yet seen the first request's writes reads. */
+  function forgetDecision(kv: FakeKv) {
+    kv.values.set(KEY, JSON.stringify(draft()));
+    kv.values.delete("draft-resolved:triage:42");
+  }
+
+  it("lets exactly one of several concurrent posts through, without KV claim keys", async () => {
+    const { kv, lock, posts, claimKeysWritten } = await lockedAdmin();
+
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () => act(kv, { action: "post", draftKey: KEY }))
+    );
+
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409, 409, 409]);
+    expect(posts).toHaveLength(1);
+    expect(claimKeysWritten).toEqual([]);
+    expect(lock.calls.filter((c) => c.op === "claim")).toHaveLength(4);
+  });
+
+  it("refuses a retry that reads stale KV after a recorded post, until the hold ends", async () => {
+    const { kv, lock, posts } = await lockedAdmin();
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(200);
+
+    forgetDecision(kv);
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(409);
+    expect(posts).toHaveLength(1);
+
+    // Past the hold the KV marker has propagated; a location that really
+    // lacks it (a reopened draft) may act again.
+    lock.now += 2 * 60 * 1000;
+    forgetDecision(kv);
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(200);
+    expect(posts).toHaveLength(2);
+  });
+
+  it("keeps the lease after an unknown GitHub outcome, and lets it expire", async () => {
+    const { kv, lock, posts } = await lockedAdmin(502);
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(502);
+    stubGitHub();
+
+    // Even without the KV "posting" marker, the lease refuses a retry...
+    kv.values.delete("draft-resolved:triage:42");
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(409);
+    expect(posts).toHaveLength(1);
+
+    // ...until it expires, so the draft is not wedged for good.
+    lock.now += 15 * 60 * 1000;
+    const retryPosts = stubGitHub();
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(200);
+    expect(retryPosts).toHaveLength(1);
+  });
+
+  it("frees the draft at once when GitHub definitely rejected the post", async () => {
+    const { kv } = await lockedAdmin(422);
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(502);
+    const posts = stubGitHub();
+    expect((await act(kv, { action: "post", draftKey: KEY })).status).toBe(200);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("treats a double-clicked discard as one discard, concurrent or repeated", async () => {
+    const { kv, posts } = await lockedAdmin();
+
+    const both = await Promise.all([
+      act(kv, { action: "discard", draftKey: KEY }),
+      act(kv, { action: "discard", draftKey: KEY }),
+    ]);
+    expect(both.map((r) => r.status)).toEqual([200, 200]);
+    for (const res of both) await expect(res.json()).resolves.toEqual({ ok: true, action: "discarded" });
+    expect(JSON.parse(kv.values.get("draft-resolved:triage:42")!)).toMatchObject({ state: "discarded" });
+
+    // A third click served from stale KV hits the post-discard hold.
+    forgetDecision(kv);
+    expect((await act(kv, { action: "discard", draftKey: KEY })).status).toBe(200);
+    expect(posts).toEqual([]);
+  });
+
+  it("refuses a discard while a post holds the draft, and a post after a discard", async () => {
+    const { kv, posts } = await lockedAdmin();
+    const [post, discard] = await Promise.all([
+      act(kv, { action: "post", draftKey: KEY }),
+      act(kv, { action: "discard", draftKey: KEY }),
+    ]);
+    expect([post.status, discard.status]).toEqual([200, 409]);
+    expect(posts).toHaveLength(1);
+
+    const other = await lockedAdmin();
+    expect((await act(other.kv, { action: "discard", draftKey: KEY })).status).toBe(200);
+    forgetDecision(other.kv);
+    expect((await act(other.kv, { action: "post", draftKey: KEY })).status).toBe(409);
+    expect(other.posts).toEqual([]);
+  });
+
+  it("fails closed when the lock cannot be reached", async () => {
+    const { kv, lock, posts } = await lockedAdmin();
+    lock.get = () => ({ act: async () => { throw new Error("DO unavailable"); } }) as never;
+    const res = await act(kv, { action: "post", draftKey: KEY });
+    expect(res.status).toBe(500);
+    expect(posts).toEqual([]);
+    expect(kv.values.get("draft-resolved:triage:42")).toBeUndefined();
   });
 });
 

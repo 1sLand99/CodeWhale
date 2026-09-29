@@ -9,6 +9,9 @@
  * - Cites specific files / line numbers / linked issues when discussing code.
  * - Always ends with the draft disclaimer.
  */
+
+import type { DraftClaimLockNamespace, DraftClaimLockStub, DraftLockAction } from "./draft-claim-lock";
+
 const MAX_OUTPUT_TOKENS = 2_000;
 const FALLBACK_BASE = "https://api.deepseek.com";
 const FALLBACK_MODEL = "deepseek-v4-flash";
@@ -244,6 +247,8 @@ interface KVNamespace {
 
 export interface CommunityAgentEnv {
   CURATED_KV?: KVNamespace;
+  /** Exclusive per-draft claim lock; see `claimDraft`. Absent locally. */
+  DRAFT_CLAIM_LOCK?: DraftClaimLockNamespace;
   ADMIN_LOGIN_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_BASE_URL?: string;
@@ -259,7 +264,12 @@ export async function getAgentEnv(): Promise<CommunityAgentEnv> {
   try {
     const mod = await import("@opennextjs/cloudflare");
     const ctx = await mod.getCloudflareContext({ async: true });
-    return ctx.env as CommunityAgentEnv;
+    const env = ctx.env as CommunityAgentEnv;
+    // `next dev` proxies bindings through wrangler, which cannot run a
+    // Durable Object class defined in this Worker's own entry; claims use
+    // the KV fallback there.
+    if (process.env.NODE_ENV === "development") return { ...env, DRAFT_CLAIM_LOCK: undefined };
+    return env;
   } catch {
     return {
       DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
@@ -383,59 +393,105 @@ export async function markDraftResolved(
 
 /**
  * A hold on one draft identity while a maintainer action (post or discard)
- * runs. It is a single KV key holding the claiming request's random token.
+ * runs. With the `DRAFT_CLAIM_LOCK` Durable Object bound it is a lease in
+ * that object (`lock` is set); without it, a KV key holding the claiming
+ * request's `<action>:<random>` token.
  */
 export interface DraftClaim {
   key: string;
   token: string;
+  lock?: DraftClaimLockStub;
 }
 
 /**
  * Why a claim was not taken:
- * - `held`: another request's claim is visible (a post in flight, or one whose
- *   outcome is unknown, which holds the draft until the claim expires).
+ * - `held`: another request holds the draft (a post or discard in flight, one
+ *   whose outcome is unknown, which holds it until the lease expires, or one
+ *   that just finished). `holder` is that request's action, when known.
  * - `resolved`: a decision (posted, discarded, a post in flight) exists.
- * - `unconfirmed`: this request could not read its own claim back; nothing
- *   was done and a retry is safe.
+ * - `unconfirmed`: this request could not read its own KV claim back;
+ *   nothing was done and a retry is safe. The Durable Object path never
+ *   returns it.
  */
 export type DraftClaimResult =
   | { ok: true; claim: DraftClaim }
-  | { ok: false; reason: "held" | "unconfirmed" }
+  | { ok: false; reason: "held"; holder?: DraftLockAction }
+  | { ok: false; reason: "unconfirmed" }
   | { ok: false; reason: "resolved"; resolution: DraftResolution };
 
+/** Where claims live: the Durable Object when bound, else KV. */
+export interface DraftClaimStores {
+  CURATED_KV?: KVNamespace;
+  DRAFT_CLAIM_LOCK?: DraftClaimLockNamespace;
+}
+
 const CLAIM_PREFIX = "draft-claim:";
+// After an action whose decision is recorded, the Durable Object keeps
+// refusing claims this long, so a retry in a location whose KV has not yet
+// seen the decision marker (KV can lag 60 s or more) cannot act again.
+const RECORDED_CLAIM_HOLD_MS = 2 * 60 * 1000;
 
 function claimKey(type: AgentDraftType, id: string): string {
   return CLAIM_PREFIX + draftKey(type, id).slice("draft:".length);
 }
 
+function claimHolder(token: string | null): DraftLockAction | undefined {
+  const action = token?.split(":", 1)[0];
+  return action === "post" || action === "discard" ? action : undefined;
+}
+
 /**
  * Claim a draft before acting on it.
  *
- * This is best effort, not a lock. Workers KV has no compare-and-set: a
- * write is usually visible at once to reads in the location that made it,
- * but can take 60 seconds or more to reach other locations, and list results
- * can lag even locally. So the claim uses only get and put on one key:
- * refuse if a claim is already visible, write our token, and proceed only if
- * reading the key back returns our token and no decision has been recorded.
- * That stops the double-post cases this admin page actually produces (a
- * second tab, a retry, a discard during a post), since each re-reads a key
- * that a finished request wrote. Two requests whose writes land within the
- * same moment, or that run in different locations, can still both proceed;
- * a Durable Object would be needed to rule that out.
+ * With the `DRAFT_CLAIM_LOCK` Durable Object bound (production, once the
+ * binding and its migration are deployed) the claim is exclusive: one object
+ * per draft identity grants the lease to exactly one request, and the lease
+ * expires after 15 minutes so a crashed or unknown-outcome post cannot wedge
+ * the draft for good. After the lease, the KV decision marker is still
+ * checked, so a decision recorded after the caller's own check wins.
  *
- * A released claim can also stay visible to a retry from another location
- * for up to about a minute, which surfaces as `held`.
+ * Without the binding (local dev, tests) the claim falls back to KV, which is
+ * best effort, not a lock. Workers KV has no compare-and-set: a write is
+ * usually visible at once to reads in the location that made it, but can
+ * take 60 seconds or more to reach other locations, and list results can lag
+ * even locally. So the fallback uses only get and put on one key: refuse if a
+ * claim is already visible, write our token, and proceed only if reading the
+ * key back returns our token and no decision has been recorded. That stops
+ * the sequential cases (a second tab, a retry, a discard during a post), but
+ * two requests whose writes land within the same moment, or that run in
+ * different locations, can both proceed.
  */
 export async function claimDraft(
-  kv: KVNamespace | undefined,
+  stores: DraftClaimStores,
   type: AgentDraftType,
-  id: string
+  id: string,
+  action: DraftLockAction
 ): Promise<DraftClaimResult> {
-  const token = crypto.randomUUID();
-  if (!kv) return { ok: true, claim: { key: "", token } };
+  const token = `${action}:${crypto.randomUUID()}`;
   const key = claimKey(type, id);
-  if (await kv.get(key)) return { ok: false, reason: "held" };
+  const kv = stores.CURATED_KV;
+
+  if (stores.DRAFT_CLAIM_LOCK) {
+    const ns = stores.DRAFT_CLAIM_LOCK;
+    const lock = ns.get(ns.idFromName(key));
+    const granted = await lock.act({ op: "claim", token, action, leaseMs: POSTING_CLAIM_TTL_SEC * 1000 });
+    if (!granted.ok) return { ok: false, reason: "held", holder: granted.holder };
+    const claim: DraftClaim = { key, token, lock };
+    const drop = () => lock.act({ op: "release", token, holdMs: 0 }).catch(() => undefined);
+    const resolution = await getDraftResolution(kv, type, id).catch(async (e) => {
+      await drop();
+      throw e;
+    });
+    if (resolution) {
+      await drop();
+      return { ok: false, reason: "resolved", resolution };
+    }
+    return { ok: true, claim };
+  }
+
+  if (!kv) return { ok: true, claim: { key: "", token } };
+  const visible = await kv.get(key);
+  if (visible) return { ok: false, reason: "held", holder: claimHolder(visible) };
   await kv.put(key, token, { expirationTtl: POSTING_CLAIM_TTL_SEC });
   const seen = await kv.get(key);
   if (seen !== token) {
@@ -445,7 +501,7 @@ export async function claimDraft(
       await kv.delete(key).catch(() => undefined);
       return { ok: false, reason: "unconfirmed" };
     }
-    return { ok: false, reason: "held" };
+    return { ok: false, reason: "held", holder: claimHolder(seen) };
   }
   // A decision recorded after the caller's own check still wins.
   const resolution = await getDraftResolution(kv, type, id).catch(async (e) => {
@@ -459,8 +515,21 @@ export async function claimDraft(
   return { ok: true, claim: { key, token } };
 }
 
-/** Give up a claim, for an action that definitely did not happen or is recorded. */
-export async function releaseDraftClaim(kv: KVNamespace | undefined, claim: DraftClaim): Promise<void> {
+/**
+ * Give up a claim, for an action that definitely did not happen or whose
+ * decision is recorded. Pass `recorded: true` in the second case: the Durable
+ * Object then holds the draft a little longer (RECORDED_CLAIM_HOLD_MS) while
+ * the KV marker propagates, instead of freeing it at once.
+ */
+export async function releaseDraftClaim(
+  kv: KVNamespace | undefined,
+  claim: DraftClaim,
+  opts: { recorded?: boolean } = {}
+): Promise<void> {
+  if (claim.lock) {
+    await claim.lock.act({ op: "release", token: claim.token, holdMs: opts.recorded ? RECORDED_CLAIM_HOLD_MS : 0 });
+    return;
+  }
   if (!kv || !claim.key) return;
   // Leave a claim another request has since written in place.
   if ((await kv.get(claim.key)) !== claim.token) return;
