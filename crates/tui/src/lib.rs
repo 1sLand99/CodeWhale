@@ -2551,6 +2551,13 @@ async fn run_async_main_dispatch(
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
                 initialize_cloud_facts(&config);
+                // #6705: OpenCode Zen's per-model wire comes from its
+                // Models.dev catalog. Seed the persisted snapshot (disk only,
+                // no network) so exec routes the models the picker offers
+                // instead of only the ones compiled into this build.
+                if config.api_provider() == crate::config::ApiProvider::OpencodeZen {
+                    crate::models_dev_live::maybe_load_persisted_cache();
+                }
                 let prompt = resolve_exec_prompt(&args)?;
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
                 validate_exec_tool_authority_resume(

@@ -310,6 +310,20 @@ pub struct ModelsDevProviderModel {
     /// Interleaved reasoning field hints.
     #[serde(default)]
     pub interleaved: Option<ModelsDevInterleaved>,
+    /// Per-model override of the provider's transport (`provider.npm`), used
+    /// when a gateway serves some models over a different wire than its
+    /// provider-level `npm` default (OpenCode Zen, #6705).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ModelsDevModelTransport>,
+}
+
+/// A Models.dev model row's `provider` override: the AI SDK package that
+/// serves this model when it differs from the provider default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelsDevModelTransport {
+    /// AI SDK package identifier, such as `@ai-sdk/anthropic`.
+    #[serde(default)]
+    pub npm: Option<String>,
 }
 
 impl ModelsDevProviderModel {

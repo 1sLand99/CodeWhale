@@ -57,11 +57,28 @@ impl fmt::Display for RouteError {
                 provider,
                 model,
                 endpoint_key,
-            } => write!(
-                f,
-                "model {model:?} on provider {} has unsupported or unproven endpoint {endpoint_key:?}",
-                provider.as_str()
-            ),
+            } => {
+                write!(
+                    f,
+                    "model {model:?} on provider {} has unsupported or unproven endpoint {endpoint_key:?}",
+                    provider.as_str()
+                )?;
+                // #6705: say which case this is, so a catalog Codewhale has not
+                // caught up with does not read as a broken install.
+                if endpoint_key == "unproven" {
+                    write!(
+                        f,
+                        ": no catalog Codewhale has loaded proves this model's wire protocol. \
+                         Refresh with `codewhale models --update`, or reach it through a \
+                         `kind = \"openai-compatible\"` provider with an explicit `wire`"
+                    )
+                } else {
+                    write!(
+                        f,
+                        ": the provider serves this model over a protocol Codewhale does not speak"
+                    )
+                }
+            }
         }
     }
 }
