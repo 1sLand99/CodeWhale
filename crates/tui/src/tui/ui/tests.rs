@@ -2524,6 +2524,47 @@ fn failed_workflow_run_raises_a_sticky_error() {
 }
 
 #[test]
+fn failed_workflow_toast_names_the_agents_cause_not_the_aggregate() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".to_string());
+    let events = [
+        serde_json::json!({"type": "run_started", "at_ms": 1, "workflow_goal": "Audit"}),
+        serde_json::json!({"type": "task_started", "at_ms": 2, "task_id": "t1", "label": "a"}),
+        serde_json::json!({"type": "task_started", "at_ms": 2, "task_id": "t2", "label": "b"}),
+        serde_json::json!({
+            "type": "task_completed", "at_ms": 300, "task_id": "t1", "status": "failed",
+            "reason": "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Top up."
+        }),
+        serde_json::json!({
+            "type": "task_completed", "at_ms": 300, "task_id": "t2", "status": "failed",
+            "reason": "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Top up."
+        }),
+        serde_json::json!({
+            "type": "run_completed", "at_ms": 356, "status": "failed",
+            "error": "no task produced a result: all 2 task(s) failed and 1 fan-out(s) lost every slot"
+        }),
+    ];
+    for event in &events {
+        assert!(apply_owned_workflow_ui_event(
+            &mut app,
+            "session-a",
+            "workflow-auth",
+            event,
+        ));
+    }
+    let sticky = app.sticky_status.as_ref().expect("failed run is loud");
+    // The toast text still passes the key-based secret redactor, which masks
+    // whatever follows an `Authorization …:` key; the cause's name survives.
+    assert!(
+        sticky.text.contains("Authorization failed")
+            && !sticky.text.contains("no task produced a result")
+            && !sticky.text.contains("[auth]"),
+        "the toast must carry the same cause as the workbar: {:?}",
+        sticky.text
+    );
+}
+
+#[test]
 fn successful_workflow_run_raises_no_failure_toast() {
     let mut app = create_test_app();
     app.current_session_id = Some("session-a".to_string());
