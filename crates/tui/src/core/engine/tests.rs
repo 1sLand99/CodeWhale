@@ -11121,13 +11121,106 @@ fn path_alias_spellings_meet_the_same_typed_file_rules() {
             json!({"action": "write", "filePath": "src/lib.rs", "content": "new\n"}),
         ),
     ] {
-        let decision =
-            file_tool_ask_rule_decision(&config, tool, &input, Path::new("/repo"), ApprovalMode::Auto);
+        let decision = file_tool_ask_rule_decision(
+            &config,
+            tool,
+            &input,
+            Path::new("/repo"),
+            ApprovalMode::Auto,
+        );
         assert_eq!(decision, expected, "{tool} {input}");
     }
     assert_eq!(
         file_write_tool_target_paths("write_file", &json!({"filePath": "src/lib.rs"})),
         Some(vec!["src/lib.rs".to_string()])
+    );
+}
+
+#[test]
+fn file_path_aliases_preserve_deny_allow_and_patch_targets() {
+    use codewhale_execpolicy::{ExecPolicyEngine, PermissionAction, Ruleset, ToolAskRule};
+
+    for policy_tool in [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_dir",
+        "file_search",
+        "grep_files",
+        "apply_patch",
+    ] {
+        for action in [PermissionAction::Deny, PermissionAction::Allow] {
+            let mut rule = ToolAskRule::file_path(policy_tool, "protected.txt");
+            rule.action = action;
+            let policy = ExecPolicyEngine::with_rulesets(vec![
+                Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+            ]);
+            for key in ["path", "file_path", "filePath"] {
+                let mut input = json!({key: "protected.txt"});
+                if policy_tool == "apply_patch" {
+                    input["patch"] = json!("@@ -1 +1 @@\n-original\n+changed\n");
+                }
+                let decision = file_tool_ask_rule_decision_for_policy(
+                    &policy,
+                    policy_tool,
+                    &input,
+                    Path::new("/repo"),
+                    ApprovalMode::Bypass,
+                );
+                match action {
+                    PermissionAction::Deny => assert!(
+                        matches!(decision, Some(ToolAskRuleDecision::Block(_))),
+                        "{policy_tool} {key}: {decision:?}"
+                    ),
+                    PermissionAction::Allow => assert_eq!(
+                        decision,
+                        Some(ToolAskRuleDecision::Allow),
+                        "{policy_tool} {key}"
+                    ),
+                    PermissionAction::Ask => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn file_write_without_resolvable_target_is_blocked_before_execution() {
+    let policy = codewhale_execpolicy::ExecPolicyEngine::new(vec![], vec![]);
+    for mode in [
+        ApprovalMode::Suggest,
+        ApprovalMode::Auto,
+        ApprovalMode::Bypass,
+        ApprovalMode::Never,
+    ] {
+        for (tool, input) in [
+            ("write_file", json!({"content": "changed"})),
+            (
+                "edit_file",
+                json!({"filePath": " ", "search": "a", "replace": "b"}),
+            ),
+            (
+                "File",
+                json!({"action": "write", "file_path": false, "content": "changed"}),
+            ),
+            ("apply_patch", json!({"patch": "not a patch"})),
+        ] {
+            let decision = file_tool_ask_rule_decision_for_policy(
+                &policy,
+                tool,
+                &input,
+                Path::new("/repo"),
+                mode,
+            );
+            assert!(
+                matches!(decision, Some(ToolAskRuleDecision::Block(_))),
+                "{tool} {mode:?}: {decision:?}"
+            );
+        }
+    }
+    assert_eq!(
+        file_tool_permission_paths("list_dir", &json!({})),
+        Some(vec![".".to_string()])
     );
 }
 
@@ -14734,7 +14827,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
         ..EngineConfig::default()
     };
     let tool_input =
-        json!({"action": "write", "path": "CHANGELOG.md", "content": "must not be written\n"});
+        json!({"action": "write", "filePath": "CHANGELOG.md", "content": "must not be written\n"});
     assert_eq!(
         file_tool_ask_rule_decision(
             &engine_config,
@@ -14759,6 +14852,56 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
     .await;
 
     assert!(!target.exists(), "repo-law block must prevent the write");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn full_access_file_rules_block_alias_and_parent_paths_without_mutation() {
+    use codewhale_execpolicy::{ExecPolicyEngine, PermissionAction, Ruleset, ToolAskRule};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    fs::create_dir(workspace.path().join("sub")).expect("fixture directory");
+    let target = workspace.path().join("protected.txt");
+    fs::write(&target, "original\n").expect("fixture contents");
+    let rules = ["write_file", "edit_file", "apply_patch"]
+        .into_iter()
+        .map(|tool| {
+            let mut rule = ToolAskRule::file_path(tool, "protected.txt");
+            rule.action = PermissionAction::Deny;
+            rule
+        })
+        .collect();
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        exec_policy_engine: ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![]).with_ask_rules(rules),
+        ]),
+        ..EngineConfig::default()
+    };
+    assert_full_access_model_tool_batch_is_blocked(
+        engine_config,
+        vec![
+            ("write_file", json!({"filePath": "protected.txt", "content": "changed\n"})),
+            ("File", json!({"action": "edit", "file_path": "protected.txt", "search": "original", "replace": "changed"})),
+            ("apply_patch", json!({"filePath": "protected.txt", "patch": "@@ -1 +1 @@\n-original\n+changed\n"})),
+            ("write", json!({"path": "sub/../protected.txt", "content": "changed\n"})),
+        ],
+        &[
+            ("write_file", "Permission rule 'tool=write_file path=protected.txt' explicitly denies"),
+            ("File", "Permission rule 'tool=edit_file path=protected.txt' explicitly denies"),
+            ("apply_patch", "Permission rule 'tool=apply_patch path=protected.txt' explicitly denies"),
+            ("write", "Permission rule 'tool=write_file path=protected.txt' explicitly denies"),
+        ],
+        "explicitly denies this invocation",
+    ).await;
+    assert_eq!(
+        fs::read_to_string(&target).expect("retained contents"),
+        "original\n"
+    );
 }
 
 #[tokio::test]

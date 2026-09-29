@@ -156,9 +156,8 @@ pub(super) const PATH_ALIASES: &[ParamAlias] =
 ///
 /// Policy gates (typed file rules, the workspace-write carve-out, repo law,
 /// Auto-Review) must judge the path the tool will act on. Reading only the
-/// raw `path` key let a `file_path`/`filePath` spelling carry its target past
-/// every path-scoped rule. A conflicting pair, which `execute` refuses, is
-/// returned unchanged.
+/// raw `path` key misses accepted `file_path`/`filePath` spellings. A
+/// conflicting pair, which `execute` refuses, is returned unchanged.
 pub(crate) fn with_canonical_path_argument(input: &Value) -> Cow<'_, Value> {
     if !PATH_ALIASES
         .iter()

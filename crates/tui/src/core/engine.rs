@@ -7875,6 +7875,12 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
     let paths = file_tool_permission_paths(policy_tool_name, tool_input)?;
     if paths.is_empty() {
+        if matches!(policy_tool_name, "write_file" | "edit_file" | "apply_patch") {
+            return Some(ToolAskRuleDecision::Block(
+                "File write has no resolvable target; provide an explicit path or valid patch."
+                    .to_string(),
+            ));
+        }
         return tool_ask_rule_decision_for_context(
             exec_policy_engine,
             policy_tool_name,
