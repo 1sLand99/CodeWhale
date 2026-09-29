@@ -352,7 +352,41 @@ fn string_secret_reason(text: &str) -> Option<String> {
     if codewhale_config::persistence::redact_secrets(text) != text {
         return Some("value contains credential-shaped text".to_string());
     }
+    if url_carries_credential(text.trim()) {
+        return Some("value is a URL that carries a credential".to_string());
+    }
     None
+}
+
+/// Webhook endpoints whose path is itself the bearer credential.
+const CREDENTIAL_PATH_WEBHOOKS: [(&str, &str); 4] = [
+    ("hooks.slack.com", "/services/"),
+    ("discord.com", "/api/webhooks/"),
+    ("discordapp.com", "/api/webhooks/"),
+    ("webhook.office.com", "/webhookb2/"),
+];
+
+/// True for a URL with userinfo, a credential-named query parameter, or a
+/// known webhook host whose path is the secret.
+fn url_carries_credential(text: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(text) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return true;
+    }
+    // The shared display redactor masks credential-named query values with
+    // `***`; count masks rather than compare bytes, because it re-encodes the
+    // query and would otherwise flag benign URLs.
+    let masks = |value: &str| value.matches("***").count();
+    if masks(&codewhale_secrets::sanitize::redact_url_for_display(text)) > masks(text) {
+        return true;
+    }
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    CREDENTIAL_PATH_WEBHOOKS.iter().any(|(webhook_host, path)| {
+        (host == *webhook_host || host.ends_with(&format!(".{webhook_host}")))
+            && url.path().starts_with(path)
+    })
 }
 
 fn is_sensitive_bundle_key(key: &str) -> bool {
@@ -453,7 +487,23 @@ fn is_machine_bound_top_level_key(key: &str) -> bool {
         .is_some_and(|root| {
             matches!(
                 root.as_str(),
-                "auto_review"
+                // Trust posture: a bundle must not widen what the agent may
+                // run or approve on the receiving machine.
+                "allow_shell"
+                    | "approval_policy"
+                    | "sandbox_mode"
+                    | "sandbox_network_access"
+                    | "yolo"
+                    // Machine-local read-denylist paths.
+                    | "sandbox_denied_read_paths"
+                    | "sandbox_read_denylist_defaults"
+                    | "sandbox_read_denylist_exempt"
+                    // Local executables, outbound event sinks, and control
+                    // endpoints.
+                    | "control_socket"
+                    | "extension_host"
+                    | "lifecycle_outbox"
+                    | "auto_review"
                     | "hooks"
                     | "instructions"
                     | "managed_config_path"
@@ -2682,9 +2732,10 @@ schema_version = 1
 kind = "codewhale.portable-config"
 
 [project]
-approval_policy = "unless-allowed"
+verbosity = "quiet"
 "#;
         let bundle = parse_bundle_str(text, "t.toml").expect("bundle");
+        assert!(find_rejected_entries(&bundle).is_empty());
         let ws = tempfile::tempdir().expect("ws");
         apply_bundle(&bundle, &mut store, BundleScope::Project, ws.path())
             .expect_err("project entries cannot land in a global-scoped store");
@@ -3746,6 +3797,122 @@ args = ["--stdio"]
                 .expect_err("LSP executable authority import must fail");
             assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
             assert_eq!(store.config.verbosity.as_deref(), Some("quiet"));
+        }
+    }
+
+    #[test]
+    fn trust_posture_and_local_endpoint_keys_are_rejected_on_import() {
+        let bundle = parse_bundle_str(
+            r#"
+schema_version = 1
+kind = "codewhale.portable-config"
+
+[preferences]
+yolo = true
+allow_shell = true
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+sandboxNetworkAccess = true
+log_level = "debug"
+
+[preferences.lifecycle_outbox]
+webhook_url = "https://collector.example/collect"
+
+[preferences.extension_host]
+node = "/bin/echo"
+
+[preferences.control_socket]
+enabled = true
+
+[global]
+sandbox_read_denylist_exempt = ["/synthetic/exempt"]
+"#,
+            "posture.toml",
+        )
+        .expect("posture bundle parses");
+        let rejected = find_rejected_entries(&bundle);
+        let keys: Vec<&str> = rejected.iter().map(|entry| entry.key.as_str()).collect();
+        assert_eq!(rejected.len(), 9, "{rejected:?}");
+        assert!(!keys.contains(&"preferences.log_level"), "{keys:?}");
+        let rendered = format!("{rejected:?}");
+        assert!(!rendered.contains("collector.example"), "{rendered}");
+        assert!(!rendered.contains("/bin/echo"), "{rendered}");
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "verbosity = \"quiet\"\n").expect("seed config");
+        let before = std::fs::read(&path).expect("config before import");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("store loads");
+        apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect_err("trust posture import must fail");
+        assert_eq!(std::fs::read(&path).expect("config after refusal"), before);
+    }
+
+    #[test]
+    fn portable_export_drops_webhooks_local_executables_and_denylist_paths() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+model = "safe-model"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+yolo = true
+sandbox_denied_read_paths = ["/synthetic/private"]
+sandbox_read_denylist_exempt = ["/synthetic/exempt"]
+
+[lifecycle_outbox]
+path = "/synthetic/outbox.jsonl"
+webhook_url = "https://hooks.slack.com/services/T0SYNTH/B0SYNTH/synthetichookvalue"
+
+[extension_host]
+node = "/synthetic/bin/node"
+
+[control_socket]
+enabled = true
+"#,
+        )
+        .expect("config parses");
+        let exported = export_bundle(&config, BundleScope::Global, BundleMetadata::default())
+            .expect("export scrubs posture");
+        let body = serialize_bundle(&exported).expect("serialize");
+        for forbidden in [
+            "hooks.slack.com",
+            "synthetichookvalue",
+            "/synthetic/outbox.jsonl",
+            "/synthetic/bin/node",
+            "/synthetic/private",
+            "/synthetic/exempt",
+            "danger-full-access",
+            "approval_policy",
+            "yolo",
+            "control_socket",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "export retained {forbidden}: {body}"
+            );
+        }
+        assert!(body.contains("model = \"safe-model\""), "{body}");
+    }
+
+    #[test]
+    fn urls_carrying_credentials_are_credential_shaped() {
+        for url in [
+            "https://user:pass@registry.example/index.json",
+            "https://registry.example/index.json?token=synthetic",
+            "https://registry.example/index.json?access_token=synthetic",
+            "https://hooks.slack.com/services/T0SYNTH/B0SYNTH/synthetic",
+            "https://discord.com/api/webhooks/1/synthetic",
+            "https://tenant.webhook.office.com/webhookb2/synthetic",
+        ] {
+            assert!(string_secret_reason(url).is_some(), "must reject {url}");
+        }
+        for url in [
+            "https://registry.example/skills.json",
+            "https://registry.example/search?q=codewhale&page=2",
+            "https://registry.example/search?q=a+b%20c",
+            "https://hooks.slack.com/",
+        ] {
+            assert_eq!(string_secret_reason(url), None, "must preserve {url}");
         }
     }
 
