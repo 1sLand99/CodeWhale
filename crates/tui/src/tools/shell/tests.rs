@@ -263,6 +263,7 @@ fn contract_bash_nonzero_is_an_error_with_status_after_output() {
         },
         None,
         &ToolContext::new("."),
+        None,
     )
     .expect_err("nonzero must be a failed tool call");
     assert!(
@@ -290,6 +291,160 @@ async fn lowercase_bash_returns_one_ordered_stream() {
         .await
         .expect("bash");
     assert_eq!(result.content, "out-1err-2out-3");
+}
+
+/// #6689: the receipt is exact-or-absent, fits the hook bound after JSON
+/// escaping, and reports how the run ended without inventing an exit code.
+#[test]
+fn execution_receipt_is_bounded_and_reports_truthful_state() {
+    let tmp = tempdir().unwrap();
+    let identity = |command: &str, cwd: &Path| ShellExecutionIdentity {
+        command: command.to_string(),
+        cwd: cwd.to_path_buf(),
+    };
+    let cwd = tmp.path().canonicalize().unwrap();
+    let mut result = failed_network_shell_result(
+        &"\u{1f40b}\n\"\u{1}".repeat(12_000),
+        &"err\n".repeat(12_000),
+    );
+    result.sandboxed = false;
+    result.sandbox_type = None;
+    result.stdout_truncated = true;
+    result.exit_code = None;
+    result.status = ShellStatus::Killed;
+
+    let receipt = shell_execution_receipt(&identity("printf hi", &cwd), &result, "separate")
+        .expect("receipt");
+    let encoded = serde_json::to_string(&receipt).unwrap();
+    assert!(encoded.len() <= crate::hooks::HOOK_EXECUTION_RECEIPT_MAX_BYTES);
+    assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), receipt);
+    assert_eq!(receipt["schema_version"], 1);
+    assert_eq!(receipt["command"], "printf hi");
+    assert_eq!(receipt["cwd"], cwd.to_str().unwrap());
+    assert_eq!(receipt["state"], "interrupted");
+    assert!(receipt["exit_code"].is_null());
+    assert_eq!(receipt["stdout_truncated"], true);
+    assert_eq!(receipt["stderr_truncated"], true);
+    assert!(
+        receipt["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("[receipt preview truncated]")
+    );
+
+    // A nonzero exit is a completed run, and a 64-bit code survives.
+    result.status = ShellStatus::Failed;
+    result.exit_code = Some(3_221_225_477);
+    let receipt = shell_execution_receipt(&identity("x", &cwd), &result, "combined").unwrap();
+    assert_eq!(receipt["state"], "completed");
+    assert_eq!(receipt["exit_code"], 3_221_225_477_i64);
+    assert_eq!(receipt["output_kind"], "combined");
+
+    result.status = ShellStatus::TimedOut;
+    result.exit_code = None;
+    let receipt = shell_execution_receipt(&identity("x", &cwd), &result, "separate").unwrap();
+    assert_eq!(receipt["state"], "interrupted");
+
+    // Absent, never truncated or guessed.
+    result.status = ShellStatus::Running;
+    assert!(shell_execution_receipt(&identity("x", &cwd), &result, "separate").is_none());
+    result.status = ShellStatus::Completed;
+    for command in ["", "bad\0command"] {
+        assert!(shell_execution_receipt(&identity(command, &cwd), &result, "separate").is_none());
+    }
+    let long = "x".repeat(EXECUTION_RECEIPT_IDENTITY_MAX_BYTES + 1);
+    assert!(shell_execution_receipt(&identity(&long, &cwd), &result, "separate").is_none());
+    let long_cwd = PathBuf::from(format!("/{long}"));
+    assert!(shell_execution_receipt(&identity("x", &long_cwd), &result, "separate").is_none());
+    assert!(
+        shell_execution_receipt(&identity("x", Path::new("relative")), &result, "separate")
+            .is_none()
+    );
+    result.sandboxed = true;
+    assert!(shell_execution_receipt(&identity("x", &cwd), &result, "separate").is_none());
+}
+
+/// #6689: a settled foreground run records the command and directory the
+/// process manager spawned, on success and on failure, and background runs
+/// carry no receipt.
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_shell_results_carry_the_spawned_execution_receipt() {
+    let tmp = tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("child")).unwrap();
+    let mut context = ToolContext::new(tmp.path().to_path_buf())
+        .with_elevated_sandbox_policy(ExecutionSandboxPolicy::DangerFullAccess);
+    context.auto_approve = true;
+    let child = tmp.path().join("child").canonicalize().unwrap();
+    let receipt_cwd = |receipt: &Value| {
+        Path::new(receipt["cwd"].as_str().expect("cwd"))
+            .canonicalize()
+            .unwrap()
+    };
+
+    let tool = BashTool::new("Bash");
+    let command = "printf effective; printf diagnostic >&2; exit 7";
+    let result = tool
+        .execute(json!({"command": command, "cwd": "child"}), &context)
+        .await
+        .unwrap();
+    let receipt = &result.metadata.as_ref().unwrap()["execution_receipt"];
+    assert_eq!(receipt["command"], command);
+    assert!(Path::new(receipt["cwd"].as_str().unwrap()).is_absolute());
+    assert_eq!(receipt_cwd(receipt), child);
+    assert_eq!(receipt["stdout"], "effective");
+    assert_eq!(receipt["stderr"], "diagnostic");
+    assert_eq!(receipt["exit_code"], 7);
+    assert_eq!(receipt["state"], "completed");
+    assert_eq!(receipt["output_kind"], "separate");
+
+    let interrupted = tool
+        .execute(json!({"command": "kill -TERM $$"}), &context)
+        .await
+        .unwrap();
+    let receipt = &interrupted.metadata.as_ref().unwrap()["execution_receipt"];
+    assert_eq!(receipt["state"], "interrupted");
+    assert!(receipt["exit_code"].is_null());
+
+    let background = tool
+        .execute(
+            json!({"command": "printf background", "background": true}),
+            &context,
+        )
+        .await
+        .unwrap();
+    assert!(
+        background
+            .metadata
+            .as_ref()
+            .unwrap()
+            .get("execution_receipt")
+            .is_none()
+    );
+
+    // Lowercase `bash` shares one pipe: the preview is combined output, and a
+    // failing command's error still carries the receipt for hooks.
+    let result = LowercaseBashTool
+        .execute(
+            json!({"command": "printf merged; printf diagnostic >&2"}),
+            &context,
+        )
+        .await
+        .unwrap();
+    let receipt = &result.metadata.as_ref().unwrap()["execution_receipt"];
+    assert_eq!(receipt["output_kind"], "combined");
+    assert_eq!(receipt["stdout"], "mergeddiagnostic");
+    assert_eq!(receipt["stderr"], "");
+    assert_eq!(receipt["state"], "completed");
+    let error = LowercaseBashTool
+        .execute(json!({"command": "printf partial; exit 3"}), &context)
+        .await
+        .expect_err("nonzero exit is a failed bash call");
+    let receipt = &error.metadata().expect("failure metadata")["execution_receipt"];
+    assert_eq!(receipt["command"], "printf partial; exit 3");
+    assert_eq!(receipt["exit_code"], 3);
+    assert_eq!(receipt["state"], "completed");
+    assert_eq!(receipt_cwd(receipt), tmp.path().canonicalize().unwrap());
 }
 
 #[cfg(unix)]
@@ -2538,7 +2693,7 @@ fn contract_bash_denial_surfaces_the_escalation_shape() {
     let mut result = failed_network_shell_result("", "Operation not permitted");
     result.sandbox_denied = true;
 
-    let error = finish_contract_bash_result(result, None, &ctx)
+    let error = finish_contract_bash_result(result, None, &ctx, None)
         .expect_err("sandbox denial is a failed call");
 
     assert!(
