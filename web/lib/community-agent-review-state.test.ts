@@ -870,10 +870,13 @@ describe("admin claims with the DRAFT_CLAIM_LOCK Durable Object bound", () => {
 
   it("refuses a discard while a post holds the draft, and a post after a discard", async () => {
     const { kv, posts } = await lockedAdmin();
-    const [post, discard] = await Promise.all([
-      act(kv, { action: "post", draftKey: KEY }),
-      act(kv, { action: "discard", draftKey: KEY }),
-    ]);
+    // Send the discard only once the post holds the draft (it has reached
+    // GitHub), so the outcome does not depend on which request the
+    // scheduler delivers to the lock first.
+    const postP = act(kv, { action: "post", draftKey: KEY });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    const discard = await act(kv, { action: "discard", draftKey: KEY });
+    const post = await postP;
     expect([post.status, discard.status]).toEqual([200, 409]);
     expect(posts).toHaveLength(1);
 
