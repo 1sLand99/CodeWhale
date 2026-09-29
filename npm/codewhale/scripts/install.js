@@ -650,6 +650,12 @@ function httpRequest(rawUrl, opts = {}) {
       if (stallMs <= 0) return;
       if (stallTimer) clearTimeout(stallTimer);
       stallTimer = setTimeout(() => {
+        // A body the caller has paused (a slow disk pushing back through
+        // `pipe`) is not a stalled network. The total budget still bounds it.
+        if (handedOff && res && res.readableFlowing === false) {
+          armStallTimer();
+          return;
+        }
         fail(new DownloadTimeoutError(
           `download stalled — no bytes received for ${stallMs} ms ` +
           `(set CODEWHALE_DOWNLOAD_STALL_MS to raise it; total budget is ${totalTimeoutMs} ms)`,

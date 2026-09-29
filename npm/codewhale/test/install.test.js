@@ -411,3 +411,44 @@ test("a body that trickles past the total budget fails with the total timeout", 
     return true;
   });
 });
+
+test("a body paused by a slow consumer is not reported as a stall", { timeout: 5000 }, async (t) => {
+  const http = require("node:http");
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/octet-stream" });
+    res.write("first chunk ");
+    setTimeout(() => res.end("rest of the body"), 50);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  const noProxy = process.env.NO_PROXY;
+  process.env.NO_PROXY = "*";
+  t.after(() => {
+    if (noProxy === undefined) delete process.env.NO_PROXY;
+    else process.env.NO_PROXY = noProxy;
+  });
+  const { response } = await _internal.httpRequest(
+    `http://127.0.0.1:${server.address().port}/asset`,
+    { stallMs: 150, totalTimeoutMs: 30000 },
+  );
+  // Hold the stream paused for several stall budgets, as `pipe` does while a
+  // slow disk drains, then let it flow again.
+  let body = "";
+  const done = new Promise((resolve, reject) => {
+    response.on("data", (chunk) => {
+      body += chunk;
+    });
+    response.on("end", resolve);
+    response.on("error", reject);
+  });
+  response.resume();
+  response.once("data", () => {
+    response.pause();
+    setTimeout(() => response.resume(), 600);
+  });
+  await done;
+  assert.equal(body, "first chunk rest of the body");
+});
