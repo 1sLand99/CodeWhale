@@ -16,6 +16,7 @@
 //! - `q` / Esc — close pager
 
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -50,50 +51,90 @@ struct PagerDestructiveAction {
 #[derive(Debug, Clone)]
 pub(crate) struct PagerPage {
     title: String,
-    /// Sanitized source of a text page. Its display rows are re-wrapped from
-    /// this to the width the body really gets at render time, and `c` / `y`
-    /// copy it verbatim when no explicit copy payload is attached.
-    source: Option<String>,
+    /// What the page shows. Its display rows are wrapped from this to the
+    /// width the body really gets at render time, so one row is one scroll
+    /// step whatever the terminal width.
+    source: PagerSource,
+    /// Width to lay the page out at before its first render (`0`: unwrapped).
+    first_width: usize,
     rows: RefCell<PagerRows>,
     export_markdown: Option<String>,
     copy_text: Option<String>,
     answer_text: Option<String>,
 }
 
-/// The display rows of one page and the column width they were wrapped to.
-/// Styled-line pages carry `width == 0` and are never re-wrapped.
 #[derive(Debug, Clone)]
+enum PagerSource {
+    /// Sanitized text; `c` / `y` copy it verbatim when no explicit copy
+    /// payload is attached.
+    Text(String),
+    /// Pre-styled lines, wrapped with their styles intact.
+    Lines(Vec<Line<'static>>),
+}
+
+/// The display rows of one page and the column width they were wrapped to.
+#[derive(Debug, Clone, Default)]
 struct PagerRows {
-    width: usize,
-    lines: Vec<Line<'static>>,
+    /// `None` until the page is first laid out.
+    width: Option<usize>,
     plain: Vec<String>,
+    /// Styled rows of a styled-line page; text pages paint `plain`.
+    styled: Vec<Line<'static>>,
+    /// The source line each row was wrapped from, so a re-wrap can keep the
+    /// same line at the top of the view.
+    origin: Vec<usize>,
 }
 
 impl PagerRows {
-    fn from_lines(lines: Vec<Line<'static>>) -> Self {
-        let plain = lines.iter().map(line_to_string).collect();
-        Self {
-            width: 0,
-            lines,
-            plain,
+    fn wrap_text(source: &str, width: usize) -> Self {
+        let mut rows = Self {
+            width: Some(width),
+            ..Self::default()
+        };
+        for (line_index, raw) in source.lines().enumerate() {
+            for row in wrap_text(raw, width) {
+                rows.plain.push(row);
+                rows.origin.push(line_index);
+            }
         }
+        rows
     }
 
-    fn wrap(source: &str, width: usize) -> Self {
-        let width = width.max(1);
-        let plain: Vec<String> = source
-            .lines()
-            .flat_map(|raw| wrap_text(raw, width))
-            .collect();
-        let lines = plain
-            .iter()
-            .map(|row| Line::from(Span::raw(row.clone())))
-            .collect();
-        Self {
-            width,
-            lines,
-            plain,
+    fn wrap_lines(lines: &[Line<'static>], width: usize) -> Self {
+        let mut rows = Self {
+            width: Some(width),
+            ..Self::default()
+        };
+        for (line_index, line) in lines.iter().enumerate() {
+            let cells = display_cells(
+                line.spans
+                    .iter()
+                    .enumerate()
+                    .map(|(span, piece)| (piece.content.as_ref(), span)),
+            );
+            for range in wrap_ranges(&cells, width) {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let mut run = String::new();
+                let mut run_span = None;
+                for &(ch, span) in &cells[range] {
+                    if run_span.is_some_and(|current| current != span) {
+                        let style = line.spans[run_span.unwrap_or(span)].style;
+                        spans.push(Span::styled(std::mem::take(&mut run), style));
+                    }
+                    run_span = Some(span);
+                    run.push(ch);
+                }
+                if let Some(span) = run_span {
+                    spans.push(Span::styled(run, line.spans[span].style));
+                }
+                let mut row = Line::from(spans).style(line.style);
+                row.alignment = line.alignment;
+                rows.plain.push(line_to_string(&row));
+                rows.styled.push(row);
+                rows.origin.push(line_index);
+            }
         }
+        rows
     }
 }
 
@@ -103,45 +144,63 @@ impl PagerPage {
         // Keep the same terminal-injection boundary as the single-page path.
         let mut sanitized = String::with_capacity(text.len());
         crate::tui::osc8::strip_ansi_into(text, &mut sanitized);
-        // The caller's width is only a first guess; `render` re-wraps to the
-        // body's real content width before painting.
-        let rows = PagerRows::wrap(&sanitized, usize::from(width));
-        Self {
-            title: title.into(),
-            source: Some(sanitized),
-            rows: RefCell::new(rows),
-            export_markdown: None,
-            copy_text: None,
-            answer_text: None,
-        }
+        Self::new(title, PagerSource::Text(sanitized), usize::from(width))
     }
 
     fn from_lines(title: impl Into<String>, lines: Vec<Line<'static>>) -> Self {
+        Self::new(title, PagerSource::Lines(lines), 0)
+    }
+
+    fn new(title: impl Into<String>, source: PagerSource, first_width: usize) -> Self {
         Self {
             title: title.into(),
-            source: None,
-            rows: RefCell::new(PagerRows::from_lines(lines)),
+            source,
+            first_width,
+            rows: RefCell::default(),
             export_markdown: None,
             copy_text: None,
             answer_text: None,
         }
     }
 
-    /// Re-wrap a text page so no row is wider than `width`; the paragraph then
-    /// never wraps again and one row is one scroll step. Styled-line pages
-    /// keep their rows.
-    fn rewrap(&self, width: usize) {
-        let Some(source) = self.source.as_deref() else {
-            return;
-        };
-        let width = width.max(1);
-        if self.rows.borrow().width != width {
-            *self.rows.borrow_mut() = PagerRows::wrap(source, width);
+    /// Wrap the page to `width` columns (`0`: unwrapped) unless it already
+    /// is; the paragraph then never wraps a row again, so one row is one
+    /// scroll step. Returns whether the rows changed.
+    fn layout(&self, width: usize) -> bool {
+        if self.rows.borrow().width == Some(width) {
+            return false;
         }
+        *self.rows.borrow_mut() = match &self.source {
+            PagerSource::Text(source) => PagerRows::wrap_text(source, width),
+            PagerSource::Lines(lines) => PagerRows::wrap_lines(lines, width),
+        };
+        true
+    }
+
+    /// The display rows, laid out at the caller's width if no render has
+    /// fixed the real one yet.
+    fn rows(&self) -> std::cell::Ref<'_, PagerRows> {
+        if self.rows.borrow().width.is_none() {
+            self.layout(self.first_width);
+        }
+        self.rows.borrow()
     }
 
     fn row_count(&self) -> usize {
-        self.rows.borrow().lines.len()
+        self.rows().plain.len()
+    }
+
+    /// What `c` / `y` copy without an explicit payload: the source, never the
+    /// display wrapping.
+    fn source_text(&self) -> String {
+        match &self.source {
+            PagerSource::Text(source) => source.clone(),
+            PagerSource::Lines(lines) => lines
+                .iter()
+                .map(line_to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
     }
 
     pub(crate) fn with_export_markdown(mut self, markdown: impl Into<String>) -> Self {
@@ -167,13 +226,14 @@ impl PagerPage {
 pub struct PagerView {
     pages: Vec<PagerPage>,
     page_index: usize,
-    scroll: usize,
+    /// First visible row. A cell because a resize re-wraps the rows during
+    /// render, which remaps it to keep the same source line on top.
+    scroll: Cell<usize>,
     search_input: String,
-    search_matches: Vec<usize>,
-    /// Row width `search_matches` was computed against. A resize re-wraps the
-    /// rows, after which the stored indices no longer name the same rows.
-    search_width: usize,
-    search_index: usize,
+    /// Rows matching the search, ascending; recomputed when a re-wrap moves
+    /// the rows under them.
+    search_matches: RefCell<Vec<usize>>,
+    search_index: Cell<usize>,
     search_mode: bool,
     pending_g: bool,
     /// Cached visible content height from the last render. Used by paging
@@ -199,11 +259,10 @@ impl PagerView {
         Self {
             pages,
             page_index,
-            scroll: 0,
+            scroll: Cell::new(0),
             search_input: String::new(),
-            search_matches: Vec::new(),
-            search_width: 0,
-            search_index: 0,
+            search_matches: RefCell::default(),
+            search_index: Cell::new(0),
             search_mode: false,
             pending_g: false,
             last_visible_height: Cell::new(0),
@@ -312,43 +371,42 @@ impl PagerView {
             return;
         }
         self.page_index = page_index;
-        self.scroll = 0;
+        self.scroll.set(0);
         self.search_input.clear();
-        self.search_matches.clear();
-        self.search_index = 0;
+        self.search_matches.get_mut().clear();
+        self.search_index.set(0);
         self.search_mode = false;
         self.pending_g = false;
     }
 
     fn scroll_up(&mut self, amount: usize) {
-        self.scroll = self.scroll.saturating_sub(amount);
+        self.scroll.set(self.scroll.get().saturating_sub(amount));
     }
 
     fn scroll_down(&mut self, amount: usize, max_scroll: usize) {
-        self.scroll = (self.scroll + amount).min(max_scroll);
+        self.scroll
+            .set(self.scroll.get().saturating_add(amount).min(max_scroll));
     }
 
     fn scroll_to_top(&mut self) {
-        self.scroll = 0;
+        self.scroll.set(0);
     }
 
     fn scroll_to_bottom(&mut self, max_scroll: usize) {
-        self.scroll = max_scroll;
+        self.scroll.set(max_scroll);
     }
 
     /// Plain-text rendered body of the pager joined with `\n`. This reflects
     /// width-based display wrapping, so it is not what the clipboard gets:
-    /// an explicit copy payload wins, then a text page's own source.
+    /// an explicit copy payload wins, then the page's own source.
+    #[cfg(test)]
     pub fn body_text(&self) -> String {
-        self.current_page().rows.borrow().plain.join("\n")
+        self.current_page().rows().plain.join("\n")
     }
 
     fn clipboard_text(&self) -> String {
         let page = self.current_page();
-        page.copy_text
-            .clone()
-            .or_else(|| page.source.clone())
-            .unwrap_or_else(|| self.body_text())
+        page.copy_text.clone().unwrap_or_else(|| page.source_text())
     }
 
     /// The pager's title bar text. Used by tests to assert the raw-detail
@@ -386,70 +444,72 @@ impl PagerView {
     fn start_search(&mut self) {
         self.search_mode = true;
         self.search_input.clear();
-        self.search_matches.clear();
-        self.search_index = 0;
+        self.search_matches.get_mut().clear();
+        self.search_index.set(0);
     }
 
     fn update_search_matches(&mut self) {
-        let query = self.search_input.trim();
-        if query.is_empty() {
-            self.search_matches.clear();
-            self.search_index = 0;
-            return;
-        }
-        let lower = query.to_ascii_lowercase();
-        let rows = self.current_page().rows.borrow();
-        let matches = rows
-            .plain
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, line)| row_matches(line, &lower).then_some(idx))
-            .collect();
-        let width = rows.width;
-        drop(rows);
-        self.search_matches = matches;
-        self.search_width = width;
-        self.search_index = 0;
+        let matches = find_matches(&self.current_page().rows().plain, &self.search_input);
+        *self.search_matches.get_mut() = matches;
+        self.search_index.set(0);
     }
 
-    /// Recompute matches found before a resize re-wrapped the rows, keeping
-    /// the user's position in the match list as far as it still exists.
-    fn refresh_stale_search(&mut self) {
-        if self.search_matches.is_empty()
-            || self.search_width == self.current_page().rows.borrow().width
-        {
+    /// Wrap the current page to `width`. When that re-wraps it (a resize),
+    /// keep the same source line at the top of the view and the same match
+    /// selected, since the old row indices no longer name the same rows.
+    fn layout(&self, width: usize) {
+        let page = self.current_page();
+        let (top, current_match) = {
+            let rows = page.rows.borrow();
+            let origin = |row: usize| rows.origin.get(row).copied();
+            let current = self
+                .search_matches
+                .borrow()
+                .get(self.search_index.get())
+                .copied();
+            (origin(self.scroll.get()), current.and_then(origin))
+        };
+        if !page.layout(width) {
             return;
         }
-        let index = self.search_index;
-        self.update_search_matches();
-        self.search_index = index.min(self.search_matches.len().saturating_sub(1));
+        let rows = page.rows.borrow();
+        if let Some(top) = top {
+            self.scroll
+                .set(rows.origin.partition_point(|&line| line < top));
+        }
+        if !self.search_matches.borrow().is_empty() {
+            let matches = find_matches(&rows.plain, &self.search_input);
+            let index = current_match
+                .and_then(|line| matches.iter().position(|&row| rows.origin[row] >= line))
+                .unwrap_or(0);
+            *self.search_matches.borrow_mut() = matches;
+            self.search_index.set(index);
+        }
     }
 
     fn jump_to_match(&mut self) {
-        if let Some(&line) = self.search_matches.get(self.search_index) {
-            self.scroll = line;
+        if let Some(&row) = self.search_matches.get_mut().get(self.search_index.get()) {
+            self.scroll.set(row);
         }
     }
 
     fn next_match(&mut self) {
-        self.refresh_stale_search();
-        if self.search_matches.is_empty() {
+        let total = self.search_matches.get_mut().len();
+        if total == 0 {
             return;
         }
-        self.search_index = (self.search_index + 1) % self.search_matches.len();
+        self.search_index.set((self.search_index.get() + 1) % total);
         self.jump_to_match();
     }
 
     fn prev_match(&mut self) {
-        self.refresh_stale_search();
-        if self.search_matches.is_empty() {
+        let total = self.search_matches.get_mut().len();
+        if total == 0 {
             return;
         }
-        if self.search_index == 0 {
-            self.search_index = self.search_matches.len().saturating_sub(1);
-        } else {
-            self.search_index = self.search_index.saturating_sub(1);
-        }
+        let index = self.search_index.get();
+        self.search_index
+            .set(if index == 0 { total - 1 } else { index - 1 });
         self.jump_to_match();
     }
 }
@@ -479,8 +539,8 @@ impl ModalView for PagerView {
                     // off they re-enter `/` and re-type.
                     self.search_mode = false;
                     self.search_input.clear();
-                    self.search_matches.clear();
-                    self.search_index = 0;
+                    self.search_matches.get_mut().clear();
+                    self.search_index.set(0);
                     return ViewAction::None;
                 }
                 KeyCode::Backspace => {
@@ -783,7 +843,7 @@ impl ModalView for PagerView {
         if self.search_mode {
             // Reserve a row for the search prompt that gets pushed below.
             visible_height = visible_height.saturating_sub(1);
-        } else if !self.search_matches.is_empty() {
+        } else if !self.search_matches.borrow().is_empty() {
             // Reserve a row for the "match X/Y (n/N)" status; without this
             // the status line gets clipped on small popup heights and the
             // user can't see how many matches there are.
@@ -792,7 +852,7 @@ impl ModalView for PagerView {
         // Cache for paging keys; the value is treated as advisory and
         // clamped at use-time.
         self.last_visible_height.set(visible_height);
-        // Wrap text pages to the columns the body really gets. One column is
+        // Wrap the page to the columns the body really gets. One column is
         // always held back for the scroll rail, so the rail appearing never
         // makes the paragraph wrap a row again behind the scroll arithmetic.
         let body_width = if content.width >= 2 {
@@ -800,16 +860,21 @@ impl ModalView for PagerView {
         } else {
             content.width
         };
-        page.rewrap(usize::from(body_width));
+        self.layout(usize::from(body_width));
         let rows = page.rows.borrow();
-        let row_count = rows.lines.len();
+        let row_count = rows.plain.len();
         let max_scroll = row_count.saturating_sub(visible_height);
-        let scroll = self.scroll.min(max_scroll);
+        let scroll = self.scroll.get().min(max_scroll);
         let end = (scroll + visible_height).min(row_count);
-        let mut visible_lines = if rows.lines.is_empty() {
+        let mut visible_lines: Vec<Line<'static>> = if row_count == 0 {
             vec![Line::from("")]
+        } else if rows.styled.is_empty() {
+            rows.plain[scroll..end]
+                .iter()
+                .map(|row| Line::from(row.clone()))
+                .collect()
         } else {
-            rows.lines[scroll..end].to_vec()
+            rows.styled[scroll..end].to_vec()
         };
 
         // Highlight matched lines while the search prompt is closed and the
@@ -818,29 +883,16 @@ impl ModalView for PagerView {
         // highlighting is deferred to a follow-up — preserving the pre-styled
         // spans (assistant / system colors) through a substring re-style is
         // a separate concern.
-        if !self.search_mode && !self.search_matches.is_empty() {
-            // After a resize re-wrapped the rows the stored indices are stale
-            // until the next `n` / `N`; match rows by content meanwhile and
-            // mark no current row rather than the wrong one.
-            let fresh = self.search_width == rows.width;
-            let current_match_line = if fresh {
-                self.search_matches.get(self.search_index).copied()
-            } else {
-                None
-            };
-            let query = self.search_input.trim().to_ascii_lowercase();
+        let search_matches = self.search_matches.borrow();
+        if !self.search_mode && !search_matches.is_empty() {
+            let current_match_line = search_matches.get(self.search_index.get()).copied();
             for (visible_idx, line) in visible_lines.iter_mut().enumerate() {
                 let absolute_idx = scroll + visible_idx;
                 if absolute_idx >= row_count {
                     break;
                 }
                 // `search_matches` is built in ascending line order.
-                let is_match = if fresh {
-                    self.search_matches.binary_search(&absolute_idx).is_ok()
-                } else {
-                    row_matches(&rows.plain[absolute_idx], &query)
-                };
-                if !is_match {
+                if search_matches.binary_search(&absolute_idx).is_err() {
                     continue;
                 }
                 let is_current = current_match_line == Some(absolute_idx);
@@ -869,11 +921,11 @@ impl ModalView for PagerView {
                     .fg(palette::WHALE_ACTION)
                     .add_modifier(Modifier::BOLD),
             )));
-        } else if !self.search_matches.is_empty() {
+        } else if !search_matches.is_empty() {
             let status = format!(
                 "match {}/{} (n/N)",
-                self.search_index + 1,
-                self.search_matches.len()
+                self.search_index.get() + 1,
+                search_matches.len()
             );
             visible_lines.push(Line::from(Span::styled(
                 status,
@@ -901,101 +953,130 @@ fn line_to_string(line: &Line<'static>) -> String {
         .collect::<String>()
 }
 
-fn row_matches(row: &str, lower_query: &str) -> bool {
-    row.to_ascii_lowercase().contains(lower_query)
+/// Rows containing `query` (trimmed, ASCII case-insensitive), ascending.
+fn find_matches(rows: &[String], query: &str) -> Vec<usize> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, row)| row.to_ascii_lowercase().contains(&query).then_some(index))
+        .collect()
 }
 
-/// Wrap one source line to `width` columns without collapsing whitespace:
-/// indentation, aligned columns and repeated spaces survive, and only the
-/// whitespace at a soft break is consumed. Tabs expand to four columns, the
-/// width the rest of the TUI gives them (`ui_text::char_display_width`).
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let mut expanded = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '\t' => expanded.push_str("    "),
-            // A carriage return, form feed or line/paragraph separator must
-            // not reach a painted cell; it reads as the space it separates.
-            ch if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}') => {
-                expanded.push(' ');
+/// Columns between tab stops, the width the rest of the TUI gives a tab
+/// (`ui_text::char_display_width`).
+const TAB_STOP: usize = 4;
+
+/// The characters one source line paints, each tagged with the piece (span)
+/// it came from. Tabs advance to the next tab stop, so tab-aligned columns
+/// stay aligned; a carriage return, form feed or other control character or
+/// line/paragraph separator reads as the space it separates; bidirectional
+/// format characters, which would reorder the painted row, are dropped. The
+/// source itself is kept for copying.
+fn display_cells<'a>(pieces: impl Iterator<Item = (&'a str, usize)>) -> Vec<(char, usize)> {
+    let mut cells = Vec::new();
+    let mut column = 0;
+    for (text, tag) in pieces {
+        for ch in text.chars() {
+            match ch {
+                '\t' => {
+                    let advance = TAB_STOP - column % TAB_STOP;
+                    cells.extend(std::iter::repeat_n((' ', tag), advance));
+                    column += advance;
+                }
+                ch if crate::core::events::is_bidi_format_control(ch) => {}
+                ch if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}') => {
+                    cells.push((' ', tag));
+                    column += 1;
+                }
+                ch => {
+                    cells.push((ch, tag));
+                    column += ch.width().unwrap_or(0);
+                }
             }
-            ch => expanded.push(ch),
         }
     }
-    let text = expanded;
+    cells
+}
+
+/// Wrap one source line to `width` columns (`0`: unwrapped) without
+/// collapsing whitespace: indentation, aligned columns and repeated spaces
+/// survive, and only the whitespace at a soft break is consumed.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let cells = display_cells(std::iter::once((text, 0)));
+    wrap_ranges(&cells, width)
+        .into_iter()
+        .map(|range| cells[range].iter().map(|&(ch, _)| ch).collect())
+        .collect()
+}
+
+/// The cell ranges of each wrapped row; see [`wrap_text`].
+fn wrap_ranges(cells: &[(char, usize)], width: usize) -> Vec<Range<usize>> {
     if width == 0 {
-        return vec![text];
+        return std::iter::once(0..cells.len()).collect();
     }
-    let mut lines = Vec::new();
-    let mut current = String::new();
+    let cell_width = |index: usize| cells[index].0.width().unwrap_or(0);
+    let mut rows = Vec::new();
+    let mut current = 0..0;
     let mut current_width = 0usize;
     // Whether `current` holds more than indentation. A soft break is only
     // taken after real content; an over-wide indent or word is split instead.
     let mut has_content = false;
 
-    for run in whitespace_runs(&text) {
-        let is_space = run.starts_with(char::is_whitespace);
-        let run_width = run.width();
+    let mut run_start = 0;
+    while run_start < cells.len() {
+        let is_space = cells[run_start].0.is_whitespace();
+        let run_end = cells[run_start..]
+            .iter()
+            .position(|&(ch, _)| ch.is_whitespace() != is_space)
+            .map_or(cells.len(), |offset| run_start + offset);
+        let run = run_start..run_end;
+        run_start = run_end;
+        let run_width: usize = run.clone().map(cell_width).sum();
         if current_width + run_width <= width {
-            current.push_str(run);
+            current.end = run.end;
             current_width += run_width;
             has_content |= !is_space;
             continue;
         }
         if has_content {
-            let kept = current.trim_end().len();
-            current.truncate(kept);
-            lines.push(std::mem::take(&mut current));
+            let mut kept = current.end;
+            while kept > current.start && cells[kept - 1].0.is_whitespace() {
+                kept -= 1;
+            }
+            rows.push(current.start..kept);
             current_width = 0;
             has_content = false;
+            current = run.end..run.end;
             if is_space {
                 continue;
             }
+            current = run.clone();
             if run_width <= width {
-                current.push_str(run);
                 current_width = run_width;
                 has_content = true;
                 continue;
             }
+            current.end = run.start;
         }
-        push_word_breaking_chars(run, width, &mut current, &mut current_width, &mut lines);
+        // Split an over-wide word (or indent) between characters.
+        for index in run {
+            let char_width = cell_width(index);
+            if current_width + char_width > width && current_width > 0 {
+                rows.push(current.clone());
+                current = index..index;
+                current_width = 0;
+            }
+            current.end = index + 1;
+            current_width += char_width;
+        }
         has_content |= !is_space;
     }
 
-    lines.push(current);
-    lines
-}
-
-/// Split `text` into maximal alternating runs of whitespace and non-whitespace.
-fn whitespace_runs(text: &str) -> impl Iterator<Item = &str> {
-    let mut rest = text;
-    std::iter::from_fn(move || {
-        let is_space = rest.chars().next()?.is_whitespace();
-        let end = rest
-            .find(|ch: char| ch.is_whitespace() != is_space)
-            .unwrap_or(rest.len());
-        let (run, tail) = rest.split_at(end);
-        rest = tail;
-        Some(run)
-    })
-}
-
-fn push_word_breaking_chars(
-    word: &str,
-    width: usize,
-    current: &mut String,
-    current_width: &mut usize,
-    lines: &mut Vec<String>,
-) {
-    for ch in word.chars() {
-        let char_width = ch.width().unwrap_or(1);
-        if *current_width + char_width > width && *current_width > 0 {
-            lines.push(std::mem::take(current));
-            *current_width = 0;
-        }
-        current.push(ch);
-        *current_width += char_width;
-    }
+    rows.push(current);
+    rows
 }
 
 #[cfg(test)]
@@ -1151,49 +1232,49 @@ mod tests {
     fn j_scrolls_down_one_line() {
         let mut p = make_pager(50);
         let _ = p.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(p.scroll, 1);
+        assert_eq!(p.scroll.get(), 1);
     }
 
     #[test]
     fn k_scrolls_up_one_line() {
         let mut p = make_pager(50);
-        p.scroll = 5;
+        p.scroll.set(5);
         let _ = p.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(p.scroll, 4);
+        assert_eq!(p.scroll.get(), 4);
     }
 
     #[test]
     fn gg_jumps_to_top() {
         let mut p = make_pager(50);
-        p.scroll = 30;
+        p.scroll.set(30);
         let _ = p.handle_key(key(KeyCode::Char('g')));
         assert!(p.pending_g, "first 'g' should arm pending_g");
-        assert_eq!(p.scroll, 30, "first 'g' alone must not scroll");
+        assert_eq!(p.scroll.get(), 30, "first 'g' alone must not scroll");
         let _ = p.handle_key(key(KeyCode::Char('g')));
-        assert_eq!(p.scroll, 0);
+        assert_eq!(p.scroll.get(), 0);
         assert!(!p.pending_g);
     }
 
     #[test]
     fn home_jumps_to_top() {
         let mut p = make_pager(50);
-        p.scroll = 30;
+        p.scroll.set(30);
         let _ = p.handle_key(key(KeyCode::Home));
-        assert_eq!(p.scroll, 0);
+        assert_eq!(p.scroll.get(), 0);
     }
 
     #[test]
     fn shift_g_jumps_to_bottom() {
         let mut p = make_pager(50);
         let _ = p.handle_key(key(KeyCode::Char('G')));
-        assert_eq!(p.scroll, p.max_scroll());
+        assert_eq!(p.scroll.get(), p.max_scroll());
     }
 
     #[test]
     fn end_jumps_to_bottom() {
         let mut p = make_pager(50);
         let _ = p.handle_key(key(KeyCode::End));
-        assert_eq!(p.scroll, p.max_scroll());
+        assert_eq!(p.scroll.get(), p.max_scroll());
     }
 
     #[test]
@@ -1203,11 +1284,11 @@ mod tests {
         let bottom = p.max_scroll();
 
         let _ = p.handle_key(key(KeyCode::Char('G')));
-        assert_eq!(p.scroll, bottom);
+        assert_eq!(p.scroll.get(), bottom);
         let _ = p.handle_key(key(KeyCode::Up));
-        assert_eq!(p.scroll, bottom - 1);
+        assert_eq!(p.scroll.get(), bottom - 1);
         let _ = p.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(p.scroll, bottom - 2);
+        assert_eq!(p.scroll.get(), bottom - 2);
     }
 
     #[test]
@@ -1217,9 +1298,9 @@ mod tests {
         let bottom = p.max_scroll();
 
         let _ = p.handle_key(key(KeyCode::End));
-        assert_eq!(p.scroll, bottom);
+        assert_eq!(p.scroll.get(), bottom);
         let _ = p.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(p.scroll, bottom - 1);
+        assert_eq!(p.scroll.get(), bottom - 1);
     }
 
     #[test]
@@ -1229,17 +1310,17 @@ mod tests {
         let half = p.half_page_height();
         assert!(half >= 1, "half-page must move at least one line");
         let _ = p.handle_key(ctrl(KeyCode::Char('d')));
-        assert_eq!(p.scroll, half);
+        assert_eq!(p.scroll.get(), half);
     }
 
     #[test]
     fn ctrl_u_half_page_up() {
         let mut p = make_pager(200);
         prime_layout(&mut p, 22);
-        p.scroll = 50;
+        p.scroll.set(50);
         let half = p.half_page_height();
         let _ = p.handle_key(ctrl(KeyCode::Char('u')));
-        assert_eq!(p.scroll, 50 - half);
+        assert_eq!(p.scroll.get(), 50 - half);
     }
 
     #[test]
@@ -1248,17 +1329,17 @@ mod tests {
         prime_layout(&mut p, 22);
         let page = p.page_height();
         let _ = p.handle_key(ctrl(KeyCode::Char('f')));
-        assert_eq!(p.scroll, page);
+        assert_eq!(p.scroll.get(), page);
     }
 
     #[test]
     fn ctrl_b_full_page_up() {
         let mut p = make_pager(200);
         prime_layout(&mut p, 22);
-        p.scroll = 80;
+        p.scroll.set(80);
         let page = p.page_height();
         let _ = p.handle_key(ctrl(KeyCode::Char('b')));
-        assert_eq!(p.scroll, 80 - page);
+        assert_eq!(p.scroll.get(), 80 - page);
     }
 
     #[test]
@@ -1267,17 +1348,17 @@ mod tests {
         prime_layout(&mut p, 22);
         let page = p.page_height();
         let _ = p.handle_key(key(KeyCode::Char(' ')));
-        assert_eq!(p.scroll, page);
+        assert_eq!(p.scroll.get(), page);
     }
 
     #[test]
     fn shift_space_pages_up() {
         let mut p = make_pager(200);
         prime_layout(&mut p, 22);
-        p.scroll = 80;
+        p.scroll.set(80);
         let page = p.page_height();
         let _ = p.handle_key(key_mod(KeyCode::Char(' '), KeyModifiers::SHIFT));
-        assert_eq!(p.scroll, 80 - page);
+        assert_eq!(p.scroll.get(), 80 - page);
     }
 
     #[test]
@@ -1286,7 +1367,7 @@ mod tests {
         prime_layout(&mut p, 22);
         let page = p.page_height();
         let _ = p.handle_key(key(KeyCode::PageDown));
-        assert_eq!(p.scroll, page);
+        assert_eq!(p.scroll.get(), page);
     }
 
     #[test]
@@ -1311,18 +1392,18 @@ mod tests {
             .with_copy_text("LATEST-SOURCE")
             .with_export_markdown("LATEST-HANDOFF");
         let mut pager = PagerView::from_pages(vec![first, latest], 1);
-        pager.scroll = 4;
+        pager.scroll.set(4);
         pager.search_input = "latest".to_string();
-        pager.search_matches = vec![0];
+        *pager.search_matches.get_mut() = vec![0];
 
         assert!(matches!(
             pager.handle_key(key(KeyCode::Left)),
             ViewAction::None
         ));
         assert_eq!(pager.body_text(), "first displayed");
-        assert_eq!(pager.scroll, 0);
+        assert_eq!(pager.scroll.get(), 0);
         assert!(pager.search_input.is_empty());
-        assert!(pager.search_matches.is_empty());
+        assert!(pager.search_matches.borrow().is_empty());
         assert!(matches!(
             pager.handle_key(key(KeyCode::Char('c'))),
             ViewAction::Emit(ViewEvent::CopyToClipboard { text, .. }) if text == "FIRST-SOURCE"
@@ -1344,12 +1425,12 @@ mod tests {
         // While in search mode, 'g' must be treated as a search character,
         // not as the half of a `gg` jump-to-top sequence.
         let mut p = make_pager(50);
-        p.scroll = 10;
+        p.scroll.set(10);
         let _ = p.handle_key(key(KeyCode::Char('/')));
         assert!(p.search_mode);
         let _ = p.handle_key(key(KeyCode::Char('g')));
         assert_eq!(p.search_input, "g");
-        assert_eq!(p.scroll, 10);
+        assert_eq!(p.scroll.get(), 10);
     }
 
     #[test]
@@ -1658,12 +1739,12 @@ mod tests {
         let _ = p.handle_key(key(KeyCode::Char('/')));
         let _ = p.handle_key(key(KeyCode::Char('5')));
         let _ = p.handle_key(key(KeyCode::Enter));
-        assert!(!p.search_matches.is_empty());
+        assert!(!p.search_matches.borrow().is_empty());
 
         // Re-enter search mode and Esc out — matches must clear.
         let _ = p.handle_key(key(KeyCode::Char('/')));
         let _ = p.handle_key(key(KeyCode::Esc));
-        assert!(p.search_matches.is_empty());
+        assert!(p.search_matches.borrow().is_empty());
         assert_eq!(p.search_input, "");
         assert!(!p.search_mode);
     }
@@ -1679,20 +1760,20 @@ mod tests {
         let _ = p.handle_key(key(KeyCode::Char('/')));
         let _ = p.handle_key(key(KeyCode::Char('1')));
         let _ = p.handle_key(key(KeyCode::Enter));
-        let total = p.search_matches.len();
+        let total = p.search_matches.borrow().len();
         assert!(total > 1, "test needs multiple matches, got {total}");
 
-        let start = p.search_index;
+        let start = p.search_index.get();
         let _ = p.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(p.search_index, (start + 1) % total);
+        assert_eq!(p.search_index.get(), (start + 1) % total);
         let _ = p.handle_key(key(KeyCode::Char('N')));
-        assert_eq!(p.search_index, start);
+        assert_eq!(p.search_index.get(), start);
 
         // Wrap backwards from 0 → last.
         let _ = p.handle_key(key(KeyCode::Char('N')));
-        assert_eq!(p.search_index, total - 1);
+        assert_eq!(p.search_index.get(), total - 1);
         let _ = p.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(p.search_index, 0);
+        assert_eq!(p.search_index.get(), 0);
     }
 
     /// While search matches exist and the prompt is closed, the matched
@@ -1708,7 +1789,7 @@ mod tests {
         let _ = p.handle_key(key(KeyCode::Char('/')));
         let _ = p.handle_key(key(KeyCode::Char('5')));
         let _ = p.handle_key(key(KeyCode::Enter));
-        assert!(!p.search_matches.is_empty());
+        assert!(!p.search_matches.borrow().is_empty());
 
         let area = Rect::new(0, 0, 40, 16);
         let mut buf = Buffer::empty(area);
@@ -1735,7 +1816,7 @@ mod tests {
     #[test]
     fn mouse_scroll_up_scrolls_content() {
         let mut p = make_pager(50);
-        p.scroll = 10;
+        p.scroll.set(10);
         let action = p.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 0,
@@ -1743,7 +1824,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(p.scroll, 7);
+        assert_eq!(p.scroll.get(), 7);
         assert!(matches!(action, ViewAction::None));
     }
 
@@ -1751,7 +1832,7 @@ mod tests {
     fn mouse_scroll_down_scrolls_content() {
         let mut p = make_pager(50);
         prime_layout(&mut p, 20);
-        p.scroll = 10;
+        p.scroll.set(10);
         let action = p.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 0,
@@ -1759,7 +1840,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(p.scroll, 13);
+        assert_eq!(p.scroll.get(), 13);
         assert!(matches!(action, ViewAction::None));
     }
 
@@ -1778,7 +1859,7 @@ mod tests {
             });
         }
 
-        assert_eq!(p.scroll, bottom);
+        assert_eq!(p.scroll.get(), bottom);
     }
 
     #[test]
@@ -1894,6 +1975,101 @@ mod tests {
             screen.contains("END-MARKER"),
             "End must reveal the last line:\n{screen}"
         );
+    }
+
+    fn render_screen(pager: &PagerView, width: u16, height: u16) -> String {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        pager.render(area, &mut buf);
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn styled_pager_wraps_to_its_body_so_end_reaches_the_last_line() {
+        // A styled row wider than the body used to be wrapped by the
+        // paragraph but counted as one row, so End stopped short of the tail.
+        let mut lines: Vec<Line<'static>> = (0..39)
+            .map(|i| {
+                Line::from(vec![
+                    Span::styled(format!("row {i:02} "), Style::default().fg(Color::Cyan)),
+                    Span::raw("word ".repeat(20)),
+                ])
+            })
+            .collect();
+        lines.push(Line::from(format!(
+            "row 39 {}END-MARKER",
+            "word ".repeat(20)
+        )));
+        let mut pager = PagerView::new("Models", lines);
+        let (width, height) = (80u16, 24u16);
+        render_screen(&pager, width, height);
+
+        let _ = pager.handle_key(key(KeyCode::End));
+        let screen = render_screen(&pager, width, height);
+        assert!(
+            screen.contains("END-MARKER"),
+            "End must reveal the last line:\n{screen}"
+        );
+        // Wrapping keeps each piece's style and copies the unwrapped source.
+        let rows = pager.current_page().rows();
+        assert_eq!(rows.styled[0].spans[0].style.fg, Some(Color::Cyan));
+        assert!(
+            rows.plain.len() > 40,
+            "rows must be wrapped: {}",
+            rows.plain.len()
+        );
+        drop(rows);
+        match pager.handle_key(key(KeyCode::Char('c'))) {
+            ViewAction::Emit(ViewEvent::CopyToClipboard { text, .. }) => {
+                assert_eq!(text.lines().count(), 40);
+            }
+            other => panic!("expected CopyToClipboard emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrap_text_advances_tabs_to_stops_and_drops_bidi_format_chars() {
+        assert_eq!(wrap_text("a\tb", 40), ["a   b"]);
+        assert_eq!(wrap_text("abcd\tb", 40), ["abcd    b"]);
+        assert_eq!(wrap_text("会\tb", 40), ["会  b"]);
+        assert_eq!(wrap_text("left\u{202E}right\u{2066}", 40), ["leftright"]);
+    }
+
+    #[test]
+    fn resize_keeps_the_top_line_and_the_current_match() {
+        let text = (0..60)
+            .map(|i| {
+                let tag = if i == 40 { "needle" } else { "hay" };
+                format!("row {i:02} {tag} {}", "word ".repeat(24).trim_end())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut pager = PagerView::from_text("Output", &text, 98);
+        render_screen(&pager, 100, 24);
+        let _ = pager.handle_key(key(KeyCode::Char('/')));
+        for ch in "needle".chars() {
+            let _ = pager.handle_key(key(KeyCode::Char(ch)));
+        }
+        let _ = pager.handle_key(key(KeyCode::Enter));
+
+        // Narrowing re-wraps every line into more rows.
+        let screen = render_screen(&pager, 60, 24);
+        let first_body_row = screen
+            .lines()
+            .find(|row| row.contains("row "))
+            .unwrap_or_default();
+        assert!(
+            first_body_row.contains("row 40 needle"),
+            "the line on top must stay on top after a resize:\n{screen}"
+        );
+        assert!(screen.contains("match 1/1"), "{screen}");
+        let rows = pager.current_page().rows();
+        let matches = pager.search_matches.borrow();
+        assert_eq!(matches.len(), 1);
+        assert!(rows.plain[matches[pager.search_index.get()]].contains("needle"));
     }
 
     #[test]
