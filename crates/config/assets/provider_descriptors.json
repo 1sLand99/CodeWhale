@@ -109,8 +109,9 @@
       "wire": "openai-compatible",
       "base_url": "https://yolo-auto.com/v1",
       "api_key_env": "YOLO_AUTO_API_KEY",
-      "default_model": "yolo",
+      "default_model": "qwen3.8-flash",
       "discovery": "models_endpoint",
+      "docs_url": "https://yolo-auto.com/docs",
       "aliases": [
         "yolo"
       ]
