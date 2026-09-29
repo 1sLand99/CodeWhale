@@ -12581,9 +12581,7 @@ fn save_api_key_for_identity_unlocked(
 ) -> Result<SavedCredential> {
     let provider = identity.provider;
     if provider == ApiProvider::OpenaiCodex {
-        anyhow::bail!(
-            "OpenAI Codex uses OAuth. Sign in with ChatGPT via `codewhale auth chatgpt` (subscription billing, Codewhale-owned tokens). The openai API-key route is a different billing owner. Alternatively run `codex login`, then grant exact read-only access with `codewhale auth external-consent --provider openai-codex --mode read-only`, or set OPENAI_CODEX_ACCESS_TOKEN for this process; Codewhale does not store an API key for this provider."
-        );
+        anyhow::bail!(codewhale_config::credentials::OPENAI_CODEX_API_KEY_REFUSAL);
     }
     let is_legacy_literal_custom = provider == ApiProvider::Custom
         && identity.key.trim() == ApiProvider::Custom.as_str()

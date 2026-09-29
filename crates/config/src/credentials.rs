@@ -65,6 +65,12 @@ pub fn prepare_provider_api_key_metadata(store: &mut ConfigStore, provider: Prov
     }
 }
 
+/// Why no writer stores an API key for OpenAI Codex. The route authenticates
+/// through OAuth or an external read-only consent and never reads the secret
+/// store, so a saved key would be unused while its metadata write replaced
+/// the consent.
+pub const OPENAI_CODEX_API_KEY_REFUSAL: &str = "OpenAI Codex uses OAuth. Sign in with ChatGPT via `codewhale auth chatgpt` (subscription billing, Codewhale-owned tokens). The openai API-key route is a different billing owner. Alternatively run `codex login`, then grant exact read-only access with `codewhale auth external-consent --provider openai-codex --mode read-only`, or set OPENAI_CODEX_ACCESS_TOKEN for this process; Codewhale does not store an API key for this provider.";
+
 /// Persist a provider credential to the durable secret store without silently
 /// downgrading a backend failure to plaintext config storage.
 ///
@@ -76,6 +82,10 @@ pub fn set_provider_api_key(
     provider: ProviderKind,
     api_key: &str,
 ) -> Result<bool> {
+    anyhow::ensure!(
+        provider != ProviderKind::OpenaiCodex,
+        OPENAI_CODEX_API_KEY_REFUSAL
+    );
     // #6528: strip pasted invisible characters and whitespace in one place.
     let api_key = codewhale_secrets::normalize_api_key(api_key);
     anyhow::ensure!(!api_key.is_empty(), "Refusing to save an empty API key.");
@@ -258,5 +268,47 @@ mod tests {
 
         let saved = ConfigStore::load(Some(store.path().to_path_buf())).expect("reload");
         assert_eq!(saved.config.auth_mode.as_deref(), Some("api_key"));
+    }
+
+    #[test]
+    fn openai_codex_key_save_is_refused_and_keeps_external_consent() {
+        let (_dir, mut store) = store_with(
+            "provider = \"openai-codex\"\n\n[providers.openai-codex]\nauth_mode = \"oauth\"\n",
+        );
+        store.config.providers.openai_codex.external_credentials =
+            Some(crate::ExternalCredentialConsentToml::read_only(
+                ProviderKind::OpenaiCodex,
+                crate::ExternalCredentialSource::CodexCli,
+                std::path::PathBuf::from("/synthetic/codex/auth.json"),
+            ));
+        store.save().expect("seed consent");
+        let before = std::fs::read_to_string(store.path()).expect("config before");
+        let secrets = in_memory_secrets();
+
+        let error = set_provider_api_key(&mut store, &secrets, ProviderKind::OpenaiCodex, "k")
+            .expect_err("openai-codex keys are not stored");
+
+        assert!(
+            error.to_string().contains("OpenAI Codex uses OAuth"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.path()).expect("config after"),
+            before
+        );
+        assert!(
+            store
+                .config
+                .providers
+                .openai_codex
+                .external_credentials
+                .is_some()
+        );
+        assert_eq!(
+            secrets
+                .get(provider_slot(ProviderKind::OpenaiCodex))
+                .expect("read"),
+            None
+        );
     }
 }
