@@ -43,6 +43,12 @@ const OTHER_READER_ROOT_KEYS: &[&str] = &[
     "tui.stream_chunk_timeout_secs",
 ];
 
+/// [`OTHER_READER_ROOT_KEYS`] whose value is a table of user entries
+/// (`[profiles.<name>]`, `[projects.'<path>']`, `[workspace.'<path>']`).
+/// `config doctor` counts them as read, but `config set <key> <value>` would
+/// replace the whole table with a string, so a scalar write is refused.
+const TABLE_ROOT_KEYS: &[&str] = &["profiles", "projects", "workspace"];
+
 /// Where a key a user asked `config set` to write is read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKeyHome {
@@ -156,7 +162,7 @@ fn settable_keys() -> impl Iterator<Item = &'static str> {
             OTHER_READER_ROOT_KEYS
                 .iter()
                 .copied()
-                .filter(|key| !key.contains('.')),
+                .filter(|key| !key.contains('.') && !TABLE_ROOT_KEYS.contains(key)),
         )
 }
 
@@ -230,6 +236,12 @@ pub(crate) fn settings_toml_keys() -> impl Iterator<Item = &'static str> {
 /// [`ReasoningEffort::parse_strict`]: crate::reasoning_preference::ReasoningEffort::parse_strict
 pub fn config_toml_value(key: &str, value: &str) -> Result<Option<toml::Value>> {
     let key = key.trim();
+    if TABLE_ROOT_KEYS.contains(&key) {
+        anyhow::bail!(
+            "`{key}` is a table of entries, so `config set {key}` would replace all of \
+             them; nothing was saved. Edit the [{key}.<name>] table in config.toml instead."
+        );
+    }
     codewhale_config::check_config_toml_choice(key, value)?;
     if key == "reasoning_effort" {
         let effort = crate::reasoning_preference::ReasoningEffort::parse_strict(value)
@@ -471,6 +483,63 @@ mod tests {
             "effective_auto_compact",
         ] {
             assert!(!keys.contains(&internal), "{internal} is not settable");
+        }
+    }
+
+    #[test]
+    fn scalar_set_of_a_table_root_key_is_refused() {
+        // `config set workspace /path` used to store `workspace = "/path"`,
+        // replacing every `[workspace.'<path>']` entry on save.
+        for key in TABLE_ROOT_KEYS {
+            assert_eq!(config_key_home(key), ConfigKeyHome::ConfigToml, "{key}");
+            let error = config_toml_value(key, "/some/path").expect_err(key);
+            assert!(error.to_string().contains("nothing was saved"), "{error}");
+        }
+    }
+
+    #[test]
+    fn config_set_and_loader_accept_the_same_closed_vocabulary() {
+        for (key, value, valid) in [
+            ("approval_policy", " ON-REQUEST ", true),
+            ("approval_policy", "ask", false),
+            ("verbosity", " CONCISE ", true),
+            ("verbosity", "quiet", false),
+            ("sandbox_mode", " WORKSPACE-WRITE ", true),
+            ("sandbox_mode", "full", false),
+        ] {
+            let mut config = crate::config::Config::default();
+            match key {
+                "approval_policy" => config.approval_policy = Some(value.to_string()),
+                "verbosity" => config.verbosity = Some(value.to_string()),
+                "sandbox_mode" => config.sandbox_mode = Some(value.to_string()),
+                _ => unreachable!(),
+            }
+            assert_eq!(config_toml_value(key, value).is_ok(), valid, "{key}");
+            assert_eq!(config.validate().is_ok(), valid, "{key}");
+        }
+    }
+
+    #[test]
+    fn loader_choice_errors_redact_pasted_keys_but_keep_ordinary_typos() {
+        let token = ["sk-live-", "Z7qX4mNb2Vc9Lk3PwR8t"].concat();
+        for key in ["approval_policy", "verbosity", "sandbox_mode"] {
+            for value in [token.as_str(), "misspelled-choice"] {
+                let mut config = crate::config::Config::default();
+                match key {
+                    "approval_policy" => config.approval_policy = Some(value.to_string()),
+                    "verbosity" => config.verbosity = Some(value.to_string()),
+                    "sandbox_mode" => config.sandbox_mode = Some(value.to_string()),
+                    _ => unreachable!(),
+                }
+                let error = config.validate().expect_err("invalid choice").to_string();
+                assert!(!error.contains(&token));
+                assert!(error.contains("expected"));
+                assert!(error.contains(if value == token {
+                    "[redacted]"
+                } else {
+                    "misspelled-choice"
+                }));
+            }
         }
     }
 

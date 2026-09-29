@@ -3741,6 +3741,26 @@ base_url = "https://acme.example/v1"
 }
 
 #[test]
+fn project_config_unknown_provider_reason_never_echoes_a_pasted_key() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let config_dir = workspace.path().join(CODEWHALE_APP_DIR);
+    fs::create_dir_all(&config_dir).expect("mkdir project config");
+    let key = ["sk-live-", "Z7qX4mNb2Vc9Lk3PwR8t"].concat();
+    fs::write(
+        config_dir.join(CONFIG_FILE_NAME),
+        format!("provider = \"{key}\"\n"),
+    )
+    .expect("write project config");
+
+    let reason = load_project_config_outcome(workspace.path())
+        .invalid()
+        .map(|(_, reason)| reason.to_string())
+        .expect("unknown provider is rejected");
+    assert!(reason.starts_with("unknown provider"), "{reason}");
+    assert!(!reason.contains(&key), "{reason}");
+}
+
+#[test]
 fn malformed_project_config_is_distinguishable_from_a_missing_one() {
     // #4733: the loader returned `None` for both cases. A project config can
     // only *tighten* approval/sandbox posture, so reporting a broken file as
@@ -4242,7 +4262,13 @@ fn env_api_key_lookup_reads_exactly_each_providers_env_vars() {
             }
             unsafe { std::env::remove_var(var) };
         }
-        let mut declared = provider.env_vars().to_vec();
+        // Xiaomi MiMo's token-plan variables are read only by the mode-aware
+        // lookup, never by this generic fallback.
+        let mut declared = if kind == ProviderKind::XiaomiMimo {
+            super::XIAOMI_MIMO_STANDARD_ENV_VARS.to_vec()
+        } else {
+            provider.env_vars().to_vec()
+        };
         declared.sort_unstable();
         assert_eq!(reads, declared, "{}", kind.as_str());
     }
@@ -7501,6 +7527,25 @@ fn xiaomi_mimo_env_pay_as_you_go_mode_prefers_standard_key() {
     assert_eq!(resolved.api_key.as_deref(), Some("sk-env-key"));
     assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
     assert_eq!(resolved.base_url, XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL);
+}
+
+#[test]
+fn xiaomi_mimo_pay_as_you_go_mode_never_falls_back_to_a_token_plan_key() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    // Safety: test-only environment mutation guarded by a module mutex.
+    unsafe {
+        env::set_var("DEEPSEEK_PROVIDER", "xiaomi-mimo");
+        env::set_var("XIAOMI_MIMO_MODE", "pay-as-you-go");
+        env::set_var("MIMO_TOKEN_PLAN_API_KEY", "tp-env-key");
+    }
+
+    let resolved = ConfigToml::default().resolve_runtime_options(&CliRuntimeOverrides::default());
+
+    assert_eq!(resolved.provider, ProviderKind::XiaomiMimo);
+    assert_eq!(resolved.base_url, XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL);
+    assert_eq!(resolved.api_key, None);
+    assert_eq!(resolved.api_key_source, None);
 }
 
 #[test]

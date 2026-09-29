@@ -3888,7 +3888,12 @@ pub fn load_project_config_outcome(workspace: &Path) -> ProjectConfigOutcome {
                     return ProjectConfigOutcome::Invalid {
                         path,
                         reason: match raw_provider {
-                            Some(name) => format!("unknown provider '{name}'"),
+                            // A key pasted into `provider =` must not be
+                            // echoed; an ordinary typo stays readable.
+                            Some(name) => format!(
+                                "unknown provider '{}'",
+                                codewhale_secrets::redact::redact_secrets(&name)
+                            ),
                             None => "unknown provider".to_string(),
                         },
                     };
@@ -4752,13 +4757,15 @@ fn xiaomi_mimo_base_url_uses_token_plan(base_url: &str) -> bool {
         || normalized == XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL
 }
 
+const XIAOMI_MIMO_TOKEN_PLAN_ENV_VARS: &[&str] =
+    &["XIAOMI_MIMO_TOKEN_PLAN_API_KEY", "MIMO_TOKEN_PLAN_API_KEY"];
+const XIAOMI_MIMO_STANDARD_ENV_VARS: &[&str] =
+    &["XIAOMI_MIMO_API_KEY", "XIAOMI_API_KEY", "MIMO_API_KEY"];
+
 fn xiaomi_mimo_env_api_key_for_runtime(
     mode: Option<&str>,
     base_url: Option<&str>,
 ) -> Option<String> {
-    const TOKEN_PLAN_ENV_VARS: &[&str] =
-        &["XIAOMI_MIMO_TOKEN_PLAN_API_KEY", "MIMO_TOKEN_PLAN_API_KEY"];
-    const STANDARD_ENV_VARS: &[&str] = &["XIAOMI_MIMO_API_KEY", "XIAOMI_API_KEY", "MIMO_API_KEY"];
     let env_value = |vars: &[&str]| codewhale_secrets::env_first(vars).map(|(_, value)| value);
 
     let normalized_mode =
@@ -4768,7 +4775,7 @@ fn xiaomi_mimo_env_api_key_for_runtime(
         .is_some_and(xiaomi_mimo_mode_uses_standard_endpoint)
         || base_url.is_some_and(xiaomi_mimo_base_url_is_pay_as_you_go);
     if standard_selected {
-        return env_value(STANDARD_ENV_VARS);
+        return env_value(XIAOMI_MIMO_STANDARD_ENV_VARS);
     }
 
     let token_plan_selected = normalized_mode
@@ -4777,10 +4784,10 @@ fn xiaomi_mimo_env_api_key_for_runtime(
         .is_some()
         || base_url.is_some_and(xiaomi_mimo_base_url_uses_token_plan);
     if token_plan_selected {
-        return env_value(TOKEN_PLAN_ENV_VARS);
+        return env_value(XIAOMI_MIMO_TOKEN_PLAN_ENV_VARS);
     }
 
-    env_value(TOKEN_PLAN_ENV_VARS).or_else(|| env_value(STANDARD_ENV_VARS))
+    env_value(XIAOMI_MIMO_TOKEN_PLAN_ENV_VARS).or_else(|| env_value(XIAOMI_MIMO_STANDARD_ENV_VARS))
 }
 
 fn resolve_xiaomi_mimo_base_url(
@@ -4995,8 +5002,19 @@ fn stored_api_key_for_provider(
 
 /// The provider's API key from its own environment variables, the single
 /// list on its descriptor ([`provider::Provider::env_vars`]).
+///
+/// Xiaomi MiMo is the exception: its token-plan variables belong to the
+/// token-plan endpoints, and `xiaomi_mimo_env_api_key_for_runtime` (which the
+/// resolver tries first) is the only reader that knows the selected mode. This
+/// fallback reads the standard variables only, so a token-plan key is never
+/// sent to the pay-as-you-go endpoint.
 fn env_api_key_for_provider(provider: ProviderKind) -> Option<String> {
-    codewhale_secrets::env_first(provider.provider().env_vars()).map(|(_, value)| value)
+    let env_vars = if provider == ProviderKind::XiaomiMimo {
+        XIAOMI_MIMO_STANDARD_ENV_VARS
+    } else {
+        provider.provider().env_vars()
+    };
+    codewhale_secrets::env_first(env_vars).map(|(_, value)| value)
 }
 
 /// Whether an authentication mode requires API-key material.

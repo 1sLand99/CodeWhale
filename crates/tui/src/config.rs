@@ -5196,32 +5196,26 @@ impl Config {
                 provider.as_str()
             );
         }
-        if let Some(policy) = self.approval_policy.as_deref() {
-            let normalized = policy.trim().to_ascii_lowercase();
-            if !matches!(
-                normalized.as_str(),
-                "on-request" | "untrusted" | "never" | "auto" | "suggest"
-            ) {
-                anyhow::bail!(
-                    "Invalid approval_policy '{policy}': expected on-request, untrusted, never, auto, or suggest."
-                );
-            }
-        }
-        if let Some(v) = self.verbosity.as_deref() {
-            let normalized = v.trim().to_ascii_lowercase();
-            if !matches!(normalized.as_str(), "normal" | "concise") {
-                anyhow::bail!("Invalid verbosity '{v}': expected normal or concise.");
-            }
-        }
-        if let Some(mode) = self.sandbox_mode.as_deref() {
-            let normalized = mode.trim().to_ascii_lowercase();
-            if !matches!(
-                normalized.as_str(),
-                "read-only" | "workspace-write" | "danger-full-access" | "external-sandbox"
-            ) {
-                anyhow::bail!(
-                    "Invalid sandbox_mode '{mode}': expected read-only, workspace-write, danger-full-access, or external-sandbox."
-                );
+        // One vocabulary with `codewhale config set`, which refuses the same
+        // values before writing them (`codewhale_config::config_toml_choices`).
+        for (key, value) in [
+            ("approval_policy", self.approval_policy.as_deref()),
+            ("verbosity", self.verbosity.as_deref()),
+            ("sandbox_mode", self.sandbox_mode.as_deref()),
+        ] {
+            let (Some(value), Some(choices)) = (value, codewhale_config::config_toml_choices(key))
+            else {
+                continue;
+            };
+            if !choices.contains(&value.trim().to_ascii_lowercase().as_str()) {
+                let expected = match choices.split_last() {
+                    Some((last, [])) => (*last).to_string(),
+                    Some((last, [only])) => format!("{only} or {last}"),
+                    Some((last, rest)) => format!("{}, or {last}", rest.join(", ")),
+                    None => String::new(),
+                };
+                let displayed_value = codewhale_secrets::redact::redact_secrets(value);
+                anyhow::bail!("Invalid {key} '{displayed_value}': expected {expected}.");
             }
         }
         if let Some(tui) = &self.tui

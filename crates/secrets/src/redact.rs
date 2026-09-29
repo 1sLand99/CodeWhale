@@ -244,9 +244,9 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
             changed = true;
             masked.push(word.replace(trimmed, &redacted));
             spaced = SpacedAssignment::None;
-        } else if !trimmed.is_empty() && looks_like_secret_token(trimmed) {
+        } else if let Some(core) = secret_token_core(trimmed) {
             changed = true;
-            masked.push(word.replace(trimmed, REDACTED));
+            masked.push(word.replacen(core, REDACTED, 1));
             spaced = SpacedAssignment::None;
         } else if let Some(redacted) = redact_structured_word(trimmed, policy) {
             changed = true;
@@ -700,6 +700,23 @@ const BARE_OPAQUE_TOKEN_PREFIXES: &[&str] = &["xai-", "nvapi-", "gsk_", "hf_", "
 /// [`SECRET_TOKEN_PREFIXES`] word, a provider-prefixed opaque key, an AWS
 /// access key id, or a JWT.
 fn looks_like_secret_token(word: &str) -> bool {
+    secret_token_core(word).is_some()
+}
+
+/// The credential inside `word` once markdown and prose punctuation around it
+/// is dropped (`` `xai-…` ``, `(nvapi-…)`, `AKIA…:`, a JWT ending a
+/// sentence), or `None` when the word is not a credential on its own.
+fn secret_token_core(word: &str) -> Option<&str> {
+    let core = word.trim_matches(|c| {
+        matches!(
+            c,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ':' | '`' | '.' | '!' | '?'
+        )
+    });
+    (!core.is_empty() && is_bare_secret_token(core)).then_some(core)
+}
+
+fn is_bare_secret_token(word: &str) -> bool {
     SECRET_TOKEN_PREFIXES
         .iter()
         .any(|p| word.len() > p.len() + 6 && word.starts_with(p))
@@ -790,6 +807,44 @@ mod bare_token_tests {
         for token in tokens {
             let out = redact_secrets(&format!("request failed: {token} rejected"));
             assert_eq!(out, "request failed: [redacted] rejected", "{token}");
+        }
+    }
+
+    #[test]
+    fn a_bare_token_wrapped_in_markdown_or_prose_punctuation_is_masked() {
+        let body = "Z7qX4mNb2Vc9Lk3PwR8t";
+        let aws = ["AKIA", "Z7QX4MNB2VC9LK3P"].concat();
+        let jwt = ["eyJhbGciOiJIUzI1NiJ9", ".eyJzdWIiOiIxIn0", ".c2lnbmF0dXJl"].concat();
+        for (wrapped, token) in [
+            (format!("`xai-{body}`"), format!("xai-{body}")),
+            (format!("(nvapi-{body})"), format!("nvapi-{body}")),
+            (format!("hf_{body})"), format!("hf_{body}")),
+            (format!("[pplx-{body}]"), format!("pplx-{body}")),
+            (format!("{aws}:"), aws.clone()),
+            (format!("{aws})"), aws.clone()),
+            (format!("{jwt})."), jwt.clone()),
+        ] {
+            let out = redact_secrets(&format!("key {wrapped} rejected"));
+            assert!(!out.contains(&token), "{out}");
+            assert!(out.contains(REDACTED), "{out}");
+        }
+        assert_eq!(
+            redact_secrets(&format!("key `xai-{body}` rejected")),
+            "key `[redacted]` rejected"
+        );
+    }
+
+    #[test]
+    fn lowercase_opaque_keys_with_separators_are_still_masked() {
+        // Lowercase letters and separators are also valid random key material;
+        // their shape alone does not establish that this is an identifier.
+        for prefix in BARE_OPAQUE_TOKEN_PREFIXES {
+            for separator in ['-', '_', '.'] {
+                let body = ["a1b2c3d4", "e5f6g7h8", "i9j0k1l2"].join(&separator.to_string());
+                let token = format!("{prefix}{body}");
+                let out = redact_secrets(&format!("request failed: `{token}` rejected"));
+                assert_eq!(out, "request failed: `[redacted]` rejected");
+            }
         }
     }
 
