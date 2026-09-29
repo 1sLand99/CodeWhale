@@ -21,7 +21,9 @@ use crate::settings::Settings;
 /// Root keys read from config.toml outside both the TUI [`Config`] struct and
 /// the dispatcher's [`ConfigToml`] typed fields. Each has a named reader:
 /// profile overlays (`ConfigFile::profiles`), per-project trust
-/// (`config::project_trust_*`), the route-preference migration
+/// (`config::project_trust_*`), user workspace entries
+/// (`merge_user_workspace_config_from_doc` reads `[workspace.'<path>']` and
+/// the legacy `[projects]` spelling), the route-preference migration
 /// (`config_persistence`), the MCP stdio dispatcher's literal JSON key, the
 /// stream-timeout fallbacks in `ConfigToml::stream_chunk_timeout_secs`, and
 /// the legacy top-level `base_url` / `api_key`, which
@@ -33,6 +35,7 @@ const OTHER_READER_ROOT_KEYS: &[&str] = &[
     "api_key",
     "apiKey",
     "projects",
+    "workspace",
     "route_preferences_version",
     "route_preferences_migration",
     "mcp.server_definitions",
@@ -469,6 +472,16 @@ mod tests {
         ] {
             assert!(!keys.contains(&internal), "{internal} is not settable");
         }
+    }
+
+    #[test]
+    fn documented_user_workspace_entry_is_read() {
+        // The block docs/CONFIGURATION.md gives under "User workspace entries".
+        let documented: toml::Table =
+            toml::from_str("[workspace.'/absolute/path/to/project']\nallow_shell = true\n")
+                .expect("documented block parses");
+        let unread = unread_config_keys(documented.keys().map(String::as_str));
+        assert!(unread.is_empty(), "{unread:#?}");
     }
 
     #[test]
