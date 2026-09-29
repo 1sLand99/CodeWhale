@@ -1821,7 +1821,8 @@ pub struct TuiConfig {
     /// to `0..=10`.
     pub stream_max_transparent_retries: Option<u32>,
     /// #6700: recoverable errors tolerated within one stream before it
-    /// ends. Omitted resolves to the default (5); values clamp to `1..=50`.
+    /// ends. Omitted or `0` resolves to the default (5); other values clamp
+    /// to `1..=50`.
     pub stream_max_errors: Option<u32>,
     /// #6700: wait for SSE response headers, in seconds. Omitted or `0`
     /// fall back to `CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`, then 45; values

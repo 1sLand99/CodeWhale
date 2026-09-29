@@ -76,7 +76,9 @@ pub const MAX_STREAM_MAX_TRANSPARENT_RETRIES: u32 = 10;
 /// Default streak of recoverable stream errors tolerated in one stream.
 /// Preserves the pre-#6700 hard-coded `MAX_STREAM_ERRORS_BEFORE_FAIL`.
 pub const DEFAULT_STREAM_MAX_ERRORS: u32 = super::streaming::MAX_STREAM_ERRORS_BEFORE_FAIL;
-/// Smallest accepted error streak: the first error ends the stream.
+/// Smallest accepted error streak: the first error ends the stream. `0` is
+/// not a value here; like the other finite stream budgets it selects
+/// [`DEFAULT_STREAM_MAX_ERRORS`].
 pub const MIN_STREAM_MAX_ERRORS: u32 = 1;
 /// Largest accepted error streak.
 pub const MAX_STREAM_MAX_ERRORS: u32 = 50;
@@ -103,8 +105,9 @@ impl Default for StreamRetryLimits {
 /// Resolve configured stream retry budgets.
 ///
 /// `None` selects each default. The two retry counts accept `0` (no
-/// retries) and clamp to their maximum; the error streak clamps to
-/// `MIN_STREAM_MAX_ERRORS..=MAX_STREAM_MAX_ERRORS`.
+/// retries) and clamp to their maximum. The error streak is a finite stream
+/// budget like `stream_max_content_mb`: `0` selects its default, and other
+/// values clamp to `MIN_STREAM_MAX_ERRORS..=MAX_STREAM_MAX_ERRORS`.
 #[must_use]
 pub fn resolve_stream_retry_limits(
     max_resumes: Option<u32>,
@@ -118,9 +121,10 @@ pub fn resolve_stream_retry_limits(
         max_transparent_retries: max_transparent_retries
             .unwrap_or(DEFAULT_STREAM_MAX_TRANSPARENT_RETRIES)
             .min(MAX_STREAM_MAX_TRANSPARENT_RETRIES),
-        max_errors: max_errors
-            .unwrap_or(DEFAULT_STREAM_MAX_ERRORS)
-            .clamp(MIN_STREAM_MAX_ERRORS, MAX_STREAM_MAX_ERRORS),
+        max_errors: match max_errors {
+            None | Some(0) => DEFAULT_STREAM_MAX_ERRORS,
+            Some(value) => value.clamp(MIN_STREAM_MAX_ERRORS, MAX_STREAM_MAX_ERRORS),
+        },
     }
 }
 
@@ -365,7 +369,14 @@ mod tests {
         let disabled = resolve_stream_retry_limits(Some(0), Some(0), Some(0));
         assert_eq!(disabled.max_resumes, 0, "0 disables resumes");
         assert_eq!(disabled.max_transparent_retries, 0);
-        assert_eq!(disabled.max_errors, MIN_STREAM_MAX_ERRORS);
+        assert_eq!(
+            disabled.max_errors, DEFAULT_STREAM_MAX_ERRORS,
+            "0 selects the error-streak default, like the other finite stream budgets"
+        );
+        assert_eq!(
+            resolve_stream_retry_limits(None, None, Some(1)).max_errors,
+            MIN_STREAM_MAX_ERRORS
+        );
 
         let huge = resolve_stream_retry_limits(Some(u32::MAX), Some(u32::MAX), Some(u32::MAX));
         assert_eq!(huge.max_resumes, MAX_STREAM_MAX_RESUMES);
