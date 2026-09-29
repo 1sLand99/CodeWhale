@@ -2,11 +2,42 @@
 
 > **Repository copy.** This is the design as reviewed on 2026-09-25, copied from
 > the private release plan (`codewhale-ops/releases/0.10.1/plans-20260925/`) so
-> the code and its design live together. Section "As built: phase 1" below
-> records where the phase-1 implementation (`crates/tui/extension-host/`,
+> the code and its design live together. The "As built" sections below
+> record where the implementation (`crates/tui/extension-host/`,
 > `crates/tui/src/extension_host/`, behind `[features] extension_host`) differs
-> from the text that follows. Where they disagree, that section and the code
-> are current; the rest is the plan for later phases.
+> from the text that follows. Where they disagree, the newest "As built"
+> section and the code are current; the rest is the plan for later phases.
+
+## As built: phase 2a supervision (2026-09-29)
+
+The experimental host now has bounded lifecycle supervision. It uses the same
+Rust manager, owner registry, attachment snapshots, and approval gate:
+
+- `host/ping` runs every 3 seconds. A ping unanswered for 3 seconds marks the
+  host **Unresponsive**; after 10 seconds the existing process-tree supervisor
+  kills it. A pong restores Ready only for that generation. Deadlines use a
+  monotonic clock; laptop suspend/resume behavior has not been qualified.
+- Unexpected exits, protocol violations and hang kills share one crash budget.
+  Below 3 crashes in 5 minutes, the manager waits 250 ms then revalidates current
+  attachments and replays eligible owners with fresh generations and tokens.
+  The third crash stops recovery and retains the failure/stderr diagnostic.
+  Opening another engine and replaying a host never reset this budget.
+- In-flight tool calls fail with the existing typed unavailable error; they
+  are **never replayed**. Failed/faulted receipts remain suppressed. A crash
+  during the sole activating owner's initialization is attributed to that
+  receipt, so other valid plugins can recover.
+- Explicit plugin changes/reload clear the crash budget and retry failed
+  receipts through the existing `plugins_changed` path. Start failures also
+  permit a new engine attachment to retry once the one-minute cooldown has
+  elapsed. There is no automatic handshake/start-failure loop.
+- Old-generation callbacks and recovery tickets cannot mutate a newer host.
+  Planned shutdown is not a crash. Native-entry, staged-byte, persisted-state,
+  approval-grant and platform sandbox rules remain unchanged.
+
+This slice does **not** add dirty-teardown idle restarts, per-owner author logs,
+`exec.cwd`, `.mts` entries, commands, hooks, MCP, `core/call`, or sandbox parity.
+Those remain subsequent work. The following phase-1 section is its historical
+receipt, including the earlier lack of heartbeat/restart.
 
 ## As built: phase 1 (2026-09-25)
 

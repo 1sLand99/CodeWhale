@@ -8766,6 +8766,7 @@ fn install_extension_host_boot_config(config: &Config) {
                 .and_then(|table| table.node.as_deref())
                 .map(|node| PathBuf::from(shellexpand::tilde(node).as_ref())),
             root: None,
+            ..Default::default()
         });
     }
 }

@@ -224,7 +224,7 @@ impl OwnerRegistry {
     }
 
     /// Mark an owner failed or faulted and drop everything it registered.
-    pub fn mark_failed(&mut self, owner: &OwnerRef, state: OwnerState) {
+    pub fn mark_failed(&mut self, owner: &OwnerRef, state: OwnerState) -> bool {
         let matches = self
             .owners
             .get(&owner.plugin_id)
@@ -235,6 +235,7 @@ impl OwnerRegistry {
                 entry.state = state;
             }
         }
+        matches
     }
 
     /// Admit or refuse one `registry/register`.
@@ -391,13 +392,35 @@ impl OwnerRegistry {
     }
 
     /// Forget owners that are not live (failed, faulted, revoked) so a new
-    /// session retries them.
+    /// explicit plugin mutation retries them.
     pub fn forget_inactive(&mut self) {
         self.owners
             .retain(|_, entry| matches!(entry.state, OwnerState::Activating | OwnerState::Active));
     }
 
-    /// The host exited: every owner is revoked and every tool is gone.
+    /// A crash drops live registrations, preserves failed/faulted receipts,
+    /// and blames the sole activating owner. Other owners are replayable only
+    /// after reconciliation verifies their current persisted authority again.
+    pub fn host_exited(&mut self, reason: &str) {
+        self.tools.clear();
+        self.by_name.clear();
+        let activating: Vec<_> = self
+            .owners
+            .values()
+            .filter(|entry| entry.state == OwnerState::Activating)
+            .map(|entry| entry.owner.plugin_id.clone())
+            .collect();
+        if let [plugin] = activating.as_slice() {
+            self.owners.get_mut(plugin).expect("activating owner").state =
+                OwnerState::Failed(format!("host crashed during activation: {reason}"));
+        }
+        self.owners.retain(|_, entry| {
+            matches!(entry.state, OwnerState::Failed(_) | OwnerState::Faulted(_))
+        });
+    }
+
+    /// Planned test shutdown drops all tools and fails the remaining live owners.
+    #[cfg(test)]
     pub fn revoke_all(&mut self, reason: &str) {
         self.tools.clear();
         self.by_name.clear();

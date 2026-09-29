@@ -389,6 +389,7 @@ impl FixturePlugins {
         Arc::new(ExtensionHostManager::new(ExtensionHostOptions {
             node_override: Some(node),
             root: Some(self.root.clone()),
+            ..Default::default()
         }))
     }
 }
@@ -591,7 +592,7 @@ async fn disabling_mid_call_revokes_at_once_and_teardown_waits_for_async_dispose
 }
 
 #[tokio::test]
-async fn killed_host_fails_calls_with_a_typed_error_and_does_not_respawn() {
+async fn killed_host_fails_calls_once_and_replays_with_fresh_owners() {
     let Some(node) = node_for_tests("killed_host") else {
         return;
     };
@@ -627,19 +628,14 @@ async fn killed_host_fails_calls_with_a_typed_error_and_does_not_respawn() {
         }
         other => panic!("expected a typed not-available error, got {other:?}"),
     }
-    // Let the exit watcher publish the failure.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        matches!(manager.status(), HostStatus::Failed { .. }),
-        "{:?}",
-        manager.status()
-    );
-    assert!(manager.live_tool_names().is_empty());
-    let report = super::render_status(&manager);
-    assert!(report.contains("failed"), "{report}");
-    engine.sync().await.ok();
-    assert_eq!(manager.spawn_attempts(), 1, "no respawn within the session");
-    assert!(matches!(manager.status(), HostStatus::Failed { .. }));
+    wait_host(&manager, || {
+        manager.spawn_attempts() == 2 && manager.live_tool_names().contains(&"slow_wait".into())
+    })
+    .await;
+    assert!(matches!(manager.status(), HostStatus::Ready { .. }));
+    assert_ne!(manager.host_pid(), Some(pid));
+    assert_eq!(manager.shared.supervision.lock().unwrap().crashes.len(), 1);
+    manager.shutdown().await;
 }
 
 #[tokio::test]
@@ -745,6 +741,7 @@ async fn with_no_native_plugin_the_host_is_never_spawned() {
     let manager = Arc::new(ExtensionHostManager::new(ExtensionHostOptions {
         node_override: None,
         root: Some(temp.path().join("home")),
+        ..Default::default()
     }));
     let engine = manager.attach(registry);
     engine.sync().await.unwrap();
@@ -1167,5 +1164,416 @@ async fn a_disable_through_either_registry_revokes_for_every_engine() {
     assert_eq!(manager.owner_state(&id), None, "revoked and forgotten");
     assert!(installed(&first, fixture.workspace()).is_empty());
     assert!(installed(&second, fixture.workspace()).is_empty());
+    manager.shutdown().await;
+}
+
+fn fast_supervision() -> super::SupervisionOptions {
+    super::SupervisionOptions {
+        heartbeat_interval: Duration::from_millis(50),
+        ping_timeout: Duration::from_millis(150),
+        hang_timeout: Duration::from_millis(600),
+        restart_backoff: Duration::from_millis(25),
+        ..Default::default()
+    }
+}
+
+fn supervised_manager(fixture: &FixturePlugins, node: PathBuf) -> Arc<ExtensionHostManager> {
+    Arc::new(ExtensionHostManager::new(ExtensionHostOptions {
+        node_override: Some(node),
+        root: Some(fixture.root.clone()),
+        supervision: fast_supervision(),
+    }))
+}
+
+async fn wait_host(manager: &ExtensionHostManager, predicate: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !predicate() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "host wait timed out: {:?}; {:?}",
+            manager.status(),
+            manager.diagnostics()
+        )
+    });
+}
+
+#[test]
+fn crash_budget_is_bounded_and_expires_only_with_the_window() {
+    let options = super::SupervisionOptions::default();
+    let mut state = super::SupervisionState::default();
+    let now = Instant::now();
+    assert!(state.record_crash(now, &options));
+    assert!(state.record_crash(now + Duration::from_secs(1), &options));
+    assert!(!state.record_crash(now + Duration::from_secs(2), &options));
+    assert_eq!(state.crashes.len(), 3);
+    assert!(state.record_crash(
+        now + options.crash_window + Duration::from_secs(3),
+        &options
+    ));
+    assert_eq!(state.crashes.len(), 1);
+}
+
+#[test]
+fn host_exit_preserves_failed_receipts_and_blames_only_the_activating_owner() {
+    let mut registry = OwnerRegistry::new();
+    let active = registry.begin_owner(
+        "healthy",
+        "healthy",
+        fake_authority("healthy"),
+        "hash-healthy",
+    );
+    registry.mark_active(&active);
+    register(&mut registry, &active, "healthy_probe").unwrap();
+    let failed = registry.begin_owner("failed", "failed", fake_authority("failed"), "hash-failed");
+    registry.mark_failed(&failed, OwnerState::Faulted("existing fault".into()));
+    registry.begin_owner(
+        "activating",
+        "activating",
+        fake_authority("activating"),
+        "hash-activating",
+    );
+    registry.host_exited("fixture crash");
+    assert!(registry.owner("healthy").is_none());
+    assert!(registry.live_tools().is_empty());
+    assert!(matches!(
+        registry.owner("failed").unwrap().state,
+        OwnerState::Faulted(_)
+    ));
+    assert!(matches!(
+        registry.owner("activating").unwrap().state,
+        OwnerState::Failed(_)
+    ));
+    let replay = registry.begin_owner(
+        "healthy",
+        "healthy",
+        fake_authority("healthy"),
+        "hash-healthy",
+    );
+    assert_ne!(replay.generation, active.generation);
+    assert_ne!(replay.owner_token, active.owner_token);
+}
+
+#[test]
+fn opening_an_engine_never_resets_a_crash_budget() {
+    let manager = Arc::new(ExtensionHostManager::new(ExtensionHostOptions::default()));
+    {
+        *manager.shared.host.lock().unwrap() = super::HostSlot::Failed {
+            reason: "budget".into(),
+            stderr_tail: String::new(),
+        };
+        let mut state = manager.shared.supervision.lock().unwrap();
+        for _ in 0..3 {
+            state.record_crash(Instant::now(), &manager.shared.options.supervision);
+        }
+    }
+    let _engine = manager.attach(Arc::new(PluginRegistry::empty(Path::new("/fixture"))));
+    assert_eq!(manager.shared.supervision.lock().unwrap().crashes.len(), 3);
+    assert!(matches!(manager.status(), HostStatus::Failed { .. }));
+    manager.retry();
+    assert!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .crashes
+            .is_empty()
+    );
+    assert_eq!(manager.status(), HostStatus::Idle);
+}
+
+#[tokio::test]
+async fn three_crashes_stop_replay_until_explicit_retry() {
+    let Some(node) = node_for_tests("crash budget") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["crash-tool", "refuses-approval"]).await;
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    let failed_id = plugin_id(&fixture, "refuses-approval");
+    let mut previous = None;
+    for crash in 1..=3 {
+        let tool = host_tool(&engine, fixture.workspace(), "crash_probe");
+        let registration = manager
+            .shared
+            .registry
+            .lock()
+            .unwrap()
+            .live_tools()
+            .into_iter()
+            .find(|t| t.name == "crash_probe")
+            .unwrap();
+        if let Some(old) = previous {
+            assert_ne!(registration.owner, old);
+        }
+        previous = Some(registration.owner);
+        let outcome = tool
+            .execute(json!({}), &ToolContext::new(fixture.workspace()))
+            .await;
+        assert!(matches!(outcome, Err(ToolError::NotAvailable { .. })));
+        if crash < 3 {
+            wait_host(&manager, || {
+                manager.spawn_attempts() == crash + 1
+                    && manager.live_tool_names().contains(&"crash_probe".into())
+            })
+            .await;
+            assert!(matches!(
+                manager.owner_state(&failed_id),
+                Some(OwnerState::Failed(_))
+            ));
+        } else {
+            wait_host(&manager, || {
+                matches!(manager.status(), HostStatus::Failed { .. })
+            })
+            .await;
+        }
+    }
+    assert_eq!(manager.spawn_attempts(), 3);
+    let _another = manager.attach(fixture.registry());
+    engine.sync().await.ok();
+    assert_eq!(manager.spawn_attempts(), 3);
+    manager.retry();
+    engine.sync().await.unwrap();
+    assert_eq!(manager.spawn_attempts(), 4);
+    assert!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .crashes
+            .is_empty()
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_activation_crash_does_not_prevent_other_receipts_replaying() {
+    let Some(node) = node_for_tests("activation crash") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["crash-activation", "clash-script"]).await;
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    wait_host(&manager, || {
+        manager.spawn_attempts() == 2
+            && manager
+                .live_tool_names()
+                .contains(&"fixture_script_tool".into())
+    })
+    .await;
+    assert!(matches!(
+        manager.owner_state(&plugin_id(&fixture, "crash-activation")),
+        Some(OwnerState::Failed(_))
+    ));
+    assert_eq!(manager.shared.supervision.lock().unwrap().crashes.len(), 1);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn heartbeat_recovers_a_delayed_pong_then_kills_a_hung_host() {
+    let Some(node) = node_for_tests("heartbeat") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["hang-tool"]).await;
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    let tool = host_tool(&engine, fixture.workspace(), "hang_probe");
+    let workspace = fixture.workspace().to_path_buf();
+    let task = tokio::spawn(async move {
+        tool.execute(json!({"ms": 400}), &ToolContext::new(&workspace))
+            .await
+    });
+    wait_host(&manager, || {
+        matches!(manager.status(), HostStatus::Unresponsive { .. })
+    })
+    .await;
+    assert!(task.await.unwrap().is_ok());
+    wait_host(&manager, || {
+        matches!(manager.status(), HostStatus::Ready { .. })
+    })
+    .await;
+    assert_eq!(manager.spawn_attempts(), 1);
+    let tool = host_tool(&engine, fixture.workspace(), "hang_probe");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        tool.execute(json!({}), &ToolContext::new(fixture.workspace())),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(ToolError::NotAvailable { .. })));
+    wait_host(&manager, || {
+        manager.spawn_attempts() == 2 && manager.live_tool_names().contains(&"hang_probe".into())
+    })
+    .await;
+    assert_eq!(manager.shared.supervision.lock().unwrap().crashes.len(), 1);
+    manager.shutdown().await;
+}
+
+#[test]
+fn old_host_callbacks_cannot_fault_or_remove_a_new_owner() {
+    use super::supervisor::HostEvents;
+    let manager = ExtensionHostManager::new(ExtensionHostOptions::default());
+    manager
+        .shared
+        .host_generation
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let owner = {
+        let mut registry = manager.shared.registry.lock().unwrap();
+        let owner = registry.begin_owner(
+            "fixture",
+            "fixture",
+            fake_authority("fixture"),
+            "hash-fixture",
+        );
+        registry.mark_active(&owner);
+        register(&mut registry, &owner, "fixture_probe").unwrap();
+        owner
+    };
+    let old = super::Events {
+        shared: Arc::downgrade(&manager.shared),
+        generation: 1,
+    };
+    old.faulted(&protocol::FaultedParams {
+        owner,
+        error: "stale fault".into(),
+    });
+    old.exited(1, "stale exit".into(), String::new());
+    assert_eq!(manager.owner_state("fixture"), Some(OwnerState::Active));
+    assert_eq!(manager.live_tool_names(), ["fixture_probe"]);
+    assert!(
+        manager
+            .shared
+            .supervision
+            .lock()
+            .unwrap()
+            .crashes
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_new_attachment_retries_only_cooled_down_launch_failures() {
+    let manager = Arc::new(ExtensionHostManager::new(ExtensionHostOptions::default()));
+    *manager.shared.host.lock().unwrap() = super::HostSlot::Failed {
+        reason: "missing Node".into(),
+        stderr_tail: String::new(),
+    };
+    {
+        let mut state = manager.shared.supervision.lock().unwrap();
+        state.launch_failed = true;
+        state.last_start = Some(Instant::now());
+    }
+    let plugins = Arc::new(PluginRegistry::empty(Path::new("/fixture")));
+    let _first = manager.attach(Arc::clone(&plugins));
+    assert!(matches!(manager.status(), HostStatus::Failed { .. }));
+    manager.shared.supervision.lock().unwrap().last_start =
+        Some(Instant::now() - Duration::from_secs(61));
+    let _later = manager.attach(plugins);
+    assert_eq!(manager.status(), HostStatus::Idle);
+}
+
+#[tokio::test]
+async fn replay_rechecks_persisted_disable_and_keeps_workspace_tools_separate() {
+    let Some(node) = node_for_tests("replay authority") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let a = FixturePlugins::new(&["crash-tool"]).await;
+    let b = FixturePlugins::new(&["clash-script"]).await;
+    let manager = Arc::new(ExtensionHostManager::new(ExtensionHostOptions {
+        node_override: Some(node),
+        root: Some(a.root.clone()),
+        supervision: super::SupervisionOptions {
+            restart_backoff: Duration::from_secs(1),
+            ..fast_supervision()
+        },
+    }));
+    let first = manager.attach(a.registry());
+    let second = manager.attach(b.registry());
+    first.sync().await.unwrap();
+    let tool = host_tool(&first, a.workspace(), "crash_probe");
+    assert!(matches!(
+        tool.execute(json!({}), &ToolContext::new(a.workspace()))
+            .await,
+        Err(ToolError::NotAvailable { .. })
+    ));
+    wait_host(&manager, || {
+        matches!(manager.status(), HostStatus::Restarting { .. })
+    })
+    .await;
+    // Keep the engine's snapshot stale deliberately. Replay must consult the
+    // persisted state rather than restoring the previous owner's authority.
+    a.disable("crash-tool");
+    wait_host(&manager, || {
+        manager.spawn_attempts() == 2
+            && manager
+                .live_tool_names()
+                .contains(&"fixture_script_tool".into())
+    })
+    .await;
+    assert!(installed(&first, a.workspace()).is_empty());
+    assert_eq!(installed(&second, b.workspace()), ["fixture_script_tool"]);
+    assert!(manager.owner_state(&plugin_id(&a, "crash-tool")).is_none());
+    manager.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(manager.status(), HostStatus::Idle);
+    assert_eq!(
+        manager.spawn_attempts(),
+        2,
+        "planned shutdown never restarts"
+    );
+}
+
+#[tokio::test]
+async fn explicit_retry_refreshes_same_byte_authority_without_inheriting_old_handles() {
+    let Some(node) = node_for_tests("same byte retry") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["clash-script"]).await;
+    let manager = supervised_manager(&fixture, node);
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    let old = host_tool(&engine, fixture.workspace(), "fixture_script_tool");
+    let old_owner = manager.shared.registry.lock().unwrap().live_tools()[0]
+        .owner
+        .clone();
+    let mut updated = discover_with_config(&fixture.config);
+    updated.enable("clash-script").unwrap();
+    manager.refresh_workspace(&Arc::new(updated));
+    manager.retry();
+    engine.sync().await.unwrap();
+    let current_owner = manager.shared.registry.lock().unwrap().live_tools()[0]
+        .owner
+        .clone();
+    assert_ne!(old_owner, current_owner);
+    assert!(matches!(
+        old.execute(json!({}), &ToolContext::new(fixture.workspace()))
+            .await,
+        Err(ToolError::NotAvailable { .. })
+    ));
+    let current = host_tool(&engine, fixture.workspace(), "fixture_script_tool");
+    assert!(
+        current
+            .execute(json!({}), &ToolContext::new(fixture.workspace()))
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        manager.spawn_attempts(),
+        1,
+        "a healthy process need not restart"
+    );
     manager.shutdown().await;
 }

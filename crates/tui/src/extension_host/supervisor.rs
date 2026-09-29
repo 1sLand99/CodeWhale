@@ -1,10 +1,8 @@
 //! One extension-host process: launch plan, spawn, handshake, channel, exit.
 //!
-//! Phase 1 has no heartbeat and no auto-restart. When the process exits for
-//! any reason, every in-flight call fails with a typed error, the owner
-//! registry is revoked wholesale, and the host is marked failed with its
-//! stderr tail. Nothing respawns until the next session or a newly enabled
-//! plugin.
+//! When the process exits, every in-flight call fails with a typed error.
+//! The existing Rust manager owns heartbeat, crash budget, generation changes,
+//! and receipt-checked replay; this channel never replays a tool call.
 //!
 //! **OS sandbox.** Where Codewhale's default command sandbox is available
 //! (Seatbelt on macOS; bubblewrap stays opt-in for shell commands and is not
@@ -257,6 +255,7 @@ pub(crate) struct HostProcess {
     next_id: AtomicU64,
     stderr_tail: Arc<Mutex<VecDeque<u8>>>,
     exited: tokio::sync::watch::Receiver<bool>,
+    kill: mpsc::Sender<String>,
 }
 
 fn push_tail(tail: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
@@ -454,6 +453,7 @@ impl HostProcess {
             next_id: AtomicU64::new(1),
             stderr_tail,
             exited: exited_rx,
+            kill: kill_tx.clone(),
         });
 
         let handshake_result = tokio::time::timeout(HANDSHAKE_DEADLINE, async {
@@ -528,6 +528,14 @@ impl HostProcess {
         *self.exited.borrow()
     }
 
+    pub(crate) fn terminate(&self, reason: String) {
+        let _ = self.kill.try_send(reason);
+    }
+
+    pub(crate) fn stderr_tail(&self) -> String {
+        tail_string(&self.stderr_tail)
+    }
+
     fn send_frame(&self, value: &Value) -> Result<(), HostCallError> {
         let frame = protocol::encode_frame(value).map_err(|error| HostCallError::Rpc {
             code: error_code::INVALID_PARAMS,
@@ -554,7 +562,9 @@ impl HostProcess {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("pending lock");
-            if pending.len() >= protocol::MAX_INFLIGHT {
+            // Reserve one control request for the single heartbeat monitor,
+            // so saturated tool calls cannot make a healthy host look hung.
+            if pending.len() >= protocol::MAX_INFLIGHT && !matches!(request, CoreRequest::Ping) {
                 return Err(HostCallError::Busy);
             }
             pending.insert(

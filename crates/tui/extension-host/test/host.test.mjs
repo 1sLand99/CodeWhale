@@ -25,6 +25,13 @@ test('handshake reports protocol 1 and the digest of the running bundle', async 
   t.diagnostic(`spawn → host/ready: ${host.readyMs.toFixed(1)} ms`)
 })
 
+test('heartbeat answers after initialization without an owner or tool call', async (t) => {
+  const host = await startHost()
+  t.after(() => host.stop())
+  assert.deepEqual(await host.call('host/ping', {}), {})
+  assert.equal(host.registry.length, 0)
+})
+
 test('the published DSH plugin runs unmodified and returns its payload', async (t) => {
   const host = await startHost()
   t.after(() => host.stop())

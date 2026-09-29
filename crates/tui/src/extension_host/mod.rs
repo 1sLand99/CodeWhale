@@ -8,7 +8,7 @@
 //! `ToolSpec`s ([`tool::HostToolSpec`]) behind the existing gate.
 //!
 //! Lifecycle: a reviewed, enabled plugin with a `native` entry (activation
-//! policy v4, selected by the flag) makes [`ExtensionHostManager::reconcile`]
+//! policy v4, selected by the flag) makes [`ExtensionHostManager::reconcile_in_background`]
 //! spawn the host in the background — never on the first-prompt path — and
 //! activate one owner per plugin. Tools join the per-turn registry at the next
 //! rebuild, deferred. Disabling, revoking or updating the plugin revokes its
@@ -30,9 +30,10 @@
 //! Known limitations (phase 1, by design — see the design doc §8):
 //! * Tools only: no commands, hooks, skills, prompt sections, MCP, or
 //!   `core/call` (the host cannot ask the core to do anything).
-//! * No heartbeat and no auto-restart. A dead host fails in-flight calls with
-//!   a typed error and stays failed until the next session or until a plugin
-//!   the session has not seen before becomes desired. A teardown that times
+//! * Heartbeat and bounded automatic restart preserve the shared crash budget
+//!   across engine creation and replay. Dead-host calls fail with a typed
+//!   error and are never replayed. Three crashes in five minutes require an
+//!   explicit plugin change/reload to retry. A teardown that times
 //!   out or reports leaks is logged in `/plugin`; the plugin's leftover
 //!   JavaScript keeps running until the host process ends.
 //! * One host per engine process and one trust tier. On macOS (Seatbelt) the
@@ -77,6 +78,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -162,6 +164,58 @@ pub struct ExtensionHostOptions {
     pub node_override: Option<PathBuf>,
     /// Where the bundle is materialized; defaults to the Codewhale home.
     pub root: Option<PathBuf>,
+    /// Per-manager timings; tests can shorten them without global state.
+    pub supervision: SupervisionOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct SupervisionOptions {
+    pub heartbeat_interval: Duration,
+    pub ping_timeout: Duration,
+    pub hang_timeout: Duration,
+    pub restart_backoff: Duration,
+    pub crash_window: Duration,
+    pub crash_limit: usize,
+    pub start_retry_cooldown: Duration,
+}
+
+impl Default for SupervisionOptions {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: Duration::from_secs(3),
+            ping_timeout: Duration::from_secs(3),
+            hang_timeout: Duration::from_secs(10),
+            restart_backoff: Duration::from_millis(250),
+            crash_window: Duration::from_secs(5 * 60),
+            crash_limit: 3,
+            start_retry_cooldown: Duration::from_secs(60),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SupervisionState {
+    crashes: VecDeque<Instant>,
+    last_start: Option<Instant>,
+    launch_failed: bool,
+    retry_ticket: u64,
+    policy: bool,
+}
+
+impl SupervisionState {
+    fn record_crash(&mut self, now: Instant, options: &SupervisionOptions) -> bool {
+        while self
+            .crashes
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= options.crash_window)
+        {
+            self.crashes.pop_front();
+        }
+        self.crashes.push_back(now);
+        self.launch_failed = false;
+        self.retry_ticket += 1;
+        self.crashes.len() < options.crash_limit
+    }
 }
 
 /// Observable host state, for `/plugin`, doctor and tests.
@@ -175,6 +229,12 @@ pub enum HostStatus {
         /// `seatbelt` / `bwrap`, or `None` when the host runs unsandboxed.
         sandbox: Option<String>,
     },
+    Unresponsive {
+        pid: Option<u32>,
+    },
+    Restarting {
+        reason: String,
+    },
     Failed {
         reason: String,
         stderr_tail: String,
@@ -185,6 +245,8 @@ enum HostSlot {
     Idle,
     Starting,
     Ready(Arc<HostProcess>),
+    Unresponsive(Arc<HostProcess>),
+    Restarting { reason: String },
     Failed { reason: String, stderr_tail: String },
 }
 
@@ -211,8 +273,8 @@ pub(crate) struct ManagerShared {
     spawn_attempts: AtomicU64,
     sync_lock: tokio::sync::Mutex<()>,
     diagnostics: Mutex<VecDeque<String>>,
-    /// Plugin ids this session has already tried; a new one clears `Failed`.
-    seen_plugins: Mutex<BTreeSet<String>>,
+    /// Lock order: host, supervision, registry. Never held across await.
+    supervision: Mutex<SupervisionState>,
 }
 
 impl ManagerShared {
@@ -268,20 +330,30 @@ impl ManagerShared {
 
 /// Channel callbacks. Holds a `Weak` so the host process (which owns the
 /// callbacks) never keeps the manager alive.
-struct Events(Weak<ManagerShared>);
+struct Events {
+    shared: Weak<ManagerShared>,
+    generation: u64,
+}
 
 impl HostEvents for Events {
     fn register(&self, params: &protocol::RegisterParams) -> RegisterResult {
-        let Some(shared) = self.0.upgrade() else {
+        let Some(shared) = self.shared.upgrade() else {
             return RegisterResult::Refused {
                 refused: "extension host manager is gone".to_string(),
             };
         };
+        let slot = shared.host.lock().expect("host lock");
+        if shared.host_generation.load(Ordering::SeqCst) != self.generation {
+            return RegisterResult::Refused {
+                refused: "stale host generation".to_string(),
+            };
+        }
         let result = shared
             .registry
             .lock()
             .expect("registry lock")
             .register_tool(params);
+        drop(slot);
         match result {
             Ok(handle) => RegisterResult::Admitted { handle },
             Err(reason) => {
@@ -295,7 +367,7 @@ impl HostEvents for Events {
     }
 
     fn unregister(&self, params: &protocol::UnregisterParams) {
-        if let Some(shared) = self.0.upgrade() {
+        if let Some(shared) = self.shared.upgrade() {
             shared
                 .registry
                 .lock()
@@ -305,17 +377,25 @@ impl HostEvents for Events {
     }
 
     fn faulted(&self, params: &protocol::FaultedParams) {
-        let Some(shared) = self.0.upgrade() else {
+        let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        shared
+        let slot = shared.host.lock().expect("host lock");
+        if shared.host_generation.load(Ordering::SeqCst) != self.generation {
+            return;
+        }
+        if !shared
             .registry
             .lock()
             .expect("registry lock")
-            .mark_failed(&params.owner, OwnerState::Faulted(params.error.clone()));
-        if let Some(host) = shared.ready_host() {
+            .mark_failed(&params.owner, OwnerState::Faulted(params.error.clone()))
+        {
+            return;
+        }
+        if let HostSlot::Ready(host) | HostSlot::Unresponsive(host) = &*slot {
             host.revoke_calls_of(&params.owner.plugin_id);
         }
+        drop(slot);
         shared.diagnostic(format!(
             "extension `{}` faulted and was disposed: {}",
             params.owner.plugin_id, params.error
@@ -323,28 +403,173 @@ impl HostEvents for Events {
     }
 
     fn exited(&self, host_generation: u64, reason: String, stderr_tail: String) {
-        let Some(shared) = self.0.upgrade() else {
+        let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        if shared.host_generation.load(Ordering::SeqCst) != host_generation {
-            return;
-        }
-        shared
-            .registry
-            .lock()
-            .expect("registry lock")
-            .revoke_all(&format!("extension host exited: {reason}"));
-        {
+        let retry = {
             let mut slot = shared.host.lock().expect("host lock");
-            if !matches!(&*slot, HostSlot::Failed { .. } | HostSlot::Idle) {
-                *slot = HostSlot::Failed {
+            if shared.host_generation.load(Ordering::SeqCst) != host_generation
+                || !matches!(&*slot, HostSlot::Ready(_) | HostSlot::Unresponsive(_))
+            {
+                return;
+            }
+            let mut supervision = shared.supervision.lock().expect("supervision lock");
+            let restart = supervision.record_crash(Instant::now(), &shared.options.supervision);
+            shared
+                .registry
+                .lock()
+                .expect("registry lock")
+                .host_exited(&reason);
+            *slot = if restart {
+                HostSlot::Restarting {
                     reason: reason.clone(),
-                    stderr_tail: stderr_tail.clone(),
-                };
+                }
+            } else {
+                HostSlot::Failed {
+                    reason: format!("crash budget exhausted: {reason}"),
+                    stderr_tail,
+                }
+            };
+            restart.then_some((supervision.retry_ticket, supervision.policy))
+        };
+        shared.diagnostic(format!("extension host {reason}"));
+        if let Some((ticket, policy)) = retry {
+            schedule_restart(&shared, host_generation, ticket, policy);
+        }
+    }
+}
+
+/// One scheduled retry owns a ticket, so explicit retry/shutdown and a newer
+/// host generation invalidate it. The existing reconcile lock owns replay.
+fn schedule_restart(shared: &Arc<ManagerShared>, generation: u64, ticket: u64, policy: bool) {
+    let weak = Arc::downgrade(shared);
+    let backoff = shared.options.supervision.restart_backoff;
+    tokio::spawn(async move {
+        tokio::time::sleep(backoff).await;
+        let Some(shared) = weak.upgrade() else {
+            return;
+        };
+        {
+            let _serial = shared.sync_lock.lock().await;
+            let mut slot = shared.host.lock().expect("host lock");
+            if shared.host_generation.load(Ordering::SeqCst) != generation
+                || shared
+                    .supervision
+                    .lock()
+                    .expect("supervision lock")
+                    .retry_ticket
+                    != ticket
+                || !matches!(&*slot, HostSlot::Restarting { .. })
+            {
+                return;
+            }
+            *slot = HostSlot::Idle;
+        }
+        let manager = ExtensionHostManager { shared };
+        if let Err(error) = manager.reconcile_with_policy(policy).await {
+            manager.shared.diagnostic(error);
+        }
+    });
+}
+
+fn set_host_health(shared: &ManagerShared, generation: u64, unresponsive: bool) -> bool {
+    let mut slot = shared.host.lock().expect("host lock");
+    if shared.host_generation.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+    let host = match &*slot {
+        HostSlot::Ready(host) | HostSlot::Unresponsive(host) => Arc::clone(host),
+        _ => return false,
+    };
+    *slot = if unresponsive {
+        HostSlot::Unresponsive(host)
+    } else {
+        HostSlot::Ready(host)
+    };
+    true
+}
+
+/// A monitor never owns the manager. Dropping the manager or changing host
+/// generation stops its monitor; pending calls are never retried here.
+fn monitor_host(shared: &Arc<ManagerShared>, host: &Arc<HostProcess>, generation: u64) {
+    let weak = Arc::downgrade(shared);
+    let host = Arc::clone(host);
+    let options = shared.options.supervision.clone();
+    tokio::spawn(async move {
+        let mut blocked_since = None;
+        loop {
+            tokio::time::sleep(options.heartbeat_interval).await;
+            let Some(shared) = weak.upgrade() else {
+                return;
+            };
+            if shared.host_generation.load(Ordering::SeqCst) != generation || host.has_exited() {
+                return;
+            }
+            drop(shared);
+            let (id, mut answer) = match host.start_request(CoreRequest::Ping, None) {
+                Ok(request) => {
+                    blocked_since = None;
+                    request
+                }
+                Err(supervisor::HostCallError::Busy) => {
+                    // A full outbound queue can itself be caused by a hung
+                    // host. Bound that wait too instead of skipping forever.
+                    let elapsed = blocked_since.get_or_insert_with(Instant::now).elapsed();
+                    if elapsed >= options.hang_timeout {
+                        host.terminate("heartbeat queue remained blocked".into());
+                        return;
+                    }
+                    if elapsed >= options.ping_timeout {
+                        let Some(shared) = weak.upgrade() else {
+                            return;
+                        };
+                        if !set_host_health(&shared, generation, true) {
+                            return;
+                        }
+                    }
+                    continue;
+                }
+                Err(_) => return,
+            };
+            let result = match tokio::time::timeout(options.ping_timeout, &mut answer).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let Some(shared) = weak.upgrade() else {
+                        host.forget(id);
+                        return;
+                    };
+                    if !set_host_health(&shared, generation, true) {
+                        host.forget(id);
+                        return;
+                    }
+                    drop(shared);
+                    let remaining = options.hang_timeout.saturating_sub(options.ping_timeout);
+                    match tokio::time::timeout(remaining, answer).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            host.forget(id);
+                            host.terminate("heartbeat timed out".into());
+                            return;
+                        }
+                    }
+                }
+            };
+            host.forget(id);
+            if !matches!(result, Ok(Ok(serde_json::Value::Object(ref object))) if object.is_empty())
+            {
+                if !host.has_exited() {
+                    host.terminate("invalid heartbeat response".into());
+                }
+                return;
+            }
+            let Some(shared) = weak.upgrade() else {
+                return;
+            };
+            if !set_host_health(&shared, generation, false) {
+                return;
             }
         }
-        shared.diagnostic(format!("extension host {reason}"));
-    }
+    });
 }
 
 /// Supervises at most one extension host for this engine process.
@@ -366,7 +591,7 @@ impl ExtensionHostManager {
                 spawn_attempts: AtomicU64::new(0),
                 sync_lock: tokio::sync::Mutex::new(()),
                 diagnostics: Mutex::new(VecDeque::new()),
-                seen_plugins: Mutex::new(BTreeSet::new()),
+                supervision: Mutex::new(SupervisionState::default()),
             }),
         }
     }
@@ -380,6 +605,10 @@ impl ExtensionHostManager {
                 pid: host.pid,
                 node_version: host.node_version.get().cloned().unwrap_or_default(),
                 sandbox: host.sandbox.clone(),
+            },
+            HostSlot::Unresponsive(host) => HostStatus::Unresponsive { pid: host.pid },
+            HostSlot::Restarting { reason } => HostStatus::Restarting {
+                reason: reason.clone(),
             },
             HostSlot::Failed {
                 reason,
@@ -432,20 +661,39 @@ impl ExtensionHostManager {
             .map(|entry| entry.state.clone())
     }
 
-    /// A new session may retry a host that failed in an earlier one.
-    pub fn begin_session(&self) {
-        {
-            let mut slot = self.shared.host.lock().expect("host lock");
-            if matches!(&*slot, HostSlot::Failed { .. }) {
-                *slot = HostSlot::Idle;
-            }
+    /// An explicit plugin mutation retries failed receipts and clears the
+    /// shared crash budget. Merely opening another engine never does this.
+    pub fn retry(&self) {
+        let mut slot = self.shared.host.lock().expect("host lock");
+        let mut supervision = self.shared.supervision.lock().expect("supervision lock");
+        supervision.crashes.clear();
+        supervision.launch_failed = false;
+        supervision.retry_ticket += 1;
+        if matches!(
+            &*slot,
+            HostSlot::Failed { .. } | HostSlot::Restarting { .. }
+        ) {
+            *slot = HostSlot::Idle;
         }
         self.shared
             .registry
             .lock()
             .expect("registry lock")
             .forget_inactive();
-        self.shared.seen_plugins.lock().expect("seen lock").clear();
+    }
+
+    fn retry_launch_on_attach(&self) {
+        let mut slot = self.shared.host.lock().expect("host lock");
+        let mut supervision = self.shared.supervision.lock().expect("supervision lock");
+        if matches!(&*slot, HostSlot::Failed { .. })
+            && supervision.launch_failed
+            && supervision.last_start.is_some_and(|at| {
+                at.elapsed() >= self.shared.options.supervision.start_retry_cooldown
+            })
+        {
+            *slot = HostSlot::Idle;
+            supervision.retry_ticket += 1;
+        }
     }
 
     /// Record native tool names from one engine's turn build (the registry
@@ -464,6 +712,7 @@ impl ExtensionHostManager {
     /// is reconciled until [`HostAttachment::sync`] or a background sync.
     #[must_use]
     pub fn attach(self: &Arc<Self>, plugins: Arc<PluginRegistry>) -> HostAttachment {
+        self.retry_launch_on_attach();
         let id = self.shared.next_attachment.fetch_add(1, Ordering::SeqCst) + 1;
         self.shared
             .attachments
@@ -569,15 +818,16 @@ impl ExtensionHostManager {
         installed
     }
 
-    /// Kick [`Self::reconcile`] without waiting (turn builds, session start,
+    /// Reconcile without waiting (turn builds, session start,
     /// plugin changes).
     pub fn reconcile_in_background(self: &Arc<Self>) {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
         let manager = Arc::clone(self);
+        let policy = activation::extension_host_policy_enabled();
         tokio::spawn(async move {
-            if let Err(error) = manager.reconcile().await {
+            if let Err(error) = manager.reconcile_with_policy(policy).await {
                 manager.shared.diagnostic(error);
             }
         });
@@ -587,7 +837,13 @@ impl ExtensionHostManager {
     /// `native` entries in any attached engine's snapshot: revoke what no
     /// attachment desires any more or what changed (synchronously, then ask
     /// the host to tear down), spawn the host if needed, activate the rest.
+    #[cfg(test)]
     pub async fn reconcile(&self) -> Result<(), String> {
+        self.reconcile_with_policy(activation::extension_host_policy_enabled())
+            .await
+    }
+
+    async fn reconcile_with_policy(&self, policy: bool) -> Result<(), String> {
         let shared = &self.shared;
         let _serial = shared.sync_lock.lock().await;
         let (desired, errors) = loop {
@@ -598,7 +854,6 @@ impl ExtensionHostManager {
                 .iter()
                 .map(|(id, state)| (*id, Arc::clone(&state.plugins)))
                 .collect();
-            let policy = activation::extension_host_policy_enabled();
             let scan = tokio::task::spawn_blocking(move || {
                 let _scope = activation::PolicyScope::propagate(policy);
                 union_of_desired_owners(snapshots)
@@ -616,37 +871,25 @@ impl ExtensionHostManager {
             shared.diagnostic(error);
         }
 
-        {
-            let mut seen = shared.seen_plugins.lock().expect("seen lock");
-            let fresh = desired.keys().any(|id| !seen.contains(id));
-            seen.extend(desired.keys().cloned());
-            if fresh {
-                let mut slot = shared.host.lock().expect("host lock");
-                if matches!(&*slot, HostSlot::Failed { .. }) {
-                    *slot = HostSlot::Idle;
-                }
-            }
-        }
-
         // 1. Revoke first — never waits for the host.
         let mut revoked: Vec<OwnerRef> = Vec::new();
         let mut to_activate: Vec<(String, DesiredOwner)> = Vec::new();
         {
             let mut registry = shared.registry.lock().expect("registry lock");
-            let existing: Vec<(String, String, OwnerState)> = registry
+            let existing: Vec<(String, PluginAuthority)> = registry
                 .owners()
-                .map(|entry| {
-                    (
-                        entry.owner.plugin_id.clone(),
-                        entry.content_hash.clone(),
-                        entry.state.clone(),
-                    )
-                })
+                .map(|entry| (entry.owner.plugin_id.clone(), entry.authority.clone()))
                 .collect();
-            for (plugin_id, content_hash, _) in &existing {
-                let keep = desired
-                    .get(plugin_id)
-                    .is_some_and(|want| &want.authority.content_hash == content_hash);
+            for (plugin_id, authority) in &existing {
+                // An explicit trust/enable transition revokes the persisted
+                // authority even when the bytes stay identical. Refresh that
+                // owner instead of retaining a tool that can only fail closed.
+                let keep = desired.get(plugin_id).is_some_and(|want| {
+                    want.authority.content_hash == authority.content_hash
+                        && want.authority.capability_hash == authority.capability_hash
+                        && want.authority.state_generation == authority.state_generation
+                        && want.authority.state_path == authority.state_path
+                });
                 if !keep {
                     if let Some(owner) = registry.revoke_owner(plugin_id) {
                         revoked.push(owner);
@@ -656,7 +899,8 @@ impl ExtensionHostManager {
             }
             for (plugin_id, want) in desired {
                 // A failed or faulted activation of these exact bytes is not
-                // retried every turn; a content change or a new session is.
+                // retried every turn; changed authority or an explicit
+                // plugin mutation/reload permits another attempt.
                 if registry.owner(&plugin_id).is_none() {
                     to_activate.push((plugin_id, want));
                 }
@@ -698,8 +942,11 @@ impl ExtensionHostManager {
         if to_activate.is_empty() {
             return Ok(());
         }
-        let host = self.ensure_host().await?;
+        let host = self.ensure_host(policy).await?;
         for (plugin_id, want) in to_activate {
+            if host.has_exited() {
+                break;
+            }
             self.activate_owner(&host, &plugin_id, want).await;
         }
         Ok(())
@@ -786,20 +1033,31 @@ impl ExtensionHostManager {
         }
     }
 
-    async fn ensure_host(&self) -> Result<Arc<HostProcess>, String> {
+    async fn ensure_host(&self, policy: bool) -> Result<Arc<HostProcess>, String> {
         let shared = &self.shared;
-        {
+        let generation = {
             let mut slot = shared.host.lock().expect("host lock");
             match &*slot {
                 HostSlot::Ready(host) if !host.has_exited() => return Ok(Arc::clone(host)),
+                HostSlot::Ready(_) | HostSlot::Unresponsive(_) => {
+                    return Err("extension host is unavailable; waiting for supervision".into());
+                }
+                HostSlot::Restarting { .. } => return Err("extension host is restarting".into()),
                 HostSlot::Failed { reason, .. } => {
                     return Err(format!(
-                        "extension host is failed ({reason}); it restarts with the next session"
+                        "extension host is failed ({reason}); change/reload a plugin to retry"
                     ));
                 }
-                _ => *slot = HostSlot::Starting,
+                HostSlot::Starting => return Err("extension host is starting".into()),
+                HostSlot::Idle => {}
             }
-        }
+            *slot = HostSlot::Starting;
+            let mut supervision = shared.supervision.lock().expect("supervision lock");
+            supervision.last_start = Some(Instant::now());
+            supervision.policy = policy;
+            supervision.launch_failed = false;
+            shared.host_generation.fetch_add(1, Ordering::SeqCst) + 1
+        };
         shared.spawn_attempts.fetch_add(1, Ordering::SeqCst);
         let options = shared.options.clone();
         let prepared = tokio::task::spawn_blocking(move || -> Result<supervisor::HostLaunch, String> {
@@ -824,17 +1082,41 @@ impl ExtensionHostManager {
         .and_then(|result| result);
         let spawned = match prepared {
             Ok(launch) => {
-                let generation = shared.host_generation.fetch_add(1, Ordering::SeqCst) + 1;
-                let events: Arc<dyn HostEvents> = Arc::new(Events(Arc::downgrade(shared)));
+                let events: Arc<dyn HostEvents> = Arc::new(Events {
+                    shared: Arc::downgrade(shared),
+                    generation,
+                });
                 HostProcess::spawn(generation, &launch, bundle_sha256(), events).await
             }
             Err(error) => Err(error),
         };
         let mut slot = shared.host.lock().expect("host lock");
+        if shared.host_generation.load(Ordering::SeqCst) != generation
+            || !matches!(&*slot, HostSlot::Starting)
+        {
+            drop(slot);
+            if let Ok(host) = spawned {
+                host.terminate("host startup superseded".into());
+            }
+            return Err("extension host startup was superseded".into());
+        }
         match spawned {
             Ok(host) => {
                 *slot = HostSlot::Ready(Arc::clone(&host));
                 drop(slot);
+                if host.has_exited() {
+                    Events {
+                        shared: Arc::downgrade(shared),
+                        generation,
+                    }
+                    .exited(
+                        generation,
+                        "exited immediately after handshake".into(),
+                        host.stderr_tail(),
+                    );
+                    return Err("extension host exited immediately after handshake".into());
+                }
+                monitor_host(shared, &host, generation);
                 shared.diagnostic(format!(
                     "extension host started (pid {}, node {}, sandbox {})",
                     host.pid
@@ -845,6 +1127,11 @@ impl ExtensionHostManager {
                 Ok(host)
             }
             Err(reason) => {
+                shared
+                    .supervision
+                    .lock()
+                    .expect("supervision lock")
+                    .launch_failed = true;
                 *slot = HostSlot::Failed {
                     reason: reason.clone(),
                     stderr_tail: String::new(),
@@ -865,16 +1152,18 @@ impl ExtensionHostManager {
     pub async fn shutdown(&self) {
         let host = {
             let mut slot = self.shared.host.lock().expect("host lock");
+            self.shared.host_generation.fetch_add(1, Ordering::SeqCst);
+            self.shared
+                .supervision
+                .lock()
+                .expect("supervision lock")
+                .retry_ticket += 1;
             match std::mem::replace(&mut *slot, HostSlot::Idle) {
-                HostSlot::Ready(host) => Some(host),
-                other => {
-                    *slot = other;
-                    None
-                }
+                HostSlot::Ready(host) | HostSlot::Unresponsive(host) => Some(host),
+                _ => None,
             }
         };
         if let Some(host) = host {
-            self.shared.host_generation.fetch_add(1, Ordering::SeqCst);
             self.shared
                 .registry
                 .lock()
@@ -921,11 +1210,15 @@ pub(crate) fn render_status(manager: &ExtensionHostManager) -> String {
                 }
             );
         }
+        HostStatus::Unresponsive { pid } => {
+            let _ = write!(out, "unresponsive · pid {} (supervisor is waiting for a pong)", pid.map_or_else(|| "?".into(), |pid| pid.to_string()));
+        }
+        HostStatus::Restarting { reason } => { let _ = write!(out, "restarting after: {reason}"); }
         HostStatus::Failed {
             reason,
             stderr_tail,
         } => {
-            let _ = write!(out, "failed: {reason} (restarts with the next session)");
+            let _ = write!(out, "failed: {reason} (change/reload a plugin to retry)");
             let tail = stderr_tail.trim();
             if !tail.is_empty() {
                 let start = tail
@@ -978,6 +1271,7 @@ pub fn plugins_changed(plugins: Arc<PluginRegistry>) {
     if activation::extension_host_policy_enabled() {
         let manager = manager();
         manager.refresh_workspace(&plugins);
+        manager.retry();
         manager.reconcile_in_background();
     }
 }
