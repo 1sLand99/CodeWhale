@@ -5058,6 +5058,18 @@ fn pty_resize_updates_live_terminal_and_rejects_finished_or_pipe_jobs() {
         }
         assert!(Instant::now() < deadline, "PTY did not become ready");
     }
+    // Reopening a client after an idle minute must retain this live PTY's
+    // identity and resize eligibility; output silence is normal at a prompt.
+    manager.processes.get_mut(&id).unwrap().last_output_at =
+        Instant::now() - STALE_NO_OUTPUT_AFTER - Duration::from_millis(1);
+    let idle = manager.inspect_job(&id).unwrap().snapshot;
+    assert_eq!(idle.status, ShellStatus::Running);
+    assert!(idle.stdin_available);
+    assert!(!idle.stale, "an idle live PTY must remain reconnectable");
+    assert!(
+        idle.elapsed_since_output_ms
+            .is_some_and(|ms| ms >= STALE_NO_OUTPUT_AFTER.as_millis() as u64)
+    );
     let size = PtyDimensions {
         rows: 37,
         cols: 111,
