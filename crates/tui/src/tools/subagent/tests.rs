@@ -23051,6 +23051,25 @@ async fn continuing_a_child_whose_worktree_was_removed_fails_with_the_reason() {
 #[tokio::test]
 async fn failed_spawn_removes_the_worktree_it_created() {
     let repo = init_subagent_git_repo();
+    refuse_worktree_spawn_and_expect_cleanup(&repo, "codex/agent-rollback-probe").await;
+}
+
+/// Post-checkout hooks (and line-ending or LFS filters) can leave files in a
+/// fresh checkout. The rollback used to require a pristine `git status`, so
+/// in such repos every refused spawn still left its worktree behind.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_spawn_removes_its_worktree_despite_post_checkout_hook_output() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = init_subagent_git_repo();
+    let hook = repo.path().join(".git").join("hooks").join("post-checkout");
+    std::fs::create_dir_all(hook.parent().unwrap()).expect("hooks dir");
+    std::fs::write(&hook, "#!/bin/sh\necho generated > hook-output.txt\n").expect("hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    refuse_worktree_spawn_and_expect_cleanup(&repo, "codex/agent-hook-probe").await;
+}
+
+async fn refuse_worktree_spawn_and_expect_cleanup(repo: &tempfile::TempDir, branch: &str) {
     let mut runtime = stub_runtime();
     runtime.context = ToolContext::new(repo.path().to_path_buf());
     let manager = new_shared_subagent_manager(repo.path().to_path_buf(), 4);
@@ -23060,14 +23079,14 @@ async fn failed_spawn_removes_the_worktree_it_created() {
         assign_test_session_owner(&mut guard, &source, &runtime.context.state_namespace);
         source
     };
-    let branch = "codex/agent-rollback-probe";
+    let worktree_path = format!("{}-path", branch.replace('/', "-"));
     let err = spawn_subagent_from_input(
         json!({
             "prompt": "continue the review",
             "type": "scout",
             "worktree": true,
             "worktree_branch": branch,
-            "worktree_path": "rollback-probe",
+            "worktree_path": worktree_path,
             "resume_from": source,
         }),
         Arc::clone(&manager),
@@ -23079,7 +23098,20 @@ async fn failed_spawn_removes_the_worktree_it_created() {
     .expect_err("a running resume source refuses the spawn");
     assert!(err.to_string().contains("still running"), "{err}");
 
-    let worktrees = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]);
+    // The removal runs on the blocking pool, off the async worker.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let worktrees = loop {
+        let worktrees = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]);
+        let count = worktrees
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count();
+        let branch_gone = git_stdout(repo.path(), &["branch", "--list", branch]).is_empty();
+        if (count == 1 && branch_gone) || std::time::Instant::now() >= deadline {
+            break worktrees;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(
         worktrees
             .lines()

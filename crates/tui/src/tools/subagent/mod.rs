@@ -6921,12 +6921,13 @@ impl SubAgentManager {
                 runtime.max_spawn_depth
             ));
         }
-        // A finished worker's unchanged isolated worktree is removed with its
-        // branch, but its checkpoint stays continuable. Resuming into the
-        // missing directory would start a child whose every tool fails.
+        // A checkpoint outlives its workspace (a finished worker's unchanged
+        // worktree is removed, a directory is deleted or unmounted).
+        // Resuming into the missing directory would start a child whose
+        // every tool fails.
         if !workspace.is_dir() {
             return Err(anyhow!(
-                "Cannot resume agent {agent_id}: its workspace {} no longer exists (an isolated worktree with no changes is removed when the agent finishes); start a new agent for the follow-up work.",
+                "Cannot resume agent {agent_id}: its workspace {} no longer exists (for example, an isolated worktree with no changes is removed when its agent finishes); start a new agent for the follow-up work.",
                 workspace.display()
             ));
         }
@@ -11495,20 +11496,22 @@ async fn spawn_subagent_from_input(
 }
 
 /// An isolated worktree created for a spawn that has not started yet. If the
-/// spawn fails it is removed with its branch, through the same path that
-/// removes a finished worker's unchanged checkout, so nothing the worktree
-/// holds beyond its fresh checkout is ever deleted.
+/// spawn fails, or its future is dropped, the checkout and its new branch are
+/// removed. Removal runs git and deletes a directory, so inside a runtime it
+/// goes to the blocking pool rather than stall an async worker.
 struct PendingChildWorktree(Option<PathBuf>);
 
 impl Drop for PendingChildWorktree {
     fn drop(&mut self) {
-        if let Some(worktree) = self.0.take()
-            && !worktree::remove_unchanged_worktree(&worktree, Some(&BTreeSet::new()))
-        {
-            tracing::debug!(
-                "kept the worktree of a failed sub-agent spawn: {}",
-                worktree.display()
-            );
+        let Some(worktree) = self.0.take() else {
+            return;
+        };
+        let remove = move || worktree::remove_unstarted_worktree(&worktree);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(remove);
+            }
+            Err(_) => remove(),
         }
     }
 }
