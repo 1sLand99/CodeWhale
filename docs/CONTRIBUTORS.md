@@ -28,6 +28,15 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>Unreleased</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[SparkofSpike](https://github.com/SparkofSpike)** — translated seventeen more guides into Simplified Chinese, among them plugins, memory, sandbox, workflow authoring, Docker, Termux and HarmonyOS, and brought the existing zh_hans docs onto one terminology standard ([#6662](https://github.com/Hmbown/Codewhale/pull/6662)).
+
+</details>
+
+<details open>
 <summary><strong>v0.10.1 — reliability and first-run fixes</strong></summary>
 
 **Merged or adapted contributions**
