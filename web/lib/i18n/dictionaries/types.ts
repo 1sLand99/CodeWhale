@@ -547,6 +547,26 @@ export interface RoadmapDict {
   pullsDetail: string;
 }
 
+/** `app/[locale]/docs/vocabulary/page.tsx`. */
+export interface DocsVocabularyDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Classes on every body paragraph; zh loosens leading and tracking. */
+  bodyClassName: string;
+  /** Page H1. */
+  title: string;
+  lead: string;
+  executionHeading: string;
+  controlHeading: string;
+  controlLead: string;
+  routeHeading: string;
+  advisoryHeading: string;
+  measurementHeading: string;
+  leaderboardNote: string;
+  /** Maintainer pointer, carried in a hidden `data-source-note`. */
+  sourceNote: string;
+}
+
 /** `app/[locale]/contribute/page.tsx`. */
 export interface ContributeDict {
   metaTitle: string;
