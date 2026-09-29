@@ -214,7 +214,7 @@ pub(crate) fn settings_toml_keys() -> impl Iterator<Item = &'static str> {
 ///
 /// - `reasoning_effort` is checked against its reader,
 ///   [`ReasoningEffort::parse_strict`], and stored in canonical spelling.
-/// - A root field the TUI [`Config`] reads but `SETTINGS_SCHEMA` does not
+/// - A root field the TUI `Config` reads but `SETTINGS_SCHEMA` does not
 ///   declare (`yolo`, `max_subagents`, `mcp_oauth_callback_port`, ...) is
 ///   typed by that field's own deserializer: a string in a boolean or
 ///   integer field fails the TUI's strict parse of the whole file, so the
