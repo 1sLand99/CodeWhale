@@ -1730,11 +1730,8 @@ async fn resolve_diff_target(
         None
     };
 
-    let mut args = vec![
-        "diff".to_string(),
-        "--no-ext-diff".to_string(),
-        "--no-textconv".to_string(),
-    ];
+    let mut args = vec!["diff".to_string()];
+    args.extend(crate::dependencies::Git::REVIEW_DIFF_ARGS.map(String::from));
     if staged {
         args.push("--cached".to_string());
         if let Some(base_commit) = base_commit {

@@ -15,10 +15,6 @@ pub(crate) enum ProjectContextError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Refusing symlinked context file {path}")]
-    Symlink { path: PathBuf },
-    #[error("Context path {path} is not a regular file")]
-    NotFile { path: PathBuf },
     #[error("Context file {path} is too large ({size} bytes, max {max})")]
     TooLarge {
         path: PathBuf,

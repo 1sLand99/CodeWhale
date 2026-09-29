@@ -2229,9 +2229,9 @@ mod tests {
     fn classifier_prompt_redacts_secret_after_tool_result_flattening() {
         let secret = "cw-router-secret-should-never-leave-process";
         let config = Config {
-            api_key: Some(secret.to_string()),
             ..Default::default()
-        };
+        }
+        .with_legacy_root(Some(secret.to_string()), None);
         let client = CodewhaleClient::new(&config).expect("classifier client");
         // `recent_auto_router_context` converts ToolResult blocks into ordinary
         // text before this boundary. Exercise that exact flattened shape.
@@ -2547,7 +2547,9 @@ mod tests {
             crate::config::ZAI_GLM_5_3_MODEL,
             "GLM-5.3 must resolve to its own id"
         );
-        assert_eq!(route_53.reasoning_effort, Some(ReasoningEffort::High));
+        // GLM-5.3 publishes its own ladder (low/high/max) instead of 5.2's, so
+        // low reaches the wire (#6396).
+        assert_eq!(route_53.reasoning_effort, Some(ReasoningEffort::Low));
     }
 
     #[tokio::test]

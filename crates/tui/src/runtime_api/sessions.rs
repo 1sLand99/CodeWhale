@@ -436,6 +436,7 @@ pub(super) async fn create_session_from_thread(
             message: format!(
                 "Thread {thread_id} has a queued or active turn; wait for completion before saving as a session"
             ),
+            code: None,
         });
     }
 
@@ -449,16 +450,51 @@ pub(super) async fn create_session_from_thread(
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
     let total_tokens = total_tokens_from_thread_detail(&detail);
-    let session_handle = uuid::Uuid::new_v4().to_string();
-    let mut session = create_saved_session_with_id_and_mode(
-        session_handle.clone(),
-        &messages,
-        &detail.thread.model,
-        &detail.thread.workspace,
-        total_tokens,
-        None,
-        Some(&detail.thread.mode),
-    );
+    // Export is idempotent (#6144). Every POST used to mint a fresh document
+    // and rebind the thread to it, so each re-export left the previous
+    // document unreferenced, and a crash between the save and the bind below
+    // left the new one unreferenced too. Export writes only the document id
+    // derived from the thread — the one its engine already writes artifacts
+    // under — so a re-export or a retry after such a crash updates and binds
+    // the document it already wrote.
+    //
+    // The document the thread is currently bound to is deliberately *not*
+    // the target: a thread opened with `resume-thread` is bound to the
+    // original saved session, often a TUI conversation, and rewriting it from
+    // this thread's lossier projection would drop its images, tool work and
+    // system prompt. Export leaves that document untouched.
+    let session_handle = crate::runtime_threads::thread_session_id(&detail.thread.id);
+    if manager.is_session_live_anywhere(&session_handle) {
+        return Err(map_session_err(
+            &session_handle,
+            crate::session_manager::live_session_conflict(&session_handle),
+            "export",
+        ));
+    }
+    let existing = match manager.load_session(&session_handle) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(map_session_err(&session_handle, error, "read")),
+    };
+    let created = existing.is_none();
+    let mut session = match existing {
+        Some(existing) => {
+            let mut updated =
+                crate::session_manager::update_session(existing, &messages, total_tokens, None);
+            updated.metadata.model = detail.thread.model.clone();
+            updated.metadata.mode = Some(detail.thread.mode.clone());
+            updated
+        }
+        None => create_saved_session_with_id_and_mode(
+            session_handle.clone(),
+            &messages,
+            &detail.thread.model,
+            &detail.thread.workspace,
+            total_tokens,
+            None,
+            Some(&detail.thread.mode),
+        ),
+    };
     {
         let config = state.runtime_threads.read_config();
         stamp_session_provider_from_thread(&config, &detail, &mut session.metadata).map_err(
@@ -498,7 +534,11 @@ pub(super) async fn create_session_from_thread(
         })?;
 
     Ok((
-        StatusCode::CREATED,
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
         Json(CreateSessionResponse {
             session_id: session_handle,
             thread_id: detail.thread.id,
@@ -764,9 +804,9 @@ async fn persist_thread_cost(
 /// items), this endpoint asks the engine for its live session snapshot so
 /// token counts and message ordering are authoritative.
 ///
-/// `session_id` names the document to write. Omitted, the document is the
-/// conversation's own id (the one its workspace snapshots are tagged with),
-/// so a thread never ends up bound to a session that owns none of them — see
+/// `session_id` names the document to write. Omitted, the thread's bound
+/// document is updated, or, for a thread bound to none, a document is created
+/// under the thread's own conversation id — see
 /// [`crate::core::ops::SessionSnapshot::session_id`].
 pub(super) async fn save_current_session(
     State(state): State<RuntimeApiState>,
@@ -809,73 +849,98 @@ pub(super) async fn save_current_session(
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
 
+    // A document another thread is bound to is that thread's conversation.
+    // Rebinding this thread onto it would leave the other thread's checkpoint
+    // describing a document it no longer owns (#6144). A thread already bound
+    // to the same document (a legacy shared link) keeps saving to it.
+    if let Some(requested) = req.session_id.as_deref() {
+        let own = state
+            .runtime_threads
+            .get_thread(&thread_id)
+            .await
+            .map_err(map_thread_err)?;
+        if own.session_id.as_deref() != Some(requested)
+            && let Some(other) = state
+                .runtime_threads
+                .thread_bound_to_session(requested, &thread_id)
+        {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!(
+                    "Session '{requested}' belongs to thread {other}; save this thread without a session_id, or into its own session"
+                ),
+                code: None,
+            });
+        }
+    }
+    // Which document this save writes. A named `session_id` wins. With none,
+    // the thread's own document answers it: the one it is bound to (a
+    // `resume-thread` from document X runs bound to X, and saving it must
+    // update X, not start a second copy under another name), else a new
+    // document under the engine's conversation id, which for a Runtime thread
+    // is the thread's own id (see `ensure_engine_loaded`) and so cannot
+    // collide with another thread's document. Snapshot ownership does not
+    // depend on this binding: a thread owns the restore points recorded on
+    // its turns.
+    let document_id = match req.session_id {
+        Some(named) => named,
+        None => state
+            .runtime_threads
+            .get_thread(&thread_id)
+            .await
+            .map_err(map_thread_err)?
+            .session_id
+            .unwrap_or_else(|| snapshot.session_id.clone()),
+    };
+    if manager.is_session_live_anywhere(&document_id) {
+        return Err(map_session_err(
+            &document_id,
+            crate::session_manager::live_session_conflict(&document_id),
+            "save",
+        ));
+    }
+
     // Build or update the session, mirroring TUI's `build_session_snapshot`.
     // Only `io::ErrorKind::NotFound` falls back to creating a new session;
     // other I/O errors (e.g. PermissionDenied) are propagated so callers
     // don't silently overwrite a corrupt or inaccessible session file.
-    let mut session = if let Some(ref existing_id) = req.session_id {
-        match manager.load_session(existing_id) {
-            Ok(existing) => {
-                let mut updated = crate::session_manager::update_session(
-                    existing,
-                    &snapshot.messages,
-                    snapshot.total_tokens,
-                    snapshot.system_prompt.as_ref(),
-                );
-                updated.metadata.model = snapshot.model.clone();
-                updated.metadata.set_model_provider_route(
-                    &snapshot.model_provider,
-                    snapshot.model_provider_id.as_deref(),
-                );
-                updated.metadata.mode = Some(snapshot.mode.clone());
-                updated
-            }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    let mut session = crate::session_manager::create_saved_session_with_id_and_mode(
-                        existing_id.clone(),
-                        &snapshot.messages,
-                        &snapshot.model,
-                        &snapshot.workspace,
-                        snapshot.total_tokens,
-                        snapshot.system_prompt.as_ref(),
-                        Some(snapshot.mode.as_str()),
-                    );
-                    session.metadata.set_model_provider_route(
-                        &snapshot.model_provider,
-                        snapshot.model_provider_id.as_deref(),
-                    );
-                    session
-                } else {
-                    return Err(ApiError::internal(format!(
-                        "Failed to load session {existing_id}: {e}"
-                    )));
-                }
-            }
+    let mut session = match manager.load_session(&document_id) {
+        Ok(existing) => {
+            let mut updated = crate::session_manager::update_session(
+                existing,
+                &snapshot.messages,
+                snapshot.total_tokens,
+                snapshot.system_prompt.as_ref(),
+            );
+            updated.metadata.model = snapshot.model.clone();
+            updated.metadata.set_model_provider_route(
+                &snapshot.model_provider,
+                snapshot.model_provider_id.as_deref(),
+            );
+            updated.metadata.mode = Some(snapshot.mode.clone());
+            updated
         }
-    } else {
-        // No session was named, so the conversation the thread is running
-        // answers it — and the engine's live conversation id *is* that
-        // conversation's identity: every `tool:` / `pre-turn:` workspace
-        // snapshot it took is tagged with it, and `patch-undo` /
-        // `file-revert` select snapshots by the thread's binding. Minting a
-        // third uuid here (what this used to do) left the thread bound to a
-        // document whose id owned none of those snapshots, so an undo forked
-        // the conversation and left every file on disk untouched.
-        let mut session = crate::session_manager::create_saved_session_with_id_and_mode(
-            snapshot.session_id.clone(),
-            &snapshot.messages,
-            &snapshot.model,
-            &snapshot.workspace,
-            snapshot.total_tokens,
-            snapshot.system_prompt.as_ref(),
-            Some(snapshot.mode.as_str()),
-        );
-        session.metadata.set_model_provider_route(
-            &snapshot.model_provider,
-            snapshot.model_provider_id.as_deref(),
-        );
-        session
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut session = crate::session_manager::create_saved_session_with_id_and_mode(
+                document_id.clone(),
+                &snapshot.messages,
+                &snapshot.model,
+                &snapshot.workspace,
+                snapshot.total_tokens,
+                snapshot.system_prompt.as_ref(),
+                Some(snapshot.mode.as_str()),
+            );
+            session.metadata.set_model_provider_route(
+                &snapshot.model_provider,
+                snapshot.model_provider_id.as_deref(),
+            );
+            session
+        }
+        Err(e) => {
+            return Err(ApiError::internal(format!(
+                "Failed to load session {document_id}: {e}"
+            )));
+        }
     };
 
     persist_thread_cost(&state, &thread_id, &mut session).await?;
@@ -935,10 +1000,32 @@ pub(super) async fn delete_session(
 ) -> Result<StatusCode, ApiError> {
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
+    // Deleting a document an interactive session holds open would be undone
+    // by its next autosave, in whichever process holds it.
+    if manager.is_session_live_anywhere(&id) {
+        return Err(map_session_err(
+            &id,
+            crate::session_manager::live_session_conflict(&id),
+            "delete",
+        ));
+    }
     manager
         .delete_session(&id)
         .map_err(|e| map_session_err(&id, e, "delete"))?;
+    // Threads bound to the document keep their turns; drop the dead link so
+    // they load from those instead of failing (#6144).
+    if let Err(error) = state.runtime_threads.unbind_session_threads(&id) {
+        tracing::warn!(session_id = %id, %error, "deleted session's threads were not unbound");
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /v1/sessions/repair`: what the last session-store repair did (#6144).
+/// `null` when none has completed.
+pub(super) async fn get_session_repair(
+    State(state): State<RuntimeApiState>,
+) -> Json<Option<crate::session_reconcile::ReconcileSummary>> {
+    Json(crate::session_reconcile::last_run(&state.sessions_dir))
 }
 
 pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse {
@@ -1035,6 +1122,7 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
         std::io::ErrorKind::ResourceBusy => ApiError {
             status: StatusCode::CONFLICT,
             message: err.to_string(),
+            code: None,
         },
         _ => ApiError::internal(format!("Failed to {action} session '{id}': {err}")),
     }
@@ -1258,114 +1346,16 @@ fn read_session_artifact_window(
     offset: usize,
     limit: usize,
 ) -> Result<SessionArtifactReadResponse, ApiError> {
-    if !crate::artifacts::is_valid_session_id(id) {
-        return Err(ApiError::bad_request("invalid session id"));
-    }
-    let manager = SessionManager::new(sessions_dir.to_path_buf())
-        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
-    let record = match manager.load_session_snapshot(id) {
-        Ok(session) if session.metadata.id == id => session
-            .artifacts
-            .into_iter()
-            .find(|record| record.id == artifact_id),
-        Ok(_) => return Err(ApiError::forbidden("artifact session owner does not match")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(map_session_err(id, error, "read")),
-    };
-    // The reserved image namespace always requires its immutable manifest,
-    // even if a later SavedSession index also mentions that handle.
-    let image_handle = artifact_id.strip_prefix("art_image_").is_some_and(|hash| {
-        hash.len() == 64
-            && hash
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    });
-    let record = record.filter(|_| !image_handle);
-    let (summary, evidence) = if let Some(record) = record {
-        if record.storage_path.is_absolute()
-            || !crate::fleet::files::path_is_confined(&record.storage_path)
-            || (!record.session_id.is_empty() && record.session_id != id)
-        {
-            return Err(ApiError::forbidden(
-                "artifact record is not confined to its session",
-            ));
-        }
-        let mut summary = artifact_summary(&record);
-        summary.session_id = id.to_owned();
-        (summary, None)
-    } else {
-        // Fresh Engine sessions can publish immutable observations before a
-        // SavedSession JSON exists. Only the exact owned image manifest grants
-        // access; arbitrary relative paths and other evidence are not a fallback.
-        if !image_handle {
-            return Err(ApiError::not_found("artifact not found"));
-        }
-        let relative = PathBuf::from(id)
-            .join(crate::tools::large_output_router::evidence_metadata_relative_path(artifact_id));
-        let file = super::workspace::open_confined_file(sessions_dir, &relative, false)?;
-        let evidence = crate::tools::large_output_router::read_evidence_metadata_file(&file)
-            .map_err(|error| super::workspace::map_fs_error(error, "evidence metadata"))?;
-        let expected_path = PathBuf::from(crate::artifacts::ARTIFACTS_DIR_NAME)
-            .join(format!("{artifact_id}.image"));
-        if evidence.origin_session != id
-            || evidence.handle != artifact_id
-            || evidence.storage_path != expected_path
-            || evidence.generation != 1
-            || evidence.encoding != "binary"
-            || evidence.call_id.is_empty()
-        {
-            return Err(ApiError::forbidden(
-                "image evidence owner or path does not match",
-            ));
-        }
-        if evidence.redacted
-            || crate::tools::large_output_router::evidence_is_expired(
-                &evidence,
-                crate::tools::large_output_router::unix_millis_now(),
-            )
-        {
-            return Err(ApiError::forbidden("image evidence is no longer available"));
-        }
-        if evidence.size_bytes > crate::image_attach::MAX_IMAGE_BYTES as u64
-            || !matches!(
-                evidence.content_type.as_str(),
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-            )
-        {
-            return Err(ApiError::bad_request("invalid image evidence"));
-        }
-        let created_at = i64::try_from(evidence.created_at_unix_ms)
-            .ok()
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .ok_or_else(|| ApiError::bad_request("invalid evidence timestamp"))?;
-        let summary = SessionArtifactSummary {
-            id: artifact_id.to_owned(),
-            session_id: id.to_owned(),
-            content_type: Some(evidence.content_type.clone()),
-            kind: crate::artifacts::ArtifactKind::ToolOutput,
-            tool_call_id: evidence.call_id.clone(),
-            tool_name: evidence.tool_name.clone(),
-            created_at,
-            byte_size: evidence.size_bytes,
-            preview: String::new(),
-            path: crate::artifacts::format_artifact_relative_path(&evidence.storage_path),
-        };
-        (summary, Some(evidence))
-    };
-    let relative = PathBuf::from(id).join(&summary.path);
-    let file = super::workspace::open_confined_file(sessions_dir, &relative, false)?;
-    let read = super::workspace::read_confined_bytes(&file)?;
-    if let Some(evidence) = evidence
-        && (read.size != evidence.size_bytes
-            || read.revision != evidence.digest
-            || crate::image_attach::sniff_media_type(&read.bytes)
-                != Some(evidence.content_type.as_str())
-            || crate::image_attach::decode_and_guard_image(&read.bytes).is_err())
-    {
-        return Err(ApiError::bad_request(
-            "image evidence integrity check failed",
-        ));
-    }
+    let resolved = resolve_session_artifact(
+        sessions_dir,
+        id,
+        artifact_id,
+        ArtifactAuthority::SavedSession,
+    )?;
+    let summary = resolved
+        .summary
+        .ok_or_else(|| ApiError::internal("saved-session artifact has no summary"))?;
+    let read = resolved.read;
     let (window, truncated) = super::workspace::read_window(&read.bytes, offset, limit);
     let (encoding, content) = super::workspace::encode_window(window);
     Ok(SessionArtifactReadResponse {
@@ -1378,6 +1368,209 @@ fn read_session_artifact_window(
         encoding,
         content,
     })
+}
+
+/// Who vouches that `artifact_id` belongs to session `id`.
+pub(super) enum ArtifactAuthority<'a> {
+    /// The SavedSession JSON's `artifacts` index.
+    SavedSession,
+    /// A runtime turn's recorded reference. A Runtime engine runs under its
+    /// thread's own id (#6621), which has no SavedSession index, so the turn
+    /// record is the ownership proof: the bytes must sit at `path` and, when `revision` is
+    /// known, hash to it.
+    TurnRef {
+        path: &'a str,
+        revision: Option<&'a str>,
+    },
+}
+
+/// One session artifact's bytes, read through the confined opener.
+pub(super) struct ResolvedSessionArtifact {
+    /// The index or manifest record; `None` for a turn-ref read of a
+    /// non-image artifact, whose caller already holds the reference.
+    pub(super) summary: Option<SessionArtifactSummary>,
+    pub(super) read: super::workspace::ConfinedFileBytes,
+}
+
+/// The one resolver behind both session-artifact reads: the session route
+/// (SavedSession authority) and the turn route (turn-ref authority). Both
+/// get the same session-id validation, confinement, image-manifest checks
+/// and integrity checks.
+pub(super) fn resolve_session_artifact(
+    sessions_dir: &std::path::Path,
+    id: &str,
+    artifact_id: &str,
+    authority: ArtifactAuthority<'_>,
+) -> Result<ResolvedSessionArtifact, ApiError> {
+    if !crate::artifacts::is_valid_session_id(id) {
+        return Err(ApiError::bad_request("invalid session id"));
+    }
+    // The reserved image namespace always requires its immutable manifest,
+    // even if a later SavedSession index also mentions that handle.
+    let image_handle = artifact_id.strip_prefix("art_image_").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    });
+    let (summary, relative_path, evidence) = if image_handle {
+        let (summary, evidence) = image_evidence_summary(sessions_dir, id, artifact_id)?;
+        let path = summary.path.clone();
+        (Some(summary), path, Some(evidence))
+    } else {
+        match &authority {
+            ArtifactAuthority::SavedSession => {
+                let summary = saved_session_summary(sessions_dir, id, artifact_id)?;
+                let path = summary.path.clone();
+                (Some(summary), path, None)
+            }
+            ArtifactAuthority::TurnRef { path, .. } => {
+                let relative = PathBuf::from(path);
+                if relative.is_absolute() || !crate::fleet::files::path_is_confined(&relative) {
+                    return Err(ApiError::forbidden(
+                        "artifact reference is not confined to its session",
+                    ));
+                }
+                (None, (*path).to_string(), None)
+            }
+        }
+    };
+    let relative = PathBuf::from(id).join(&relative_path);
+    let opened = super::workspace::open_confined_file(sessions_dir, &relative, false)
+        .and_then(|file| super::workspace::read_confined_bytes(&file));
+    let read = match (opened, &authority) {
+        (Ok(read), _) => read,
+        // A turn recorded these bytes; their absence means the session
+        // directory was pruned since.
+        (Err(error), ArtifactAuthority::TurnRef { .. })
+            if error.status == StatusCode::NOT_FOUND =>
+        {
+            return Err(ApiError::gone(
+                "this artifact's bytes are no longer stored (its session was pruned)",
+            ));
+        }
+        (Err(error), _) => return Err(error),
+    };
+    if let Some(evidence) = evidence
+        && (read.size != evidence.size_bytes
+            || read.revision != evidence.digest
+            || crate::image_attach::sniff_media_type(&read.bytes)
+                != Some(evidence.content_type.as_str())
+            || crate::image_attach::decode_and_guard_image(&read.bytes).is_err())
+    {
+        return Err(ApiError::bad_request(
+            "image evidence integrity check failed",
+        ));
+    }
+    if let ArtifactAuthority::TurnRef {
+        revision: Some(expected),
+        ..
+    } = authority
+        && read.revision != expected
+    {
+        return Err(ApiError::conflict(format!(
+            "artifact bytes changed since the turn recorded them; current revision is {}",
+            read.revision
+        )));
+    }
+    Ok(ResolvedSessionArtifact { summary, read })
+}
+
+fn saved_session_summary(
+    sessions_dir: &std::path::Path,
+    id: &str,
+    artifact_id: &str,
+) -> Result<SessionArtifactSummary, ApiError> {
+    let manager = SessionManager::new(sessions_dir.to_path_buf())
+        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
+    let record = match manager.load_session_snapshot(id) {
+        Ok(session) if session.metadata.id == id => session
+            .artifacts
+            .into_iter()
+            .find(|record| record.id == artifact_id),
+        Ok(_) => return Err(ApiError::forbidden("artifact session owner does not match")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(map_session_err(id, error, "read")),
+    };
+    let record = record.ok_or_else(|| ApiError::not_found("artifact not found"))?;
+    if record.storage_path.is_absolute()
+        || !crate::fleet::files::path_is_confined(&record.storage_path)
+        || (!record.session_id.is_empty() && record.session_id != id)
+    {
+        return Err(ApiError::forbidden(
+            "artifact record is not confined to its session",
+        ));
+    }
+    let mut summary = artifact_summary(&record);
+    summary.session_id = id.to_owned();
+    Ok(summary)
+}
+
+/// Fresh Engine sessions can publish immutable observations before a
+/// SavedSession JSON exists. Only the exact owned image manifest grants
+/// access; arbitrary relative paths and other evidence are not a fallback.
+fn image_evidence_summary(
+    sessions_dir: &std::path::Path,
+    id: &str,
+    artifact_id: &str,
+) -> Result<
+    (
+        SessionArtifactSummary,
+        crate::tools::large_output_router::EvidenceArtifact,
+    ),
+    ApiError,
+> {
+    let relative = PathBuf::from(id)
+        .join(crate::tools::large_output_router::evidence_metadata_relative_path(artifact_id));
+    let file = super::workspace::open_confined_file(sessions_dir, &relative, false)?;
+    let evidence = crate::tools::large_output_router::read_evidence_metadata_file(&file)
+        .map_err(|error| super::workspace::map_fs_error(error, "evidence metadata"))?;
+    let expected_path =
+        PathBuf::from(crate::artifacts::ARTIFACTS_DIR_NAME).join(format!("{artifact_id}.image"));
+    if evidence.origin_session != id
+        || evidence.handle != artifact_id
+        || evidence.storage_path != expected_path
+        || evidence.generation != 1
+        || evidence.encoding != "binary"
+        || evidence.call_id.is_empty()
+    {
+        return Err(ApiError::forbidden(
+            "image evidence owner or path does not match",
+        ));
+    }
+    if evidence.redacted
+        || crate::tools::large_output_router::evidence_is_expired(
+            &evidence,
+            crate::tools::large_output_router::unix_millis_now(),
+        )
+    {
+        return Err(ApiError::forbidden("image evidence is no longer available"));
+    }
+    if evidence.size_bytes > crate::image_attach::MAX_IMAGE_BYTES as u64
+        || !matches!(
+            evidence.content_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        )
+    {
+        return Err(ApiError::bad_request("invalid image evidence"));
+    }
+    let created_at = i64::try_from(evidence.created_at_unix_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .ok_or_else(|| ApiError::bad_request("invalid evidence timestamp"))?;
+    let summary = SessionArtifactSummary {
+        id: artifact_id.to_owned(),
+        session_id: id.to_owned(),
+        content_type: Some(evidence.content_type.clone()),
+        kind: crate::artifacts::ArtifactKind::ToolOutput,
+        tool_call_id: evidence.call_id.clone(),
+        tool_name: evidence.tool_name.clone(),
+        created_at,
+        byte_size: evidence.size_bytes,
+        preview: String::new(),
+        path: crate::artifacts::format_artifact_relative_path(&evidence.storage_path),
+    };
+    Ok((summary, evidence))
 }
 
 #[cfg(test)]

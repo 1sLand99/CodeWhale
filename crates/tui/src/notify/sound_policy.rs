@@ -11,7 +11,9 @@ use std::sync::{OnceLock, RwLock};
 pub fn event_for_kind(kind: NotificationKind) -> SoundEvent {
     match kind {
         NotificationKind::TurnComplete => SoundEvent::TurnComplete,
-        NotificationKind::SubagentTerminal => SoundEvent::SubagentTerminal,
+        NotificationKind::SubagentTerminal | NotificationKind::BackgroundTerminal => {
+            SoundEvent::SubagentTerminal
+        }
         NotificationKind::ApprovalNeeded => SoundEvent::ApprovalNeeded,
         NotificationKind::InputNeeded => SoundEvent::InputNeeded,
         NotificationKind::ElevationNeeded => SoundEvent::ElevationNeeded,
@@ -498,6 +500,10 @@ mod tests {
             NotificationKind::ModelNotify,
         ];
         assert_eq!(kinds.map(event_for_kind), SoundEvent::ALL);
+        assert_eq!(
+            event_for_kind(NotificationKind::BackgroundTerminal),
+            SoundEvent::SubagentTerminal
+        );
         for event in SoundEvent::ALL {
             assert_eq!(SoundEvent::parse(event.as_str()), Some(event));
         }

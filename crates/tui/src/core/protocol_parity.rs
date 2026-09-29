@@ -218,7 +218,7 @@ fn tool_error_to_wire(error: &ToolError) -> wire::ToolCallError {
             field: field.clone(),
         },
         ToolError::PathEscape { path } => wire::ToolCallError::PathEscape { path: path.clone() },
-        ToolError::ExecutionFailed { message } => wire::ToolCallError::ExecutionFailed {
+        ToolError::ExecutionFailed { message, .. } => wire::ToolCallError::ExecutionFailed {
             message: message.clone(),
         },
         ToolError::Timeout { seconds } => wire::ToolCallError::Timeout { seconds: *seconds },
@@ -545,6 +545,11 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             route: route.as_ref().map(route_to_wire),
         },
         Event::ToolRequestSnapshot { snapshot } => wire::EventMsg::ToolRequestSnapshot {
+            thread_id,
+            session_id,
+            snapshot: to_value(snapshot),
+        },
+        Event::WorkspaceSnapshotTaken { snapshot } => wire::EventMsg::WorkspaceSnapshotTaken {
             thread_id,
             session_id,
             snapshot: to_value(snapshot),
@@ -1440,6 +1445,17 @@ mod tests {
                 error: Some("stopped".into()),
                 tool_catalog: None,
                 base_url: Some("https://example.invalid".into()),
+            },
+            Event::WorkspaceSnapshotTaken {
+                snapshot: crate::snapshot::WorkspaceSnapshotRef {
+                    kind: crate::snapshot::WorkspaceSnapshotKind::Tool,
+                    snapshot_id: "a".repeat(40),
+                    tree_id: "b".repeat(40),
+                    session_id: "thr_1".into(),
+                    tool_call_id: Some("c1".into()),
+                    write_paths: Some(vec!["src/lib.rs".into()]),
+                    changed_paths: Some(Vec::new()),
+                },
             },
             Event::RoutedTurnUsage {
                 usage: usage.clone(),

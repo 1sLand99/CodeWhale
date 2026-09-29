@@ -112,6 +112,12 @@ impl WorkspaceFile {
         self.open_with_flags(libc::O_RDONLY)
     }
 
+    pub(crate) fn open_write(&self, append: bool) -> io::Result<File> {
+        self.open_with_flags(
+            libc::O_WRONLY | libc::O_CREAT | if append { libc::O_APPEND } else { 0 },
+        )
+    }
+
     fn open_with_flags(&self, flags: libc::c_int) -> io::Result<File> {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::fs::MetadataExt;
@@ -352,9 +358,17 @@ impl WorkspaceFile {
     }
 
     pub(crate) fn open_update(&self, create: bool, append: bool) -> io::Result<File> {
+        self.open_with_access(create, append, true)
+    }
+
+    pub(crate) fn open_write(&self, append: bool) -> io::Result<File> {
+        self.open_with_access(true, append, false)
+    }
+
+    fn open_with_access(&self, create: bool, append: bool, read: bool) -> io::Result<File> {
         use std::os::windows::fs::OpenOptionsExt;
         let file = std::fs::OpenOptions::new()
-            .read(true)
+            .read(read)
             .write(true)
             .append(append)
             .create(create)
@@ -619,6 +633,9 @@ impl WorkspaceFile {
         unreachable!()
     }
     pub(crate) fn open_update(&self, _: bool, _: bool) -> io::Result<File> {
+        unreachable!()
+    }
+    pub(crate) fn open_write(&self, _: bool) -> io::Result<File> {
         unreachable!()
     }
     pub(crate) fn replace(&self, _: &[u8]) -> io::Result<()> {
