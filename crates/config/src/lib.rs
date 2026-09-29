@@ -134,7 +134,7 @@ pub fn is_upstream_auth_header(name: &str) -> bool {
     // contract, so suppress every credential-shaped request header instead of
     // allowing the same secret through Proxy-Authorization, X-Auth-Token,
     // X-Access-Token, X-Goog-Api-Key, or another *-token/*-api-key spelling.
-    is_sensitive_config_key(name) || name.eq_ignore_ascii_case("cookie")
+    is_sensitive_config_key(name)
 }
 
 /// Preserve OpenRouter endpoint slugs verbatim; an empty value clears a pin.
@@ -6869,11 +6869,20 @@ pub fn is_sensitive_config_key(key: &str) -> bool {
             | "secrets"
             | "token"
             | "tokens"
-    ) || normalized.ends_with("_api_key")
-        || normalized.ends_with("_authorization")
+            | "cookie"
+            | "set_cookie"
+            | "sas"
+    ) || normalized.ends_with("_authorization")
+        || normalized.ends_with("_cookie")
         || normalized.ends_with("_password")
         || normalized.ends_with("_secret")
         || normalized.ends_with("_token")
+        // `*_key` covers `api_key`, `secret_key`, `access_key`,
+        // `private_key` and header spellings such as
+        // `Ocp-Apim-Subscription-Key`. Only names known to hold no secret
+        // are exempt.
+        || (normalized.ends_with("_key")
+            && !matches!(normalized.as_str(), "public_key" | "endpoint_key"))
 }
 
 /// Resolve dotted paths without treating a dotted key as a top-level literal.

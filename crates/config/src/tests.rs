@@ -10304,3 +10304,39 @@ fn deepseek_scoped_headers_and_model_stay_out_of_root_keys() -> Result<()> {
     assert!(config.http_headers.is_empty());
     Ok(())
 }
+
+#[test]
+fn key_and_cookie_names_are_classified_as_sensitive() {
+    for name in [
+        "Ocp-Apim-Subscription-Key",
+        "Cookie",
+        "Set-Cookie",
+        "secret_key",
+        "access_key",
+        "private_key",
+        "providers.acme.secret_key",
+        "X-Api-Key",
+        "api_key",
+    ] {
+        assert!(is_sensitive_config_key(name), "{name}");
+        assert!(is_upstream_auth_header(name), "{name}");
+    }
+    for name in [
+        "api_key_env",
+        "public_key",
+        "base_url",
+        "model",
+        "X-Model-Provider-Id",
+    ] {
+        assert!(!is_sensitive_config_key(name), "{name}");
+    }
+
+    let mut config = ConfigToml::default();
+    config.http_headers.insert(
+        "Ocp-Apim-Subscription-Key".to_string(),
+        "apim-value-0123456789abcdef".to_string(),
+    );
+    let listed = config.list_values();
+    let shown = listed.get("http_headers").expect("headers listed");
+    assert!(!shown.contains("apim-value-0123456789abcdef"), "{shown}");
+}
