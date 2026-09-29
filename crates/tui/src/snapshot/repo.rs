@@ -164,6 +164,13 @@ const STALE_TMP_PACK_AGE: Duration = Duration::from_secs(60 * 60);
 /// object.
 const SNAPSHOT_LOCK_FILE: &str = "codewhale-snapshot.lock";
 
+/// Longest a snapshot, restore or prune waits for another writer's lock
+/// before failing (the turn then shows the snapshot-failure notice).
+const SNAPSHOT_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// How often a waiting writer retries the lock.
+const SNAPSHOT_LOCK_POLL: Duration = Duration::from_millis(25);
+
 thread_local! {
     /// Side repos whose write lock this thread already holds, so a locked
     /// operation that calls another (restore takes a safety snapshot, a
@@ -412,7 +419,9 @@ impl SnapshotRepo {
 
         let git_dir = ensure_snapshot_dir(&work_tree)?.join(".git");
 
-        let needs_init = !git_dir.exists();
+        // A `.git` without HEAD is an init that never finished (or only a
+        // peer's lock file): initialize it rather than use it half-made.
+        let needs_init = !git_dir.join("HEAD").exists();
         if needs_init {
             // First-init size guard. Skipping this on subsequent opens
             // is intentional: paying a workspace walk on every snapshot
@@ -429,54 +438,75 @@ impl SnapshotRepo {
                     gate.describe(cap_bytes, workspace),
                 ));
             }
-            let parent = git_dir.parent().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "snapshot dir has no parent")
+            // The lock file lives in `.git`, so create it first; `git init`
+            // accepts an existing `.git` directory.
+            std::fs::create_dir_all(&git_dir)?;
+        }
+        let repo = Self { git_dir, work_tree };
+        if needs_init {
+            // Two sessions opening a new workspace at once must not both run
+            // `git init` and the identity config: a config write that loses
+            // git's own config lock is ignored, and a snapshot committed
+            // before the identity lands would carry the user's.
+            repo.with_write_lock(|| {
+                if repo.git_dir.join("HEAD").exists() {
+                    return Ok(());
+                }
+                repo.init_side_repo()
             })?;
-            std::fs::create_dir_all(parent)?;
-            // `git init` here uses the parent directory as the work tree
-            // and stores metadata in `.git`. We then continue to use
-            // explicit `--git-dir` / `--work-tree` flags for every other
-            // command so behaviour is invariant of cwd.
-            let init = crate::dependencies::Git::command()
-                .ok_or_else(|| io_other("git not found on PATH"))?
-                .arg("init")
-                .arg("--quiet")
-                .arg(parent)
-                .output()
-                .map_err(|e| io_other(format!("failed to spawn git init: {e}")))?;
-            if !init.status.success() {
-                return Err(io_other(format!(
-                    "git init failed: {}",
-                    String::from_utf8_lossy(&init.stderr).trim()
-                )));
-            }
-
-            // Pin a stable identity so snapshot commits are recognisable
-            // and don't bleed into the user's git config.
-            let _ = run_git(
-                &git_dir,
-                &work_tree,
-                &["config", "user.name", "deepseek-snapshots"],
-            );
-            let _ = run_git(
-                &git_dir,
-                &work_tree,
-                &["config", "user.email", "snapshots@codewhale.local"],
-            );
-            // Don't auto-gc on every commit; we manage pruning ourselves.
-            let _ = run_git(&git_dir, &work_tree, &["config", "gc.auto", "0"]);
-            // Ignore CRLF rewriting — we want byte-for-byte fidelity.
-            let _ = run_git(&git_dir, &work_tree, &["config", "core.autocrlf", "false"]);
         }
 
-        write_builtin_excludes(&git_dir)?;
-        if let Err(err) = cleanup_stale_pack_temps(&git_dir, STALE_TMP_PACK_AGE) {
+        write_builtin_excludes(&repo.git_dir)?;
+        if let Err(err) = cleanup_stale_pack_temps(&repo.git_dir, STALE_TMP_PACK_AGE) {
             tracing::debug!(
                 target: "snapshot",
                 "failed to clean stale snapshot tmp_pack files: {err}"
             );
         }
-        Ok(Self { git_dir, work_tree })
+        Ok(repo)
+    }
+
+    /// `git init` the side repo and pin its config. Runs under the write lock.
+    fn init_side_repo(&self) -> io::Result<()> {
+        let (git_dir, work_tree) = (&self.git_dir, &self.work_tree);
+        let parent = git_dir.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "snapshot dir has no parent")
+        })?;
+        // `git init` here uses the parent directory as the work tree
+        // and stores metadata in `.git`. We then continue to use
+        // explicit `--git-dir` / `--work-tree` flags for every other
+        // command so behaviour is invariant of cwd.
+        let init = crate::dependencies::Git::command()
+            .ok_or_else(|| io_other("git not found on PATH"))?
+            .arg("init")
+            .arg("--quiet")
+            .arg(parent)
+            .output()
+            .map_err(|e| io_other(format!("failed to spawn git init: {e}")))?;
+        if !init.status.success() {
+            return Err(io_other(format!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&init.stderr).trim()
+            )));
+        }
+
+        // Pin a stable identity so snapshot commits are recognisable
+        // and don't bleed into the user's git config.
+        let _ = run_git(
+            git_dir,
+            work_tree,
+            &["config", "user.name", "deepseek-snapshots"],
+        );
+        let _ = run_git(
+            git_dir,
+            work_tree,
+            &["config", "user.email", "snapshots@codewhale.local"],
+        );
+        // Don't auto-gc on every commit; we manage pruning ourselves.
+        let _ = run_git(git_dir, work_tree, &["config", "gc.auto", "0"]);
+        // Ignore CRLF rewriting — we want byte-for-byte fidelity.
+        let _ = run_git(git_dir, work_tree, &["config", "core.autocrlf", "false"]);
+        Ok(())
     }
 
     /// Take a snapshot of the current working tree.
@@ -538,27 +568,6 @@ impl SnapshotRepo {
         {
             notify_snapshot_history_pruned_once(&self.work_tree, removed);
         }
-        self.stage_work_tree()?;
-        let mut tree = run_git(&self.git_dir, &self.work_tree, &["write-tree"])?;
-        if !tree.status.success() {
-            // An index naming objects that no longer exist (left by an
-            // interrupted or racing gc) fails every later write-tree, because
-            // `add -A` does not rehash files whose stat data is unchanged.
-            // Rebuild the index from the work tree once before giving up.
-            let reset = run_git(&self.git_dir, &self.work_tree, &["read-tree", "--empty"])?;
-            if reset.status.success() {
-                self.stage_work_tree()?;
-                tree = run_git(&self.git_dir, &self.work_tree, &["write-tree"])?;
-            }
-        }
-        if !tree.status.success() {
-            return Err(io_other(format!(
-                "git write-tree failed: {}",
-                String::from_utf8_lossy(&tree.stderr).trim()
-            )));
-        }
-        let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
-
         // A HEAD that names a missing commit would make every `commit-tree
         // -p` below fail ("is not a valid object"), silently ending undo.
         self.repair_broken_head()?;
@@ -573,10 +582,61 @@ impl SnapshotRepo {
             .then(|| String::from_utf8_lossy(&parent.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
 
+        self.stage_work_tree()?;
+        let (tree, sha) = match self.commit_staged_tree(parent.as_deref(), label, session_id) {
+            Ok(done) => done,
+            Err(first) => {
+                // An index naming objects that no longer exist (left by an
+                // interrupted or racing gc) breaks every later snapshot:
+                // `add -A` does not rehash files whose stat data is
+                // unchanged, and `write-tree` hands back the index's cached
+                // tree id even when that tree is gone, so `commit-tree` then
+                // fails. Rebuild the index from the work tree once.
+                let reset = run_git(&self.git_dir, &self.work_tree, &["read-tree", "--empty"])?;
+                if !reset.status.success() {
+                    return Err(first);
+                }
+                self.stage_work_tree()?;
+                self.commit_staged_tree(parent.as_deref(), label, session_id)?
+            }
+        };
+
+        self.move_head(Some(&sha), parent.as_deref())?;
+
+        let id = SnapshotId::parse(&sha).map_err(|_| {
+            io_other(format!(
+                "git commit-tree returned a malformed commit id: {sha:?}"
+            ))
+        })?;
+        let tree = SnapshotId::parse(&tree).map_err(|_| {
+            io_other(format!(
+                "git write-tree returned a malformed tree id: {tree:?}"
+            ))
+        })?;
+        Ok(TakenSnapshot { id, tree })
+    }
+
+    /// `write-tree` the staged index and `commit-tree` it onto `parent`,
+    /// returning the tree and commit ids.
+    fn commit_staged_tree(
+        &self,
+        parent: Option<&str>,
+        label: &str,
+        session_id: Option<&str>,
+    ) -> io::Result<(String, String)> {
+        let tree = run_git(&self.git_dir, &self.work_tree, &["write-tree"])?;
+        if !tree.status.success() {
+            return Err(io_other(format!(
+                "git write-tree failed: {}",
+                String::from_utf8_lossy(&tree.stderr).trim()
+            )));
+        }
+        let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+
         let mut args = vec!["commit-tree".to_string(), tree.clone()];
-        if let Some(parent) = parent.as_ref() {
+        if let Some(parent) = parent {
             args.push("-p".to_string());
-            args.push(parent.clone());
+            args.push(parent.to_string());
         }
         args.push("-m".to_string());
         args.push(Self::encode_session_label(label, session_id));
@@ -592,33 +652,7 @@ impl SnapshotRepo {
             )));
         }
         let sha = String::from_utf8_lossy(&commit.stdout).trim().to_string();
-
-        // Compare-and-swap against the parent read above (an empty old value
-        // means HEAD must not exist yet), so a writer that does not take the
-        // snapshot lock, such as an older build, cannot be silently orphaned.
-        let update = run_git(
-            &self.git_dir,
-            &self.work_tree,
-            &["update-ref", "HEAD", &sha, parent.as_deref().unwrap_or("")],
-        )?;
-        if !update.status.success() {
-            return Err(io_other(format!(
-                "git update-ref HEAD failed: {}",
-                String::from_utf8_lossy(&update.stderr).trim()
-            )));
-        }
-
-        let id = SnapshotId::parse(&sha).map_err(|_| {
-            io_other(format!(
-                "git commit-tree returned a malformed commit id: {sha:?}"
-            ))
-        })?;
-        let tree = SnapshotId::parse(&tree).map_err(|_| {
-            io_other(format!(
-                "git write-tree returned a malformed tree id: {tree:?}"
-            ))
-        })?;
-        Ok(TakenSnapshot { id, tree })
+        Ok((tree, sha))
     }
 
     /// Repair a side repo whose HEAD names a commit that no longer exists
@@ -780,8 +814,9 @@ impl SnapshotRepo {
     /// tell the user their undo history shrank (S5).
     ///
     /// The prune goes oldest first by count and always keeps the newest
-    /// snapshot plus the newest `pre-turn:` and `post-turn:` boundaries, so
-    /// the running turn (and the one before it) stay restorable. It used to
+    /// snapshot plus each session's newest `pre-turn:` and `post-turn:`
+    /// boundaries, so every session's running turn (and the one before it)
+    /// stays restorable. It used to
     /// prune by age starting at one second, which on the first pass dropped
     /// every snapshot older than a second and then wiped the rest: a workspace
     /// whose side repo sat above the cap lost all undo history on every
@@ -809,7 +844,7 @@ impl SnapshotRepo {
                 if survivors.is_empty() || survivors.len() >= snapshots.len() {
                     break;
                 }
-                self.rebuild_survivor_chain(&survivors)?;
+                self.rebuild_survivor_chain(&survivors, &snapshots[0].id)?;
                 self.reclaim_unreachable();
                 removed_total = removed_total.saturating_add(snapshots.len() - survivors.len());
                 let new_size = dir_size_bytes(&self.git_dir)?;
@@ -1566,24 +1601,9 @@ impl SnapshotRepo {
         }
 
         if cut == 0 {
-            // Every snapshot is older than the cutoff — wipe the repo
-            // entirely so the next snapshot starts a fresh history.
-            // Removing `.git/refs/heads/*` is enough to orphan the old
-            // commits, then gc reclaims them.
-            let refs_dir = self.git_dir.join("refs").join("heads");
-            if refs_dir.exists() {
-                for entry in std::fs::read_dir(&refs_dir)? {
-                    let path = entry?.path();
-                    if path.is_file() {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-            }
-            // Also drop HEAD's packed refs so `git log` returns nothing.
-            let packed = self.git_dir.join("packed-refs");
-            if packed.exists() {
-                let _ = std::fs::remove_file(&packed);
-            }
+            // Every snapshot is older than the cutoff: unset HEAD so the next
+            // snapshot starts a fresh history and gc reclaims the old one.
+            self.move_head(None, Some(snapshots[0].id.as_str()))?;
         } else {
             // Keep the newest `cut` snapshots (indices [0..cut], newest-first)
             // and drop the older tail. This MUST rebuild the survivors as a
@@ -1593,7 +1613,7 @@ impl SnapshotRepo {
             // NEWER snapshot (gc then destroyed them) while keeping the very
             // snapshots we meant to remove as its ancestors — the exact
             // inverse of the intent (2026-08-04 review, reproduced).
-            self.rebuild_survivor_chain(&snapshots[..cut])?;
+            self.rebuild_survivor_chain(&snapshots[..cut], &snapshots[0].id)?;
         }
 
         self.reclaim_unreachable();
@@ -1621,13 +1641,40 @@ impl SnapshotRepo {
     /// [`SNAPSHOT_LOCK_FILE`]). Reentrant on one thread, so a locked
     /// operation may call another.
     fn with_write_lock<T>(&self, op: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        self.with_write_lock_within(SNAPSHOT_LOCK_WAIT, op)
+    }
+
+    /// [`Self::with_write_lock`] with an explicit bound on the wait. The
+    /// snapshot runs on the turn and tool path, so a peer's long gc (or a
+    /// stopped process holding the lock) must fail this snapshot, not stall
+    /// the turn and pin a blocking thread indefinitely.
+    fn with_write_lock_within<T>(
+        &self,
+        wait: Duration,
+        op: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         let held = HELD_SNAPSHOT_LOCKS.with(|held| held.borrow().contains(&self.git_dir));
         if held {
             return op();
         }
         let file = open_snapshot_lock_file(&self.git_dir.join(SNAPSHOT_LOCK_FILE))?;
         let mut lock = fd_lock::RwLock::new(file);
-        let _guard = lock.write()?;
+        let deadline = std::time::Instant::now() + wait;
+        let _guard = loop {
+            match lock.try_write() {
+                Ok(guard) => break guard,
+                Err(err) if std::time::Instant::now() >= deadline => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "snapshot side repo is busy: another session held its lock for over {}s ({err})",
+                            wait.as_secs()
+                        ),
+                    ));
+                }
+                Err(_) => std::thread::sleep(SNAPSHOT_LOCK_POLL),
+            }
+        };
         // Declared after the guard, so it is dropped (and the thread's claim
         // released) before the file lock is.
         let _held = HeldSnapshotLock::claim(&self.git_dir);
@@ -1653,7 +1700,15 @@ impl SnapshotRepo {
     /// id, and author/committer timestamp are preserved, so ages do not lie
     /// after a prune (finding: `prune_keep_last_n` previously reset them to
     /// "now"). Assumes `survivors` is non-empty.
-    fn rebuild_survivor_chain(&self, survivors: &[Snapshot]) -> io::Result<()> {
+    ///
+    /// `listed_head` is the HEAD the survivors were chosen from; if another
+    /// writer moved HEAD since, the rebuild fails rather than orphan that
+    /// writer's snapshot.
+    fn rebuild_survivor_chain(
+        &self,
+        survivors: &[Snapshot],
+        listed_head: &SnapshotId,
+    ) -> io::Result<()> {
         let mut prev_sha: Option<String> = None;
         for s in survivors.iter().rev() {
             let tree = run_git(
@@ -1686,17 +1741,27 @@ impl SnapshotRepo {
         }
 
         if let Some(final_sha) = prev_sha {
-            let up = run_git(
-                &self.git_dir,
-                &self.work_tree,
-                &["update-ref", "HEAD", &final_sha],
-            )?;
-            if !up.status.success() {
-                return Err(io_other(format!(
-                    "update-ref HEAD failed: {}",
-                    String::from_utf8_lossy(&up.stderr).trim()
-                )));
-            }
+            self.move_head(Some(&final_sha), Some(listed_head.as_str()))?;
+        }
+        Ok(())
+    }
+
+    /// Point HEAD at `new` (or delete it when `None`), only if it still names
+    /// `expected` (`None`: HEAD must not exist yet). The compare-and-swap
+    /// means a writer that does not take the snapshot lock, such as an older
+    /// build, is never silently orphaned: the move fails instead.
+    fn move_head(&self, new: Option<&str>, expected: Option<&str>) -> io::Result<()> {
+        let expected = expected.unwrap_or("");
+        let args = match new {
+            Some(new) => ["update-ref", "HEAD", new, expected],
+            None => ["update-ref", "-d", "HEAD", expected],
+        };
+        let update = run_git(&self.git_dir, &self.work_tree, &args)?;
+        if !update.status.success() {
+            return Err(io_other(format!(
+                "git update-ref HEAD failed: {}",
+                String::from_utf8_lossy(&update.stderr).trim()
+            )));
         }
         Ok(())
     }
@@ -1769,7 +1834,7 @@ impl SnapshotRepo {
         if removed == 0 || survivors.is_empty() {
             return Ok(0);
         }
-        self.rebuild_survivor_chain(&survivors)?;
+        self.rebuild_survivor_chain(&survivors, &snapshots[0].id)?;
         self.reclaim_unreachable();
         Ok(removed)
     }
@@ -1831,24 +1896,28 @@ fn is_turn_boundary_label(label: &str) -> bool {
 }
 
 /// Which snapshots a size-pressure prune keeps (newest first): the newest
-/// `keep`, plus the newest snapshot and the newest `pre-turn:` and
-/// `post-turn:` boundaries wherever they sit, so the running turn and the one
-/// before it stay restorable however hard the prune has to cut.
+/// `keep`, plus the newest snapshot and, for every session, its newest
+/// `pre-turn:` and `post-turn:` boundaries wherever they sit. Sessions and
+/// sub-agents share the side repo, so protecting only the globally newest
+/// boundaries let one session's snapshots push out another's running turn;
+/// each session's current turn and the one before it stay restorable
+/// however hard the prune has to cut.
 fn size_pressure_survivors(snapshots: &[Snapshot], keep: usize) -> Vec<Snapshot> {
-    let newest_pre = snapshots
-        .iter()
-        .position(|s| s.label.starts_with("pre-turn:"));
-    let newest_post = snapshots
-        .iter()
-        .position(|s| s.label.starts_with("post-turn:"));
+    let mut boundaries_seen: HashSet<(Option<&str>, bool)> = HashSet::new();
     snapshots
         .iter()
         .enumerate()
-        .filter(|(index, _)| {
-            *index == 0
-                || *index < keep
-                || Some(*index) == newest_pre
-                || Some(*index) == newest_post
+        .filter(|(index, snapshot)| {
+            let kind = if snapshot.label.starts_with("pre-turn:") {
+                Some(true)
+            } else if snapshot.label.starts_with("post-turn:") {
+                Some(false)
+            } else {
+                None
+            };
+            let newest_boundary = kind
+                .is_some_and(|pre| boundaries_seen.insert((snapshot.session_id.as_deref(), pre)));
+            *index == 0 || *index < keep || newest_boundary
         })
         .map(|(_, snapshot)| snapshot.clone())
         .collect()
@@ -1890,10 +1959,20 @@ fn open_snapshot_lock_file(path: &Path) -> io::Result<std::fs::File> {
     options.open(path)
 }
 
+/// Keep the side repo's `info/exclude` at [`BUILTIN_EXCLUDES`]. Every open
+/// runs this without the write lock, while another session may be inside
+/// `git add -A` reading the file, so it is left alone when already current
+/// and otherwise replaced by rename: a truncate-then-write let that reader
+/// see an empty exclude list and stage `node_modules/`, `target/` and the
+/// like into the shared side repo.
 fn write_builtin_excludes(git_dir: &Path) -> io::Result<()> {
     let info_dir = git_dir.join("info");
+    let exclude = info_dir.join("exclude");
+    if std::fs::read(&exclude).is_ok_and(|current| current == BUILTIN_EXCLUDES.as_bytes()) {
+        return Ok(());
+    }
     std::fs::create_dir_all(&info_dir)?;
-    std::fs::write(info_dir.join("exclude"), BUILTIN_EXCLUDES)
+    crate::utils::write_atomic(&exclude, BUILTIN_EXCLUDES.as_bytes())
 }
 
 /// Recursively compute the total size of a directory in bytes.
@@ -2467,6 +2546,199 @@ mod tests {
                 snapshot.id.as_str()
             );
         }
+    }
+
+    /// A peer stuck holding the lock (a long gc, a stopped process) used to
+    /// block the snapshot, and the turn waiting on it, with no end. The wait
+    /// is bounded and ends in an error the turn reports.
+    #[test]
+    fn side_repo_lock_wait_is_bounded() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let lock_path = repo.git_dir().join(SNAPSHOT_LOCK_FILE);
+        let mut peer = fd_lock::RwLock::new(open_snapshot_lock_file(&lock_path).unwrap());
+        let _held = peer.write().expect("peer holds the write lock");
+
+        let started = std::time::Instant::now();
+        let err = repo
+            .with_write_lock_within(Duration::from_millis(200), || Ok(()))
+            .expect_err("a held lock times out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(err.to_string().contains("busy"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the wait ends near its bound"
+        );
+    }
+
+    /// First-time init (git init plus the pinned identity) runs under the
+    /// write lock, so two sessions opening a new workspace do not race it; a
+    /// `.git` holding only a peer's lock file is initialized, not trusted.
+    #[test]
+    fn first_init_waits_for_the_side_repo_write_lock() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let git_dir = repo.git_dir().to_path_buf();
+        let workspace = repo.work_tree().to_path_buf();
+        drop(repo);
+        std::fs::remove_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let mut peer = fd_lock::RwLock::new(
+            open_snapshot_lock_file(&git_dir.join(SNAPSHOT_LOCK_FILE)).unwrap(),
+        );
+        let held = peer.write().expect("peer holds the write lock");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            let opened = SnapshotRepo::open_or_init(&workspace);
+            let _ = done_tx.send(());
+            opened
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(400)).is_err(),
+            "init must not run while another writer holds the lock"
+        );
+        drop(held);
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("init proceeds once the lock is released");
+        let repo = opener.join().expect("opener thread").expect("open_or_init");
+        assert!(
+            repo.git_dir().join("HEAD").exists(),
+            "the repo was initialized"
+        );
+        std::fs::write(repo.work_tree().join("f.txt"), b"v").unwrap();
+        repo.snapshot("pre-turn:1").expect("the new repo snapshots");
+    }
+
+    /// Opening runs on every snapshot without the write lock while a peer may
+    /// be staging. It used to truncate and rewrite `info/exclude` each time,
+    /// so the peer's `git add -A` could read an empty exclude list.
+    #[test]
+    fn opening_leaves_a_current_exclude_file_untouched() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let exclude = repo.git_dir().join("info").join("exclude");
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        File::options()
+            .write(true)
+            .open(&exclude)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(old))
+            .unwrap();
+
+        SnapshotRepo::open_or_init(repo.work_tree()).expect("reopen");
+        assert_eq!(
+            std::fs::metadata(&exclude).unwrap().modified().unwrap(),
+            old,
+            "a current exclude file is not rewritten"
+        );
+
+        std::fs::write(&exclude, b"stale\n").unwrap();
+        SnapshotRepo::open_or_init(repo.work_tree()).expect("reopen");
+        assert_eq!(
+            std::fs::read_to_string(&exclude).unwrap(),
+            BUILTIN_EXCLUDES,
+            "a stale exclude file is replaced"
+        );
+    }
+
+    /// HEAD moves only from the value the writer read. A writer that does not
+    /// take the lock (an older build) must not be orphaned by a later move.
+    #[test]
+    fn head_moves_only_from_the_expected_commit() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        std::fs::write(repo.work_tree().join("f.txt"), b"v1").unwrap();
+        let first = repo.snapshot("pre-turn:1").expect("snapshot 1");
+        std::fs::write(repo.work_tree().join("f.txt"), b"v2").unwrap();
+        let second = repo.snapshot("post-turn:1").expect("snapshot 2");
+
+        repo.move_head(Some(first.as_str()), Some(first.as_str()))
+            .expect_err("HEAD no longer names the expected commit");
+        repo.move_head(Some(first.as_str()), None)
+            .expect_err("HEAD exists, so an unborn expectation fails");
+        repo.move_head(None, Some(first.as_str()))
+            .expect_err("deleting HEAD also checks the expected commit");
+        assert_eq!(repo.list(1).unwrap()[0].id, second, "HEAD is unchanged");
+
+        repo.move_head(Some(first.as_str()), Some(second.as_str()))
+            .expect("the expected commit moves");
+        assert_eq!(repo.list(1).unwrap()[0].id, first);
+    }
+
+    /// A prune rebuilds the survivors it listed. If another writer committed
+    /// after that listing, the rebuild used to overwrite HEAD and orphan the
+    /// new snapshot for gc; now it fails and the snapshot stays.
+    #[test]
+    fn survivor_rebuild_refuses_when_another_writer_moved_head() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        for i in 0..3 {
+            std::fs::write(repo.work_tree().join("f.txt"), format!("v{i}")).unwrap();
+            repo.snapshot(&format!("tool:{i}")).expect("snapshot");
+        }
+        let listed = repo.list(usize::MAX).unwrap();
+        std::fs::write(repo.work_tree().join("f.txt"), b"peer").unwrap();
+        let peer = repo.snapshot("post-turn:peer").expect("peer snapshot");
+
+        repo.rebuild_survivor_chain(&listed[..1], &listed[0].id)
+            .expect_err("HEAD moved since the listing");
+        let history = repo.list(usize::MAX).unwrap();
+        assert_eq!(history.len(), 4, "nothing was dropped");
+        assert_eq!(history[0].id, peer, "the peer's snapshot is still HEAD");
+    }
+
+    /// An index naming objects that no longer exist (an interrupted or racing
+    /// gc) failed every later `write-tree`, because `add -A` does not rehash
+    /// files whose stat data is unchanged. The index is rebuilt once instead.
+    #[test]
+    fn snapshot_rebuilds_an_index_naming_missing_objects() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let file = repo.work_tree().join("f.txt");
+        std::fs::write(&file, b"content").unwrap();
+        // An mtime well before the index keeps git from treating the entry as
+        // racily clean and rehashing it, which would hide the broken index.
+        File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(3600)))
+            .unwrap();
+        let taken = repo
+            .take_snapshot("pre-turn:1", None)
+            .expect("first snapshot");
+        let blob = git_output(&repo, &["rev-parse", "HEAD:f.txt"]);
+        for oid in [blob.as_str(), taken.tree.as_str()] {
+            let object = repo
+                .git_dir()
+                .join("objects")
+                .join(&oid[..2])
+                .join(&oid[2..]);
+            std::fs::remove_file(&object).expect("loose object removed");
+        }
+
+        let again = repo
+            .take_snapshot("post-turn:1", None)
+            .expect("the snapshot rebuilds the index and succeeds");
+        assert_eq!(
+            git_output(
+                &repo,
+                &["cat-file", "-p", &format!("{}:f.txt", again.id.as_str())]
+            ),
+            "content"
+        );
+    }
+
+    fn git_output(repo: &SnapshotRepo, args: &[&str]) -> String {
+        let out = run_git(repo.git_dir(), repo.work_tree(), args).unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     #[test]
@@ -3370,6 +3642,53 @@ mod tests {
         std::fs::write(repo.work_tree().join("f.txt"), b"hello").unwrap();
         let id = repo.snapshot("pre-turn:1").expect("snapshot under cap");
         assert_eq!(id.as_str().len(), 40);
+    }
+
+    /// Sessions and sub-agents share one side repo. The size-pressure prune
+    /// used to protect only the globally newest turn boundaries, so another
+    /// session's snapshots pushed a running turn's `pre-turn:` out and its
+    /// undo had nothing to restore.
+    #[test]
+    fn prune_size_pressure_keeps_every_sessions_turn_boundaries() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        for (i, (label, sid)) in [
+            ("pre-turn:5", "A"),
+            ("tool:a", "A"),
+            ("pre-turn:1", "B"),
+            ("tool:b", "B"),
+            ("post-turn:1", "B"),
+            ("pre-turn:2", "B"),
+            ("tool:c", "B"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::fs::write(repo.work_tree().join("f.txt"), format!("v{i}")).unwrap();
+            repo.snapshot_with_session(label, Some(sid))
+                .expect("snapshot");
+        }
+        repo.prune_size_pressure(0, 0).expect("prune_size_pressure");
+        let kept: Vec<(String, Option<String>)> = repo
+            .list(usize::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.label, s.session_id))
+            .collect();
+        let kept_a_pre = kept
+            .iter()
+            .any(|(label, sid)| label == "pre-turn:5" && sid.as_deref() == Some("A"));
+        assert!(
+            kept_a_pre,
+            "session A's running turn stays restorable: {kept:?}"
+        );
+        assert_eq!(
+            kept.iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["tool:c", "pre-turn:2", "post-turn:1", "pre-turn:5"],
+            "only boundaries and the newest snapshot survive a full cut"
+        );
     }
 
     /// The size-pressure prune drops the oldest snapshots first and keeps the
