@@ -1388,6 +1388,101 @@ fn dirty_teardown_window_is_bounded_and_a_requested_restart_waits_for_idle() {
 }
 
 #[tokio::test]
+async fn ordinary_exit_rejects_requests_from_a_drained_calls_waker() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::task::{Context, Wake, Waker};
+
+    use super::supervisor::{HostCallError, HostProcess};
+
+    struct AdmissionProbe {
+        host: Arc<HostProcess>,
+        result: Mutex<Option<Result<(), HostCallError>>>,
+        woke: tokio::sync::Notify,
+    }
+
+    impl Wake for AdmissionProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let mut result = self.result.lock().unwrap();
+            if result.is_none() {
+                // oneshot send wakes synchronously: probe the exact gap after
+                // the exit watcher drains pending and starts failing its calls.
+                *result = Some(
+                    self.host
+                        .start_request(protocol::CoreRequest::Ping, None)
+                        .map(|(id, _)| self.host.forget(id)),
+                );
+                self.woke.notify_one();
+            }
+        }
+    }
+
+    let Some(node) = node_for_tests("ordinary exit admission") else {
+        return;
+    };
+    let _policy = TestPolicyGuard::extension_host(true);
+    let fixture = FixturePlugins::new(&["slow-tool"]).await;
+    let manager = Arc::new(ExtensionHostManager::new(ExtensionHostOptions {
+        node_override: Some(node),
+        root: Some(fixture.root.clone()),
+        supervision: super::SupervisionOptions {
+            heartbeat_interval: Duration::from_secs(60),
+            ..Default::default()
+        },
+    }));
+    let engine = manager.attach(fixture.registry());
+    engine.sync().await.unwrap();
+    let host = manager.shared.ready_host().unwrap();
+    let registration = manager.shared.registry.lock().unwrap().live_tools()[0].clone();
+    let (_, mut call) = host
+        .start_request(
+            protocol::CoreRequest::ToolCall(protocol::ToolCallParams {
+                handle: registration.handle,
+                call_id: "exit-admission".into(),
+                input: json!({"ms": 30_000}),
+                deadline_ms: 60_000,
+            }),
+            Some(registration.owner.plugin_id),
+        )
+        .unwrap();
+    // A following response proves the writer flushed the slow call and is
+    // waiting for another frame, so a closed outbound queue cannot mask the bug.
+    host.request_with_deadline(protocol::CoreRequest::Ping, None, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let probe = Arc::new(AdmissionProbe {
+        host: Arc::clone(&host),
+        result: Mutex::new(None),
+        woke: tokio::sync::Notify::new(),
+    });
+    let waker = Waker::from(Arc::clone(&probe));
+    assert!(
+        Pin::new(&mut call)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert!(
+        !host.is_retiring(),
+        "this exercises exit, not maintenance sealing"
+    );
+    host.terminate("ordinary exit admission regression".into());
+    tokio::time::timeout(Duration::from_secs(5), probe.woke.notified())
+        .await
+        .expect("exit must fail the pending call");
+    assert!(matches!(
+        probe.result.lock().unwrap().take().unwrap(),
+        Err(HostCallError::Exited(_))
+    ));
+    assert!(matches!(call.await.unwrap(), Err(HostCallError::Exited(_))));
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn idle_retirement_seals_admission_and_does_not_wait_for_heartbeat() {
     use futures_util::FutureExt;
 

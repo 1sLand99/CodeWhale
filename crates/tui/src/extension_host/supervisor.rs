@@ -433,16 +433,16 @@ impl HostProcess {
                 };
                 // The leader is gone; take anything it left behind with it.
                 let _ = tree.kill();
-                let drained: Vec<PendingCall> = pending
-                    .lock()
-                    .expect("pending lock")
-                    .drain()
-                    .map(|(_, call)| call)
-                    .collect();
+                let drained: Vec<PendingCall> = {
+                    let mut pending = pending.lock().expect("pending lock");
+                    // Publish exit under the admission lock before draining:
+                    // waking a failed call must not admit another orphaned call.
+                    let _ = exited_tx.send(true);
+                    pending.drain().map(|(_, call)| call).collect()
+                };
                 for call in drained {
                     let _ = call.tx.send(Err(HostCallError::Exited(reason.clone())));
                 }
-                let _ = exited_tx.send(true);
                 // Give the stderr task a moment to capture the last lines.
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 events.exited(generation, reason, tail_string(&tail));
@@ -590,6 +590,11 @@ impl HostProcess {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("pending lock");
+            // Exit may have won after the fast check above. It publishes under
+            // this same lock, so every admitted call is either live or drained.
+            if self.has_exited() {
+                return Err(HostCallError::Exited("already exited".to_string()));
+            }
             if self.admission_closed.load(Ordering::Relaxed) {
                 return Err(HostCallError::Exited("host is restarting".to_string()));
             }
