@@ -357,3 +357,29 @@ fn parallel_read_only_rejects_parentheses() {
         );
     }
 }
+
+#[test]
+fn typed_deny_rule_skips_global_options_before_the_subcommand() {
+    let engine = ExecPolicyEngine::with_rulesets(vec![
+        Ruleset::user(vec![], vec![]).with_ask_rules(vec![ToolAskRule {
+            action: PermissionAction::Deny,
+            workspace: Some("/workspace".to_string()),
+            ..ToolAskRule::exec_shell("git push")
+        }]),
+    ]);
+    for command in [
+        "git push",
+        "git -C . push",
+        "git -c a=b push origin main",
+        "git --no-pager push",
+    ] {
+        assert!(denied(&engine, command), "{command} must be denied");
+    }
+    assert!(!denied(&engine, "git -C . status"));
+    // The rule stays scoped to its workspace.
+    let elsewhere = ExecPolicyContext {
+        cwd: "/other",
+        ..context("git -C . push", AskForApproval::Never)
+    };
+    assert!(engine.check(elsewhere).expect("policy check").allow);
+}

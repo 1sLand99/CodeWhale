@@ -446,6 +446,16 @@ impl ExecPolicyEngine {
             })
             .filter(|(_, rule)| match rule.command.as_deref() {
                 Some(command) if rule.command_exact => command.trim() == ctx.command.trim(),
+                // A typed Deny is a deny rule: match it the way denied
+                // prefixes are matched, skipping global options before the
+                // subcommand (`git -C . push`, `git -c k=v push`). The
+                // allow-direction arity matcher requires the subcommand to be
+                // spelled literally at the front, which is right for granting
+                // and a gap for refusing.
+                Some(command) if rule.action == PermissionAction::Deny => {
+                    denied_prefix_matches(command, ctx.command)
+                        || self.arity_dict.allow_rule_matches(command, ctx.command)
+                }
                 Some(command) => self.arity_dict.allow_rule_matches(command, ctx.command),
                 None => true,
             })
