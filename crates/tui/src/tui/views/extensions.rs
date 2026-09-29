@@ -1249,21 +1249,43 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             let config = configured
                 .as_ref()
                 .and_then(|configured| configured.servers.get(&name));
-            let enabled = observed
-                .map(|server| server.enabled)
-                .or_else(|| config.map(crate::mcp::McpServerConfig::is_enabled))
+            // The config file just read is the authority for on/off. The
+            // snapshot is the live pool as of its last event, and a server
+            // switched off (or on) since then used to keep its stale live row
+            // — a disabled server offered "reconnect" instead of "enable".
+            // When the two disagree, the observation belongs to a config the
+            // user already changed, so it is not shown as this row's state.
+            let config_enabled = config.map(crate::mcp::McpServerConfig::is_enabled);
+            let stale = observed
+                .zip(config_enabled)
+                .is_some_and(|(server, enabled)| server.enabled != enabled);
+            let observed = observed.filter(|_| !stale);
+            let enabled = config_enabled
+                .or_else(|| observed.map(|server| server.enabled))
                 .unwrap_or(true);
+            // A `/mcp retry` the person already asked for: connecting now, or
+            // queued behind the running turn.
+            let retry = enabled
+                .then(|| {
+                    app.mcp_retries
+                        .iter()
+                        .find(|pending| pending.server == name)
+                })
+                .flatten();
             // `connecting` is the engine's real in-flight set (#6033): under
-            // lazy boot a configured-but-unstarted server reads "configured",
+            // lazy boot a configured-but-unstarted server reads "not started",
             // never "connecting".
-            let initializing = enabled
-                && app
-                    .mcp_connecting
-                    .iter()
-                    .any(|connecting| connecting == &name)
-                && observed.is_none_or(|server| !server.connected && server.error.is_none());
+            let initializing = retry.is_some()
+                || (enabled
+                    && app
+                        .mcp_connecting
+                        .iter()
+                        .any(|connecting| connecting == &name)
+                    && observed.is_none_or(|server| !server.connected && server.error.is_none()));
             let state = if !enabled {
                 tr(locale, MessageId::HotbarSetupStatusDisabled)
+            } else if retry.is_some_and(|pending| pending.queued) {
+                tr(locale, MessageId::AutomationRunStatusQueued)
             } else if initializing {
                 Cow::Borrowed("connecting")
             } else if observed.is_some_and(|server| server.connected) {
@@ -1272,12 +1294,20 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 Cow::Owned(crate::tui::session_boot::mcp_auth_required_state_label())
             } else if observed.is_some_and(|server| server.error.is_some()) {
                 tr(locale, MessageId::ExtensionsStateError)
+            } else if stale {
+                // Switched on in the file, still off in the live pool.
+                tr(locale, MessageId::SetupStatusNotStarted)
             } else if observed.is_none() {
                 tr(locale, MessageId::ExtensionsStateNotInspected)
+            } else if observed.is_some_and(|server| !server.started()) {
+                tr(locale, MessageId::SetupStatusNotStarted)
             } else {
-                tr(locale, MessageId::PickerActionConfigured)
+                tr(locale, MessageId::ExtensionsStateDisconnected)
             }
             .into_owned();
+            let not_started = enabled
+                && !initializing
+                && (stale || observed.is_none_or(|server| !server.started()));
             let oauth_capable = config.is_some_and(crate::mcp::mcp_server_oauth_capable);
             let recovery = match observed {
                 Some(server) => server.recovery_kind(oauth_capable),
@@ -1287,6 +1317,14 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 // Still connecting: the state is the whole story.
                 (true, _) => ExtensionAction::Status {
                     label: state.clone(),
+                },
+                // The live pool still holds the pre-edit config, and a
+                // single-server retry deliberately never re-reads it; only a
+                // reload brings the newly enabled server into the pool.
+                (false, Some(_)) if stale && enabled => ExtensionAction::Command {
+                    label: tr(locale, MessageId::ExtensionsActionConnect).into_owned(),
+                    command: "/mcp reload".into(),
+                    disposition: RowActionDisposition::InPlace,
                 },
                 // Healthy. A row that needs nothing offers nothing — the
                 // actionable rows are the ones worth finding in a list of 20.
@@ -1366,6 +1404,8 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 id: name.clone(),
                 tone: match (enabled, initializing, recovery) {
                     (false, ..) => ExtensionTone::Idle,
+                    // Lazy boot left it for later: nothing is wrong with it.
+                    _ if not_started => ExtensionTone::Idle,
                     (true, true, _) => ExtensionTone::Attention,
                     (true, false, None) => ExtensionTone::Ready,
                     // A server that reports an error is broken; one that only
@@ -1483,9 +1523,15 @@ fn mcp_item_needs_login(item: &ExtensionItem) -> bool {
 /// sorts below.
 fn mcp_groups(locale: Locale, items: Vec<ExtensionItem>) -> Vec<ExtensionGroup> {
     let (login, rest): (Vec<_>, Vec<_>) = items.into_iter().partition(mcp_item_needs_login);
-    let (attention, healthy): (Vec<_>, Vec<_>) = rest
-        .into_iter()
-        .partition(|item| item.action.as_ref().is_some_and(|a| a.command().is_some()));
+    // "Needs attention" is for rows that are broken or waiting on a person.
+    // A switched-off server or one lazy boot has not started yet keeps its
+    // `enable` / `connect` action but sorts with the rest: listing eight
+    // servers as needing attention when six were simply idle buried the two
+    // that were actually failing.
+    let (attention, healthy): (Vec<_>, Vec<_>) = rest.into_iter().partition(|item| {
+        matches!(item.tone, ExtensionTone::Attention | ExtensionTone::Failure)
+            && item.action.as_ref().is_some_and(|a| a.command().is_some())
+    });
     [
         (
             MCP_LOGIN_GROUP_ID,
@@ -2436,6 +2482,154 @@ mod tests {
         assert_eq!(title, "row");
         assert!(content.contains("state"));
         assert!(view.pending_remove.is_none());
+    }
+
+    fn observed_row(
+        name: &str,
+        enabled: bool,
+        connected: bool,
+        error: Option<&str>,
+        auth_required: bool,
+    ) -> crate::mcp::McpServerSnapshot {
+        crate::mcp::McpServerSnapshot {
+            name: name.into(),
+            enabled,
+            required: false,
+            transport: "stdio".into(),
+            command_or_url: format!("{name}-mcp"),
+            connect_timeout: 5,
+            execute_timeout: 5,
+            read_timeout: 5,
+            connected,
+            error: error.map(str::to_string),
+            auth_required,
+            capability_metadata: if connected {
+                crate::mcp::McpServerCapabilityMetadata::LegacyFallback
+            } else {
+                crate::mcp::McpServerCapabilityMetadata::NotObserved
+            },
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        }
+    }
+
+    /// The founder's Extensions > MCP screen listed eight servers under
+    /// "Needs attention", six of them "reconnect · configured". Each row now
+    /// reads the state the engine's pool actually has, offers the action
+    /// that state needs, and only broken or waiting rows need attention.
+    #[test]
+    fn mcp_rows_show_real_state_with_the_action_that_state_needs() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path());
+        let mut app = App::new_with_plugin_registry(
+            crate::test_support::test_tui_options(root.path()),
+            &crate::config::Config::default(),
+            registry,
+        );
+        app.mcp_config_path = root.path().join("mcp.json");
+        std::fs::write(
+            &app.mcp_config_path,
+            r#"{"servers":{
+                "github":{"command":"github-mcp"},
+                "playwright":{"command":"npx"},
+                "stripe":{"url":"https://mcp.stripe.com"},
+                "aws":{"command":"uvx"},
+                "linear":{"url":"https://mcp.linear.app/mcp","disabled":true,"enabled":false},
+                "chrome-devtools":{"command":"npx"}
+            }}"#,
+        )
+        .unwrap();
+        app.mcp_snapshot = Some(crate::mcp::McpManagerSnapshot {
+            config_path: app.mcp_config_path.clone(),
+            config_exists: true,
+            reload_required: false,
+            servers: vec![
+                observed_row("github", true, true, None, false),
+                // Lazy boot never started it.
+                observed_row("playwright", true, false, None, false),
+                observed_row("stripe", true, false, Some("HTTP 401 Unauthorized"), true),
+                observed_row(
+                    "aws",
+                    true,
+                    false,
+                    Some("MCP server 'aws' rejected initialize (command `uvx`): -32602"),
+                    false,
+                ),
+                // Disabled in the file since this snapshot was taken.
+                observed_row("linear", true, false, None, false),
+                observed_row("chrome-devtools", true, false, None, false),
+            ],
+        });
+        app.mcp_retries.push(crate::tui::app::PendingMcpRetry {
+            server: "chrome-devtools".into(),
+            queued: true,
+            result: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        });
+
+        let model = mcp_model(&app, Locale::En);
+        let row = |name: &str| {
+            model
+                .groups
+                .iter()
+                .flat_map(|group| {
+                    group
+                        .items
+                        .iter()
+                        .map(move |item| (group.id.as_str(), item))
+                })
+                .find(|(_, item)| item.id == name)
+                .unwrap_or_else(|| panic!("row {name}"))
+        };
+        let command = |item: &ExtensionItem| {
+            item.action
+                .as_ref()
+                .and_then(ExtensionAction::command)
+                .map(str::to_string)
+        };
+
+        let (group, github) = row("github");
+        assert_eq!((group, github.state.as_str()), ("servers", "connected"));
+        assert_eq!(command(github), None);
+
+        let (group, playwright) = row("playwright");
+        assert_eq!(
+            (group, playwright.state.as_str()),
+            ("servers", "not started")
+        );
+        assert_eq!(playwright.tone, ExtensionTone::Idle);
+        assert_eq!(
+            command(playwright).as_deref(),
+            Some("/mcp retry playwright")
+        );
+        assert_eq!(
+            playwright.action.as_ref().map(ExtensionAction::label),
+            Some("connect")
+        );
+
+        let (group, stripe) = row("stripe");
+        assert_eq!(group, MCP_LOGIN_GROUP_ID);
+        assert_eq!(command(stripe).as_deref(), Some("/mcp login stripe"));
+
+        let (group, aws) = row("aws");
+        assert_eq!((group, aws.state.as_str()), ("attention", "error"));
+        assert_eq!(aws.tone, ExtensionTone::Failure);
+        assert!(aws.detail.contains("rejected initialize"), "{}", aws.detail);
+
+        let (group, linear) = row("linear");
+        assert_eq!((group, linear.state.as_str()), ("servers", "disabled"));
+        assert_eq!(command(linear).as_deref(), Some("/mcp enable linear"));
+
+        let (_, chrome) = row("chrome-devtools");
+        assert_eq!(chrome.state, "queued");
+        assert_eq!(
+            command(chrome),
+            None,
+            "a pending retry is not offered twice"
+        );
     }
 
     #[test]

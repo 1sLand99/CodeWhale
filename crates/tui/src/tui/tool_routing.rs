@@ -2238,7 +2238,8 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("started"), "{rendered}");
+        // The settled record replaces `started`: one row for the run.
+        assert!(!rendered.contains("started"), "{rendered}");
         assert!(rendered.contains("finished"), "{rendered}");
         assert!(rendered.contains("3 findings"), "{rendered}");
     }
@@ -2276,12 +2277,13 @@ mod tests {
         );
 
         app.flush_active_cell();
-        assert_eq!(app.history.len(), 2, "start card, then finish line");
-        let HistoryCell::Tool(ToolCell::Generic(finish)) = &app.history[1] else {
+        // One row per run: the start card becomes the finish, in place.
+        assert_eq!(app.history.len(), 1, "the start card is the finish line");
+        let HistoryCell::Tool(ToolCell::Generic(finish)) = &app.history[0] else {
             panic!("finish line is a workflow card");
         };
         assert_eq!(finish.status, ToolStatus::Failed);
-        let rendered = app.history[1]
+        let rendered = app.history[0]
             .lines(100)
             .iter()
             .map(|line| {
@@ -2295,26 +2297,15 @@ mod tests {
         assert!(rendered.contains("failed"), "{rendered}");
         assert!(rendered.contains("quick"), "{rendered}");
         assert!(rendered.contains("script error, line 3"), "{rendered}");
-        let start = app.history[0]
-            .lines(100)
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            start.contains("started") && start.contains("quick"),
-            "{start}"
+        assert!(!rendered.contains("started"), "{rendered}");
+
+        // The live stream repeating the terminal event writes nothing more.
+        apply_workflow_ui_event(
+            &mut app,
+            "run-fast",
+            &json!({"type": "run_completed", "status": "failed", "error": "script error, line 3", "at_ms": 1_400}),
         );
-        assert_eq!(
-            start.lines().count(),
-            1,
-            "the start card is one line: {start}"
-        );
+        assert_eq!(app.history.len(), 1);
     }
 
     #[cfg(unix)]
