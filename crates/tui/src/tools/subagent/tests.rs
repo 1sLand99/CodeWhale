@@ -23010,6 +23010,90 @@ fn user_follow_up_to_completed_child_requires_a_runtime_to_resume() {
     assert!(err.to_string().contains("no runtime"), "{err}");
 }
 
+/// A finished worker's unchanged isolated worktree is removed, but its
+/// checkpoint stays continuable. Continuing it used to start a child inside
+/// the missing directory, where every tool failed.
+#[tokio::test]
+async fn continuing_a_child_whose_worktree_was_removed_fails_with_the_reason() {
+    let tmp = tempdir().expect("tempdir");
+    let worktree = tmp.path().join("removed-worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let agent_id = {
+        let mut guard = manager.write().await;
+        let (id, _) = guard.insert_test_interrupted_continuable_agent(
+            "read_mostly",
+            &worktree,
+            vec![text_message("user", "prior work")],
+        );
+        guard.agents.get_mut(&id).expect("agent").status = SubAgentStatus::Completed;
+        id
+    };
+    std::fs::remove_dir(&worktree).expect("worktree removed on completion");
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+
+    let result = {
+        let mut guard = manager.write().await;
+        guard.continue_child_from_user(Arc::clone(&manager), Some(runtime), &agent_id, "more")
+    };
+    let err = result.expect_err("a child whose workspace is gone cannot be continued");
+    assert!(err.to_string().contains("no longer exists"), "{err}");
+    assert_eq!(
+        manager.read().await.agents.len(),
+        1,
+        "no continuation child was started"
+    );
+}
+
+/// A spawn refused after its isolated worktree was created used to leave the
+/// checkout and its branch behind, one more per failed attempt.
+#[tokio::test]
+async fn failed_spawn_removes_the_worktree_it_created() {
+    let repo = init_subagent_git_repo();
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(repo.path().to_path_buf());
+    let manager = new_shared_subagent_manager(repo.path().to_path_buf(), 4);
+    let source = {
+        let mut guard = manager.write().await;
+        let source = guard.insert_test_running_agent("busy-source", repo.path());
+        assign_test_session_owner(&mut guard, &source, &runtime.context.state_namespace);
+        source
+    };
+    let branch = "codex/agent-rollback-probe";
+    let err = spawn_subagent_from_input(
+        json!({
+            "prompt": "continue the review",
+            "type": "scout",
+            "worktree": true,
+            "worktree_branch": branch,
+            "worktree_path": "rollback-probe",
+            "resume_from": source,
+        }),
+        Arc::clone(&manager),
+        runtime,
+        false,
+        None,
+    )
+    .await
+    .expect_err("a running resume source refuses the spawn");
+    assert!(err.to_string().contains("still running"), "{err}");
+
+    let worktrees = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert_eq!(
+        worktrees
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1,
+        "only the main checkout remains: {worktrees}"
+    );
+    assert!(
+        git_stdout(repo.path(), &["branch", "--list", branch]).is_empty(),
+        "the spawn's branch is removed too"
+    );
+}
+
 // === child permission gate: the session posture applied to a worker's calls ===
 
 mod child_permission_gate {

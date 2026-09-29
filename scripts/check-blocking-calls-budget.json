@@ -399,7 +399,7 @@
   },
   "crates/tui/src/snapshot/repo.rs": {
     "path_canonicalize": 4,
-    "std_fs": 17
+    "std_fs": 19
   },
   "crates/tui/src/tools/git.rs": {
     "path_canonicalize": 1

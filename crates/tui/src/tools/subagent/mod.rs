@@ -6921,6 +6921,15 @@ impl SubAgentManager {
                 runtime.max_spawn_depth
             ));
         }
+        // A finished worker's unchanged isolated worktree is removed with its
+        // branch, but its checkpoint stays continuable. Resuming into the
+        // missing directory would start a child whose every tool fails.
+        if !workspace.is_dir() {
+            return Err(anyhow!(
+                "Cannot resume agent {agent_id}: its workspace {} no longer exists (an isolated worktree with no changes is removed when the agent finishes); start a new agent for the follow-up work.",
+                workspace.display()
+            ));
+        }
         runtime.context.workspace = workspace;
         // Rebind the child's saved provider pin (#6046). The resumed runtime
         // is derived from the caller, whose active provider can differ from
@@ -11242,6 +11251,15 @@ async fn spawn_subagent_from_input(
         spawn_request.session_name.as_deref(),
         &spawn_request.agent_type,
     )?;
+    // Every later refusal (resume_from, resident lease, admission, a name
+    // already in use) would otherwise leave the new checkout and its branch
+    // behind, one more per failed attempt. Disarmed once the child is live.
+    let mut pending_worktree = PendingChildWorktree(
+        child_workspace
+            .as_ref()
+            .filter(|_| spawn_request.worktree.is_some())
+            .cloned(),
+    );
 
     child_runtime.max_spawn_depth = child_max_spawn_depth_for_spawn(
         child_runtime.max_spawn_depth,
@@ -11471,9 +11489,30 @@ async fn spawn_subagent_from_input(
     if let Some((lease_key, _)) = resident_lease.as_ref() {
         commit_resident_lease(lease_key, &result.agent_id);
     }
+    pending_worktree.0 = None;
 
     Ok((result, spawn_metadata))
 }
+
+/// An isolated worktree created for a spawn that has not started yet. If the
+/// spawn fails it is removed with its branch, through the same path that
+/// removes a finished worker's unchanged checkout, so nothing the worktree
+/// holds beyond its fresh checkout is ever deleted.
+struct PendingChildWorktree(Option<PathBuf>);
+
+impl Drop for PendingChildWorktree {
+    fn drop(&mut self) {
+        if let Some(worktree) = self.0.take()
+            && !worktree::remove_unchanged_worktree(&worktree, Some(&BTreeSet::new()))
+        {
+            tracing::debug!(
+                "kept the worktree of a failed sub-agent spawn: {}",
+                worktree.display()
+            );
+        }
+    }
+}
+
 const CHILD_ROUTE_RECEIPT_MAX_BYTES: usize = 1024;
 
 fn assemble_spawn_prompt(request: &SpawnRequest, resident: Option<&ResidentContext>) -> String {

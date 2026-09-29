@@ -261,14 +261,25 @@ fn validate_git_branch_name(repo_root: &Path, branch: &str) -> Result<(), ToolEr
     .map_err(|err| ToolError::invalid_input(format!("Invalid worktree_branch '{branch}': {err}")))
 }
 
+/// Longest seed slug a default branch carries. The default checkout path is
+/// the branch slug, which [`sanitize_worktree_slug`] caps at 48 characters;
+/// `codex/agent-` (12) + seed + `-` + an 8-character unique suffix must fit,
+/// or a long agent name truncated the suffix away and every retry of that
+/// name (or any name sharing its first 27 characters) reused one path.
+const DEFAULT_BRANCH_SEED_MAX: usize = 27;
+
 fn default_worktree_branch(session_name: Option<&str>, agent_type: &FleetRole) -> String {
     let seed = session_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| agent_type.as_str());
+    // The slug is ASCII, so truncating by bytes cannot split a character.
+    let mut seed = sanitize_worktree_slug(seed);
+    seed.truncate(DEFAULT_BRANCH_SEED_MAX);
+    let seed = seed.trim_end_matches(['-', '.', '_']);
     format!(
         "codex/agent-{}-{}",
-        sanitize_worktree_slug(seed),
+        if seed.is_empty() { "task" } else { seed },
         &Uuid::new_v4().to_string()[..8]
     )
 }
@@ -479,6 +490,37 @@ fn run_git_checked(workspace: &Path, args: &[String], action: &str) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long agent name used to push the unique suffix past the 48-character
+    /// path slug, so a retry of the same name collided with the checkout the
+    /// previous run kept.
+    #[test]
+    fn default_worktree_paths_stay_unique_for_long_agent_names() {
+        let name = "audit-authentication-middleware-a";
+        let first = default_worktree_branch(Some(name), &FleetRole::Worker);
+        let second = default_worktree_branch(Some(name), &FleetRole::Worker);
+        let sibling = default_worktree_branch(
+            Some("audit-authentication-middleware-b"),
+            &FleetRole::Worker,
+        );
+        assert!(
+            first.starts_with("codex/agent-audit-authentication-midd"),
+            "{first}"
+        );
+        let paths = [&first, &second, &sibling].map(|branch| sanitize_worktree_slug(branch));
+        for (branch, path) in [&first, &second, &sibling].into_iter().zip(&paths) {
+            assert_eq!(
+                path.as_str(),
+                branch.replace('/', "-"),
+                "the default path slug keeps the whole branch, suffix included"
+            );
+        }
+        assert_ne!(paths[0], paths[1], "a retry must get its own checkout");
+        assert_ne!(
+            paths[0], paths[2],
+            "names sharing a prefix must not collide"
+        );
+    }
 
     #[test]
     fn cwd_errors_name_the_allowed_root() {
