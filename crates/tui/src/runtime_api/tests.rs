@@ -961,6 +961,8 @@ struct TestServerOverrides {
     fleet_codewhale_binary: Option<String>,
     config: Option<Config>,
     config_path: Option<PathBuf>,
+    /// Observe the exact loaded config shared with the HTTP handlers.
+    config_handle: Option<Arc<parking_lot::RwLock<Config>>>,
     config_profile: Option<String>,
     mobile: Option<mobile::RuntimeMobileState>,
     web: Option<web::RuntimeWebState>,
@@ -1235,8 +1237,14 @@ async fn build_test_server(
     } else {
         None
     };
+    let config = if let Some(handle) = overrides.config_handle {
+        *handle.write() = config;
+        handle
+    } else {
+        Arc::new(parking_lot::RwLock::new(config))
+    };
     let state = RuntimeApiState {
-        config: Arc::new(parking_lot::RwLock::new(config)),
+        config,
         workspace,
         plugin_discovery: overrides
             .plugin_discovery
@@ -19880,9 +19888,23 @@ async fn provider_key_write_is_write_only_and_reports_readiness() -> Result<()> 
     let tmp = tempfile::tempdir()?;
     let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join("cwhome"));
     let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let _provider_keys: Vec<_> = ApiProvider::Deepseek
+        .env_vars()
+        .iter()
+        .copied()
+        .map(crate::test_support::EnvVarGuard::remove)
+        .collect();
     fs::create_dir_all(tmp.path().join("cwhome"))?;
     let workspace = tmp.path().join("workspace");
     fs::create_dir_all(&workspace)?;
+    let config_path = tmp.path().join("config.toml");
+    fs::write(
+        &config_path,
+        "provider = \"deepseek\"\n[providers.deepseek]\nbase_url = \"http://127.0.0.1:1/v1\"\n",
+    )?;
+    let secret_path = tmp.path().join("cwhome/secrets/secrets.json");
+    let live_config = Arc::new(parking_lot::RwLock::new(Config::default()));
 
     // No literal DeepSeek key in the live config: the older harness kept one
     // at the top level, where it silently outranked the store. Since #6394
@@ -19895,10 +19917,8 @@ async fn provider_key_write_is_write_only_and_reports_readiness() -> Result<()> 
             false,
             workspace.clone(),
             TestServerOverrides {
-                config: Some(
-                    Config::default()
-                        .with_legacy_root(None, Some("http://127.0.0.1:1/v1".to_string())),
-                ),
+                config_path: Some(config_path.clone()),
+                config_handle: Some(live_config.clone()),
                 ..TestServerOverrides::default()
             },
         )
@@ -19937,22 +19957,38 @@ async fn provider_key_write_is_write_only_and_reports_readiness() -> Result<()> 
         .status();
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // A key written for the *active* provider reports configured through the
-    // live store even though the test route is a keyless local endpoint —
-    // saving a key declares the api-key contract, exactly as `auth set` would.
-    let receipt: Value = client
-        .put(format!("{base}/v1/providers/deepseek/key"))
+    // An unsupported write is a client error before opening a secret backend
+    // or changing either config copy. No opaque setter error is reclassified.
+    let config_before = fs::read(&config_path)?;
+    assert!(!secret_path.exists());
+    let refused = client
+        .put(format!("{base}/v1/providers/openai-codex/key"))
         .bearer_auth("keys-token")
-        .json(&json!({ "key": "sk-test-active-route-key" }))
+        .json(&json!({ "key": "synthetic-unsupported-codex-key" }))
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
-    assert_eq!(receipt["provider"], "deepseek");
-    assert_eq!(receipt["stored"], true);
-    assert!(!receipt.to_string().contains("sk-test-active-route-key"));
-    assert_eq!(receipt["credentialState"], "configured");
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let refused: Value = refused.json().await?;
+    assert_eq!(
+        refused["error"]["message"],
+        codewhale_config::credentials::OPENAI_CODEX_API_KEY_REFUSAL
+    );
+    assert!(
+        !refused
+            .to_string()
+            .contains("synthetic-unsupported-codex-key")
+    );
+    assert_eq!(fs::read(&config_path)?, config_before);
+    assert!(!secret_path.exists());
+    {
+        let live = live_config.read();
+        assert_eq!(live.auth_mode, None);
+        assert_eq!(
+            live.provider_config_for(ApiProvider::OpenaiCodex)
+                .and_then(|entry| entry.auth_mode.as_deref()),
+            None
+        );
+    }
 
     // A key written for a *non-active* provider is the harder case: the
     // readiness catalog only probes the secret store for it when the
@@ -19990,6 +20026,96 @@ async fn provider_key_write_is_write_only_and_reports_readiness() -> Result<()> 
         .find(|p| p["id"] == "openai")
         .expect("openai is listed");
     assert_eq!(openai["credentialState"], "configured");
+
+    // Before the active provider has a saved key, its local route must stay
+    // keyless. An unconditional live root marker changes this to "missing".
+    let deepseek = providers["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "deepseek")
+        .expect("deepseek is listed");
+    assert_eq!(deepseek["credentialState"], "local");
+    {
+        let live = live_config.read();
+        assert_eq!(live.auth_mode, None);
+        assert_eq!(
+            live.provider_config_for(ApiProvider::Deepseek)
+                .and_then(|entry| entry.auth_mode.as_deref()),
+            None
+        );
+        assert_eq!(
+            live.provider_config_for(ApiProvider::Openai)
+                .and_then(|entry| entry.auth_mode.as_deref()),
+            Some("api_key")
+        );
+    }
+    let saved = codewhale_config::ConfigStore::load(Some(config_path.clone()))?;
+    assert_eq!(saved.config.auth_mode, None);
+    assert_eq!(
+        saved.config.providers.openai.auth_mode.as_deref(),
+        Some("api_key")
+    );
+    assert_eq!(saved.config.providers.openai_codex.auth_mode, None);
+
+    // A key written for the *active* provider reports configured through the
+    // live store even though the test route is a keyless local endpoint —
+    // saving a key declares the api-key contract, exactly as `auth set` would.
+    let receipt: Value = client
+        .put(format!("{base}/v1/providers/deepseek/key"))
+        .bearer_auth("keys-token")
+        .json(&json!({ "key": "sk-test-active-route-key" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(receipt["provider"], "deepseek");
+    assert_eq!(receipt["stored"], true);
+    assert!(!receipt.to_string().contains("sk-test-active-route-key"));
+    assert_eq!(receipt["credentialState"], "configured");
+
+    {
+        let live = live_config.read();
+        assert_eq!(live.auth_mode.as_deref(), Some("api_key"));
+        assert_eq!(
+            live.provider_config_for(ApiProvider::Deepseek)
+                .and_then(|entry| entry.auth_mode.as_deref()),
+            Some("api_key")
+        );
+    }
+    let saved = codewhale_config::ConfigStore::load(Some(config_path.clone()))?;
+    assert_eq!(saved.config.auth_mode.as_deref(), Some("api_key"));
+    assert_eq!(
+        saved.config.providers.deepseek.auth_mode.as_deref(),
+        Some("api_key")
+    );
+
+    // A real backend read failure still reports a server error and leaves
+    // the last committed metadata and damaged backend bytes untouched.
+    let config_before = fs::read(&config_path)?;
+    fs::write(&secret_path, b"not valid secret-store JSON")?;
+    let failed = client
+        .put(format!("{base}/v1/providers/openrouter/key"))
+        .bearer_auth("keys-token")
+        .json(&json!({ "key": "synthetic-failed-storage-key" }))
+        .send()
+        .await?;
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let failed = failed.text().await?;
+    assert!(failed.contains("credential write failed"));
+    assert!(!failed.contains("synthetic-failed-storage-key"));
+    assert_eq!(fs::read(&config_path)?, config_before);
+    assert_eq!(fs::read(&secret_path)?, b"not valid secret-store JSON");
+    {
+        let live = live_config.read();
+        assert_eq!(live.auth_mode.as_deref(), Some("api_key"));
+        assert_eq!(
+            live.provider_config_for(ApiProvider::Openrouter)
+                .and_then(|entry| entry.auth_mode.as_deref()),
+            None
+        );
+    }
 
     handle.abort();
     Ok(())
