@@ -28,8 +28,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
+use crate::tui::ui_text::grapheme_display_width;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, action_footer_lines,
     render_modal_footer, render_panel_scroll_rail, render_underwater_surface,
@@ -477,7 +479,7 @@ impl PagerView {
             self.scroll
                 .set(rows.origin.partition_point(|&line| line < top));
         }
-        if !self.search_matches.borrow().is_empty() {
+        if !self.search_input.trim().is_empty() {
             let matches = find_matches(&rows.plain, &self.search_input);
             let index = current_match
                 .and_then(|line| matches.iter().position(|&row| rows.origin[row] >= line))
@@ -838,6 +840,16 @@ impl ModalView for PagerView {
         }
         let content = render_modal_footer(inner, buf, &hints);
 
+        // Re-wrap before reserving the search-status row: resizing can make
+        // the first match appear or the last match disappear. Hold a column
+        // for the scroll rail so it cannot cause another paragraph wrap.
+        let body_width = if content.width >= 2 {
+            content.width - 1
+        } else {
+            content.width
+        };
+        self.layout(usize::from(body_width));
+
         // `content` already excludes the border, padding, and footer rows.
         let mut visible_height = content.height as usize;
         if self.search_mode {
@@ -852,15 +864,6 @@ impl ModalView for PagerView {
         // Cache for paging keys; the value is treated as advisory and
         // clamped at use-time.
         self.last_visible_height.set(visible_height);
-        // Wrap the page to the columns the body really gets. One column is
-        // always held back for the scroll rail, so the rail appearing never
-        // makes the paragraph wrap a row again behind the scroll arithmetic.
-        let body_width = if content.width >= 2 {
-            content.width - 1
-        } else {
-            content.width
-        };
-        self.layout(usize::from(body_width));
         let rows = page.rows.borrow();
         let row_count = rows.plain.len();
         let max_scroll = row_count.saturating_sub(visible_height);
@@ -979,22 +982,25 @@ fn display_cells<'a>(pieces: impl Iterator<Item = (&'a str, usize)>) -> Vec<(cha
     let mut cells = Vec::new();
     let mut column = 0;
     for (text, tag) in pieces {
-        for ch in text.chars() {
-            match ch {
-                '\t' => {
-                    let advance = TAB_STOP - column % TAB_STOP;
-                    cells.extend(std::iter::repeat_n((' ', tag), advance));
-                    column += advance;
+        let display: String = text
+            .chars()
+            .filter(|&ch| !crate::core::events::is_bidi_format_control(ch))
+            .map(|ch| {
+                if ch != '\t' && (ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}')) {
+                    ' '
+                } else {
+                    ch
                 }
-                ch if crate::core::events::is_bidi_format_control(ch) => {}
-                ch if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}') => {
-                    cells.push((' ', tag));
-                    column += 1;
-                }
-                ch => {
-                    cells.push((ch, tag));
-                    column += ch.width().unwrap_or(0);
-                }
+            })
+            .collect();
+        for grapheme in display.graphemes(true) {
+            if grapheme == "\t" {
+                let advance = TAB_STOP - column % TAB_STOP;
+                cells.extend(std::iter::repeat_n((' ', tag), advance));
+                column += advance;
+            } else {
+                cells.extend(grapheme.chars().map(|ch| (ch, tag)));
+                column += grapheme_display_width(grapheme);
             }
         }
     }
@@ -1017,7 +1023,24 @@ fn wrap_ranges(cells: &[(char, usize)], width: usize) -> Vec<Range<usize>> {
     if width == 0 {
         return std::iter::once(0..cells.len()).collect();
     }
-    let cell_width = |index: usize| cells[index].0.width().unwrap_or(0);
+    // Keep character ranges for style reconstruction, but measure and break
+    // only at grapheme boundaries. Summing scalar widths splits joined emoji
+    // even when their painted width fits on one row.
+    let text: String = cells.iter().map(|&(ch, _)| ch).collect();
+    let mut character = 0;
+    let graphemes: Vec<_> = text
+        .graphemes(true)
+        .map(|grapheme| {
+            let start = character;
+            character += grapheme.chars().count();
+            (
+                start,
+                grapheme_display_width(grapheme),
+                grapheme.chars().all(char::is_whitespace),
+            )
+        })
+        .collect();
+    let cell_width = |index: usize| graphemes[index].1;
     let mut rows = Vec::new();
     let mut current = 0..0;
     let mut current_width = 0usize;
@@ -1026,12 +1049,12 @@ fn wrap_ranges(cells: &[(char, usize)], width: usize) -> Vec<Range<usize>> {
     let mut has_content = false;
 
     let mut run_start = 0;
-    while run_start < cells.len() {
-        let is_space = cells[run_start].0.is_whitespace();
-        let run_end = cells[run_start..]
+    while run_start < graphemes.len() {
+        let is_space = graphemes[run_start].2;
+        let run_end = graphemes[run_start..]
             .iter()
-            .position(|&(ch, _)| ch.is_whitespace() != is_space)
-            .map_or(cells.len(), |offset| run_start + offset);
+            .position(|&(_, _, space)| space != is_space)
+            .map_or(graphemes.len(), |offset| run_start + offset);
         let run = run_start..run_end;
         run_start = run_end;
         let run_width: usize = run.clone().map(cell_width).sum();
@@ -1043,7 +1066,7 @@ fn wrap_ranges(cells: &[(char, usize)], width: usize) -> Vec<Range<usize>> {
         }
         if has_content {
             let mut kept = current.end;
-            while kept > current.start && cells[kept - 1].0.is_whitespace() {
+            while kept > current.start && graphemes[kept - 1].2 {
                 kept -= 1;
             }
             rows.push(current.start..kept);
@@ -1061,7 +1084,7 @@ fn wrap_ranges(cells: &[(char, usize)], width: usize) -> Vec<Range<usize>> {
             }
             current.end = run.start;
         }
-        // Split an over-wide word (or indent) between characters.
+        // Split an over-wide word (or indent) between whole graphemes.
         for index in run {
             let char_width = cell_width(index);
             if current_width + char_width > width && current_width > 0 {
@@ -1076,7 +1099,10 @@ fn wrap_ranges(cells: &[(char, usize)], width: usize) -> Vec<Range<usize>> {
     }
 
     rows.push(current);
-    rows
+    let boundary = |index: usize| graphemes.get(index).map_or(cells.len(), |cell| cell.0);
+    rows.into_iter()
+        .map(|range| boundary(range.start)..boundary(range.end))
+        .collect()
 }
 
 #[cfg(test)]
@@ -2036,6 +2062,52 @@ mod tests {
         assert_eq!(wrap_text("abcd\tb", 40), ["abcd    b"]);
         assert_eq!(wrap_text("会\tb", 40), ["会  b"]);
         assert_eq!(wrap_text("left\u{202E}right\u{2066}", 40), ["leftright"]);
+        assert_eq!(wrap_text("👩‍💻\tx", 40), ["👩‍💻  x"]);
+    }
+
+    #[test]
+    fn pager_wraps_whole_graphemes_and_preserves_their_styles() {
+        for grapheme in ["👩‍💻", "👍🏽", "🇨🇳", "1\u{fe0f}\u{20e3}"] {
+            assert_eq!(wrap_text(grapheme, 2), [grapheme]);
+            let source = grapheme.repeat(2);
+            assert_eq!(wrap_text(&source, 2), [grapheme, grapheme]);
+            let style = Style::default().fg(Color::Cyan);
+            let rows = PagerRows::wrap_lines(&[Line::from(Span::styled(source, style))], 2);
+            assert_eq!(rows.plain, [grapheme, grapheme]);
+            assert!(
+                rows.styled
+                    .iter()
+                    .all(|row| row.spans.len() == 1 && row.spans[0].style == style)
+            );
+        }
+        assert_eq!(wrap_text("a\u{301}b", 1), ["a\u{301}", "b"]);
+    }
+
+    #[test]
+    fn resize_recomputes_zero_matches_before_reserving_the_status_row() {
+        let query = "needle".repeat(10);
+        let text = format!("{query}\n{}", "hay\n".repeat(40));
+        let mut pager = PagerView::from_text("Output", &text, 38);
+        let no_search = PagerView::from_text("Output", &text, 38);
+        render_screen(&pager, 40, 24);
+        let _ = pager.handle_key(key(KeyCode::Char('/')));
+        for ch in query.chars() {
+            let _ = pager.handle_key(key(KeyCode::Char(ch)));
+        }
+        let _ = pager.handle_key(key(KeyCode::Enter));
+        assert!(pager.search_matches.borrow().is_empty());
+
+        let wide = render_screen(&pager, 100, 24);
+        render_screen(&no_search, 100, 24);
+        assert!(wide.contains("match 1/1"), "{wide}");
+        assert_eq!(pager.search_matches.borrow().len(), 1);
+        assert_eq!(pager.page_height() + 1, no_search.page_height());
+
+        let narrow = render_screen(&pager, 40, 24);
+        render_screen(&no_search, 40, 24);
+        assert!(!narrow.contains("match 1/1"), "{narrow}");
+        assert!(pager.search_matches.borrow().is_empty());
+        assert_eq!(pager.page_height(), no_search.page_height());
     }
 
     #[test]
