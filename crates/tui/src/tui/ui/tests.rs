@@ -9097,6 +9097,7 @@ fn apply_loaded_session_never_restores_background_shell_event_as_composer_draft(
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "plan-complete".to_string(),
                     name: "update_plan".to_string(),
                     input: serde_json::json!({"plan": [{"step": "Check the output", "status": "completed"}]}),
@@ -9107,6 +9108,7 @@ fn apply_loaded_session_never_restores_background_shell_event_as_composer_draft(
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "plan-complete".to_string(),
                     content: "Plan updated".to_string(),
                     is_error: None,
@@ -16961,12 +16963,6 @@ async fn empty_bang_shell_input_is_consumed_with_usage_error() {
         app.status_message.as_deref(),
         Some("Error: Usage: ! <shell command>")
     );
-}
-
-#[test]
-fn local_bang_shell_tool_ids_are_not_model_visible() {
-    assert!(!is_model_visible_tool_call("user_shell_1"));
-    assert!(is_model_visible_tool_call("toolu_01abc"));
 }
 
 fn complete_release_json(tag: &str) -> serde_json::Value {
@@ -25388,11 +25384,14 @@ fn message_complete_drain_preserves_thinking_when_thinking_complete_lost() {
 #[test]
 fn approval_prompt_uses_event_input_after_message_complete_drain() {
     let mut app = create_test_app();
-    app.pending_tool_uses.push((
-        "tool-1".to_string(),
-        "exec_shell".to_string(),
-        serde_json::json!({"command": "stale value from drained list"}),
-    ));
+    app.pending_tool_uses.push(ContentBlock::ToolUse {
+        execution_id: Some("tool-1".to_string()),
+        id: "provider-tool-1".to_string(),
+        name: "exec_shell".to_string(),
+        input: serde_json::json!({"command": "stale value from drained list"}),
+        caller: None,
+        thought_signature: None,
+    });
 
     // Mirror the old race: MessageComplete drains pending tool uses before
     // ApprovalRequired is handled. The approval modal must still show the
@@ -29857,6 +29856,7 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "t1".into(),
                 name: "read_file".into(),
                 input: serde_json::json!({"path":"x"}),
@@ -29867,6 +29867,7 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "t1".into(),
                 content: "data".into(),
                 is_error: None,
@@ -32283,4 +32284,22 @@ async fn provider_switch_back_lands_on_root_default_owned_by_that_provider() {
     );
     assert_eq!(app.api_provider, ApiProvider::Openai);
     assert_eq!(app.model, "gpui-fixture");
+}
+
+#[test]
+fn transient_assistant_history_preserves_provider_and_local_tool_identity() {
+    let mut app = create_test_app();
+    let block = ContentBlock::ToolUse {
+        id: "wire-reused".to_string(),
+        execution_id: Some("local-fresh".to_string()),
+        name: "read".to_string(),
+        input: serde_json::json!({"path":"README.md"}),
+        caller: Some(codewhale_models::ToolCaller {
+            caller_type: "code_execution".to_string(),
+            tool_id: Some("provider-parent".to_string()),
+        }),
+        thought_signature: Some("provider-signature".to_string()),
+    };
+    push_assistant_message(&mut app, String::new(), None, vec![block.clone()]);
+    assert_eq!(app.api_messages.last().unwrap().content, vec![block]);
 }
