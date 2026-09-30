@@ -6811,6 +6811,8 @@ fn mcp_recovery_kind_routes_expired_aws_credentials_to_external_login() {
     config.args = vec!["--profile".to_string(), "x; rm -rf ~".to_string()];
     config.env.clear();
     assert!(aws_login_hint(&config, "aws", "").contains("run `aws sso login` in"));
+    config.args = vec!["--profile=--no-sign-request".to_string()];
+    assert!(aws_login_hint(&config, "aws", "").contains("run `aws sso login` in"));
 }
 
 /// Review of #6789: the AWS-before-OAuth ordering lived only in the free
@@ -6861,6 +6863,100 @@ fn expired_aws_login_with_401_wording_never_reaches_oauth_needs_auth() {
     assert!(pool.server_needs_auth("aws"));
 }
 
+#[tokio::test]
+async fn live_aws_expiry_retires_the_catalog_and_lists_external_recovery() {
+    for method in ["tools/call", "resources/read", "prompts/get"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = McpConfig::default();
+        let server = test_server_config();
+        config.servers.insert("aws".to_string(), server.clone());
+        let mut pool = McpPool::new(config);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = test_connection(Box::new(ScriptedValueTransport {
+            sent: Arc::clone(&sent),
+            responses: VecDeque::from([json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": -32000, "message": "UnauthorizedException (401): AWS token has expired" }
+            }))]),
+        }));
+        connection.name = "aws".to_string();
+        connection.config = server;
+        connection.catalog_generation = pool.current_catalog_generation();
+        connection.tools.push(McpTool {
+            name: "lookup".to_string(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
+        });
+        connection.resources.push(McpResource {
+            uri: "aws://example".to_string(),
+            name: "example".to_string(),
+            description: None,
+            mime_type: None,
+        });
+        connection.prompts.push(McpPrompt {
+            name: "lookup".to_string(),
+            description: None,
+            arguments: Vec::new(),
+        });
+        pool.store_ready_connection("aws".to_string(), connection)
+            .unwrap();
+
+        let result = match method {
+            "tools/call" => {
+                pool.call_tool("mcp_aws_lookup", serde_json::json!({}))
+                    .await
+            }
+            "resources/read" => pool.read_resource("aws", "aws://example").await,
+            "prompts/get" => {
+                pool.get_prompt("aws", "lookup", serde_json::json!({}))
+                    .await
+            }
+            _ => unreachable!(),
+        };
+        let error = result.expect_err("expired AWS credentials fail the call");
+        assert!(format!("{error:#}").contains("aws sso login"));
+        assert_eq!(sent.lock().unwrap().len(), 1, "never replay the call");
+        assert!(!pool.connected_servers().contains(&"aws"));
+        assert!(!pool.server_needs_auth("aws"));
+        assert!(
+            pool.to_api_tools()
+                .iter()
+                .all(|tool| !tool.name.starts_with("mcp_aws_"))
+        );
+
+        // No external boot error map: the latest pool failure owns this row.
+        let snapshot = pool.manager_snapshot(&dir.path().join("mcp.json"), false, &HashMap::new());
+        let row = &snapshot.servers[0];
+        assert!(!row.connected && !row.auth_required);
+        assert_eq!(row.recovery_kind(false), Some(McpRecoveryKind::AwsLogin));
+        assert!(
+            row.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("aws sso login")
+        );
+
+        // Backoff reuses the recorded failure, so neither listing spawns a
+        // process or logs in. Both model surfaces name the external recovery.
+        for items in [
+            pool.list_resources(None).await.unwrap(),
+            pool.list_resource_templates(None).await.unwrap(),
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item["server"] == "aws")
+                .expect("AWS failure item");
+            assert_eq!(item["error"], "aws_login_required");
+            assert!(item.get("authenticate_tool").is_none());
+            let message = item["message"].as_str().unwrap();
+            assert!(message.contains("aws sso login") && message.contains("/mcp retry aws"));
+            assert!(!message.contains("/mcp login"));
+        }
+    }
+}
+
 #[test]
 fn sso_wording_on_an_oauth_capable_server_stays_on_the_oauth_route() {
     // Corporate SSO in front of an OAuth HTTP server: `aws sso login` cannot
@@ -6894,7 +6990,8 @@ fn sso_wording_on_an_oauth_capable_server_stays_on_the_oauth_route() {
     let mut server = test_server_config();
     server.command = None;
     server.url = Some("https://mcp.example.test/mcp".to_string());
-    server.scopes = vec!["read".to_string()];
+    // Automatic OAuth discovery works without explicit scopes/client config.
+    assert!(mcp_server_oauth_capable(&server));
     config.servers.insert("corp".to_string(), server);
     let mut pool = McpPool::new(config);
     pool.note_connect_failure(
@@ -6909,13 +7006,13 @@ fn sso_wording_on_an_oauth_capable_server_stays_on_the_oauth_route() {
     assert_eq!(corp.recovery_kind(true), Some(McpRecoveryKind::Reauth));
 }
 
-/// Review of #6789: a reviewed plugin's `initialize` error is suppressed to
+/// Review of #6789: a reviewed plugin's initialize/live error is suppressed to
 /// protect environment-backed credentials, which also hid the AWS wording
 /// the recovery keys on. The classification now runs on the raw text first
 /// and only our fixed hint survives — never the server's own words, and
 /// never the plugin's `AWS_PROFILE` env value.
 #[tokio::test]
-async fn reviewed_plugin_initialize_rejection_keeps_aws_recovery_but_not_server_text() {
+async fn reviewed_plugin_rejection_keeps_aws_recovery_but_not_server_text() {
     let dir = tempfile::tempdir().unwrap();
     let plugins_root = dir.path().join("plugins");
     let plugin_base = plugins_root.join("aws-guard");
@@ -6938,22 +7035,11 @@ async fn reviewed_plugin_initialize_rejection_keeps_aws_recovery_but_not_server_
     registry.enable("aws-guard").unwrap();
     let authority = registry.authority_for("aws-guard").unwrap();
 
-    let transport = ScriptedValueTransport {
-        sent: Arc::new(Mutex::new(Vec::new())),
-        responses: VecDeque::from([json_frame(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "error": {
-                "code": -32602,
-                "message": "Error retrieving credentials for acct-SECRET-123: The SSO session associated with this profile has expired or is otherwise invalid."
-            }
-        }))]),
-    };
-    let mut conn = test_connection(Box::new(transport));
-    conn.config
+    let mut config = test_server_config();
+    config
         .env
         .insert("AWS_PROFILE".to_string(), "env-profile-secret".to_string());
-    conn.config.reviewed_plugin = Some(
+    config.reviewed_plugin = Some(
         ReviewedPluginMcpSource::from_authority(
             authority,
             None,
@@ -6962,20 +7048,51 @@ async fn reviewed_plugin_initialize_rejection_keeps_aws_recovery_but_not_server_
         .unwrap(),
     );
 
-    let error = format!("{:#}", conn.initialize().await.expect_err("rejected"));
-    assert!(error.contains("server details suppressed"), "{error}");
-    assert!(!error.contains("acct-SECRET-123"), "{error}");
-    assert!(!error.contains("env-profile-secret"), "{error}");
-    assert!(
-        error.contains(
-            "AWS credentials expired: run `aws sso login` in a terminal, then `/mcp retry mock`"
-        ),
-        "{error}"
-    );
-    assert_eq!(
-        mcp_recovery_kind(true, true, false, Some(&error), false),
-        Some(McpRecoveryKind::AwsLogin)
-    );
+    for initialize in [true, false] {
+        for (server_error, login) in [
+            (
+                "Error retrieving credentials for acct-SECRET-123: The SSO session associated with this profile has expired or is otherwise invalid.",
+                "aws sso login",
+            ),
+            (
+                "acct-SECRET-123 LoginRefreshRequired: Please reauthenticate using aws login",
+                "aws login",
+            ),
+        ] {
+            let transport = ScriptedValueTransport {
+                sent: Arc::new(Mutex::new(Vec::new())),
+                responses: VecDeque::from([json_frame(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": { "code": -32602, "message": server_error }
+                }))]),
+            };
+            let mut conn = test_connection(Box::new(transport));
+            conn.config = config.clone();
+            let error = if initialize {
+                conn.initialize().await.expect_err("initialize rejected")
+            } else {
+                conn.call_method("tools/call", serde_json::json!({}), 5)
+                    .await
+                    .expect_err("live call rejected")
+            };
+            let error = format!("{error:#}");
+            assert!(error.contains("server details suppressed"), "{error}");
+            assert!(!error.contains("acct-SECRET-123"), "{error}");
+            assert!(!error.contains("env-profile-secret"), "{error}");
+            let hint = format!(
+                "AWS credentials expired: run `{login}` in a terminal, then `/mcp retry mock`"
+            );
+            assert!(error.contains(&hint), "{error}");
+            assert_eq!(
+                mcp_recovery_kind(true, true, false, Some(&error), false),
+                Some(McpRecoveryKind::AwsLogin)
+            );
+            // Pool/snapshot/listing classification sees only sanitized text;
+            // it must preserve aws login versus aws sso login on that pass.
+            assert_eq!(aws_login_hint(&config, "mock", &error), hint);
+        }
+    }
 }
 
 #[test]

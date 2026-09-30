@@ -2436,8 +2436,16 @@ impl McpConnection {
 
         if let Some(error) = response.get("error") {
             if self.config.reviewed_plugin.is_some() {
+                // Preserve only the fixed recovery class, just as initialize
+                // does; raw server details may contain plugin credentials.
+                let raw = error.to_string();
+                let hint = if mcp_error_is_aws_login(&raw, mcp_server_oauth_capable(&self.config)) {
+                    format!("; {}", aws_login_hint(&self.config, &self.name, &raw))
+                } else {
+                    String::new()
+                };
                 anyhow::bail!(
-                    "Reviewed plugin MCP server returned an error in '{method}' (server details suppressed to protect environment-backed credentials)"
+                    "Reviewed plugin MCP server returned an error in '{method}' (server details suppressed to protect environment-backed credentials){hint}"
                 );
             }
             return Err(anyhow::anyhow!(
@@ -4313,7 +4321,7 @@ impl McpPool {
         format!("MCP server '{server_name}' requires authentication (◆ auth required); {recovery}")
     }
 
-    /// Route an auth-required failure from a live tool call into the same
+    /// Route an auth-required failure from a live request into the same
     /// typed state a failed connect produces: drop the connection (its
     /// credential is no longer accepted), mark the server needs-auth so the
     /// next catalog offers the synthetic login tool, and name the recovery on
@@ -4327,6 +4335,8 @@ impl McpPool {
                 && mcp_error_is_aws_login(&text, mcp_server_oauth_capable(&config))
             {
                 let hint = aws_login_hint(&config, server_name, &text);
+                self.drop_connection(server_name, "AWS credentials expired on live call");
+                self.note_connect_failure(server_name, &error);
                 return error.context(hint);
             }
             return error;
@@ -4476,8 +4486,8 @@ impl McpPool {
         let errors = self.connect_all().await;
         for (server, err) in errors {
             tracing::warn!("Failed to connect MCP server '{server}' for resources: {err:#}");
-            if oauth::error_looks_auth_required(&err) {
-                items.push(self.mcp_auth_required_error_item(&server));
+            if let Some(item) = self.mcp_recovery_error_item(&server, &err) {
+                items.push(item);
             }
         }
         for (server, conn) in &self.connections {
@@ -4525,8 +4535,8 @@ impl McpPool {
             tracing::warn!(
                 "Failed to connect MCP server '{server}' for resource templates: {err:#}"
             );
-            if oauth::error_looks_auth_required(&err) {
-                items.push(self.mcp_auth_required_error_item(&server));
+            if let Some(item) = self.mcp_recovery_error_item(&server, &err) {
+                items.push(item);
             }
         }
         for (server, conn) in &self.connections {
@@ -4544,6 +4554,27 @@ impl McpPool {
             }
         }
         Ok(items)
+    }
+
+    /// Project recoverable connection failures for every resource listing.
+    /// AWS CLI credentials cannot be renewed by the synthetic OAuth tool.
+    fn mcp_recovery_error_item(
+        &self,
+        server: &str,
+        error: &anyhow::Error,
+    ) -> Option<serde_json::Value> {
+        let text = format!("{error:#}");
+        if let Some(config) = self.server_config(server)
+            && mcp_error_is_aws_login(&text, mcp_server_oauth_capable(&config))
+        {
+            return Some(serde_json::json!({
+                "error": "aws_login_required",
+                "server": server,
+                "message": aws_login_hint(&config, server, &text),
+            }));
+        }
+        self.error_needs_oauth_login(server, error)
+            .then(|| self.mcp_auth_required_error_item(server))
     }
 
     /// Listing-time error item for a needs-auth server. Carries the same
@@ -4595,7 +4626,9 @@ impl McpPool {
             anyhow::bail!("MCP resource URI '{uri}' was not advertised by server '{server_name}'");
         }
         let timeout = conn.config().effective_read_timeout(&global_timeouts);
-        conn.read_resource(uri, timeout).await
+        conn.read_resource(uri, timeout)
+            .await
+            .map_err(|error| self.note_live_call_failure(server_name, error))
     }
 
     /// Get a prompt from a specific server
@@ -4617,7 +4650,9 @@ impl McpPool {
             );
         }
         let timeout = conn.config().effective_execute_timeout(&global_timeouts);
-        conn.get_prompt(prompt_name, arguments, timeout).await
+        conn.get_prompt(prompt_name, arguments, timeout)
+            .await
+            .map_err(|error| self.note_live_call_failure(server_name, error))
     }
 
     /// Parse a prefixed name into (server_name, tool_name)
@@ -4993,12 +5028,17 @@ impl McpPool {
                 };
                 match result {
                     Ok(mut resources) => items.append(&mut resources),
-                    Err(error) if oauth::error_looks_auth_required(&error) => {
-                        let mut item = self.mcp_auth_required_error_item(&server);
+                    Err(error) => {
+                        let Some(mut item) = self.mcp_recovery_error_item(&server, &error) else {
+                            tracing::warn!("MCP resource discovery failed: {error:#}");
+                            continue;
+                        };
                         let auth_name = Self::mcp_model_tool_name(&server, AUTHENTICATE_TOOL_NAME);
-                        if crate::core::engine::tool_catalog::tool_matches_any_rule(
-                            rules, &auth_name,
-                        ) {
+                        if item.get("authenticate_tool").is_some()
+                            && crate::core::engine::tool_catalog::tool_matches_any_rule(
+                                rules, &auth_name,
+                            )
+                        {
                             item.as_object_mut()
                                 .expect("error item object")
                                 .remove("authenticate_tool");
@@ -5007,7 +5047,6 @@ impl McpPool {
                         }
                         items.push(item);
                     }
-                    Err(error) => tracing::warn!("MCP resource discovery failed: {error:#}"),
                 }
             }
             let field = if name == "list_mcp_resources" {
@@ -5546,8 +5585,9 @@ pub fn mcp_display_target(transport: &str, command_or_url: &str) -> String {
 
 #[must_use]
 pub fn mcp_server_oauth_capable(config: &McpServerConfig) -> bool {
-    config.url.is_some()
-        && (config.oauth.is_some() || !config.scopes.is_empty() || config.oauth_resource.is_some())
+    // Use the login path's own authority, including discovery-only HTTP
+    // servers, manual Authorization and the reviewed-plugin restriction.
+    oauth::server_supports_oauth_login(config)
 }
 
 #[must_use]
@@ -5662,9 +5702,12 @@ pub fn aws_login_hint(config: &McpServerConfig, server: &str, error_text: &str) 
                 .then(|| config.env.get("AWS_PROFILE").map(String::as_str))
                 .flatten()
         })
-        .filter(|profile| mcp_name_is_command_safe(profile));
+        .filter(|profile| !profile.starts_with('-') && mcp_name_is_command_safe(profile));
     let lower = error_text.to_ascii_lowercase();
-    let command = if lower.contains("loginrefreshrequired") || lower.contains("using aws login") {
+    let command = if lower.contains("loginrefreshrequired")
+        || lower.contains("using aws login")
+        || lower.contains("run `aws login")
+    {
         "aws login"
     } else {
         "aws sso login"
@@ -6708,7 +6751,12 @@ fn snapshot_from_config(
             };
 
             if let Some((pool, errors)) = discovery {
-                if let Some(error) = errors.get(name) {
+                if let Some(error) = pool
+                    .connect_backoff
+                    .get(name)
+                    .map(|backoff| &backoff.last_error)
+                    .or_else(|| errors.get(name))
+                {
                     snapshot.error = Some(error.clone());
                 }
                 // The pool's needs-auth set is the authority; the error text
