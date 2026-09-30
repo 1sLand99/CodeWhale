@@ -11434,6 +11434,7 @@ fn resolve_skills_scenario() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace = tmp.path();
         let local_skills = workspace.join(".agents").join("skills");
+        crate::test_support::trust_workspace(workspace);
         fs::create_dir_all(&local_skills).expect("create skills dir");
 
         let config = Config::default();
@@ -11447,6 +11448,7 @@ fn resolve_skills_scenario() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace = tmp.path();
         let local_skills = workspace.join("skills");
+        crate::test_support::trust_workspace(workspace);
         fs::create_dir_all(&local_skills).expect("create skills dir");
 
         let config = Config::default();
@@ -11463,6 +11465,7 @@ fn resolve_skills_scenario() {
         let codewhale_skills = workspace.join(".codewhale").join("skills");
         fs::create_dir_all(&agents_skills).expect("create agents skills dir");
         fs::create_dir_all(&codewhale_skills).expect("create codewhale skills dir");
+        crate::test_support::trust_workspace(workspace);
 
         let config = Config {
             skills: Some(crate::config::SkillsConfig {
@@ -11613,6 +11616,47 @@ fn resolve_skills_dir_rejects_symlink_escaping_workspace() {
         config.skills_dir(),
         "with no valid in-workspace skills dir, resolution should fall back to config"
     );
+}
+
+/// An untrusted workspace's skill dirs must not become the resolved skills
+/// dir: discovery would search it and bypass the workspace-trust gate.
+#[test]
+fn resolve_skills_dir_ignores_untrusted_workspace_skills() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _env_lock = crate::test_support::lock_test_env();
+    let _home = crate::test_support::EnvVarGuard::set("HOME", tmp.path());
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", tmp.path());
+    let codewhale_only = Config {
+        skills: Some(crate::config::SkillsConfig {
+            scan_codewhale_only: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for (relative, config) in [
+        (".agents/skills", Config::default()),
+        ("skills", Config::default()),
+        (".codewhale/skills", codewhale_only),
+    ] {
+        let workspace = tmp
+            .path()
+            .join(format!("ws-{}", relative.replace('/', "-")));
+        let local_skills = workspace.join(relative);
+        fs::create_dir_all(&local_skills).expect("create skills dir");
+
+        assert_eq!(
+            resolve_skills_dir(&config, &workspace),
+            config.skills_dir(),
+            "untrusted {relative} must not be resolved as the skills dir"
+        );
+
+        crate::test_support::trust_workspace(&workspace);
+        assert_eq!(
+            resolve_skills_dir(&config, &workspace),
+            fs::canonicalize(&local_skills).expect("canonical skills"),
+            "trusted {relative} resolves as before"
+        );
+    }
 }
 
 #[cfg(unix)]
