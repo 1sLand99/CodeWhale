@@ -11,7 +11,7 @@
  */
 const MAX_OUTPUT_TOKENS = 2_000;
 const FALLBACK_BASE = "https://api.deepseek.com";
-const FALLBACK_MODEL = "deepseek-v4-flash";
+const FALLBACK_MODEL = "deepseek-flash";
 
 interface ChatMessage {
   role: "system" | "user" | "assistant";

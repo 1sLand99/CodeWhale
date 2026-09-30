@@ -1524,12 +1524,19 @@ pub trait McpTransport: Send + Sync {
     /// the default is a no-op.
     fn set_protocol_version(&mut self, _version: &str) {}
 
+    /// The last non-empty line the server wrote to stderr, for naming why a
+    /// handshake was refused. Only stdio children have a stderr; a reviewed
+    /// plugin's is never retained.
+    async fn last_stderr_line(&self) -> Option<String> {
+        None
+    }
+
     /// Synchronous, best-effort liveness probe consulted by
     /// [`McpConnection::is_ready`] so a crashed stdio child stops reading
     /// as "ready" before the next call fails (#6187). Must never block and
     /// never spawn — a contended lock reads as alive; the next call observes
-    /// the death. HTTP/SSE transports have no child to observe, so the
-    /// default is "alive".
+    /// the death. The default is "alive"; Streamable HTTP has no long-lived
+    /// channel to observe, while legacy SSE reports its closed event stream.
     fn probe_dead(&self) -> bool {
         false
     }
@@ -1964,6 +1971,30 @@ impl McpConnection {
         .await?;
 
         let response = self.recv(init_id).await?;
+        if let Some(error) = response.get("error")
+            && self.config.reviewed_plugin.is_none()
+        {
+            // A JSON-RPC error on `initialize` is the server refusing the
+            // handshake, not a transport fault: name the server and what was
+            // launched, and carry the child's last stderr line, which is
+            // usually the real reason (an MCP proxy that cannot reach its
+            // upstream answers -32602 and explains itself only on stderr).
+            let launched = match (&self.config.command, &self.config.url) {
+                (Some(command), _) => format!("command `{}`", mcp_display_target("stdio", command)),
+                (None, Some(_)) => "HTTP endpoint".to_string(),
+                (None, None) => "server".to_string(),
+            };
+            let stderr = self
+                .transport
+                .last_stderr_line()
+                .await
+                .map(|line| format!("; server stderr: {line}"))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "MCP server '{}' rejected initialize ({launched}): {error}{stderr}",
+                self.name
+            );
+        }
         let result = response_result(
             &response,
             "initialize",
@@ -5333,11 +5364,27 @@ impl McpServerSnapshot {
         }
         mcp_recovery_kind(
             self.enabled,
-            true,
+            self.started(),
             self.connected,
             self.error.as_deref(),
             oauth_capable,
         )
+    }
+
+    /// Whether this session ever attempted the server. Boot is lazy (#6033):
+    /// a configured server nobody asked for has no connection, no recorded
+    /// failure, and no observed capabilities — it was never started, so its
+    /// recovery is `connect`, not `reconnect`, and an OAuth-capable one is
+    /// not yet known to need a login.
+    #[must_use]
+    pub fn started(&self) -> bool {
+        self.connected
+            || self.auth_required
+            || self.error.is_some()
+            || !matches!(
+                self.capability_metadata,
+                McpServerCapabilityMetadata::NotObserved
+            )
     }
 }
 
@@ -5482,6 +5529,12 @@ pub fn load_config(path: &Path) -> Result<McpConfig> {
 const MAX_MCP_CONFIG_BYTES: u64 = 1024 * 1024;
 
 fn read_mcp_config_file(path: &Path) -> Result<Option<String>> {
+    read_bounded_mcp_config_file(path, MAX_MCP_CONFIG_BYTES)
+}
+
+/// [`read_mcp_config_file`] with a caller-chosen size bound, for foreign files
+/// such as `~/.claude.json` that carry far more than an MCP server map.
+fn read_bounded_mcp_config_file(path: &Path, max_bytes: u64) -> Result<Option<String>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -5498,11 +5551,15 @@ fn read_mcp_config_file(path: &Path) -> Result<Option<String>> {
     let file = open_mcp_config_file(path)
         .with_context(|| format!("Failed to read MCP config {}", path.display()))?;
     let mut contents = String::new();
-    file.take(MAX_MCP_CONFIG_BYTES + 1)
+    file.take(max_bytes + 1)
         .read_to_string(&mut contents)
         .with_context(|| format!("Failed to read MCP config {}", path.display()))?;
-    if contents.len() as u64 > MAX_MCP_CONFIG_BYTES {
-        anyhow::bail!("MCP config {} exceeds the 1 MiB limit", path.display());
+    if contents.len() as u64 > max_bytes {
+        anyhow::bail!(
+            "MCP config {} exceeds the {} MiB limit",
+            path.display(),
+            max_bytes / (1024 * 1024)
+        );
     }
     Ok(Some(contents))
 }

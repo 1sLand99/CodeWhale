@@ -299,29 +299,32 @@ fn workbar_rows_sit_under_the_status_row_one_per_workflow() {
         "the status row keeps Esc and names the manage key: {:?}",
         rows[status]
     );
-    // The workbar sits between two rules: rule, one row per run, rule.
-    let rule = "─".repeat(usize::from(width));
-    assert_eq!(rows[status + 1], rule, "rule above the workbar");
+    // One row per run directly under the status row, with no rules of its
+    // own: rules above and below stacked with the work surface's divider.
     assert!(
-        rows[status + 2].contains("Audit the parser") && rows[status + 2].contains("1/3 so far"),
+        rows[status + 1].contains("Audit the parser") && rows[status + 1].contains("1/3 done"),
         "first workbar row: {:?}",
+        rows[status + 1]
+    );
+    assert!(
+        rows[status + 2].contains("Port the fixtures") && rows[status + 2].contains("0/3 done"),
+        "second workbar row: {:?}",
         rows[status + 2]
     );
     assert!(
-        rows[status + 3].contains("Port the fixtures") && rows[status + 3].contains("0/3 so far"),
-        "second workbar row: {:?}",
-        rows[status + 3]
+        !rows[status..status + 3].iter().any(|row| row.contains('─')),
+        "the workbar draws no rules: {:?}",
+        &rows[status..status + 3]
     );
-    assert_eq!(rows[status + 4], rule, "rule below the workbar");
     assert!(
         rows[..usize::from(composer.y)]
             .iter()
-            .all(|row| !row.contains("so far")),
+            .all(|row| !row.contains("1/3 done")),
         "progress stays out of the transcript"
     );
     assert_eq!(
         app.viewport.last_workbar_area.map(|area| area.height),
-        Some(4)
+        Some(2)
     );
 }
 
@@ -877,6 +880,10 @@ fn bracketed_paste_returns_dock_focus_to_the_visible_composer() {
 /// One representative terminal encoding per shell binding.
 fn shell_binding_probe(id: ShellBindingId) -> KeyEvent {
     match id {
+        ShellBindingId::ElevationUp => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        ShellBindingId::ElevationDown => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        ShellBindingId::ElevationConfirm => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ShellBindingId::ElevationAbort => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         ShellBindingId::PetResultUp => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
         ShellBindingId::PetResultDown => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         ShellBindingId::PetResultPageUp => KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
@@ -2521,6 +2528,47 @@ fn failed_workflow_run_raises_a_sticky_error() {
 }
 
 #[test]
+fn failed_workflow_toast_names_the_agents_cause_not_the_aggregate() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".to_string());
+    let events = [
+        serde_json::json!({"type": "run_started", "at_ms": 1, "workflow_goal": "Audit"}),
+        serde_json::json!({"type": "task_started", "at_ms": 2, "task_id": "t1", "label": "a"}),
+        serde_json::json!({"type": "task_started", "at_ms": 2, "task_id": "t2", "label": "b"}),
+        serde_json::json!({
+            "type": "task_completed", "at_ms": 300, "task_id": "t1", "status": "failed",
+            "reason": "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Top up."
+        }),
+        serde_json::json!({
+            "type": "task_completed", "at_ms": 300, "task_id": "t2", "status": "failed",
+            "reason": "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Top up."
+        }),
+        serde_json::json!({
+            "type": "run_completed", "at_ms": 356, "status": "failed",
+            "error": "no task produced a result: all 2 task(s) failed and 1 fan-out(s) lost every slot"
+        }),
+    ];
+    for event in &events {
+        assert!(apply_owned_workflow_ui_event(
+            &mut app,
+            "session-a",
+            "workflow-auth",
+            event,
+        ));
+    }
+    let sticky = app.sticky_status.as_ref().expect("failed run is loud");
+    // The toast text still passes the key-based secret redactor, which masks
+    // whatever follows an `Authorization …:` key; the cause's name survives.
+    assert!(
+        sticky.text.contains("Authorization failed")
+            && !sticky.text.contains("no task produced a result")
+            && !sticky.text.contains("[auth]"),
+        "the toast must carry the same cause as the workbar: {:?}",
+        sticky.text
+    );
+}
+
+#[test]
 fn successful_workflow_run_raises_no_failure_toast() {
     let mut app = create_test_app();
     app.current_session_id = Some("session-a".to_string());
@@ -2880,8 +2928,86 @@ async fn mcp_mutations_while_turn_running_defer_the_live_pool_refresh() {
     )));
 }
 
+fn mcp_retry_snapshot_row(
+    name: &str,
+    connected: bool,
+    error: Option<&str>,
+    auth_required: bool,
+    tools: usize,
+) -> crate::mcp::McpServerSnapshot {
+    crate::mcp::McpServerSnapshot {
+        name: name.into(),
+        enabled: true,
+        required: false,
+        transport: "stdio".into(),
+        command_or_url: "fixture-mcp".into(),
+        connect_timeout: 5,
+        execute_timeout: 5,
+        read_timeout: 5,
+        connected,
+        error: error.map(str::to_string),
+        auth_required,
+        capability_metadata: if connected {
+            crate::mcp::McpServerCapabilityMetadata::LegacyFallback
+        } else {
+            crate::mcp::McpServerCapabilityMetadata::NotObserved
+        },
+        tools: (0..tools)
+            .map(|index| crate::mcp::McpDiscoveredItem {
+                name: format!("tool{index}"),
+                model_name: format!("mcp_{name}_tool{index}"),
+                description: None,
+            })
+            .collect(),
+        resources: Vec::new(),
+        prompts: Vec::new(),
+    }
+}
+
+/// Answer the next `/mcp retry` op the background task sends, then poll the
+/// UI until the outcome is delivered.
+async fn answer_mcp_retry(
+    app: &mut App,
+    mock: &mut crate::core::engine::MockEngineHandle,
+    expected: &str,
+    row: crate::mcp::McpServerSnapshot,
+) {
+    let op = tokio::time::timeout(Duration::from_secs(2), mock.rx_op.recv())
+        .await
+        .expect("the retry op reaches the engine mailbox")
+        .expect("engine mailbox open");
+    let Op::RetryMcpServer { name, tx } = op else {
+        panic!("expected RetryMcpServer");
+    };
+    assert_eq!(name, expected);
+    let sender = tx.lock().unwrap().take().expect("retry reply sender");
+    sender
+        .send(Ok(crate::core::ops::McpManagerUpdate {
+            snapshot: crate::mcp::McpManagerSnapshot {
+                config_path: PathBuf::from("mcp.json"),
+                config_exists: true,
+                reload_required: false,
+                servers: vec![row],
+            },
+            generation: app.mcp_snapshot_generation + 1,
+        }))
+        .unwrap();
+    for _ in 0..200 {
+        poll_mcp_retries(app);
+        if app.mcp_retries.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the retry outcome was never delivered");
+}
+
+/// Founder run: Enter on `reconnect` while a turn ran printed "run /mcp
+/// retry linear again after the turn finishes" and did nothing else. The
+/// retry is now queued behind the turn (the engine mailbox is the queue), the
+/// panel says so, and the outcome is reported when it lands.
 #[tokio::test]
-async fn mcp_retry_while_turn_running_names_the_deferral_and_never_awaits() {
+async fn mcp_retry_while_turn_running_is_queued_then_reports_its_outcome() {
     use crate::tui::app::McpUiAction;
 
     let mut app = create_test_app();
@@ -2900,11 +3026,123 @@ async fn mcp_retry_while_turn_running_names_the_deferral_and_never_awaits() {
     )
     .await
     .expect("retry must not park the UI loop behind the running turn (#6159)");
-    assert!(mock.rx_op.try_recv().is_err());
-    assert!(app.history.iter().any(|cell| matches!(
-        cell,
-        HistoryCell::System { content } if content.contains("/mcp retry flaky")
-    )));
+    assert_eq!(app.mcp_retries.len(), 1);
+    assert!(app.mcp_retries[0].queued);
+    let notice = app.status_toasts.back().unwrap().text.clone();
+    assert!(
+        notice.contains("flaky will reconnect as soon as it finishes"),
+        "{notice}"
+    );
+    assert!(
+        !notice.contains("again"),
+        "the person asked once; they are not told to ask again: {notice}"
+    );
+
+    // A second press while it is pending does not stack a second op.
+    handle_mcp_ui_action(
+        &mut app,
+        &mock.handle,
+        &Config::default(),
+        McpUiAction::Retry {
+            name: "flaky".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(app.mcp_retries.len(), 1);
+
+    answer_mcp_retry(
+        &mut app,
+        &mut mock,
+        "flaky",
+        mcp_retry_snapshot_row(
+            "flaky",
+            false,
+            Some("MCP server 'flaky' rejected initialize (command `uvx`): -32602"),
+            false,
+            0,
+        ),
+    )
+    .await;
+    assert!(
+        mock.rx_op.try_recv().is_err(),
+        "exactly one retry op for one pending row"
+    );
+    let receipt = app.status_toasts.back().unwrap();
+    assert_eq!(receipt.level, StatusToastLevel::Error);
+    assert!(
+        receipt
+            .text
+            .contains("flaky did not connect: MCP server 'flaky' rejected initialize"),
+        "{}",
+        receipt.text
+    );
+    let observed = &app.mcp_snapshot.as_ref().unwrap().servers[0];
+    assert!(observed.error.is_some(), "the panel reads the same outcome");
+}
+
+#[tokio::test]
+async fn mcp_retry_reports_connected_and_needs_login_outcomes() {
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    let mut mock = mock_engine_handle();
+    handle_mcp_ui_action(
+        &mut app,
+        &mock.handle,
+        &Config::default(),
+        McpUiAction::Retry {
+            name: "github".to_string(),
+        },
+    )
+    .await;
+    assert!(!app.mcp_retries[0].queued, "an idle engine connects now");
+    assert!(
+        app.status_toasts
+            .back()
+            .unwrap()
+            .text
+            .contains("Connecting github")
+    );
+    answer_mcp_retry(
+        &mut app,
+        &mut mock,
+        "github",
+        mcp_retry_snapshot_row("github", true, None, false, 3),
+    )
+    .await;
+    let receipt = app.status_toasts.back().unwrap();
+    assert_eq!(receipt.level, StatusToastLevel::Success);
+    assert!(
+        receipt.text.contains("github connected: 3 tool(s)"),
+        "{}",
+        receipt.text
+    );
+
+    handle_mcp_ui_action(
+        &mut app,
+        &mock.handle,
+        &Config::default(),
+        McpUiAction::Retry {
+            name: "stripe".to_string(),
+        },
+    )
+    .await;
+    answer_mcp_retry(
+        &mut app,
+        &mut mock,
+        "stripe",
+        mcp_retry_snapshot_row("stripe", false, Some("HTTP 401 Unauthorized"), true, 0),
+    )
+    .await;
+    let receipt = app.status_toasts.back().unwrap();
+    assert_eq!(receipt.level, StatusToastLevel::Warning);
+    assert!(
+        receipt
+            .text
+            .contains("stripe needs a login: run /mcp login stripe"),
+        "{}",
+        receipt.text
+    );
 }
 
 #[tokio::test]
@@ -8756,6 +8994,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
         work_state: None,
         window_title: None,
         last_auto_route: None,
+        turn_outcomes: Vec::new(),
     }
 }
 
@@ -8858,6 +9097,7 @@ fn apply_loaded_session_never_restores_background_shell_event_as_composer_draft(
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "plan-complete".to_string(),
                     name: "update_plan".to_string(),
                     input: serde_json::json!({"plan": [{"step": "Check the output", "status": "completed"}]}),
@@ -8868,6 +9108,7 @@ fn apply_loaded_session_never_restores_background_shell_event_as_composer_draft(
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "plan-complete".to_string(),
                     content: "Plan updated".to_string(),
                     is_error: None,
@@ -16724,12 +16965,6 @@ async fn empty_bang_shell_input_is_consumed_with_usage_error() {
     );
 }
 
-#[test]
-fn local_bang_shell_tool_ids_are_not_model_visible() {
-    assert!(!is_model_visible_tool_call("user_shell_1"));
-    assert!(is_model_visible_tool_call("toolu_01abc"));
-}
-
 fn complete_release_json(tag: &str) -> serde_json::Value {
     let assets = REQUIRED_RELEASE_ASSETS
         .iter()
@@ -17646,6 +17881,82 @@ fn an_engine_stopped_turn_keeps_its_reason_in_the_transcript() {
             .history
             .iter()
             .any(|cell| matches!(cell, HistoryCell::Error { .. }))
+    );
+}
+
+/// Founder run 2026-09-28: two turns ended `Failed` and the session record
+/// kept only the user prompts, so the reason was gone once the TUI closed.
+/// The failure the transcript showed is persisted (redacted) with the session
+/// and replayed in place on resume.
+#[test]
+fn a_failed_turn_reason_is_persisted_and_replayed_on_resume() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager =
+        crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
+    let mut app = create_test_app();
+    app.api_messages_mut()
+        .push(text_message("user", "first question"));
+    app.api_messages_mut()
+        .push(text_message("assistant", "first answer"));
+    app.api_messages_mut()
+        .push(text_message("user", "second question"));
+    let reason = "provider rejected the request: invalid key sk-live1234567890abcdef";
+    super::event_loop::present_turn_failure(
+        &mut app,
+        crate::core::events::TurnOutcomeStatus::Failed,
+        Some(reason),
+    );
+    let shown = app
+        .history
+        .iter()
+        .find_map(|cell| match cell {
+            HistoryCell::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("the failure is in the live transcript");
+
+    let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
+    assert_eq!(snapshot.turn_outcomes.len(), 1);
+    let outcome = &snapshot.turn_outcomes[0];
+    assert_eq!(
+        outcome.status,
+        crate::core::events::TurnOutcomeStatus::Failed
+    );
+    assert_eq!(outcome.after_message_count, 3);
+    assert!(outcome.error.contains("provider rejected the request"));
+    assert!(
+        !outcome.error.contains("sk-live1234567890abcdef"),
+        "the persisted reason is redacted: {}",
+        outcome.error
+    );
+    assert_eq!(
+        outcome.error,
+        codewhale_secrets::redact::redact_secrets(&shown),
+        "the record is what the live transcript showed"
+    );
+
+    // Survives a disk round trip and comes back in place on resume.
+    manager.save_session(&snapshot).expect("save");
+    let loaded = manager
+        .load_session(&snapshot.metadata.id)
+        .expect("load session");
+    assert_eq!(loaded.turn_outcomes, snapshot.turn_outcomes);
+    let mut resumed = create_test_app();
+    apply_loaded_session(&mut resumed, &mut Config::default(), &loaded).expect("resume");
+    assert_eq!(resumed.session_turn_outcomes, loaded.turn_outcomes);
+    let replayed = resumed
+        .history
+        .iter()
+        .position(
+            |cell| matches!(cell, HistoryCell::Error { message, .. } if *message == outcome.error),
+        )
+        .expect("the failure is replayed on resume");
+    assert!(
+        matches!(
+            &resumed.history[replayed - 1],
+            HistoryCell::User { content } if content.contains("second question")
+        ),
+        "the failure is replayed after the prompt it failed on"
     );
 }
 
@@ -25011,11 +25322,14 @@ fn message_complete_drain_preserves_thinking_when_thinking_complete_lost() {
 #[test]
 fn approval_prompt_uses_event_input_after_message_complete_drain() {
     let mut app = create_test_app();
-    app.pending_tool_uses.push((
-        "tool-1".to_string(),
-        "exec_shell".to_string(),
-        serde_json::json!({"command": "stale value from drained list"}),
-    ));
+    app.pending_tool_uses.push(ContentBlock::ToolUse {
+        execution_id: Some("tool-1".to_string()),
+        id: "provider-tool-1".to_string(),
+        name: "exec_shell".to_string(),
+        input: serde_json::json!({"command": "stale value from drained list"}),
+        caller: None,
+        thought_signature: None,
+    });
 
     // Mirror the old race: MessageComplete drains pending tool uses before
     // ApprovalRequired is handled. The approval modal must still show the
@@ -26382,6 +26696,54 @@ fn typeahead_before_card_does_not_answer() {
     assert!(app.view_stack.key_predates_top_approval(typed_before));
     assert!(!app.view_stack.key_predates_top_approval(Instant::now()));
     assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
+}
+
+#[test]
+fn stale_keys_cannot_answer_a_raised_or_revealed_elevation() {
+    use crate::tui::approval::ElevationOption;
+
+    let mut app = ask_posture_app();
+    let typed_before = Instant::now() - Duration::from_secs(1);
+    app.view_stack.push(ElevationView::new(
+        ElevationRequest::for_shell("elevation-id", "cargo test", "blocked", true, false),
+        codewhale_localization::Locale::En,
+    ));
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+    assert!(route_key_to_view_stack(&mut app, up, typed_before).is_none());
+    assert_eq!(app.view_stack.top_approval_id(), None);
+    // Deliberately select Full Access, then cover it with another decision.
+    assert!(route_key_to_view_stack(&mut app, up, Instant::now()).is_some());
+    push_approval_request_view(
+        &mut app,
+        "approval-id",
+        "exec_shell",
+        "Run a command",
+        &serde_json::json!({"command": "cargo test"}),
+        "k",
+        "g",
+        None,
+        crate::config::ApprovalDefaultSelection::AllowOnce,
+        None,
+    );
+    let queued_enter = Instant::now();
+    std::thread::sleep(Duration::from_millis(2));
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let events = route_key_to_view_stack(&mut app, enter, queued_enter).expect("visible approval");
+    assert!(
+        matches!(events.as_slice(), [ViewEvent::ApprovalDecision { tool_id, .. }] if tool_id == "approval-id")
+    );
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Elevation));
+    assert!(
+        route_key_to_view_stack(&mut app, enter, queued_enter).is_none(),
+        "Enter queued for the previous card must not elevate the newly revealed one"
+    );
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Elevation));
+    let events =
+        route_key_to_view_stack(&mut app, enter, Instant::now()).expect("fresh confirmation");
+    assert!(matches!(events.as_slice(), [ViewEvent::ElevationDecision {
+        tool_id, option: ElevationOption::FullAccess, ..
+    }] if tool_id == "elevation-id"));
+    assert!(app.view_stack.is_empty());
 }
 
 #[test]
@@ -29432,6 +29794,7 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
+                execution_id: None,
                 id: "t1".into(),
                 name: "read_file".into(),
                 input: serde_json::json!({"path":"x"}),
@@ -29442,6 +29805,7 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
+                execution_id: None,
                 tool_use_id: "t1".into(),
                 content: "data".into(),
                 is_error: None,
@@ -31858,4 +32222,22 @@ async fn provider_switch_back_lands_on_root_default_owned_by_that_provider() {
     );
     assert_eq!(app.api_provider, ApiProvider::Openai);
     assert_eq!(app.model, "gpui-fixture");
+}
+
+#[test]
+fn transient_assistant_history_preserves_provider_and_local_tool_identity() {
+    let mut app = create_test_app();
+    let block = ContentBlock::ToolUse {
+        id: "wire-reused".to_string(),
+        execution_id: Some("local-fresh".to_string()),
+        name: "read".to_string(),
+        input: serde_json::json!({"path":"README.md"}),
+        caller: Some(codewhale_models::ToolCaller {
+            caller_type: "code_execution".to_string(),
+            tool_id: Some("provider-parent".to_string()),
+        }),
+        thought_signature: Some("provider-signature".to_string()),
+    };
+    push_assistant_message(&mut app, String::new(), None, vec![block.clone()]);
+    assert_eq!(app.api_messages.last().unwrap().content, vec![block]);
 }

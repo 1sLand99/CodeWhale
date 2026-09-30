@@ -402,6 +402,7 @@ mod tests {
             role: Role::Assistant,
             content: vec![
                 ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "call-1".to_string(),
                     name: "read_file".to_string(),
                     input: serde_json::json!({ "path": "/etc/shadow" }),
@@ -409,6 +410,7 @@ mod tests {
                     thought_signature: None,
                 },
                 ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "call-1".to_string(),
                     content: "root:$6$verysecrethash".to_string(),
                     is_error: None,

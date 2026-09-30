@@ -116,8 +116,11 @@ fn redact_json_secrets_at(
 ///    everything from the value to the end of the line is dropped, exactly as
 ///    the whole-line form already does. Token *counts* in diagnostics
 ///    (`max tokens = 8192`) are not credentials and stay visible.
-/// 2. **Bare tokens.** Whitespace-delimited words beginning with a known
-///    `SECRET_TOKEN_PREFIXES` are replaced wholesale.
+/// 2. **Bare tokens.** Whitespace-delimited words that are a credential on
+///    their own — a known `SECRET_TOKEN_PREFIXES` word, a provider-prefixed
+///    opaque key (`CREDENTIAL_VALUE_PREFIXES`, `xai-`, `nvapi-`, `gsk_`,
+///    `hf_`, `pplx-`), an AWS access key id, or a JWT — are replaced
+///    wholesale.
 ///
 /// The goal is defense in depth: setup state and reports are built from safe
 /// summaries that never include secrets in the first place, and this is the
@@ -241,9 +244,9 @@ fn redact_line(line: &str, policy: RedactionPolicy) -> String {
             changed = true;
             masked.push(word.replace(trimmed, &redacted));
             spaced = SpacedAssignment::None;
-        } else if !trimmed.is_empty() && looks_like_secret_token(trimmed) {
+        } else if let Some(core) = secret_token_core(trimmed) {
             changed = true;
-            masked.push(word.replace(trimmed, REDACTED));
+            masked.push(word.replacen(core, REDACTED, 1));
             spaced = SpacedAssignment::None;
         } else if let Some(redacted) = redact_structured_word(trimmed, policy) {
             changed = true;
@@ -662,24 +665,6 @@ fn redact_keyed_assignment(body: &str, policy: RedactionPolicy) -> Option<String
         ));
     }
 
-    // `[auth] Authorization failed: You have run out of credits…` is an error
-    // sentence, not a header: the key names an outcome (`failed`, `denied`,
-    // `expired`…), not a credential. Dropping the rest of the line there hid
-    // the provider's human message. Keep that prose and mask only what still
-    // looks like a secret in it: keyed values, known prefixes, JWTs, opaque
-    // runs. Any other key (`The password for staging is: …`, `Authorization
-    // header was: Basic …`) keeps the whole-value policy, because a short
-    // password or passphrase is not credential-shaped and would leak.
-    if is_prose_key(key_norm)
-        && raw_value.split_whitespace().count() >= 3
-        && !mentions_password(raw_value)
-    {
-        return Some(format!(
-            "{raw_key}{sep}{}",
-            mask_credential_shaped_words(&redact_line(raw_value, policy))
-        ));
-    }
-
     // Keep leading whitespace of the key and the original separator spacing so
     // the redacted line reads naturally.
     let key_lead_ws: String = raw_key.chars().take_while(|c| c.is_whitespace()).collect();
@@ -705,63 +690,62 @@ fn redact_keyed_assignment(body: &str, policy: RedactionPolicy) -> Option<String
     ))
 }
 
-/// Words that end an error sentence rather than name a credential.
-const OUTCOME_KEY_WORDS: &[&str] = &[
-    "failed",
-    "failure",
-    "error",
-    "denied",
-    "rejected",
-    "refused",
-    "expired",
-    "invalid",
-    "forbidden",
-];
+/// Provider key prefixes masked as bare words only when the rest of the word
+/// is an opaque run ([`is_opaque_token_body`]): real keys under them are
+/// random, while identifiers sharing the prefix (`hf_hub_download`,
+/// `npm_config_cache`) are not. [`CREDENTIAL_VALUE_PREFIXES`] joins them.
+const BARE_OPAQUE_TOKEN_PREFIXES: &[&str] = &["xai-", "nvapi-", "gsk_", "hf_", "pplx-"];
 
-/// Whether a sensitive-looking key is really the start of an error sentence:
-/// several words whose last word is an outcome (`Authorization failed`,
-/// `token expired`), as opposed to a credential name (`API Key`,
-/// `client secret`) or a lead-in (`the password for staging is`).
-fn is_prose_key(key: &str) -> bool {
-    let mut words = key.split_whitespace();
-    let Some(last) = words.next_back() else {
-        return false;
-    };
-    words.next().is_some()
-        && OUTCOME_KEY_WORDS
-            .iter()
-            .any(|word| last.eq_ignore_ascii_case(word))
-}
-
-/// A sentence that talks about a password may carry one that is not
-/// credential-shaped (`Authorization failed: password is Summer2026!`).
-fn mentions_password(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    ["password", "passwd", "passphrase"]
-        .iter()
-        .any(|word| lower.contains(word))
-}
-
-/// Mask every whitespace-delimited word that looks like credential material,
-/// leaving the rest of the text byte-exact.
-fn mask_credential_shaped_words(text: &str) -> String {
-    text.split(' ')
-        .map(|word| {
-            let trimmed = trim_word_punctuation(word);
-            if value_looks_like_credential(trimmed) {
-                word.replace(trimmed, REDACTED)
-            } else {
-                word.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
+/// Whether a whitespace-delimited word is a credential on its own: a
+/// [`SECRET_TOKEN_PREFIXES`] word, a provider-prefixed opaque key, an AWS
+/// access key id, or a JWT.
 fn looks_like_secret_token(word: &str) -> bool {
+    secret_token_core(word).is_some()
+}
+
+/// The credential inside `word` once markdown and prose punctuation around it
+/// is dropped (`` `xai-…` ``, `(nvapi-…)`, `AKIA…:`, a JWT ending a
+/// sentence), or `None` when the word is not a credential on its own.
+fn secret_token_core(word: &str) -> Option<&str> {
+    let core = word.trim_matches(|c| {
+        matches!(
+            c,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ':' | '`' | '.' | '!' | '?'
+        )
+    });
+    (!core.is_empty() && is_bare_secret_token(core)).then_some(core)
+}
+
+fn is_bare_secret_token(word: &str) -> bool {
     SECRET_TOKEN_PREFIXES
         .iter()
         .any(|p| word.len() > p.len() + 6 && word.starts_with(p))
+        || CREDENTIAL_VALUE_PREFIXES
+            .iter()
+            .chain(BARE_OPAQUE_TOKEN_PREFIXES)
+            .filter(|p| !matches!(**p, "AKIA" | "ASIA"))
+            .any(|p| word.strip_prefix(p).is_some_and(is_opaque_token_body))
+        || is_aws_access_key_id(word)
+        || is_jwt_shaped(word)
+}
+
+/// At least 16 key characters with both a letter and a digit.
+fn is_opaque_token_body(body: &str) -> bool {
+    body.len() >= 16
+        && body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && body.chars().any(|c| c.is_ascii_alphabetic())
+        && body.chars().any(|c| c.is_ascii_digit())
+}
+
+/// `AKIA`/`ASIA` followed by exactly 16 upper-case letters or digits.
+fn is_aws_access_key_id(word: &str) -> bool {
+    word.len() == 20
+        && (word.starts_with("AKIA") || word.starts_with("ASIA"))
+        && word[4..]
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -804,73 +788,78 @@ mod model_bound_json_tests {
 }
 
 #[cfg(test)]
-mod prose_key_tests {
+mod bare_token_tests {
     use super::*;
 
     #[test]
-    fn provider_error_prose_after_authorization_stays_readable() {
-        // Founder run: the TUI showed `Authorization failed: [redacted](provider
-        // …` — the key-based pass read the error sentence as an
-        // `Authorization:` header and dropped the provider's message.
-        let error = "[auth] Authorization failed: You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok.\n(provider `xAI` · requested model `grok-4.6` · route: saved agent profile \"reviewer\" pins xai/grok-4.6)";
-        assert_eq!(redact_secrets(error), error);
+    fn every_known_prefix_is_masked_as_a_bare_word() {
+        let body = "Z7qX4mNb2Vc9Lk3PwR8t";
+        let mut tokens: Vec<String> = SECRET_TOKEN_PREFIXES
+            .iter()
+            .chain(CREDENTIAL_VALUE_PREFIXES)
+            .chain(BARE_OPAQUE_TOKEN_PREFIXES)
+            .filter(|prefix| !matches!(**prefix, "AKIA" | "ASIA"))
+            .map(|prefix| format!("{prefix}{body}"))
+            .collect();
+        tokens.push(["AKIA", "Z7QX4MNB2VC9LK3P"].concat());
+        tokens.push(["ASIA", "Z7QX4MNB2VC9LK3P"].concat());
+        tokens.push(["eyJhbGciOiJIUzI1NiJ9", ".eyJzdWIiOiIxIn0", ".c2lnbmF0dXJl"].concat());
+        for token in tokens {
+            let out = redact_secrets(&format!("request failed: {token} rejected"));
+            assert_eq!(out, "request failed: [redacted] rejected", "{token}");
+        }
     }
 
     #[test]
-    fn credentials_inside_prose_and_real_headers_are_still_masked() {
-        // Built at runtime so secret scanners do not flag the fixtures.
-        let jwt = [
-            ["ey", "JhbGciOiJIUzI1NiJ9"].concat(),
-            ["ey", "JzdWIiOiJmaXh0dXJlIn0"].concat(),
-            "c2lnbmF0dXJlLWZpeHR1cmU".to_string(),
-        ]
-        .join(".");
-        let out = redact_secrets(&format!(
-            "Authorization failed: the server rejected Bearer {jwt} for this route"
-        ));
-        assert!(!out.contains(&jwt), "{out}");
-        assert!(out.contains("the server rejected"), "{out}");
-        let key = ["sk", "-fixture-", "0123456789abcdef"].concat();
-        let out = redact_secrets(&format!("Authorization failed: key {key} was revoked"));
-        assert!(!out.contains(&key), "{out}");
-        assert!(out.contains("was revoked"), "{out}");
-        // Short values and single-word credential keys keep the old policy.
-        assert_eq!(
-            redact_secrets("password for db: hunter2"),
-            "password for db: [redacted]"
-        );
-        assert_eq!(
-            redact_secrets("Authorization: Bearer abc.def"),
-            "Authorization: [redacted]"
-        );
-        assert_eq!(
-            redact_secrets("API Key: some value here"),
-            "API Key: [redacted]"
-        );
-    }
-
-    #[test]
-    fn only_error_outcome_keys_keep_their_prose() {
-        // A multi-word key that is not an error outcome still hides the whole
-        // value: short passwords and passphrases are not credential-shaped.
-        for (line, kept) in [
-            (
-                "The password for staging is: Summer2026! rotate monthly",
-                "Summer2026!",
-            ),
-            (
-                "password for admin user = correct horse battery staple",
-                "horse battery",
-            ),
-            ("Authorization header was: Basic YTpi (rejected)", "YTpi"),
-            (
-                "Authorization failed: the password is Summer2026! for now",
-                "Summer2026!",
-            ),
+    fn a_bare_token_wrapped_in_markdown_or_prose_punctuation_is_masked() {
+        let body = "Z7qX4mNb2Vc9Lk3PwR8t";
+        let aws = ["AKIA", "Z7QX4MNB2VC9LK3P"].concat();
+        let jwt = ["eyJhbGciOiJIUzI1NiJ9", ".eyJzdWIiOiIxIn0", ".c2lnbmF0dXJl"].concat();
+        for (wrapped, token) in [
+            (format!("`xai-{body}`"), format!("xai-{body}")),
+            (format!("(nvapi-{body})"), format!("nvapi-{body}")),
+            (format!("hf_{body})"), format!("hf_{body}")),
+            (format!("[pplx-{body}]"), format!("pplx-{body}")),
+            (format!("{aws}:"), aws.clone()),
+            (format!("{aws})"), aws.clone()),
+            (format!("{jwt})."), jwt.clone()),
         ] {
-            let out = redact_secrets(line);
-            assert!(!out.contains(kept), "{kept} leaked from {out}");
+            let out = redact_secrets(&format!("key {wrapped} rejected"));
+            assert!(!out.contains(&token), "{out}");
             assert!(out.contains(REDACTED), "{out}");
+        }
+        assert_eq!(
+            redact_secrets(&format!("key `xai-{body}` rejected")),
+            "key `[redacted]` rejected"
+        );
+    }
+
+    #[test]
+    fn lowercase_opaque_keys_with_separators_are_still_masked() {
+        // Lowercase letters and separators are also valid random key material;
+        // their shape alone does not establish that this is an identifier.
+        for prefix in BARE_OPAQUE_TOKEN_PREFIXES {
+            for separator in ['-', '_', '.'] {
+                let body = ["a1b2c3d4", "e5f6g7h8", "i9j0k1l2"].join(&separator.to_string());
+                let token = format!("{prefix}{body}");
+                let out = redact_secrets(&format!("request failed: `{token}` rejected"));
+                assert_eq!(out, "request failed: `[redacted]` rejected");
+            }
+        }
+    }
+
+    #[test]
+    fn identifiers_sharing_a_prefix_stay_visible() {
+        for word in [
+            "hf_hub_download",
+            "npm_config_cache",
+            "xai-grok-sdk",
+            "AKIAshort",
+            "gsk_",
+            "eyJ.eyJ",
+        ] {
+            let line = format!("call {word} now");
+            assert_eq!(redact_secrets(&line), line, "{word}");
         }
     }
 }

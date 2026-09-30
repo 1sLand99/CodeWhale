@@ -1357,18 +1357,31 @@ pub(super) fn present_turn_failure(
     status: crate::core::events::TurnOutcomeStatus,
     error: Option<&str>,
 ) {
-    let Some(error) = error else { return };
-    if app.turn_error_posted {
-        return;
+    let failed = matches!(status, crate::core::events::TurnOutcomeStatus::Failed);
+    // What the transcript shows for this turn's failure: the error cell an
+    // earlier `Event::Error` already posted, or the notice added here.
+    let shown = if app.turn_error_posted {
+        app.turn_error_notice.clone()
+    } else if let Some(error) = error {
+        let notice = format!("{}: {error}", app.tr(MessageId::NotificationTurnFailed));
+        if failed {
+            app.add_message(HistoryCell::Error {
+                message: notice.clone(),
+                severity: crate::error_taxonomy::ErrorSeverity::Warning,
+            });
+        }
+        app.set_sticky_status(notice.clone(), StatusToastLevel::Error, None);
+        Some(notice)
+    } else {
+        None
+    };
+    // Persist the failure with the session (redacted), so resume, export,
+    // and the Runtime API can say why the turn stopped after the TUI closes.
+    if failed && let Some(shown) = shown {
+        let outcome =
+            crate::session_manager::SavedTurnOutcome::failed(&shown, app.api_messages.len());
+        crate::session_manager::push_turn_outcome(&mut app.session_turn_outcomes, outcome);
     }
-    let notice = format!("{}: {error}", app.tr(MessageId::NotificationTurnFailed));
-    if matches!(status, crate::core::events::TurnOutcomeStatus::Failed) {
-        app.add_message(HistoryCell::Error {
-            message: notice.clone(),
-            severity: crate::error_taxonomy::ErrorSeverity::Warning,
-        });
-    }
-    app.set_sticky_status(notice, StatusToastLevel::Error, None);
 }
 
 async fn dispatch_session_composer_submit(
@@ -1987,6 +2000,7 @@ pub(crate) async fn run_event_loop(
 
         // Discovery and callback delivery never park terminal input.
         poll_mcp_login(app);
+        poll_mcp_retries(app);
 
         // #1830/#2317: service any already-arrived terminal keys before a
         // potentially long engine batch so composer/modal input stays live.
@@ -2360,10 +2374,23 @@ pub(crate) async fn run_event_loop(
                         streaming_thinking::stash_reasoning_buffer_into_last_reasoning(app);
                         stream_display_clock.reset();
                     }
-                    EngineEvent::ToolCallStarted { id, name, input } => {
+                    EngineEvent::ToolCallStarted {
+                        id,
+                        name,
+                        input,
+                        model_call,
+                    } => {
                         app.session_metrics.record_tool_started(&id);
-                        app.pending_tool_uses
-                            .push((id.clone(), name.clone(), input.clone()));
+                        if let Some(model_call) = model_call {
+                            app.pending_tool_uses.push(ContentBlock::ToolUse {
+                                id: model_call.provider_id,
+                                execution_id: Some(id.clone()),
+                                name: name.clone(),
+                                input: input.clone(),
+                                caller: model_call.caller,
+                                thought_signature: model_call.thought_signature,
+                            });
+                        }
                         // Note this dispatch so the next sub-agent `Started`
                         // mailbox envelope routes into the right card kind
                         // (delegate vs fanout).
@@ -2389,7 +2416,12 @@ pub(crate) async fn run_event_loop(
                     // transcript renders from the ToolCall* events.
                     EngineEvent::OperationActivityStarted { .. }
                     | EngineEvent::OperationActivityCompleted { .. } => {}
-                    EngineEvent::ToolCallComplete { id, name, result } => {
+                    EngineEvent::ToolCallComplete {
+                        id,
+                        name,
+                        result,
+                        model_call,
+                    } => {
                         if crate::tui::tool_routing::evidence_completion_should_be_ignored(
                             app, &id, &result,
                         ) {
@@ -2397,7 +2429,7 @@ pub(crate) async fn run_event_loop(
                             continue;
                         }
                         app.session_metrics.record_tool_completed(&id);
-                        if is_model_visible_tool_call(&id) {
+                        if let Some(model_call) = model_call {
                             let tool_content = match &result {
                                 Ok(output) => sanitize_stream_chunk(
                                     &tool_result_content_for_api_message(app, &name, output),
@@ -2407,15 +2439,18 @@ pub(crate) async fn run_event_loop(
                             app.push_api_message(Message {
                                 role: Role::User,
                                 content: vec![ContentBlock::ToolResult {
-                                    tool_use_id: id.clone(),
+                                    execution_id: Some(id.clone()),
+                                    tool_use_id: model_call.provider_id,
                                     content: tool_content,
                                     is_error: None,
                                     content_blocks: None,
                                 }],
                             });
                         } else {
-                            app.pending_tool_uses
-                                .retain(|(tool_id, _, _)| tool_id != &id);
+                            app.pending_tool_uses.retain(|block| {
+                                block.tool_call_key()
+                                    != Some(codewhale_models::ToolCallKey::Execution(&id))
+                            });
                         }
                         handle_tool_call_complete(app, &id, &name, &result);
                         if name
@@ -2518,6 +2553,7 @@ pub(crate) async fn run_event_loop(
                         app.is_loading = true;
                         app.offline_mode = false;
                         app.turn_error_posted = false;
+                        app.turn_error_notice = None;
                         app.lsp_repair = crate::tui::app::LspRepairState::default();
                         app.prompt_suggestion = None;
                         app.prompt_suggestion_gen
