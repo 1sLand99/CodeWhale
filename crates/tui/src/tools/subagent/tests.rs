@@ -258,7 +258,14 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
 
     let mut first_ids = Vec::new();
     for _ in 0..3 {
-        let (id, _rx) = first.register_child_approval("resumed-agent-7", "bash", "fixture");
+        let (id, _rx) = first
+            .register_child_approval(
+                "resumed-agent-7",
+                &new_child_execution_id("resumed-agent-7"),
+                "bash",
+                "fixture",
+            )
+            .unwrap();
         assert!(
             SubAgentManager::is_child_approval_id(&id),
             "routing hint must still recognize {id}"
@@ -277,7 +284,14 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
     let mut second = SubAgentManager::new(tmp.path().to_path_buf(), 4);
     let mut second_ids = Vec::new();
     for _ in 0..3 {
-        let (id, _rx) = second.register_child_approval("resumed-agent-7", "bash", "fixture");
+        let (id, _rx) = second
+            .register_child_approval(
+                "resumed-agent-7",
+                &new_child_execution_id("resumed-agent-7"),
+                "bash",
+                "fixture",
+            )
+            .unwrap();
         assert!(SubAgentManager::is_child_approval_id(&id));
         second_ids.push(id);
     }
@@ -287,6 +301,46 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
             "id {id} from the second manager collides with the first boot's ids"
         );
     }
+}
+
+#[tokio::test]
+async fn child_execution_identity_cannot_replace_a_waiter_or_answer_a_later_call() {
+    let tmp = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let first = new_child_execution_id("child");
+    let second = new_child_execution_id("child");
+    let (registered, receiver) = manager
+        .register_child_approval("child", &first, "bash", "one")
+        .unwrap();
+    assert_eq!(registered, first);
+    assert!(
+        manager
+            .register_child_approval("child", &first, "bash", "replacement")
+            .is_err()
+    );
+    assert!(
+        manager
+            .register_child_approval("other", &first, "bash", "wrong owner")
+            .is_err()
+    );
+    assert!(manager.resolve_child_approval(&first, ChildApprovalOutcome::Denied));
+    assert!(matches!(
+        receiver.await.unwrap(),
+        ChildApprovalOutcome::Denied
+    ));
+    let (_, mut receiver) = manager
+        .register_child_approval("child", &second, "bash", "two")
+        .unwrap();
+    assert!(!manager.resolve_child_approval(&first, ChildApprovalOutcome::Approved));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(manager.resolve_child_approval(&second, ChildApprovalOutcome::Approved));
+    assert!(matches!(
+        receiver.await.unwrap(),
+        ChildApprovalOutcome::Approved
+    ));
 }
 
 #[test]
@@ -8084,7 +8138,14 @@ async fn execute_surface_tool(
 ) -> Result<String> {
     let request_active = surface.active_names.clone();
     registry
-        .execute_from_surface("agent_test", "", surface, &request_active, name, input)
+        .execute_from_surface(
+            "agent_test",
+            &new_child_execution_id("agent_test"),
+            surface,
+            &request_active,
+            name,
+            input,
+        )
         .await
         .map(|result| result.result.content)
 }
@@ -8246,6 +8307,7 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
+                    execution_id: None,
                     id: "search-1".to_string(),
                     name: TOOL_SEARCH_NAME.to_string(),
                     input: json!({"query": "web"}),
@@ -8256,6 +8318,7 @@ async fn small_surface_fork_context_survives_fresh_child_discovery() {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
+                    execution_id: None,
                     tool_use_id: "search-1".to_string(),
                     content: json!({
                         "type": "tool_search_tool_search_result",
@@ -19454,8 +19517,14 @@ async fn agent_wait_returns_early_with_needs_approval() {
     let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
     let agent_id = insert_running_agent(&mut inner, "test_agent_wait_needs_person");
     // The child is blocked on the Ask prompt for a shell call.
-    let (_approval_id, _rx) =
-        inner.register_child_approval(&agent_id, "bash", "Tool bash requires approval\nand more");
+    let (_approval_id, _rx) = inner
+        .register_child_approval(
+            &agent_id,
+            &new_child_execution_id(&agent_id),
+            "bash",
+            "Tool bash requires approval\nand more",
+        )
+        .unwrap();
     let manager = Arc::new(RwLock::new(inner));
 
     let context = ToolContext::new(".");
@@ -19496,7 +19565,14 @@ async fn agent_wait_returns_early_with_needs_approval() {
 async fn agent_wait_does_not_rewake_on_reported_request() {
     let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
     let agent_id = insert_running_agent(&mut inner, "test_agent_wait_no_rewake");
-    let (_approval_id, _rx) = inner.register_child_approval(&agent_id, "bash", "held");
+    let (_approval_id, _rx) = inner
+        .register_child_approval(
+            &agent_id,
+            &new_child_execution_id(&agent_id),
+            "bash",
+            "held",
+        )
+        .unwrap();
     let manager = Arc::new(RwLock::new(inner));
     let context = ToolContext::new(".");
 
@@ -19533,11 +19609,16 @@ async fn agent_wait_does_not_rewake_on_reported_request() {
     assert!(joined.get("needs_person").is_none(), "{joined}");
 
     // A new request wakes the join.
-    let (_next_id, _next_rx) =
-        manager
-            .write()
-            .await
-            .register_child_approval(&agent_id, "write_file", "held again");
+    let (_next_id, _next_rx) = manager
+        .write()
+        .await
+        .register_child_approval(
+            &agent_id,
+            &new_child_execution_id(&agent_id),
+            "write_file",
+            "held again",
+        )
+        .unwrap();
     let joined = coord::dispatch_wait(
         &json!({"until": "all", "timeout_secs": 30}),
         Arc::clone(&manager),
@@ -19562,7 +19643,14 @@ async fn status_waiting_is_derived_from_pending_store() {
         "workspace",
         None,
     );
-    let (approval_id, _rx) = inner.register_child_approval(&agent_id, "bash", "held");
+    let (approval_id, _rx) = inner
+        .register_child_approval(
+            &agent_id,
+            &new_child_execution_id(&agent_id),
+            "bash",
+            "held",
+        )
+        .unwrap();
     // The WaitingForUser progress write was skipped under contention; the
     // store still makes the record waiting, with the request and the action.
     let record = inner.get_worker_record(&agent_id).expect("worker record");
@@ -23734,6 +23822,8 @@ mod child_permission_gate {
             let receipt_store_for_answer = receipt_store.clone();
             let session_id_for_answer = session_id.clone();
             let manager_for_answer = Arc::clone(&manager);
+            let execution_id = new_child_execution_id("agent_gate");
+            let expected_id = execution_id.clone();
             let answerer = tokio::spawn(async move {
                 // Wait for the prompt, then answer it exactly like the engine
                 // does when the person decides in the parent's UI.
@@ -23756,6 +23846,7 @@ mod child_permission_gate {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 let approval_id = approval_id.expect("child prompt must reach the host");
+                assert_eq!(approval_id, expected_id);
                 let replay_before_decision = receipt_store_for_answer
                     .replay(&session_id_for_answer)
                     .expect("the durable ask replays before the prompt is answered");
@@ -23776,8 +23867,14 @@ mod child_permission_gate {
                 replay_before_decision
             });
             let result = registry
-                .execute("agent_gate", "bash", json!({"command": "echo gated"}))
-                .await;
+                .execute_full(
+                    "agent_gate",
+                    &execution_id,
+                    "bash",
+                    json!({"command": "echo gated"}),
+                )
+                .await
+                .map(|output| output.result.content);
             let replay_before_decision = answerer.await.expect("answerer task");
             assert_eq!(replay_before_decision.unmatched_asks.len(), 1);
             assert!(replay_before_decision.completed.is_empty());
@@ -24068,7 +24165,14 @@ mod child_permission_gate {
         let (registry, _rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
         let agent_id = running_gate_agent(&registry, &manager, "old_session_child").await;
         let mut manager = manager.write().await;
-        let (_id, receiver) = manager.register_child_approval(&agent_id, "bash", "held");
+        let (_id, receiver) = manager
+            .register_child_approval(
+                &agent_id,
+                &new_child_execution_id(&agent_id),
+                "bash",
+                "held",
+            )
+            .unwrap();
         assert!(manager.finalize_session_close_for_session("workspace") > 0);
         assert_eq!(
             manager.pending_child_approvals(),
@@ -25092,22 +25196,38 @@ mod readonly_shell_6015 {
         commands: Vec<&'static str>,
         report: &'static str,
     ) -> (CodewhaleClient, Arc<AtomicUsize>) {
+        scripted_bash_calls_with_pairing(commands, report, None).await
+    }
+
+    async fn scripted_bash_calls_with_pairing(
+        commands: Vec<&'static str>,
+        report: &'static str,
+        invalid_ids: Option<[&'static str; 2]>,
+    ) -> (CodewhaleClient, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let app = Router::new().route(
             "/{*path}",
             post({
                 let calls = Arc::clone(&calls);
-                move |Json(_body): Json<Value>| {
+                move |Json(request): Json<Value>| {
                     let calls = Arc::clone(&calls);
                     let commands = commands.clone();
                     async move {
                         let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                        let serialized = request.to_string();
+                        assert!(!serialized.contains("execution_id"));
+                        assert!(!serialized.contains(":approval:"));
+                        for message in request["messages"].as_array().unwrap() {
+                            if message["role"] == "tool" {
+                                assert_eq!(message["tool_call_id"], "call_ro_reused");
+                            }
+                        }
                         let usage = json!({
                             "prompt_tokens": 10,
                             "completion_tokens": 5,
                             "total_tokens": 15
                         });
-                        let body = match commands.get(attempt) {
+                        let mut body = match commands.get(attempt) {
                             Some(command) => json!({
                                 "id": format!("chatcmpl-ro-{attempt}"),
                                 "model": "deepseek-v4-flash",
@@ -25117,7 +25237,8 @@ mod readonly_shell_6015 {
                                         "role": "assistant",
                                         "content": null,
                                         "tool_calls": [{
-                                            "id": format!("call_ro_{attempt}"),
+                                            "id": "call_ro_reused",
+                                            "execution_id": "provider-forged-local",
                                             "type": "function",
                                             "function": {
                                                 "name": "bash",
@@ -25140,6 +25261,16 @@ mod readonly_shell_6015 {
                                 "usage": usage
                             }),
                         };
+                        if let Some(ids) = invalid_ids {
+                            body["choices"][0]["message"]["content"] =
+                                json!("Text retained from the refused tool response.");
+                            let prototype = body["choices"][0]["message"]["tool_calls"][0].clone();
+                            body["choices"][0]["message"]["tool_calls"] = json!(ids.map(|id| {
+                                let mut call = prototype.clone();
+                                call["id"] = json!(id);
+                                call
+                            }));
+                        }
                         Json(body).into_response()
                     }
                 }
@@ -25251,6 +25382,96 @@ mod readonly_shell_6015 {
                 _ => None,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn ambiguous_child_batch_keeps_text_and_usage_without_executing_calls() {
+        for ids in [["same", "same"], ["valid", ""]] {
+            let tmp = tempdir().unwrap();
+            let (client, calls) =
+                scripted_bash_calls_with_pairing(vec!["pwd"], "no further round", Some(ids)).await;
+            let result = run_scout(tmp.path(), client, "agent_bad_identity").await;
+            assert!(
+                matches!(&result.status, SubAgentStatus::Failed(error) if error.contains("pairing id")),
+                "{:?}",
+                result.status
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "invalid batch is terminal before dispatch"
+            );
+            assert!(
+                result.usage.as_ref().and_then(|usage| usage.total_tokens) == Some(15),
+                "billed usage must survive refusal"
+            );
+            let checkpoint = result
+                .checkpoint
+                .as_ref()
+                .expect("refused response checkpoint");
+            assert!(checkpoint.messages.iter().flat_map(|m| &m.content).any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text == "Text retained from the refused tool response.")
+            ));
+            assert!(
+                checkpoint
+                    .messages
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .all(|block| !matches!(
+                        block,
+                        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                    ))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_provider_ids_keep_child_execution_history_distinct() {
+        let tmp = tempdir().unwrap();
+        let (client, calls) = scripted_bash_calls_client(vec!["pwd", "pwd"], "read twice").await;
+        let result = run_scout(tmp.path(), client, "agent_identity").await;
+        assert_eq!(
+            result.status,
+            SubAgentStatus::Completed,
+            "{:?}",
+            result.result
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let checkpoint = result.checkpoint.as_ref().expect("real child checkpoint");
+        let mut ids = Vec::new();
+        let mut results = Vec::new();
+        for block in checkpoint.messages.iter().flat_map(|m| &m.content) {
+            match block {
+                ContentBlock::ToolUse {
+                    id, execution_id, ..
+                } => {
+                    assert_eq!(id, "call_ro_reused");
+                    let local = execution_id.clone().expect("host identity");
+                    assert!(SubAgentManager::is_child_approval_id(&local));
+                    assert_ne!(local, "provider-forged-local");
+                    ids.push(local);
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    execution_id,
+                    ..
+                } => {
+                    assert_eq!(tool_use_id, "call_ro_reused");
+                    results.push(execution_id.clone().expect("result identity"));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids, results);
+        assert_ne!(
+            child_guardian_usage_source_id("agent_identity", &ids[0]),
+            child_guardian_usage_source_id("agent_identity", &ids[1])
+        );
+        let restored: SubAgentCheckpoint =
+            serde_json::from_slice(&serde_json::to_vec(checkpoint).unwrap()).unwrap();
+        assert_eq!(restored.messages, checkpoint.messages);
     }
 
     // Only the unix-gated tests build a git fixture; ungated, Windows
