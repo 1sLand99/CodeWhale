@@ -1338,6 +1338,11 @@ pub fn normalize_task_cwd(value: &str) -> Result<String, String> {
 /// bounded repo-relative form; an absolute path outside it, or one that
 /// escapes through `..`, is still rejected. Without a workspace every
 /// absolute path is rejected, exactly as before.
+///
+/// The comparison is lexical and component-wise (no filesystem access), so
+/// `/ws-other` is never inside `/ws`. On Windows a drive letter or UNC share
+/// matches with or without the verbatim `\\?\` prefix, `/` and `\` are both
+/// separators, and components compare case-insensitively.
 pub fn normalize_task_cwd_in(
     value: &str,
     workspace: Option<&std::path::Path>,
@@ -1347,28 +1352,101 @@ pub fn normalize_task_cwd_in(
     let Some(workspace) = workspace.filter(|_| path.is_absolute()) else {
         return normalize_task_cwd(value);
     };
-    // `strip_prefix` compares whole components, so `/ws-other` is not inside
-    // `/ws`; any `..` left in the remainder is rejected below.
-    let relative = path.strip_prefix(workspace).map_err(|_| {
+    let outside = || {
         format!(
             "task(): cwd {raw:?} is outside the workspace {}; cwd entries must be bounded repo-relative paths or absolute paths inside the workspace",
             workspace.display()
         )
-    })?;
-    // Rejoin with `/` so a Windows remainder (`a\\b`) lowers to the same
-    // repo-relative form; a non-UTF-8 component is refused.
+    };
+    let mut remainder = path_keys(path).ok_or_else(outside)?.into_iter();
+    for expected in path_keys(workspace).ok_or_else(outside)? {
+        match remainder.next() {
+            Some(actual) if actual.matches(&expected) => {}
+            // `..` right after the workspace prefix is an escape, not a
+            // different root: name it as traversal.
+            Some(PathKey::Parent) => {
+                return Err("task(): cwd paths cannot contain parent traversal".to_string());
+            }
+            _ => return Err(outside()),
+        }
+    }
     let mut segments = Vec::new();
-    for component in relative.components() {
-        let segment = component
-            .as_os_str()
-            .to_str()
-            .ok_or_else(|| "task(): cwd entries must be bounded repo-relative paths".to_string())?;
-        segments.push(segment);
+    for key in remainder {
+        match key {
+            PathKey::Name { original, .. } => segments.push(original),
+            PathKey::Parent => {
+                return Err("task(): cwd paths cannot contain parent traversal".to_string());
+            }
+            PathKey::Root => return Err(outside()),
+        }
     }
     if segments.is_empty() {
         return Ok(".".to_string());
     }
     normalize_task_cwd(&segments.join("/"))
+}
+
+/// One lexical path component, keyed for comparison: a drive or UNC prefix
+/// with its verbatim marker dropped, and names case-folded on Windows.
+#[derive(Debug)]
+enum PathKey {
+    Root,
+    Parent,
+    Name { key: String, original: String },
+}
+
+impl PathKey {
+    fn matches(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Root, Self::Root) | (Self::Parent, Self::Parent) => true,
+            (Self::Name { key: left, .. }, Self::Name { key: right, .. }) => left == right,
+            _ => false,
+        }
+    }
+}
+
+fn path_keys(path: &std::path::Path) -> Option<Vec<PathKey>> {
+    use std::path::{Component, Prefix};
+    let fold = |value: &str| {
+        if cfg!(windows) {
+            value.to_lowercase()
+        } else {
+            value.to_string()
+        }
+    };
+    let mut keys = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                let key = match prefix.kind() {
+                    Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                        format!("{}:", drive.to_ascii_lowercase() as char)
+                    }
+                    Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
+                        "//{}/{}",
+                        server.to_str()?.to_lowercase(),
+                        share.to_str()?.to_lowercase()
+                    ),
+                    _ => prefix.as_os_str().to_str()?.to_lowercase(),
+                };
+                keys.push(PathKey::Name {
+                    original: key.clone(),
+                    key,
+                });
+            }
+            Component::RootDir => keys.push(PathKey::Root),
+            Component::CurDir => {}
+            Component::ParentDir => keys.push(PathKey::Parent),
+            Component::Normal(name) => {
+                let original = name.to_str()?.to_string();
+                keys.push(PathKey::Name {
+                    key: fold(&original),
+                    original,
+                });
+            }
+        }
+    }
+    Some(keys)
 }
 
 fn normalize_task_paths(
