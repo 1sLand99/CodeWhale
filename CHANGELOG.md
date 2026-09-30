@@ -37,6 +37,14 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 ### Fixed
 
+- Stream limits and transport settings share a typed `[stream]` configuration
+  table, including retry budgets, TCP keepalive and HTTP/2 keepalive. Explicit
+  values take precedence over legacy `[tui]` aliases; omitted values preserve
+  existing defaults and environment behavior. A configured HTTP/1 pin stays
+  pinned during recovery. `/config stream_chunk_timeout_secs ... --save`
+  updates the canonical setting so it survives reopening a configuration
+  that already had a timeout. Transport changes apply when a client is built
+  ([#6700](https://github.com/Hmbown/Codewhale/issues/6700)).
 - Switching providers keeps a model set only in the root `default_text_model`
   with the provider it belongs to. Switching away and back (`/provider` in the
   TUI, or the desktop app's model chip) used to land on the provider's catalog
