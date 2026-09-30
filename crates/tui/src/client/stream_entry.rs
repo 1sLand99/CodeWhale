@@ -159,10 +159,12 @@ pub struct StreamOpenRequest {
 }
 
 impl StreamOpenRequest {
+    /// `force_http1` is the client's resolved pin (`Config::force_http1`:
+    /// `[tui].force_http1` or `CODEWHALE_FORCE_HTTP1`), never re-read here.
     #[must_use]
-    pub fn new(open_timeout: Duration, idle_timeout: Duration) -> Self {
+    pub fn new(force_http1: bool, open_timeout: Duration, idle_timeout: Duration) -> Self {
         Self {
-            policy: if super::force_http1_from_env() {
+            policy: if force_http1 {
                 StreamHttpPolicy::Http1Only
             } else {
                 StreamHttpPolicy::DualWithH1Fallback
@@ -177,6 +179,19 @@ impl StreamOpenRequest {
     pub fn with_h1_only(mut self) -> Self {
         self.policy = StreamHttpPolicy::Http1Only;
         self
+    }
+}
+
+impl super::CodewhaleClient {
+    /// The open request every streaming adapter starts from, carrying this
+    /// client's resolved HTTP/1.1 pin and timeouts (#6700).
+    #[must_use]
+    pub(super) fn stream_open_request(&self) -> StreamOpenRequest {
+        StreamOpenRequest::new(
+            self.force_http1,
+            self.stream_open_timeout,
+            self.stream_idle_timeout,
+        )
     }
 }
 
