@@ -78,7 +78,7 @@ fn mark_workspace_trusted(workspace: &Path) -> WorkspaceTrustConfigGuard {
 #[test]
 fn test_mcp_config_defaults() {
     let config = McpConfig::default();
-    assert_eq!(config.timeouts.connect_timeout, 10);
+    assert_eq!(config.timeouts.connect_timeout, 30);
     assert_eq!(config.timeouts.execute_timeout, 60);
     assert_eq!(config.timeouts.read_timeout, 120);
     assert!(config.servers.is_empty());
@@ -6680,6 +6680,137 @@ fn removed_runtime_server_config_can_be_retried_with_same_name() {
     pool.remove_runtime_server_config("retryable");
     pool.add_runtime_server_config("retryable".to_string(), config)
         .expect("rollback must release the deterministic runtime name");
+}
+
+#[tokio::test]
+async fn mcp_initialize_sends_empty_client_capabilities_and_accepts_2025_11_25() {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let transport = ScriptedValueTransport {
+        sent: Arc::clone(&sent),
+        responses: VecDeque::from([json_frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-11-25",
+                "serverInfo": {"name": "current-sdk", "version": "1.0.0"},
+                "capabilities": {"tools": {}}
+            }
+        }))]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+
+    conn.initialize()
+        .await
+        .expect("a 2025-11-25 server must complete the handshake");
+
+    let sent = sent.lock().unwrap();
+    let initialize = sent
+        .iter()
+        .find(|message| message["method"] == "initialize")
+        .expect("initialize sent");
+    assert_eq!(
+        initialize["params"],
+        serde_json::json!({
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "clientInfo": {"name": "codewhale-tui", "version": env!("CARGO_PKG_VERSION")},
+            "capabilities": {}
+        }),
+        "client capabilities must not declare server-side tools/resources/prompts"
+    );
+}
+
+#[tokio::test]
+async fn mcp_initialize_rejection_from_expired_aws_sso_names_the_login_command() {
+    let transport = ScriptedValueTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        responses: VecDeque::from([json_frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32602,
+                "message": "Error retrieving credentials: The SSO session associated with this profile has expired or is otherwise invalid."
+            }
+        }))]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+    conn.config.args = vec![
+        "mcp-proxy-for-aws@1.6.4".to_string(),
+        "--profile".to_string(),
+        "work-sso".to_string(),
+    ];
+
+    let error = format!("{:#}", conn.initialize().await.expect_err("rejected"));
+    assert!(
+        error.contains(
+            "run `aws sso login --profile work-sso` in a terminal, then `/mcp retry mock`"
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        mcp_recovery_kind(true, true, false, Some(&error), false),
+        Some(McpRecoveryKind::AwsLogin)
+    );
+}
+
+#[test]
+fn mcp_recovery_kind_routes_expired_aws_credentials_to_external_login() {
+    for stderr in [
+        "The SSO session associated with this profile has expired or is otherwise invalid. To refresh this SSO session run aws sso login with the corresponding profile.",
+        "Error loading SSO Token: Token for my-sso does not exist",
+        "An error occurred (ExpiredTokenException) when calling the GetCallerIdentity operation: The security token included in the request is expired",
+        // An expired AWS token that also says 401/Unauthorized must not be
+        // routed to `/mcp login`, an OAuth flow that cannot renew it.
+        "UnauthorizedException (401): AWS token has expired",
+    ] {
+        assert_eq!(
+            mcp_recovery_kind(true, true, false, Some(stderr), false),
+            Some(McpRecoveryKind::AwsLogin),
+            "{stderr}"
+        );
+    }
+    // Unrelated text that merely shares substrings stays where it was.
+    for (stderr, expected) in [
+        ("processor token invalid", McpRecoveryKind::Diagnose),
+        ("401 Unauthorized", McpRecoveryKind::Reauth),
+        (
+            "oauth token expired; invalid_grant",
+            McpRecoveryKind::Reauth,
+        ),
+        (
+            "laws of token expiry were expired",
+            McpRecoveryKind::Diagnose,
+        ),
+    ] {
+        assert_eq!(
+            mcp_recovery_kind(true, true, false, Some(stderr), false),
+            Some(expected),
+            "{stderr}"
+        );
+    }
+    assert_eq!(
+        McpRecoveryKind::AwsLogin.slash_command("aws"),
+        "/mcp retry aws"
+    );
+    assert_eq!(
+        McpRecoveryKind::AwsLogin.slash_command("name with spaces"),
+        "/mcp reload"
+    );
+
+    let mut config = test_server_config();
+    assert_eq!(
+        aws_login_hint(&config, "aws"),
+        "AWS credentials expired: run `aws sso login` in a terminal, then `/mcp retry aws`"
+    );
+    config
+        .env
+        .insert("AWS_PROFILE".to_string(), "from-env".to_string());
+    assert!(aws_login_hint(&config, "aws").contains("aws sso login --profile from-env"));
+    config.args = vec!["--profile=from-arg".to_string()];
+    assert!(aws_login_hint(&config, "aws").contains("aws sso login --profile from-arg"));
+    // A profile the shell could misread is left out rather than quoted.
+    config.args = vec!["--profile".to_string(), "x; rm -rf ~".to_string()];
+    config.env.clear();
+    assert!(aws_login_hint(&config, "aws").contains("run `aws sso login` in"));
 }
 
 #[test]
