@@ -13,7 +13,7 @@ describe("locale layout rejects unregistered locales", () => {
   const layout = readFileSync(new URL("../../app/[locale]/layout.tsx", import.meta.url), "utf8");
 
   it("guards on isValidLocale and calls notFound()", () => {
-    expect(layout).toContain("import { isValidLocale, localeDirection, locales, type Locale }");
+    expect(layout).toMatch(/import \{[^}]*\bisValidLocale\b[^}]*\} from "@\/lib\/i18n\/config"/);
     expect(layout).toContain("if (!isValidLocale(locale)) notFound();");
   });
 
