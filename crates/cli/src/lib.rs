@@ -4445,7 +4445,7 @@ fn run_auth_command_with_secrets_and_runtime(
             let api_key = match (api_key, api_key_stdin) {
                 (Some(v), _) => v,
                 (None, true) => read_api_key_from_stdin()?,
-                (None, false) => prompt_api_key(slot)?,
+                (None, false) => prompt_api_key(provider)?,
             };
             let mut credential_store =
                 codewhale_config::credentials::credential_metadata_store(store)?;
@@ -4593,10 +4593,10 @@ fn keyring_status_short(state: Option<bool>) -> &'static str {
     }
 }
 
-fn prompt_api_key(slot: &str) -> Result<String> {
+fn prompt_api_key(provider: ProviderKind) -> Result<String> {
     use std::io::IsTerminal;
     read_prompted_api_key(
-        slot,
+        provider.as_str(),
         io::stdin().is_terminal(),
         |prompt| {
             // The help promises the key is not echoed: a plain `read_line`
@@ -4644,13 +4644,13 @@ fn hidden_prompt_stream(
 }
 
 fn read_prompted_api_key(
-    slot: &str,
+    provider_id: &str,
     stdin_is_terminal: bool,
     read_hidden_line: impl FnOnce(&str) -> io::Result<String>,
     read_piped: impl FnOnce() -> Result<String>,
 ) -> Result<String> {
     use std::io::Write;
-    let prompt = format!("Enter API key for {slot}: ");
+    let prompt = format!("Enter API key for {provider_id}: ");
     if !stdin_is_terminal {
         // Non-interactive: read directly without prompting twice.
         eprint!("{prompt}");

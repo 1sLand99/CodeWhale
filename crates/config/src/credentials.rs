@@ -269,9 +269,12 @@ mod tests {
             let outcome = clear_provider_api_key(&mut store, &secrets, ProviderKind::Deepseek)
                 .expect("the config leg saves");
             assert!(store.config.providers.deepseek.api_key.is_none());
-            assert_eq!(outcome.is_complete(), !fails, "held: {held:?}");
+            assert_eq!(outcome.is_complete(), !fails, "delete refusal completion");
             if let Some(error) = outcome.secret_store_error {
-                assert!(!error.contains("sk-keyring-fixture"), "{error}");
+                assert!(
+                    !error.contains("sk-keyring-fixture"),
+                    "credential leaked into error"
+                );
             }
         }
     }
