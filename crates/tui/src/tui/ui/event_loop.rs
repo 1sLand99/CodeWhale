@@ -1349,14 +1349,6 @@ async fn dispatch_launch_composer_submit(
     Ok(false)
 }
 
-/// Submit the live-session composer through the same branches Enter uses.
-///
-/// Mouse `[↵]` sets `pending_composer_submit`; this consumes that chord without
-/// duplicating draft consumption or opening transcript-only Enter shortcuts.
-/// Its own gates (`SendQueuedNow`, the paste-burst probe) run here; everything
-/// from slash-menu selection onward is the shared `submit_decided_composer_input`
-/// tail the keyboard Enter arm also uses, so the two surfaces cannot drift.
-#[allow(clippy::too_many_arguments)]
 /// Show why a turn ended without success. The composer status line always
 /// names it; a turn the Engine stopped itself (wall-clock or step budget, no
 /// progress, an incomplete response) posts no error event, so its reason also
@@ -1395,6 +1387,14 @@ pub(super) fn present_turn_failure(
     }
 }
 
+/// Submit the live-session composer through the same branches Enter uses.
+///
+/// Mouse `[↵]` sets `pending_composer_submit`; this consumes that chord without
+/// duplicating draft consumption or opening transcript-only Enter shortcuts.
+/// Its own gates (`SendQueuedNow`, the paste-burst probe) run here; everything
+/// from slash-menu selection onward is the shared `submit_decided_composer_input`
+/// tail the keyboard Enter arm also uses, so the two surfaces cannot drift.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_session_composer_submit(
     terminal: &mut AppTerminal,
     app: &mut App,
