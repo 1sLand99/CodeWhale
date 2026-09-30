@@ -50,6 +50,11 @@ Configured `skills_dir` that is not one of the owned Codewhale roots stays
 read-only. Discovery and the manager can list it; mutations still target owned
 project/global roots only.
 
+Every root inside the workspace — owned, compatible, or a configured
+`skills_dir` that resolves there — loads only once the workspace is trusted
+(`/trust on --save`). Until then discovery names the skipped directories in its
+warning, and the session's skills directory falls back to the global one.
+
 ## Slash commands
 
 | Command | Behavior |
