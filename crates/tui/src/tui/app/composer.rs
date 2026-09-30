@@ -1940,19 +1940,12 @@ impl App {
         let pastes_dir = self.workspace.join(".codewhale/pastes");
         let file_path = self.workspace.join(&rel_path);
         let written = std::fs::create_dir_all(&pastes_dir)
-            .map_err(|e| format!("Failed to create paste directory: {e}"))
-            .and_then(|()| {
-                std::fs::write(&file_path, &self.input)
-                    .map_err(|e| format!("Failed to write paste file: {e}"))
-            });
+            .and_then(|()| std::fs::write(&file_path, &self.input));
         if let Err(error) = written {
-            let reason = format!(
-                "Not sent: this message is over {MAX_SUBMITTED_INPUT_CHARS} characters and \
-                 could not be saved as a paste file ({error}). The full text is still in \
-                 the composer: shorten it, or make .codewhale/pastes writable, then press \
-                 Enter again."
-            );
-            self.status_message = Some(reason.clone());
+            let reason = self
+                .tr(MessageId::ComposerOversizedSubmitHeld)
+                .replace("{limit}", &MAX_SUBMITTED_INPUT_CHARS.to_string())
+                .replace("{error}", &error.to_string());
             self.push_status_toast(reason, StatusToastLevel::Error, Some(8_000));
             self.needs_redraw = true;
             return false;

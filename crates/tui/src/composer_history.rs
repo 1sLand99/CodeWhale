@@ -1,14 +1,14 @@
 //! Cross-session composer input history (#366).
 //!
-//! Persists user-typed prompts to `~/.codewhale/composer_history.txt`
-//! (falling back to a legacy `~/.deepseek/composer_history.txt` only when
-//! one already exists, #3240) so pressing Up-arrow at the composer recalls
+//! Persists user-typed prompts to `~/.codewhale/composer_history.jsonl`
+//! (using the legacy `~/.deepseek` root only when one already exists,
+//! #3240) so pressing Up-arrow at the composer recalls
 //! submissions from previous sessions, not just the current one. One entry
-//! per line, oldest first,
+//! per JSON line, oldest first. Existing `composer_history.txt` files are
+//! read verbatim on migration and left intact. The history is
 //! capped at [`MAX_HISTORY_ENTRIES`] entries (older entries are pruned
-//! at append time). A single-line entry is stored as-is; an entry with a
-//! line break, or one that starts with `"`, is stored as a JSON string so a
-//! multi-line prompt stays one entry (see [`encode_history_line`]).
+//! at append time). Encoding every entry as a JSON string keeps multiline
+//! prompts intact without mistaking old quoted prompts for encoded records.
 //!
 //! Slash commands are stored as well: recalling `/theme` or `/compact`
 //! with Up-arrow is ordinary recall (#6006), and filtering on the `/`
@@ -37,7 +37,8 @@ use std::time::Duration;
 /// time.
 pub const MAX_HISTORY_ENTRIES: usize = 1000;
 
-const HISTORY_FILE_NAME: &str = "composer_history.txt";
+const HISTORY_FILE_NAME: &str = "composer_history.jsonl";
+const LEGACY_HISTORY_FILE_NAME: &str = "composer_history.txt";
 
 fn default_history_path() -> Option<PathBuf> {
     history_path_with_home(crate::config::effective_home_dir())
@@ -49,17 +50,17 @@ fn default_history_path() -> Option<PathBuf> {
 ///
 /// On a fresh install (neither file present) this returns the `.codewhale`
 /// path, so the writer never recreates `~/.deepseek/` at runtime (#3240),
-/// while users who haven't migrated keep reading and appending to their
-/// existing legacy history. Mirrors the primary/legacy resolution used by
+/// while users who haven't migrated keep their existing history in that
+/// root. Mirrors the primary/legacy resolution used by
 /// `snapshot::paths` and `artifacts`.
 fn history_path_with_home(home: Option<PathBuf>) -> Option<PathBuf> {
     let home = home?;
     let primary = home.join(".codewhale").join(HISTORY_FILE_NAME);
-    if primary.exists() {
+    if primary.exists() || primary.with_file_name(LEGACY_HISTORY_FILE_NAME).exists() {
         return Some(primary);
     }
     let legacy = home.join(".deepseek").join(HISTORY_FILE_NAME);
-    if legacy.exists() {
+    if legacy.exists() || legacy.with_file_name(LEGACY_HISTORY_FILE_NAME).exists() {
         return Some(legacy);
     }
     Some(primary)
@@ -76,39 +77,30 @@ pub fn load_history() -> Vec<String> {
 }
 
 fn load_history_from(path: &Path) -> Vec<String> {
-    let Ok(file) = fs::File::open(path) else {
+    // A separate filename is the format discriminator: arbitrary legacy
+    // prompts can themselves be valid JSON strings (including escapes).
+    let (source, encoded) = if path.exists() {
+        (path.to_path_buf(), true)
+    } else {
+        (path.with_file_name(LEGACY_HISTORY_FILE_NAME), false)
+    };
+    let Ok(file) = fs::File::open(source) else {
         return Vec::new();
     };
     BufReader::new(file)
         .lines()
         .map_while(Result::ok)
         .filter(|line| !line.trim().is_empty())
-        .map(decode_history_line)
+        .map(|line| {
+            if encoded {
+                // Keep a malformed record as text rather than losing it on
+                // the next append/rewrite.
+                serde_json::from_str::<String>(&line).unwrap_or(line)
+            } else {
+                line
+            }
+        })
         .collect()
-}
-
-/// One file line for `entry`. Plain single-line entries stay plain, so files
-/// written before this encoding (and by older builds) read the same; see
-/// [`decode_history_line`] for why a legacy quoted line is not decoded.
-fn encode_history_line(entry: &str) -> String {
-    if entry.contains(['\n', '\r']) || entry.starts_with('"') {
-        serde_json::to_string(entry).unwrap_or_else(|_| entry.replace(['\n', '\r'], " "))
-    } else {
-        entry.to_string()
-    }
-}
-
-/// Inverse of [`encode_history_line`]. A line is decoded only when it is
-/// exactly what the encoder writes for the decoded entry, so a plain line an
-/// older build stored (such as `"yes"`, quotes included) keeps its quotes.
-fn decode_history_line(line: String) -> String {
-    if line.starts_with('"')
-        && let Ok(entry) = serde_json::from_str::<String>(&line)
-        && encode_history_line(&entry) == line
-    {
-        return entry;
-    }
-    line
 }
 
 /// Append an entry to the persisted history, pruning old entries to
@@ -271,7 +263,7 @@ fn append_history_entries_to<'a>(
 
     let payload = entries
         .iter()
-        .map(|entry| encode_history_line(entry))
+        .map(|entry| serde_json::to_string(entry).expect("serializing a string cannot fail"))
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
@@ -358,29 +350,34 @@ mod tests {
         );
     }
 
-    // Migration care: an existing legacy history is still read/appended.
+    // Migration care: an existing legacy text history keeps its root and
+    // survives the first JSONL write byte-for-byte.
     #[test]
     fn existing_legacy_history_is_still_used() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let legacy = tmp.path().join(".deepseek").join(HISTORY_FILE_NAME);
+        let legacy = tmp.path().join(".deepseek").join(LEGACY_HISTORY_FILE_NAME);
         fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("mkdir legacy");
         fs::write(&legacy, "old entry\n").expect("seed legacy history");
         let path = history_path_with_home(Some(tmp.path().to_path_buf())).expect("path resolves");
-        assert_eq!(path, legacy);
+        assert_eq!(path, legacy.with_file_name(HISTORY_FILE_NAME));
+        assert_eq!(load_history_from(&path), ["old entry"]);
+        append_history_to(&path, "new\nentry");
+        assert_eq!(load_history_from(&path), ["old entry", "new\nentry"]);
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "old entry\n");
     }
 
-    // Once a `.codewhale` history exists it wins over any legacy file.
+    // Once a `.codewhale` history exists it wins over either legacy format.
     #[test]
     fn codewhale_history_preferred_over_legacy() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let primary = tmp.path().join(".codewhale").join(HISTORY_FILE_NAME);
+        let primary = tmp.path().join(".codewhale").join(LEGACY_HISTORY_FILE_NAME);
         let legacy = tmp.path().join(".deepseek").join(HISTORY_FILE_NAME);
         for p in [&primary, &legacy] {
             fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
             fs::write(p, "x\n").expect("seed");
         }
         let path = history_path_with_home(Some(tmp.path().to_path_buf())).expect("path resolves");
-        assert_eq!(path, primary);
+        assert_eq!(path, primary.with_file_name(HISTORY_FILE_NAME));
     }
 
     #[test]
@@ -430,15 +427,32 @@ mod tests {
     #[test]
     fn legacy_plain_quoted_lines_keep_their_quotes() {
         let (_tmp, path) = temp_history_path();
-        // Written by an older build, which stored every entry raw.
-        std::fs::write(&path, "\"yes\"\n\"a\" and \"b\"\n").expect("seed legacy file");
-        assert_eq!(load_history_from(&path), vec!["\"yes\"", "\"a\" and \"b\""]);
-        // Rewriting the file on the next append must not strip them either.
+        // Older writers trimmed entries and stored every remaining byte raw.
+        // JSON-looking strings are user text, even when decoding and encoding
+        // them would round-trip: the escapes must not turn into control chars.
+        let legacy = [r#""yes""#, r#""a" and "b""#, r#""a\nb""#, r#""\"quoted\"""#];
+        let legacy_path = path.with_file_name(LEGACY_HISTORY_FILE_NAME);
+        let original = legacy.join("\n") + "\n";
+        fs::write(&legacy_path, &original).expect("seed legacy file");
+        assert_eq!(load_history_from(&path), legacy);
+        // Rewriting on the next append must preserve every legacy prompt.
+        append_history_to(&path, "next\nline");
+        let expected: Vec<String> = legacy
+            .into_iter()
+            .chain(["next\nline"])
+            .map(str::to_string)
+            .collect();
+        assert_eq!(load_history_from(&path), expected);
+        assert_eq!(fs::read_to_string(&legacy_path).unwrap(), original);
+    }
+
+    #[test]
+    fn malformed_json_records_stay_literal() {
+        let (_tmp, path) = temp_history_path();
+        fs::write(&path, "malformed record").expect("seed malformed record");
+        assert_eq!(load_history_from(&path), ["malformed record"]);
         append_history_to(&path, "next");
-        assert_eq!(
-            load_history_from(&path),
-            vec!["\"yes\"", "\"a\" and \"b\"", "next"]
-        );
+        assert_eq!(load_history_from(&path), ["malformed record", "next"]);
     }
 
     #[test]

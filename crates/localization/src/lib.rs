@@ -996,6 +996,7 @@ pub enum MessageId {
     ClipboardCutKeptText,
     /// Paste found nothing: the clipboard read came back empty or failed.
     ClipboardNothingToPaste,
+    ComposerOversizedSubmitHeld,
     KbContextMenu,
     KbPointerScroll,
     KbPointerClick,
@@ -3533,6 +3534,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ClipboardSentToTerminal,
     MessageId::ClipboardCutKeptText,
     MessageId::ClipboardNothingToPaste,
+    MessageId::ComposerOversizedSubmitHeld,
     MessageId::KbContextMenu,
     MessageId::KbPointerScroll,
     MessageId::KbPointerClick,
