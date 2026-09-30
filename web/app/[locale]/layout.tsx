@@ -80,12 +80,10 @@ export default async function LocaleLayout({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
-  // A single-segment URL that is not a routed locale — e.g. a stray dotted
-  // path such as /foo.txt, which middleware deliberately leaves alone so real
-  // static files keep resolving — would otherwise bind `[locale]` to that
-  // segment and render the shared home page as a 200 under a fake locale
-  // (`lang="foo.txt"`; likewise `/wp-login.php`). An unregistered locale is not a page: answer with an
-  // honest 404 and let the not-found boundary render instead.
+  // Dotted paths bypass locale redirection so real files keep resolving.
+  // An unknown path such as /foo.txt (or /foo.txt/faq) still binds `[locale]`
+  // here. Reject it before reading dictionaries or rendering home chrome,
+  // so nonexistent files never become HTTP 200 pages with a fake html lang.
   if (!isValidLocale(locale)) notFound();
   const chrome = getChrome(locale);
   // RTL locales (e.g. ar) set the document direction from the canonical
