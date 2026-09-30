@@ -13720,7 +13720,7 @@ mod tests {
 
     /// Serialize tests that mutate `DEEPSEEK_FORCE_HTTP1` so they don't race
     /// against each other — env vars are process-global.
-    static FORCE_HTTP1_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(super) static FORCE_HTTP1_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct ForceHttp1EnvGuard {
         prior: Option<std::ffi::OsString>,
@@ -13777,48 +13777,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// #6700: `[tui].force_http1` alone (no env var) must reach the stream-open
-    /// policy every adapter uses, not just the client builders.
-    #[test]
-    fn tui_force_http1_key_pins_stream_open_policy() {
-        let _lock = FORCE_HTTP1_ENV_LOCK.lock().unwrap();
-        let _env = crate::test_support::lock_test_env();
-        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_FORCE_HTTP1");
-        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_FORCE_HTTP1");
-        let client_for = |force_http1: Option<bool>| {
-            CodewhaleClient::new(&Config {
-                provider: Some("zai".to_string()),
-                providers: Some(ProvidersConfig {
-                    zai: ProviderConfig {
-                        api_key: Some("zai-force-http1-key".to_string()),
-                        ..ProviderConfig::default()
-                    },
-                    ..ProvidersConfig::default()
-                }),
-                tui: Some(crate::config::TuiConfig {
-                    force_http1,
-                    ..crate::config::TuiConfig::default()
-                }),
-                ..Config::default()
-            })
-            .expect("client builds")
-        };
-
-        let pinned = client_for(Some(true));
-        assert!(pinned.force_http1);
-        assert_eq!(
-            pinned.stream_open_request().policy,
-            stream_entry::StreamHttpPolicy::Http1Only
-        );
-
-        let unpinned = client_for(None);
-        assert!(!unpinned.force_http1);
-        assert_eq!(
-            unpinned.stream_open_request().policy,
-            stream_entry::StreamHttpPolicy::DualWithH1Fallback
-        );
     }
 
     #[test]
